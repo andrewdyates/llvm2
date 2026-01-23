@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# cargo wrapper - Serializes cargo builds org-wide to prevent deadlocks and OOM
+#
+# CANONICAL SOURCE: ayates_dbx/ai_template
+# DO NOT EDIT in other repos - file issues to ai_template for changes.
+#
+# This wrapper sits in PATH before the real cargo and:
+# - Routes build/test/check/run/clippy/doc/bench commands through cargo_wrapper.py
+# - Passes all other commands (version, help, add, etc.) to real cargo unchanged
+# - Handles cargo +toolchain and -Z flags before the command
+#
+# Installed by looper.py via PATH modification.
+#
+# Andrew Yates <ayates@dropbox.com>
+# Copyright 2026 Dropbox, Inc.
+# Licensed under the Apache License, Version 2.0
+
+# Find the real cargo (skip this wrapper)
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+REAL_CARGO=""
+
+# First try common locations (fastest, avoids PATH issues)
+# Check CARGO_HOME first if set (standard cargo env var)
+CARGO_LOCATIONS=()
+[[ -n "$CARGO_HOME" ]] && CARGO_LOCATIONS+=("$CARGO_HOME/bin/cargo")
+CARGO_LOCATIONS+=("$HOME/.cargo/bin/cargo" /opt/homebrew/bin/cargo /usr/local/bin/cargo /usr/bin/cargo)
+
+for loc in "${CARGO_LOCATIONS[@]}"; do
+    if [[ -x "$loc" ]]; then
+        candidate_real="$(realpath "$loc" 2>/dev/null || echo "$loc")"
+        [[ "$candidate_real" != "$SCRIPT_PATH" ]] && REAL_CARGO="$loc" && break
+    fi
+done
+
+# Fall back to PATH search if not found
+if [[ -z "$REAL_CARGO" ]]; then
+    IFS=':' read -ra PATH_DIRS <<< "$PATH"
+    for p in "${PATH_DIRS[@]}"; do
+        [[ -d "$p" ]] || continue
+        cargo_candidate="$p/cargo"
+        [[ -x "$cargo_candidate" ]] || continue
+        candidate_real="$(realpath "$cargo_candidate" 2>/dev/null || echo "$cargo_candidate")"
+        [[ "$candidate_real" == "$SCRIPT_PATH" ]] && continue
+        REAL_CARGO="$cargo_candidate"
+        break
+    done
+fi
+
+if [[ -z "$REAL_CARGO" ]]; then
+    echo "[cargo] ERROR: Real cargo not found in PATH" >&2
+    exit 1
+fi
+
+# Export for cargo_wrapper.py to use
+export AIT_REAL_CARGO="$REAL_CARGO"
+
+# Commands that need serialization (compile/link heavy)
+# Include full names and single-letter aliases
+# build/b, test/t, check/c, run/r, doc/d, clippy, bench, miri
+SERIALIZED_COMMANDS="build|b|test|t|check|c|run|r|doc|d|clippy|bench|miri"
+
+# Find the actual command in args (skip +toolchain, -flags, --flags)
+# cargo +nightly -Z unstable build -> command is "build"
+FOUND_COMMAND=""
+for arg in "$@"; do
+    # Skip toolchain selector (+nightly, +stable, etc.)
+    [[ "$arg" == +* ]] && continue
+    # Skip flags (-Z, -v, --verbose, etc.)
+    [[ "$arg" == -* ]] && continue
+    # First non-flag, non-toolchain arg is the command
+    FOUND_COMMAND="$arg"
+    break
+done
+
+# Check if found command needs serialization
+if [[ "$FOUND_COMMAND" =~ ^($SERIALIZED_COMMANDS)$ ]]; then
+    CARGO_WRAPPER="${SCRIPT_DIR}/../cargo_wrapper.py"
+    if [[ -x "$CARGO_WRAPPER" ]]; then
+        exec "$CARGO_WRAPPER" "$@"
+    else
+        # FAIL LOUDLY - silent fallback defeats the purpose
+        echo "[cargo] ERROR: cargo_wrapper.py not found or not executable at $CARGO_WRAPPER" >&2
+        echo "[cargo] ERROR: Cannot serialize builds - refusing to run to prevent deadlocks" >&2
+        exit 1
+    fi
+fi
+
+# Pass through to real cargo
+exec "$REAL_CARGO" "$@"

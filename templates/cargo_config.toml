@@ -1,0 +1,20 @@
+# Cargo configuration for ayates_dbx Rust projects
+#
+# Copy to .cargo/config.toml in project root
+# Limits parallelism to prevent OOM during builds
+#
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates <ayates@dropbox.com>
+
+[build]
+# Limit parallel jobs to prevent OOM (default is num_cpus)
+# Adjust based on system memory: 4 for 16GB, 6 for 32GB
+jobs = 4
+
+[profile.dev]
+# Faster incremental builds
+incremental = true
+
+[profile.release]
+# Still limit jobs in release mode
+# codegen-units = 1 is slower but produces smaller binaries

@@ -1,0 +1,18 @@
+# tcrane-verify - Verification backend
+#
+# Author: Andrew Yates <ayates@dropbox.com>
+# Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+
+[package]
+name = "tcrane-verify"
+description = "Verification backend for tCrane using SMT solving"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tcrane-ir = { workspace = true }
+thiserror = { workspace = true }
+# z4 = { workspace = true }

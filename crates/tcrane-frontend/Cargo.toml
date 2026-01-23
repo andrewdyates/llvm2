@@ -1,0 +1,17 @@
+# tcrane-frontend - CLIF parser and builder
+#
+# Author: Andrew Yates <ayates@dropbox.com>
+# Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+
+[package]
+name = "tcrane-frontend"
+description = "CLIF text format parser and function builder for tCrane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tcrane-ir = { workspace = true }
+thiserror = { workspace = true }

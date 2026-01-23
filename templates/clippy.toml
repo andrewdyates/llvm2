@@ -1,0 +1,32 @@
+# Clippy configuration for ayates_dbx Rust projects
+#
+# Copy to project root as clippy.toml or .clippy.toml
+# Run: cargo clippy -- -D warnings
+#
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates <ayates@dropbox.com>
+
+# Memory discipline - prevent OOM patterns
+warn = [
+    "clippy::redundant_clone",          # .clone() when not needed
+    "clippy::clone_on_ref_ptr",         # clone() on Arc/Rc
+    "clippy::large_enum_variant",       # unboxed large variants
+    "clippy::vec_init_then_push",       # Vec::new() then push vs with_capacity
+    "clippy::unnecessary_to_owned",     # .to_vec()/.to_string() when ref works
+]
+
+# Large enum variant threshold (bytes)
+large-enum-variant-size-threshold = 64
+
+# Performance
+warn = [
+    "clippy::needless_collect",         # collect() then iterate
+    "clippy::manual_memcpy",            # loop copy vs copy_from_slice
+    "clippy::inefficient_to_string",    # format!() vs to_string()
+]
+
+# Correctness
+deny = [
+    "clippy::unwrap_used",              # use expect() with context
+    "clippy::panic",                    # no panics in library code
+]

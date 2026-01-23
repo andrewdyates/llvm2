@@ -1,0 +1,55 @@
+# Sync Manifest - defines what files sync from ai_template to other repos
+# Format: One pattern per line. Supports:
+#   - Exact paths: looper.py
+#   - Glob patterns: ai_template_scripts/*.py
+#   - Directory sync (trailing /): .claude/roles/
+#
+# Lines starting with # are comments
+# Lines starting with ! are exclusions (processed after includes)
+# Special handlers: .gitignore (preserves project-specific entries)
+
+# This manifest (for sync_check.sh drift detection)
+.sync_manifest
+
+# Core runner
+looper.py
+looper/
+
+# AI instruction files
+AGENTS.md
+GEMINI.md
+
+# Config files
+ruff.toml
+requirements.txt
+.mcp.json
+.gitignore
+
+# Rules (individual files, not directory - rules may be project-specific)
+.claude/rules/ai_template.md
+.claude/rules/org_chart.md
+
+# Directories (full sync with rsync --delete)
+.claude/roles/
+.claude/plugins/
+.claude/commands/
+ai_template_scripts/headers/
+ai_template_scripts/hooks/
+ai_template_scripts/mcp/
+ai_template_scripts/templates/
+
+# Scripts - glob all .sh and .py files
+ai_template_scripts/*.sh
+ai_template_scripts/*.py
+ai_template_scripts/bin/gh
+ai_template_scripts/README.md
+
+# Templates
+postmortems/TEMPLATE.md
+tests/conftest.py
+tests/test_example.py
+
+# Exclusions - never sync these even if they match above
+!ai_template_scripts/__pycache__/
+!**/*.pyc
+!.looper_config.json

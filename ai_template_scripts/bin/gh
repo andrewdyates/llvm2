@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# gh wrapper - Intercepts issue/comment commands to add AI identity
+#
+# CANONICAL SOURCE: ayates_dbx/ai_template
+# DO NOT EDIT in other repos - file issues to ai_template for changes.
+#
+# This wrapper sits in PATH before the real gh and:
+# - Routes "gh issue create" and "gh issue comment" through gh_post.py
+# - Passes all other commands to the real gh unchanged
+#
+# Installed by looper.py via PATH modification.
+#
+# Copyright 2026 Dropbox, Inc.
+# Licensed under the Apache License, Version 2.0
+
+# Find the real gh (skip this wrapper)
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+REAL_GH=""
+
+# First try common locations (fastest, avoids PATH issues)
+for loc in /opt/homebrew/bin/gh /usr/local/bin/gh /usr/bin/gh; do
+    if [[ -x "$loc" ]]; then
+        candidate_real="$(realpath "$loc" 2>/dev/null || echo "$loc")"
+        [[ "$candidate_real" != "$SCRIPT_PATH" ]] && REAL_GH="$loc" && break
+    fi
+done
+
+# Fall back to PATH search if not found
+if [[ -z "$REAL_GH" ]]; then
+    IFS=':' read -ra PATH_DIRS <<< "$PATH"
+    for p in "${PATH_DIRS[@]}"; do
+        [[ -d "$p" ]] || continue
+        gh_candidate="$p/gh"
+        [[ -x "$gh_candidate" ]] || continue
+        candidate_real="$(realpath "$gh_candidate" 2>/dev/null || echo "$gh_candidate")"
+        [[ "$candidate_real" == "$SCRIPT_PATH" ]] && continue
+        REAL_GH="$gh_candidate"
+        break
+    done
+fi
+
+if [[ -z "$REAL_GH" ]]; then
+    echo "ERROR: Real gh not found in PATH" >&2
+    exit 1
+fi
+
+# Check if this is an issue create, comment, edit, or close command
+if [[ "$1" == "issue" ]] && [[ "$2" == "create" || "$2" == "comment" || "$2" == "edit" || "$2" == "close" ]]; then
+    GH_POST="${SCRIPT_DIR}/../gh_post.py"
+    if [[ -x "$GH_POST" ]]; then
+        exec "$GH_POST" "$@"
+    fi
+fi
+
+# Pass through to real gh
+exec "$REAL_GH" "$@"

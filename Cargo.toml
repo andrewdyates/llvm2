@@ -1,0 +1,43 @@
+# tCrane - Trusted Cranelift
+# Verified compiler backend in Rust
+#
+# Author: Andrew Yates <ayates@dropbox.com>
+# Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/tcrane-ir",
+    "crates/tcrane-verify",
+    "crates/tcrane-codegen",
+    "crates/tcrane-frontend",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/ayates_dbx/tCrane"
+authors = ["Andrew Yates <ayates@dropbox.com>"]
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Verification (z4 SMT solver)
+# z4 = { git = "https://github.com/ayates_dbx/z4" }
+
+# Cranelift (upstream reference)
+# cranelift-codegen = "0.116"
+# cranelift-frontend = "0.116"
+
+# Internal crates
+tcrane-ir = { path = "crates/tcrane-ir" }
+tcrane-verify = { path = "crates/tcrane-verify" }
+tcrane-codegen = { path = "crates/tcrane-codegen" }
+tcrane-frontend = { path = "crates/tcrane-frontend" }

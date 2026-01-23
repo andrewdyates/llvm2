@@ -1,0 +1,18 @@
+# tcrane-codegen - Verified code generation
+#
+# Author: Andrew Yates <ayates@dropbox.com>
+# Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+
+[package]
+name = "tcrane-codegen"
+description = "Verified code generation for tCrane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tcrane-ir = { workspace = true }
+tcrane-verify = { workspace = true }
+thiserror = { workspace = true }
