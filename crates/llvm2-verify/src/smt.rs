@@ -1,11 +1,11 @@
-// tcrane-verify/smt.rs - SMT encoding
+// llvm2-verify/smt.rs - SMT encoding
 //
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
-//! SMT encoding of Cranelift IR for verification.
+//! SMT encoding of LIR for verification.
 
-use tcrane_ir::types::Type;
+use llvm2_lower::types::Type;
 
 /// SMT sort corresponding to IR types.
 #[derive(Debug, Clone)]

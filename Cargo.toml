@@ -1,5 +1,5 @@
-# tCrane - Trusted Cranelift
-# Verified compiler backend in Rust
+# LLVM2
+# Verified compiler backend - tMIR to machine code
 #
 # Author: Andrew Yates <ayates@dropbox.com>
 # Copyright 2026 Dropbox, Inc. | License: Apache-2.0
@@ -7,17 +7,17 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/tcrane-ir",
-    "crates/tcrane-verify",
-    "crates/tcrane-codegen",
-    "crates/tcrane-frontend",
+    "crates/llvm2-lower",
+    "crates/llvm2-opt",
+    "crates/llvm2-verify",
+    "crates/llvm2-codegen",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/ayates_dbx/tCrane"
+repository = "https://github.com/ayates_dbx/LLVM2"
 authors = ["Andrew Yates <ayates@dropbox.com>"]
 
 [workspace.dependencies]
@@ -32,12 +32,11 @@ anyhow = "1.0"
 # Verification (z4 SMT solver)
 # z4 = { git = "https://github.com/ayates_dbx/z4" }
 
-# Cranelift (upstream reference)
-# cranelift-codegen = "0.116"
-# cranelift-frontend = "0.116"
+# Input IR
+# tmir = { git = "https://github.com/ayates_dbx/tMIR" }
 
 # Internal crates
-tcrane-ir = { path = "crates/tcrane-ir" }
-tcrane-verify = { path = "crates/tcrane-verify" }
-tcrane-codegen = { path = "crates/tcrane-codegen" }
-tcrane-frontend = { path = "crates/tcrane-frontend" }
+llvm2-lower = { path = "crates/llvm2-lower" }
+llvm2-opt = { path = "crates/llvm2-opt" }
+llvm2-verify = { path = "crates/llvm2-verify" }
+llvm2-codegen = { path = "crates/llvm2-codegen" }

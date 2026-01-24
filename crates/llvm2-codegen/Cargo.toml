@@ -1,11 +1,11 @@
-# tcrane-frontend - CLIF parser and builder
+# llvm2-codegen - Verified machine code generation
 #
 # Author: Andrew Yates <ayates@dropbox.com>
 # Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 [package]
-name = "tcrane-frontend"
-description = "CLIF text format parser and function builder for tCrane"
+name = "llvm2-codegen"
+description = "Verified machine code generation for LLVM2 (x86-64, AArch64, RISC-V)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,5 +13,6 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-tcrane-ir = { workspace = true }
+llvm2-lower = { workspace = true }
+llvm2-verify = { workspace = true }
 thiserror = { workspace = true }

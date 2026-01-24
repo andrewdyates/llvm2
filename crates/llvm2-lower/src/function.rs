@@ -1,9 +1,9 @@
-// tcrane-ir/function.rs - Function representation
+// llvm2-lower/function.rs - Function representation
 //
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
-//! Function and basic block representation.
+//! Function and basic block representation for LLVM2 LIR.
 
 use crate::instructions::{Block, Instruction, Value};
 use crate::types::Type;
@@ -17,7 +17,7 @@ pub struct BasicBlock {
     pub instructions: Vec<Instruction>,
 }
 
-/// A function in the IR.
+/// A function in the LIR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Function {
     pub name: String,

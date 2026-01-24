@@ -1,4 +1,4 @@
-// tcrane-codegen/target.rs - Target architectures
+// llvm2-codegen/target.rs - Target architectures
 //
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0

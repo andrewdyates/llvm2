@@ -1,9 +1,9 @@
-// tcrane-ir/instructions.rs - IR instruction set
+// llvm2-lower/instructions.rs - LIR instruction set
 //
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
-//! Instruction definitions for Cranelift IR.
+//! Instruction definitions for LLVM2 Low-level IR.
 
 use crate::types::Type;
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ pub struct Value(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Block(pub u32);
 
-/// Cranelift IR opcodes (subset).
+/// LIR opcodes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Opcode {
     // Constants

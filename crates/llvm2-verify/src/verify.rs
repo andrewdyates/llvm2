@@ -1,11 +1,11 @@
-// tcrane-verify/verify.rs - Verification interface
+// llvm2-verify/verify.rs - Verification interface
 //
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! High-level verification interface.
 
-use tcrane_ir::Function;
+use llvm2_lower::Function;
 use thiserror::Error;
 
 /// Verification result.

@@ -1,11 +1,11 @@
-# tcrane-codegen - Verified code generation
+# llvm2-lower - tMIR to LIR lowering
 #
 # Author: Andrew Yates <ayates@dropbox.com>
 # Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 [package]
-name = "tcrane-codegen"
-description = "Verified code generation for tCrane"
+name = "llvm2-lower"
+description = "tMIR to Low-level IR lowering for LLVM2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,6 +13,5 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-tcrane-ir = { workspace = true }
-tcrane-verify = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }

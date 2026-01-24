@@ -1,12 +1,12 @@
-// tcrane-codegen/lower.rs - Instruction lowering
+// llvm2-codegen/lower.rs - Instruction lowering
 //
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
-//! Instruction lowering from Cranelift IR to machine code.
+//! Instruction lowering from LIR to machine code.
 
 use crate::target::Target;
-use tcrane_ir::Function;
+use llvm2_lower::Function;
 use thiserror::Error;
 
 /// Lowering error.

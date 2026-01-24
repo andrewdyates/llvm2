@@ -1,13 +1,13 @@
-// tcrane-ir/types.rs - IR type system
+// llvm2-lower/types.rs - LIR type system
 //
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
-//! Type system for Cranelift IR.
+//! Type system for LLVM2 Low-level IR.
 
 use serde::{Deserialize, Serialize};
 
-/// Scalar types in Cranelift IR.
+/// Scalar types in LIR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Type {
     /// 8-bit integer
