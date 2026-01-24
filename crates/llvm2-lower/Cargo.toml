@@ -13,5 +13,11 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+# tMIR (input IR)
+tmir-types = { workspace = true }
+tmir-instrs = { workspace = true }
+tmir-func = { workspace = true }
+
+# Utilities
 serde = { workspace = true }
 thiserror = { workspace = true }

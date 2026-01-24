@@ -32,8 +32,11 @@ anyhow = "1.0"
 # Verification (z4 SMT solver)
 # z4 = { git = "https://github.com/ayates_dbx/z4" }
 
-# Input IR
-# tmir = { git = "https://github.com/ayates_dbx/tMIR" }
+# Input IR (tMIR)
+tmir-types = { path = "../tMIR/crates/tmir-types" }
+tmir-instrs = { path = "../tMIR/crates/tmir-instrs" }
+tmir-func = { path = "../tMIR/crates/tmir-func" }
+tmir-semantics = { path = "../tMIR/crates/tmir-semantics" }
 
 # Internal crates
 llvm2-lower = { path = "crates/llvm2-lower" }
