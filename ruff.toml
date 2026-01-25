@@ -28,4 +28,6 @@ ignore = [
     "PERF203", # try-except in loop (acceptable for resilient file processing)
     "SLF",     # private member access (acceptable in tests)
     "COM812",  # trailing comma - conflicts with ruff formatter
+    "TC003",   # type checking imports - not critical
+    "B905",    # zip strict parameter - false positive for window patterns
 ]

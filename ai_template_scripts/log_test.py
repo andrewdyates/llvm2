@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates
+# Licensed under the Apache License, Version 2.0
+
 """
 log_test.py - Log test invocations for manager audit
 
@@ -67,11 +71,15 @@ def cmd_start(command: str):
     log_entry(entry)
 
     # Write active file for concurrent detection
-    ACTIVE_FILE.write_text(json.dumps({
-        "command": command,
-        "started": datetime.now().isoformat(),
-        **info,
-    }))
+    ACTIVE_FILE.write_text(
+        json.dumps(
+            {
+                "command": command,
+                "started": datetime.now().isoformat(),
+                **info,
+            }
+        )
+    )
     print(f"[test-log] Started: {command}")
 
 
@@ -130,7 +138,9 @@ def cmd_run(command: str):
     log_entry(entry)
     ACTIVE_FILE.unlink(missing_ok=True)
 
-    status = "passed" if result.returncode == 0 else f"failed (exit {result.returncode})"
+    status = (
+        "passed" if result.returncode == 0 else f"failed (exit {result.returncode})"
+    )
     print(f"[test-log] Completed: {command} - {status} ({duration_s}s)")
 
     return result.returncode
@@ -174,41 +184,54 @@ def cmd_report():
     # Failures
     failures = [e for e in end_events if e.get("exit_code", 0) != 0]
     if failures:
-        print(f"\nFailures: {len(failures)}/{len(end_events)} ({100*len(failures)//len(end_events)}%)")
+        print(
+            f"\nFailures: {len(failures)}/{len(end_events)} ({100 * len(failures) // len(end_events)}%)"
+        )
 
     # Concurrent tests (look for overlapping start/end)
     print("\nConcurrent test detection:")
 
     # Build list of (start_time, end_time, session, role, command) tuples
     test_runs = []
-    starts = {(e.get("session"), e.get("command")): e for e in entries if e.get("event") == "start"}
+    starts = {
+        (e.get("session"), e.get("command")): e
+        for e in entries
+        if e.get("event") == "start"
+    }
     for e in entries:
         if e.get("event") == "end":
             key = (e.get("session"), e.get("command"))
             start_entry = starts.get(key)
             if start_entry:
-                test_runs.append({
-                    "start": start_entry.get("timestamp", ""),
-                    "end": e.get("timestamp", ""),
-                    "session": e.get("session"),
-                    "role": e.get("role"),
-                    "command": e.get("command"),
-                })
+                test_runs.append(
+                    {
+                        "start": start_entry.get("timestamp", ""),
+                        "end": e.get("timestamp", ""),
+                        "session": e.get("session"),
+                        "role": e.get("role"),
+                        "command": e.get("command"),
+                    }
+                )
 
     # Find actual overlaps
     overlaps = [
         (run, other)
         for i, run in enumerate(test_runs)
         for other in test_runs[:i]
-        if (run["start"] < other["end"] and run["end"] > other["start"]
-            and run["session"] != other["session"])
+        if (
+            run["start"] < other["end"]
+            and run["end"] > other["start"]
+            and run["session"] != other["session"]
+        )
     ]
 
     if overlaps:
         print(f"  Found {len(overlaps)} overlapping test runs:")
         for run, other in overlaps[-5:]:
             print(f"    [{run['role']}:{run['session'][:8]}] {run['command'][:30]}")
-            print(f"      overlapped with [{other['role']}:{other['session'][:8]}] {other['command'][:30]}")
+            print(
+                f"      overlapped with [{other['role']}:{other['session'][:8]}] {other['command'][:30]}"
+            )
     else:
         print("  No concurrent test runs detected")
 

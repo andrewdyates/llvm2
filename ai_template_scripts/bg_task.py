@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates
+# Licensed under the Apache License, Version 2.0
+
 """
 bg_task.py - Background task management for long-running operations
 
@@ -36,10 +40,11 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 # Directory for background tasks (relative to git root)
 TASKS_DIR = ".background_tasks"
@@ -221,11 +226,12 @@ signal.signal(signal.SIGALRM, handler)
 signal.alarm({timeout})
 
 try:
-    result = subprocess.run(
-        {command!r},
-        stdout=open({str(output_path)!r}, 'w'),
-        stderr=subprocess.STDOUT,
-    )
+    with open({str(output_path)!r}, 'w') as output_file:
+        result = subprocess.run(
+            {command!r},
+            stdout=output_file,
+            stderr=subprocess.STDOUT,
+        )
     exit_code = result.returncode
 except Exception as e:
     with open({str(output_path)!r}, 'a') as f:

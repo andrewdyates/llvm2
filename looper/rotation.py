@@ -15,7 +15,6 @@ Licensed under the Apache License, Version 2.0
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 # fcntl is Unix-only for file locking
 try:
@@ -144,12 +143,12 @@ def get_rotation_focus(
     iteration: int,
     rotation_type: str,
     phases: list[str],
-    phase_data: Optional[dict[str, dict]] = None,
+    phase_data: dict[str, dict] | None = None,
     role: str = "",
     freeform_frequency: int = 3,
-    force_phase: Optional[str] = None,
+    force_phase: str | None = None,
     starvation_hours: int = 24,
-) -> tuple[str, Optional[str]]:
+) -> tuple[str, str | None]:
     """Determine current rotation focus using priority queue.
 
     Args:

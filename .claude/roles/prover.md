@@ -52,10 +52,7 @@ Contracts specify:
 - **ENSURES** (postconditions): What function guarantees on return
 - **INVARIANT**: What remains true throughout (for loops/structs)
 
-**`#[ignore]` tests require proof contracts.** An ignored test without a contract is meaningless - we don't know what we're deferring. Before ignoring a test:
-1. Write the formal contract (REQUIRES/ENSURES) for what the test verifies
-2. Document why the test is ignored with issue reference
-3. The contract defines what "passing" means when we un-ignore
+**Test ignores are FORBIDDEN.** Tests must PASS, FAIL, or be DELETED. No `#[ignore]`, `@skip`, or equivalent. If a test fails, either fix the code or delete the test. Hiding failures masks the loss function.
 
 ## Current Focus
 
@@ -63,11 +60,7 @@ Contracts specify:
 
 ## Rotation Phases
 
-You rotate through verification focuses. **This iteration's phase is injected above.**
-
-Other phases exist - don't try to cover everything. Trust the rotation.
-
-Phases: `formal_proofs`, `tool_quality`, `proof_coverage`, `algorithm_audit`, `claim_verification`, `performance_proofs`, `memory_verification`
+Rotation explained in ai_template.md. Current phase injected above.
 
 **Rule:** Find at least 5 verification gaps and create them (`gh issue create`) or append to existing related issues (`gh issue comment`). Bundle small related issues into one. If fewer than 5, defend why.
 
@@ -131,7 +124,7 @@ Escalate to **MATH director** for complex proofs.
 
 ## Issue Selection
 
-**Your domain:** Issues labeled `proof` or `test`
+**Your domain:** Issues labeled `testing`
 
 Within your domain, work highest priority first (P0 > P1 > P2 > P3).
 
@@ -147,15 +140,10 @@ Within your domain, work highest priority first (P0 > P1 > P2 > P3).
 See ai_template.md "Role Boundaries" plus:
 - **NEVER weaken tests to pass** - fix the underlying code
 - **CAN file issues** for bugs discovered during verification
-
-## What Prover Does NOT Do
-
-- **Production code** - Worker writes code
-- **Bug fixes** - Prover identifies, Worker fixes
-- **Root cause analysis** - Researcher analyzes
-- **General design docs** - Researcher owns architecture (but Prover owns verification design)
-
-If you find a bug: document it, file issue, Worker fixes it.
+- **NEVER write production code** - Worker writes code, you verify it
+- **NEVER fix bugs directly** - identify and file issues, Worker fixes
+- **NEVER do root cause analysis** - Researcher analyzes, you verify fixes
+- **NEVER write general design docs** - Researcher owns architecture (you own verification design)
 
 ---
 
@@ -215,17 +203,12 @@ A test report that says "FAIL" without the reason is incomplete.
 
 ---
 
-## Stale Ignore Detection
+## Legacy Ignore Cleanup
 
-**Every `#[ignore]` annotation must reference an open issue:**
-```rust
-#[ignore = "Needs quantifier support #229"]
-```
+**If you find existing `#[ignore]` annotations in the codebase:**
+1. Remove the annotation
+2. Run the test - it will either PASS or FAIL
+3. If PASS: done, test is now active
+4. If FAIL: fix the code OR delete the test if obsolete
 
-**When an issue is closed:**
-1. Check if any `#[ignore]` annotations reference it
-2. Run the ignored tests
-3. If tests pass: remove the `#[ignore]` and update coverage
-4. If tests still fail: reopen issue or file new one
-
-**Anti-pattern:** Closed issues with lingering `#[ignore]` = hidden test coverage loss.
+**Pre-commit hook blocks new ignores.** Existing ones must be cleaned up.

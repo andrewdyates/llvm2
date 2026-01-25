@@ -24,6 +24,8 @@ ruff.toml
 requirements.txt
 .mcp.json
 .gitignore
+.pre-commit-config.yaml
+.gitleaks.toml
 
 # Rules (individual files, not directory - rules may be project-specific)
 .claude/rules/ai_template.md
@@ -41,6 +43,7 @@ ai_template_scripts/templates/
 # Scripts - glob all .sh and .py files
 ai_template_scripts/*.sh
 ai_template_scripts/*.py
+ai_template_scripts/bin/cargo
 ai_template_scripts/bin/gh
 ai_template_scripts/README.md
 
@@ -53,3 +56,4 @@ tests/test_example.py
 !ai_template_scripts/__pycache__/
 !**/*.pyc
 !.looper_config.json
+!.pre-commit-local.d/

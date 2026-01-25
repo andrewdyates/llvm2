@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates
+# Licensed under the Apache License, Version 2.0
+
 """
 json_to_text.py - Format AI CLI streaming output for human readability
 
@@ -611,7 +615,7 @@ def _handle_result(msg: dict) -> None:
     if _session_complete_printed:
         return  # Ignore duplicate result messages
     _session_complete_printed = True
-    stats = msg.get("stats", {})
+    stats = msg.get("usage") or msg.get("stats", {})
     print(f"\n{DIM}{'─' * 80}{RESET}")
     print(f"{BOLD}{GREEN}  ✓  Session Complete{RESET}")
     if stats:

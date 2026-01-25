@@ -31,11 +31,12 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # fcntl is Unix-only; Windows uses different locking
 try:
     import fcntl
+
     HAS_FCNTL = True
 except ImportError:
     HAS_FCNTL = False
@@ -43,8 +44,6 @@ except ImportError:
 from looper.config import (
     ITERATION_FILE_TEMPLATE,
     LOG_DIR,
-    MAX_CRASH_LOG_LINES,
-    MAX_LOG_FILES,
     PID_FILE_TEMPLATE,
     ROLES_DIR,
     STATUS_FILE_TEMPLATE,
@@ -61,7 +60,15 @@ from looper.context import (
     transition_audit_to_review,
 )
 from looper.hooks import install_hooks
+from looper.issue_manager import IssueManager
 from looper.rotation import get_rotation_focus, update_rotation_state
+from looper.status import StatusManager
+from looper.telemetry import (
+    IterationMetrics,
+    estimate_cost,
+    extract_token_usage,
+    record_iteration,
+)
 
 # --- Audit Prompt ---
 
@@ -70,7 +77,7 @@ def build_audit_prompt(
     round_num: int,
     min_issues: int,
     max_rounds: int,
-    last_commit: Optional[str] = None,
+    last_commit: str | None = None,
 ) -> str:
     """Build audit prompt for a specific round.
 
@@ -118,7 +125,9 @@ def extract_issue_numbers(commit_msg: str) -> list[int]:
     # Case-insensitive to match auto-fixed "fixes" from commit-msg-hook
     return [
         int(match.group(1))
-        for match in re.finditer(r"(?:Fixes|Part of|Re:|Claims) #(\d+)", commit_msg, re.IGNORECASE)
+        for match in re.finditer(
+            r"(?:Fixes|Part of|Re:|Claims) #(\d+)", commit_msg, re.IGNORECASE
+        )
     ]
 
 
@@ -127,7 +136,7 @@ class LoopRunner:
         self.mode = mode
         self.iteration = 1
         self.running = True
-        self.current_process: Optional[subprocess.Popen] = None
+        self.current_process: subprocess.Popen | None = None
         self._current_phase: str | None = None  # Track current rotation phase
 
         # Load role config from .claude/roles/ files
@@ -139,12 +148,26 @@ class LoopRunner:
         self.status_file = Path(STATUS_FILE_TEMPLATE.format(mode=mode))
         self.crash_log = LOG_DIR / "crashes.log"
 
+        # Managers for issue ops and status/logging
+        repo_path = Path.cwd().resolve()
+        self.issue_manager = IssueManager(repo_path=repo_path, role=mode)
+        self.status_manager = StatusManager(
+            repo_path=repo_path,
+            mode=mode,
+            status_file=self.status_file,
+            crash_log=self.crash_log,
+            config=self.config,
+            get_ait_version=self.get_ait_version,
+            log_dir=LOG_DIR,
+        )
+
         # Check for codex availability
         self.codex_available = shutil.which("codex") is not None
 
         # Session identity
         self._session_id = uuid.uuid4().hex[:6]
         self._started_at = datetime.now(timezone.utc).isoformat()
+        self.status_manager.set_started_at(self._started_at)
 
         # Working issues from main iteration (for audit context)
         self._working_issues: list[int] = []
@@ -152,8 +175,8 @@ class LoopRunner:
         # Per-role STOP file (e.g., STOP_WORKER, STOP_MANAGER)
         self._role_stop_file = f"STOP_{mode.upper()}"
 
-        # Pulse (health monitoring) - track last run time
-        self._last_pulse_time: float = 0.0
+        # Telemetry - pending metrics to be completed after commit check
+        self._pending_metrics: IterationMetrics | None = None
 
     def _check_stop_file(self) -> str | None:
         """Check for graceful shutdown request files.
@@ -231,10 +254,16 @@ class LoopRunner:
         except OSError:
             return False
 
-    def _acquire_lock_with_timeout(
-        self, lock_file, timeout_sec: float = 30.0
-    ) -> bool:
-        """Try to acquire exclusive lock with timeout. Returns True if acquired."""
+    def _acquire_lock_with_timeout(self, lock_file, timeout_sec: float = 30.0) -> bool:
+        """Try to acquire exclusive lock with timeout. Returns True if acquired.
+
+        REQUIRES: lock_file is an open file object with valid fileno()
+        REQUIRES: HAS_FCNTL is True (Unix platform with fcntl available)
+        ENSURES: If returns True: lock_file has exclusive flock held
+        ENSURES: If returns False: no lock acquired (either timeout, no fcntl, or OSError)
+        ENSURES: Returns within timeout_sec + small overhead (polling interval 0.1s)
+        ENSURES: Does not modify lock_file open/close state
+        """
         if not HAS_FCNTL:
             return False
 
@@ -271,8 +300,18 @@ class LoopRunner:
         - Unix: Uses fcntl.flock() with timeout for coordination
         - Windows: Falls back to file-based coordination (less robust)
 
+        REQUIRES: self.mode is set (e.g., 'worker', 'manager')
+        REQUIRES: LOG_DIR exists or can be created
+        ENSURES: Returns positive integer > any previously returned value for this role
+        ENSURES: Uniqueness - concurrent calls return distinct values (via file lock)
+        ENSURES: Persists returned value to commit tag file for next session
+        ENSURES: Releases lock before returning (or on exception)
+
         Returns:
             Next commit tag iteration (unique across concurrent sessions).
+
+        Raises:
+            RuntimeError: If lock cannot be acquired (prevents duplicate iterations).
         """
         # Ensure log directory exists for lock file
         LOG_DIR.mkdir(exist_ok=True)
@@ -288,11 +327,28 @@ class LoopRunner:
         if HAS_FCNTL:
             try:
                 lock_file = open(lock_file_path, "w")
-                lock_acquired = self._acquire_lock_with_timeout(lock_file, timeout_sec=30.0)
+                lock_acquired = self._acquire_lock_with_timeout(
+                    lock_file, timeout_sec=30.0
+                )
                 if not lock_acquired:
-                    print("Warning: could not acquire iteration lock (timeout)")
+                    if lock_file:
+                        lock_file.close()
+                    raise RuntimeError(
+                        "Could not acquire iteration lock within 30s timeout. "
+                        "Another session may be holding the lock. "
+                        "Refusing to proceed without lock to prevent duplicate iterations."
+                    )
             except OSError as e:
-                print(f"Warning: could not open lock file ({e})")
+                if lock_file:
+                    try:
+                        lock_file.close()
+                    except OSError:
+                        pass
+                raise RuntimeError(f"Could not open lock file: {e}") from e
+        else:
+            # Windows: no fcntl available, proceed without lock but warn
+            # This is best-effort - concurrent sessions on Windows may collide
+            print("Warning: fcntl not available (Windows?), proceeding without lock")
 
         try:
             # Read current value from commit tag file
@@ -398,6 +454,81 @@ class LoopRunner:
             pass
         return None
 
+    def check_sync_staleness(self) -> int | None:
+        """Check how many commits behind ai_template this repo is.
+
+        Looks for ai_template as sibling directory. If found, compares
+        local .ai_template_version against ai_template HEAD.
+
+        Returns:
+            Number of commits behind, or None if check not possible.
+        """
+        version_file = Path(".ai_template_version")
+        if not version_file.exists():
+            print("⚠ No .ai_template_version - repo may never have been synced")
+            return None
+
+        # Read local version (first line only - ignore timestamp)
+        try:
+            local_version = version_file.read_text().strip().split("\n")[0].strip()
+        except Exception:
+            return None
+
+        if not local_version:
+            return None
+
+        # Check for sibling ai_template directory
+        parent = Path.cwd().parent
+        ait_dir = parent / "ai_template"
+        if not ait_dir.is_dir() or not (ait_dir / ".git").is_dir():
+            # ai_template not found as sibling - can't check
+            return None
+
+        # Get ai_template HEAD
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(ait_dir), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                return None
+            ait_head = result.stdout.strip()
+        except Exception:
+            return None
+
+        # If already current, no warning needed
+        # Handle both full and short hashes: either could be a prefix of the other
+        if (
+            local_version == ait_head
+            or ait_head.startswith(local_version)
+            or local_version.startswith(ait_head)
+        ):
+            return 0
+
+        # Count commits behind using ai_template's git history
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(ait_dir),
+                    "rev-list",
+                    "--count",
+                    f"{local_version}..{ait_head}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return int(result.stdout.strip())
+        except Exception:
+            pass
+
+        return None
+
     def setup(self):
         """Initialize environment and check dependencies."""
         # Check core dependencies
@@ -410,9 +541,13 @@ class LoopRunner:
         codex_prob = self.config.get("codex_probability", 0.0)
         if codex_prob > 0:
             if self.codex_available:
-                print(f"✓ Found codex: {shutil.which('codex')} (probability: {codex_prob:.0%})")
+                print(
+                    f"✓ Found codex: {shutil.which('codex')} (probability: {codex_prob:.0%})"
+                )
             else:
-                print(f"  (codex not found, will use claude only - probability was {codex_prob:.0%})")
+                print(
+                    f"  (codex not found, will use claude only - probability was {codex_prob:.0%})"
+                )
 
         json_to_text = Path("ai_template_scripts/json_to_text.py")
         if not json_to_text.exists():
@@ -470,6 +605,25 @@ class LoopRunner:
         # Set up git identity for commits
         self.setup_git_identity()
 
+        # Check sync staleness (warn if behind ai_template)
+        commits_behind = self.check_sync_staleness()
+        if commits_behind is not None:
+            if commits_behind == 0:
+                print("✓ ai_template sync: current")
+            elif commits_behind < 50:
+                print(f"✓ ai_template sync: {commits_behind} commits behind")
+            elif commits_behind < 100:
+                print(
+                    f"⚠ ai_template sync: {commits_behind} commits behind - consider syncing"
+                )
+            else:
+                # 100+ commits behind: create flag file for health monitoring
+                msg = "sync recommended" if commits_behind < 200 else "STALE"
+                print(f"⚠ ai_template sync: {commits_behind} commits behind - {msg}")
+                flags_dir = Path(".flags")
+                flags_dir.mkdir(exist_ok=True)
+                (flags_dir / "sync_stale").write_text(f"{commits_behind}\n")
+
         # Check for existing instance
         if self.pid_file.exists():
             try:
@@ -497,7 +651,7 @@ class LoopRunner:
                 self.iteration = 1
 
         # Rotate logs
-        self.rotate_logs()
+        self.status_manager.rotate_logs()
 
         # Setup signal handlers
         signal.signal(signal.SIGINT, self.handle_signal)
@@ -505,7 +659,8 @@ class LoopRunner:
 
         # Track start time for status
         self._started_at = datetime.now(timezone.utc).isoformat()
-        self.write_status("starting")
+        self.status_manager.set_started_at(self._started_at)
+        self.status_manager.write_status(self.iteration, "starting")
 
         print()
         print(f"Starting {self.mode} loop...")
@@ -521,398 +676,17 @@ class LoopRunner:
 
     def cleanup(self):
         """Clean up on exit."""
-        self.clear_status()
+        self.status_manager.clear_status()
         if self.pid_file.exists():
             self.pid_file.unlink()
         print(f"Completed {self.iteration - 1} iterations")
 
-    def run_pulse(self) -> bool:
-        """Run pulse.py to update health metrics and flags.
-
-        Checks if enough time has passed since last run (pulse_interval_minutes).
-        Manager reads .flags/ to act on issues - it doesn't run pulse directly.
-
-        Returns:
-            True if pulse ran, False if skipped (not yet due).
-        """
-        interval_minutes = self.config.get("pulse_interval_minutes", 30)
-        now = time.time()
-
-        # Check if enough time has passed
-        elapsed_minutes = (now - self._last_pulse_time) / 60
-        if self._last_pulse_time > 0 and elapsed_minutes < interval_minutes:
-            return False
-
-        # Run pulse.py as subprocess (quiet mode - just writes files)
-        pulse_script = Path("ai_template_scripts/pulse.py")
-        if not pulse_script.exists():
-            return False
-
-        try:
-            result = subprocess.run(
-                ["python3", str(pulse_script)],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            self._last_pulse_time = now
-
-            if result.returncode == 0:
-                # Check for flags set
-                flags_dir = Path(".flags")
-                flags = list(flags_dir.glob("*")) if flags_dir.exists() else []
-                if flags:
-                    flag_names = ", ".join(f.name for f in flags[:5])
-                    print(f"⚡ Pulse: {flag_names}")
-                else:
-                    print("⚡ Pulse: OK (no flags)")
-                return True
-            print(f"⚠️  Pulse error: {result.stderr[:100] if result.stderr else 'unknown'}")
-            return False
-        except subprocess.TimeoutExpired:
-            print("⚠️  Pulse timeout")
-            return False
-        except Exception as e:
-            print(f"⚠️  Pulse failed: {e}")
-            return False
-
-    def rotate_logs(self):
-        """Remove old log files to prevent unbounded growth."""
-        log_files = sorted(LOG_DIR.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
-        if len(log_files) > MAX_LOG_FILES:
-            for f in log_files[:-MAX_LOG_FILES]:
-                f.unlink()
-            print(f"Rotated logs: removed {len(log_files) - MAX_LOG_FILES} old files")
-
-        # Rotate crash log
-        if self.crash_log.exists():
-            lines = self.crash_log.read_text().splitlines()
-            if len(lines) > MAX_CRASH_LOG_LINES:
-                self.crash_log.write_text(
-                    "\n".join(lines[-MAX_CRASH_LOG_LINES:]) + "\n"
-                )
-
-    def write_status(
-        self,
-        status: str,
-        log_file: Optional[Path] = None,
-        extra: Optional[dict[str, Any]] = None,
-    ):
-        """Write worker status to .worker_status.json for manager visibility."""
-        now = datetime.now(timezone.utc).isoformat()
-        data = {
-            "pid": os.getpid(),
-            "mode": self.mode,
-            "project": get_project_name(),
-            "iteration": self.iteration,
-            "status": status,
-            "updated_at": now,
-            "started_at": getattr(self, "_started_at", now),
-        }
-        # Include AIT version for tracking
-        ait_version = self.get_ait_version()
-        if ait_version:
-            data["ait_version"] = ait_version[0]
-            data["ait_synced"] = ait_version[1]
-        if log_file:
-            data["log_file"] = str(log_file)
-        if extra:
-            data.update(extra)
-
-        # Atomic write
-        tmp = self.status_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2))
-        tmp.rename(self.status_file)
-
-    def clear_status(self):
-        """Remove status file on clean exit."""
-        if self.status_file.exists():
-            self.status_file.unlink()
-
-    def check_stuck_issues(self) -> list[tuple[int, int]]:
-        """Check for issues that may be stuck (many references, not closed).
-
-        Returns list of (issue_number, reference_count) for potentially stuck issues.
-        Only runs for manager mode.
-        """
-        if self.mode != "manager":
-            return []
-
-        try:
-            # Get last 20 commits and count issue references
-            result = subprocess.run(
-                ["git", "log", "--oneline", "-20", "--format=%s %b"],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode != 0:
-                return []
-
-            # Count references to each issue (case-insensitive for auto-fixed "fixes")
-            issue_counts: dict[int, int] = {}
-            for match in re.finditer(r'(?:Fixes|Part of|Re:|Reopens) #(\d+)', result.stdout, re.IGNORECASE):
-                issue_num = int(match.group(1))
-                issue_counts[issue_num] = issue_counts.get(issue_num, 0) + 1
-
-            # Filter to issues with 5+ references (potentially stuck)
-            stuck = [(num, count) for num, count in issue_counts.items() if count >= 5]
-            return sorted(stuck, key=lambda x: -x[1])  # Sort by count descending
-        except Exception:
-            return []
-
-    def check_thrashing_issues(self) -> list[tuple[int, int]]:
-        """Check for issues with multiple close/reopen cycles (thrashing).
-
-        Returns list of (issue_number, reopen_count) for thrashing issues.
-        Only runs for manager mode. Thrashing indicates the fix wasn't actually
-        correct - escalate to Prover for verification and Researcher for analysis.
-        """
-        if self.mode != "manager":
-            return []
-
-        try:
-            # Get repo info
-            result = subprocess.run(
-                ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode != 0:
-                return []
-            repo = result.stdout.strip()
-
-            # Get open issues with in-progress label (actively worked)
-            result = subprocess.run(
-                ["gh", "issue", "list", "--label", "in-progress", "--json", "number"],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode != 0:
-                return []
-
-            issues = json.loads(result.stdout)
-            thrashing = []
-
-            for issue in issues[:10]:  # Limit to 10 issues to avoid API rate limits
-                issue_num = issue["number"]
-                # Get timeline events for this issue
-                result = subprocess.run(
-                    ["gh", "api", f"repos/{repo}/issues/{issue_num}/timeline",
-                     "--jq", '[.[] | select(.event=="reopened")] | length'],
-                    capture_output=True, text=True, timeout=10
-                )
-                if result.returncode == 0:
-                    reopen_count = int(result.stdout.strip() or "0")
-                    if reopen_count >= 2:  # 2+ reopens = thrashing
-                        thrashing.append((issue_num, reopen_count))
-
-            return sorted(thrashing, key=lambda x: -x[1])  # Sort by count descending
-        except Exception:
-            return []
-
-    def report_stuck_issues(self):
-        """Print warning about potentially stuck issues and thrashing."""
-        stuck = self.check_stuck_issues()
-        thrashing = self.check_thrashing_issues()
-
-        if stuck:
-            print()
-            print("⚠️  STUCK ISSUE DETECTOR:")
-            for issue_num, count in stuck[:3]:  # Top 3 most referenced
-                print(f"    #{issue_num}: {count} references in last 20 commits without closing")
-            print("    Consider: different approach, escalate, or close as won't-fix")
-            print()
-
-        if thrashing:
-            print()
-            print("🔄 THRASHING DETECTOR:")
-            for issue_num, reopen_count in thrashing[:3]:  # Top 3 most thrashed
-                print(f"    #{issue_num}: {reopen_count} close/reopen cycles")
-            print("    Escalate: Prover (verify original fix), Researcher (systemic analysis)")
-            print()
-
-    def _get_issue_checkboxes(self, issue_num: int) -> tuple[list[str], list[str], str]:
-        """Get all checkboxes from issue body and comments.
-
-        Returns (unchecked_items, checked_items, original_body).
-        Items are deduplicated and normalized.
-        """
-        unchecked = []
-        checked = []
-        original_body = ""
-
-        try:
-            # Get issue body
-            result = subprocess.run(
-                ["gh", "issue", "view", str(issue_num), "--json", "body", "-q", ".body"],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode == 0 and result.stdout:
-                original_body = result.stdout
-                unchecked.extend(re.findall(r'- \[ \] (.+?)(?:\n|$)', original_body))
-                checked.extend(re.findall(r'- \[x\] (.+?)(?:\n|$)', original_body, re.IGNORECASE))
-
-            # Get issue comments
-            result = subprocess.run(
-                ["gh", "issue", "view", str(issue_num), "--json", "comments",
-                 "-q", ".comments[].body"],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode == 0 and result.stdout:
-                for line in result.stdout.split('\n'):
-                    unchecked.extend(re.findall(r'- \[ \] (.+?)(?:\n|$)', line))
-                    checked.extend(re.findall(r'- \[x\] (.+?)(?:\n|$)', line, re.IGNORECASE))
-
-        except Exception:
-            pass
-
-        # Normalize and deduplicate
-        unchecked = list(dict.fromkeys(item.strip() for item in unchecked if item.strip()))
-        checked = list(dict.fromkeys(item.strip() for item in checked if item.strip()))
-
-        # Remove items that appear in both (checked wins)
-        checked_lower = {item.lower() for item in checked}
-        unchecked = [item for item in unchecked if item.lower() not in checked_lower]
-
-        return unchecked, checked, original_body
-
-    def _get_existing_child_issues(self, parent_num: int) -> set[str]:
-        """Get titles of existing child issues (Part of #N) to avoid duplicates."""
-        existing = set()
-        try:
-            result = subprocess.run(
-                ["gh", "issue", "list", "--search", f"Part of #{parent_num} in:body",
-                 "--json", "title", "-q", ".[].title"],
-                capture_output=True, text=True, timeout=15
-            )
-            if result.returncode == 0:
-                for title in result.stdout.strip().split('\n'):
-                    if title.strip():
-                        existing.add(title.strip().lower())
-        except Exception:
-            pass
-        return existing
-
-    def _update_issue_body_with_consolidated_checkboxes(
-        self, issue_num: int, unchecked: list[str], checked: list[str], original_body: str
-    ) -> bool:
-        """Update issue body with consolidated and cleaned checkbox list.
-
-        Removes scattered checkboxes from body and adds a clean consolidated section.
-        Returns True if update succeeded.
-        """
-        try:
-            # Remove existing checkbox lines and ## Checklist header from body
-            clean_body = re.sub(r'- \[[x ]\] .+?\n?', '', original_body, flags=re.IGNORECASE)
-            clean_body = re.sub(r'\n*## Checklist\n*', '\n', clean_body)
-            clean_body = clean_body.strip()
-
-            # Build consolidated checkbox section
-            checkbox_section = ""
-            if checked or unchecked:
-                checkbox_section = "\n\n## Checklist\n"
-                for item in checked:
-                    checkbox_section += f"- [x] {item}\n"
-                for item in unchecked:
-                    checkbox_section += f"- [ ] {item}\n"
-
-            new_body = clean_body + checkbox_section
-
-            # Update issue
-            result = subprocess.run(
-                ["gh", "issue", "edit", str(issue_num), "--body", new_body],
-                capture_output=True, text=True, timeout=15
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
-
-    def convert_unchecked_to_issues(self) -> int:
-        """Convert unchecked checkboxes in worked issues to new issues.
-
-        Automatically creates new issues for any unchecked `- [ ]` items found in
-        issues referenced by the last commit. New issues include "Part of #N" to
-        link back to the parent issue.
-
-        Also consolidates checkboxes from comments into issue body and deduplicates.
-
-        Returns number of issues created.
-        """
-        try:
-            # Get issue numbers from last commit
-            result = subprocess.run(
-                ["git", "log", "-1", "--format=%s %b"],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode != 0:
-                return 0
-
-            # Find issue references (case-insensitive for auto-fixed "fixes")
-            issue_nums = set()
-            for match in re.finditer(r'(?:Fixes|Part of|Re:|Claims) #(\d+)', result.stdout, re.IGNORECASE):
-                issue_nums.add(int(match.group(1)))
-
-            if not issue_nums:
-                return 0
-
-            created_count = 0
-
-            for issue_num in list(issue_nums)[:5]:  # Limit to 5 issues
-                # Get all checkboxes from body and comments
-                unchecked, checked, original_body = self._get_issue_checkboxes(issue_num)
-
-                if not unchecked and not checked:
-                    continue
-
-                # Get existing child issues to avoid duplicates
-                existing_children = self._get_existing_child_issues(issue_num)
-
-                # Create new issues for unchecked items (that don't already exist)
-                items_to_convert = []
-                for item_text in unchecked[:10]:  # Limit to 10 items per issue
-                    if item_text.lower() in existing_children:
-                        print(f"    ⊘ Skipped (exists): {item_text[:40]}...")
-                        continue
-                    items_to_convert.append(item_text)
-
-                for item_text in items_to_convert:
-                    new_body = f"Part of #{issue_num}\n\nAuto-created from unchecked item in parent issue."
-                    create_result = subprocess.run(
-                        ["gh", "issue", "create",
-                         "--title", item_text,
-                         "--body", new_body],
-                        capture_output=True, text=True, timeout=30
-                    )
-
-                    if create_result.returncode == 0:
-                        created_count += 1
-                        new_url = create_result.stdout.strip()
-                        print(f"    ✓ Created: {item_text[:50]}{'...' if len(item_text) > 50 else ''}")
-                        print(f"      {new_url}")
-                        # Mark as checked now that issue exists
-                        checked.append(item_text)
-                        unchecked.remove(item_text)
-
-                # Consolidate checkboxes in issue body
-                if original_body:
-                    if self._update_issue_body_with_consolidated_checkboxes(
-                        issue_num, unchecked, checked, original_body
-                    ):
-                        print(f"    ✓ Consolidated checkboxes in #{issue_num}")
-
-            return created_count
-        except Exception as e:
-            print(f"    ⚠️  Error converting checkboxes: {e}")
-            return 0
-
-    def process_unchecked_checkboxes(self):
-        """Convert unchecked checkboxes to new issues at session end."""
-        print()
-        print("📋 Processing checkboxes...")
-        created = self.convert_unchecked_to_issues()
-        if created > 0:
-            print(f"    Created {created} new issue(s) from unchecked items")
-        print()
-
     def _display_prompt_info(
-        self, replacements: dict[str, str], final_prompt: str, ai_tool: str = "claude", audit_round: int = 0
+        self,
+        replacements: dict[str, str],
+        final_prompt: str,
+        ai_tool: str = "claude",
+        audit_round: int = 0,
     ) -> None:
         """Display prompt assembly information to console.
 
@@ -963,7 +737,9 @@ class LoopRunner:
         print("-" * 70)
         print(final_prompt)
         print("-" * 70)
-        print(f"Total: {len(final_prompt)} chars, {final_prompt.count(chr(10)) + 1} lines")
+        print(
+            f"Total: {len(final_prompt)} chars, {final_prompt.count(chr(10)) + 1} lines"
+        )
         print()
 
     def select_ai_tool(self) -> str:
@@ -991,7 +767,7 @@ class LoopRunner:
             return "codex"
         return "claude"
 
-    def _extract_session_id(self, log_file: Path, ai_tool: str) -> Optional[str]:
+    def _extract_session_id(self, log_file: Path, ai_tool: str) -> str | None:
         """Extract session/thread ID from the JSON log file.
 
         Claude: session_id in final result line - used for --resume in audit rounds
@@ -1023,11 +799,36 @@ class LoopRunner:
     def run_iteration(
         self,
         audit_round: int = 0,
-        resume_session_id: Optional[str] = None,
-        force_ai_tool: Optional[str] = None,
-        force_codex_model: Optional[str] = None,
-    ) -> tuple[int, float, str, Optional[str], Optional[str]]:
+        resume_session_id: str | None = None,
+        force_ai_tool: str | None = None,
+        force_codex_model: str | None = None,
+    ) -> tuple[int, float, str, str | None, str | None]:
         """Run a single AI iteration.
+
+        REQUIRES:
+        - self.mode in {"worker", "prover", "researcher", "manager"}
+        - self._prompt_template is not None (loaded via setup() or load_role_config)
+        - self.config is valid dict with required keys: iteration_timeout
+        - audit_round >= 0
+        - If audit_round > 0: resume_session_id should be set for Claude (context continuity)
+        - If force_ai_tool is set: must be "claude" or "codex"
+
+        ENSURES:
+        - Returns (exit_code, start_time, ai_tool, session_id, codex_model)
+        - exit_code: AI process return code, OR special values:
+          - 0 = AI process completed successfully
+          - 1 = Exception during execution (our error handling)
+          - 124 = Iteration timeout exceeded (our timeout)
+          - 125 = Silence timeout (our timeout, connection may be stale)
+          - Other values = passed through from AI process (claude/codex)
+        - start_time is float epoch timestamp when iteration began
+        - ai_tool in {"claude", "codex"}
+        - session_id is str if extractable from log, else None
+        - codex_model is str if ai_tool=="codex" and model was configured, else None
+        - Log file created at LOG_DIR/{mode}_iter_{N}_{ai_tool}_{timestamp}.jsonl
+        - self._current_phase is set (may be None for freeform)
+        - If audit_round == 0: self._pending_metrics is set (not yet finalized)
+        - self.current_process is None on return (subprocess cleaned up)
 
         Args:
             audit_round: 0 for main iteration, 1-N for audit rounds.
@@ -1050,7 +851,9 @@ class LoopRunner:
             try:
                 result = subprocess.run(
                     ["git", "log", "--oneline", "-3"],
-                    capture_output=True, text=True, timeout=5
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
                 )
                 if result.returncode == 0:
                     git_log = result.stdout.strip()
@@ -1064,7 +867,9 @@ class LoopRunner:
                     issue_str = get_issue_by_number(issue_num)
                     if issue_str:
                         issue_lines.append(issue_str)
-                gh_issues = "\n".join(issue_lines) if issue_lines else "(no working issue)"
+                gh_issues = (
+                    "\n".join(issue_lines) if issue_lines else "(no working issue)"
+                )
             else:
                 gh_issues = "(no working issue tracked)"
 
@@ -1219,7 +1024,7 @@ IMPORTANT: After completing the work, YOU MUST create the git commit immediately
         self._display_prompt_info(replacements, final_prompt, ai_tool, audit_round)
 
         # Report stuck issues (manager only)
-        self.report_stuck_issues()
+        self.issue_manager.report_stuck_issues()
 
         # Prepare log file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1229,7 +1034,9 @@ IMPORTANT: After completing the work, YOU MUST create the git commit immediately
 
         # Update status for manager visibility
         status_extra: dict[str, Any] = {"ai_tool": ai_tool, "audit_round": audit_round}
-        self.write_status("working", log_file, status_extra)
+        self.status_manager.write_status(
+            self.iteration, "working", log_file=log_file, extra=status_extra
+        )
 
         # Set coder info for commit signatures (must reset each iteration)
         if ai_tool == "codex":
@@ -1260,12 +1067,14 @@ IMPORTANT: After completing the work, YOU MUST create the git commit immediately
         start_time = time.time()
         last_output_time = start_time  # Track for silence detection (sleep/resume)
         last_progress_time = start_time  # Track for progress indicator
-        last_command: Optional[str] = None  # Track running command for timeout message
-        last_command_start: Optional[float] = None
+        last_command: str | None = None  # Track running command for timeout message
+        last_command_start: float | None = None
         exit_code = 0
         timed_out = False
         silence_killed = False
         text_proc_alive = True
+        ai_proc: subprocess.Popen[bytes] | None = None
+        text_proc: subprocess.Popen[bytes] | None = None
 
         try:
             with open(log_file, "w") as log_f:
@@ -1318,23 +1127,59 @@ IMPORTANT: After completing the work, YOU MUST create the git commit immediately
                             break
 
                         # Progress indicator for long-running commands
-                        if last_command and now - last_progress_time > progress_interval_sec:
+                        if (
+                            last_command
+                            and now - last_progress_time > progress_interval_sec
+                        ):
                             elapsed = int(now - (last_command_start or start_time))
                             elapsed_min = elapsed // 60
                             elapsed_sec = elapsed % 60
                             if elapsed_min > 0:
-                                print(f"  ⏳ Running: {last_command[:60]} ({elapsed_min}m {elapsed_sec}s)")
+                                print(
+                                    f"  ⏳ Running: {last_command[:60]} ({elapsed_min}m {elapsed_sec}s)"
+                                )
                             else:
-                                print(f"  ⏳ Running: {last_command[:60]} ({elapsed_sec}s)")
+                                print(
+                                    f"  ⏳ Running: {last_command[:60]} ({elapsed_sec}s)"
+                                )
                             last_progress_time = now
 
                         # Check silence timeout (detects stale connection after sleep/resume)
-                        if now - last_output_time > silence_timeout_sec:
+                        # Skip if a known long-running command is active (#343)
+                        # But still enforce max timeout (60 min) to catch truly stuck sessions
+                        long_running_patterns = (
+                            "cargo test",
+                            "cargo build",
+                            "cargo check",
+                            "cargo clippy",
+                            "pytest",
+                            "npm test",
+                            "npm run",
+                            "make",
+                            "go test",
+                        )
+                        is_long_command = last_command and any(
+                            p in last_command for p in long_running_patterns
+                        )
+                        max_silence_sec = (
+                            3600  # 60 min absolute max even for long commands
+                        )
+
+                        silence_exceeded = now - last_output_time > silence_timeout_sec
+                        max_exceeded = now - last_output_time > max_silence_sec
+
+                        if silence_exceeded and (not is_long_command or max_exceeded):
                             silence_mins = int((now - last_output_time) / 60)
-                            print(f"\nSilence timeout: no output for {silence_mins} minutes")
+                            print(
+                                f"\nSilence timeout: no output for {silence_mins} minutes"
+                            )
                             if last_command:
-                                cmd_elapsed = int(now - (last_command_start or start_time))
-                                print(f"Last activity: {last_command[:80]} (started {cmd_elapsed // 60}m ago)")
+                                cmd_elapsed = int(
+                                    now - (last_command_start or start_time)
+                                )
+                                print(
+                                    f"Last activity: {last_command[:80]} (started {cmd_elapsed // 60}m ago)"
+                                )
                             print("Connection may be stale (e.g., after sleep/resume)")
                             ai_proc.terminate()
                             try:
@@ -1362,10 +1207,17 @@ IMPORTANT: After completing the work, YOU MUST create the git commit immediately
                                     msg = json.loads(line.decode())
                                     # Claude format: tool_use with Bash
                                     if msg.get("type") == "assistant":
-                                        content = msg.get("message", {}).get("content", [])
+                                        content = msg.get("message", {}).get(
+                                            "content", []
+                                        )
                                         for block in content:
-                                            if block.get("type") == "tool_use" and block.get("name") == "Bash":
-                                                cmd = block.get("input", {}).get("command", "")
+                                            if (
+                                                block.get("type") == "tool_use"
+                                                and block.get("name") == "Bash"
+                                            ):
+                                                cmd = block.get("input", {}).get(
+                                                    "command", ""
+                                                )
                                                 if cmd:
                                                     last_command = cmd[:100]
                                                     last_command_start = time.time()
@@ -1429,11 +1281,32 @@ IMPORTANT: After completing the work, YOU MUST create the git commit immediately
         except Exception as e:
             print(f"Error running {ai_tool}: {e}")
             exit_code = 1
+            # Ensure subprocess cleanup on early exception (#495)
+            if text_proc is not None:
+                try:
+                    text_proc.stdin.close()
+                except (BrokenPipeError, OSError):
+                    pass
+                try:
+                    text_proc.terminate()
+                    text_proc.wait(timeout=5)
+                except Exception:
+                    pass
+            if ai_proc is not None:
+                try:
+                    ai_proc.terminate()
+                    ai_proc.wait(timeout=5)
+                except Exception:
+                    pass
+            self.current_process = None
 
         print()
         print(f"=== {self.mode.title()} {iter_display} ({ai_tool}) completed ===")
         print(f"=== Exit code: {exit_code} ===")
         print(f"=== Log saved to: {log_file} ===")
+
+        # Scrub secrets from log if enabled
+        self.status_manager.scrub_log_file(log_file)
 
         # Extract session_id from log for potential resume
         session_id = self._extract_session_id(log_file, ai_tool)
@@ -1446,9 +1319,68 @@ IMPORTANT: After completing the work, YOU MUST create the git commit immediately
         if self._current_phase and not is_audit:
             update_rotation_state(self.mode, self._current_phase)
 
+        # Create pending metrics for main iteration only (audit rounds don't get recorded separately)
+        # Audit metrics are summarized in the main iteration's audit_* fields
+        if audit_round == 0:
+            # Get AI model based on tool
+            ai_model_used: str | None = None
+            if ai_tool == "claude":
+                ai_model_used = self.config.get("claude_model")
+            elif ai_tool == "codex":
+                ai_model_used = codex_model
+
+            # Calculate end time once to avoid race condition
+            end_time = time.time()
+
+            # Extract token usage from log file - Part of #488
+            token_usage = extract_token_usage(log_file, ai_tool)
+            input_tokens = token_usage.get("input_tokens", 0)
+            output_tokens = token_usage.get("output_tokens", 0)
+            cache_read_tokens = token_usage.get("cache_read_tokens", 0)
+            cache_creation_tokens = token_usage.get("cache_creation_tokens", 0)
+
+            # Get cost - Claude CLI provides it, Codex needs calculation
+            if ai_tool == "claude":
+                cost = token_usage.get("total_cost_usd", 0.0)
+            else:
+                cost = estimate_cost(
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    ai_model_used or "",
+                    ai_tool,
+                )
+
+            self._pending_metrics = IterationMetrics(
+                project=get_project_name(),
+                role=self.mode,
+                iteration=self.iteration,
+                session_id=self._session_id,
+                start_time=start_time,
+                end_time=end_time,
+                duration_seconds=end_time - start_time,
+                ai_tool=ai_tool,
+                ai_model=ai_model_used,
+                exit_code=exit_code,
+                committed=False,  # Updated in run() after check_session_success
+                incomplete_marker=False,  # Updated in run()
+                done_marker=False,  # Updated in run()
+                audit_round=0,
+                audit_committed=False,  # Updated after audit loop
+                audit_rounds_run=0,  # Updated after audit loop
+                rotation_phase=self._current_phase,
+                working_issues=[],  # Updated after extracting from commit
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens,
+                estimated_cost_usd=cost,
+            )
+
         return exit_code, start_time, ai_tool, session_id, codex_model
 
-    def _get_last_commit_message(self) -> Optional[str]:
+    def _get_last_commit_message(self) -> str | None:
         """Get the most recent commit message for context injection.
 
         Returns the full commit message (subject + body) of the last commit,
@@ -1560,7 +1492,9 @@ IMPORTANT: After completing the work, YOU MUST create the git commit immediately
             print("\n⚠️  Uncommitted changes detected - auto-committing as WIP")
 
             # Stage all changes
-            add_result = subprocess.run(["git", "add", "-A"], timeout=10, capture_output=True)
+            add_result = subprocess.run(
+                ["git", "add", "-A"], timeout=10, capture_output=True
+            )
             if add_result.returncode != 0:
                 print(f"Warning: git add failed: {add_result.stderr}")
                 return False
@@ -1584,15 +1518,23 @@ IMPORTANT: After completing the work, YOU MUST create the git commit immediately
                     text=True,
                     timeout=5,
                 )
-                commit_hash = hash_result.stdout.strip() if hash_result.returncode == 0 else "unknown"
+                commit_hash = (
+                    hash_result.stdout.strip()
+                    if hash_result.returncode == 0
+                    else "unknown"
+                )
 
                 # Push the commit
-                push_result = subprocess.run(["git", "push"], capture_output=True, timeout=60)
+                push_result = subprocess.run(
+                    ["git", "push"], capture_output=True, timeout=60
+                )
                 if push_result.returncode != 0:
-                    print(f"Warning: git push failed (commit is local): {push_result.stderr}")
+                    print(
+                        f"Warning: git push failed (commit is local): {push_result.stderr}"
+                    )
 
                 # Create follow-up issue to track WIP (#266)
-                self._create_wip_followup_issue(commit_hash)
+                self.issue_manager.create_wip_followup(commit_hash, self.iteration)
 
                 return True  # Commit succeeded even if push failed
             print(f"⚠️  WIP commit failed: {result.stderr}")
@@ -1602,87 +1544,24 @@ IMPORTANT: After completing the work, YOU MUST create the git commit immediately
             print(f"⚠️  Could not check/commit uncommitted changes: {e}")
             return False
 
-    def _create_wip_followup_issue(self, commit_hash: str) -> None:
-        """Create a GitHub issue to track WIP commit follow-up.
-
-        This ensures WIP commits don't get forgotten - they appear in the issue list
-        for the next session to pick up.
-        """
-        try:
-            role_char = self.mode[0].upper()
-            title = f"WIP follow-up: [{role_char}]{self.iteration} ({commit_hash})"
-            body = f"""Session ended with uncommitted work.
-
-**Commit:** {commit_hash}
-**Role:** {self.mode.upper()}
-**Iteration:** {self.iteration}
-
-## Action Required
-- [ ] Review changes in commit `{commit_hash}`
-- [ ] Continue work OR amend with proper message OR revert if broken
-
----
-Auto-created by looper.py to prevent work loss.
-"""
-            result = subprocess.run(
-                ["gh", "issue", "create", "--title", title, "--body", body, "--label", "wip-followup"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0:
-                # Extract issue URL from output
-                issue_url = result.stdout.strip()
-                print(f"✓ Created follow-up issue: {issue_url}")
-            else:
-                print(f"⚠️  Could not create WIP follow-up issue: {result.stderr}")
-        except Exception as e:
-            print(f"⚠️  Could not create WIP follow-up issue: {e}")
-
-    def log_crash(self, exit_code: int, ai_tool: str, session_committed: bool = False):
-        """Log crash or exit details.
-
-        Args:
-            exit_code: The process exit code
-            ai_tool: Which AI tool was used (claude/codex)
-            session_committed: Whether the session made a git commit
-        """
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        if exit_code > 128:
-            signal_num = exit_code - 128
-            error_msg = f"{ai_tool} killed by signal {signal_num}"
-            is_real_crash = True
-        elif exit_code == 124:
-            error_msg = f"{ai_tool} timed out"
-            is_real_crash = not session_committed  # Timeout after commit = not a crash
-        elif exit_code == 125:
-            error_msg = f"{ai_tool} killed due to silence (stale connection)"
-            is_real_crash = False  # Expected after sleep/resume, will restart cleanly
-        else:
-            error_msg = f"{ai_tool} exited with code {exit_code}"
-            # Exit code 1 after successful commit = likely EPIPE or graceful exit
-            is_real_crash = not session_committed
-
-        if session_committed and not is_real_crash:
-            # Session completed work - this is not a crash
-            print()
-            print(
-                f"Note: {ai_tool} exited with code {exit_code} but session committed successfully"
-            )
-            print()
-            return  # Don't log to crashes.log
-
-        with open(self.crash_log, "a") as f:
-            f.write(f"[{timestamp}] Iteration {self.iteration}: {error_msg}\n")
-
-        print()
-        print(f"*** {self.mode.upper()} CRASH: {error_msg}")
-        print(f"    Log: {self.crash_log}")
-        print()
-
     def run(self):
-        """Main loop."""
+        """Main loop for autonomous AI iteration.
+
+        REQUIRES:
+        - self.mode in {"worker", "prover", "researcher", "manager"}
+        - Config files exist: .claude/roles/shared.md, .claude/roles/{mode}.md
+        - Git repository initialized in working directory
+        - No other LoopRunner instance for same mode (PID file check in setup)
+
+        ENSURES:
+        - On return (normal or exception): cleanup() called
+        - On return: no subprocess is still running (self.current_process is None)
+        - On return: PID file removed
+        - On return: status written to worker_logs/{mode}_status.json
+        - If self.running becomes False: graceful exit (no abandoned processes)
+        - Each iteration increments self.iteration and persists to iteration file
+        - Telemetry recorded for each iteration via record_iteration()
+        """
         self.setup()
 
         try:
@@ -1691,19 +1570,24 @@ Auto-created by looper.py to prevent work loss.
                 # Don't delete STOP - let all sessions see it, user runs `rm STOP` when done
                 stop_file = self._check_stop_file()
                 if stop_file:
-                    print(f"\n*** {stop_file} file detected - shutting down gracefully ***")
+                    print(
+                        f"\n*** {stop_file} file detected - shutting down gracefully ***"
+                    )
                     self._consume_stop_file(stop_file)
                     self.running = False
                     break
 
                 # Reload config each iteration (allows live tuning)
                 self.config, self._prompt_template = load_role_config(self.mode)
+                self.status_manager.config = self.config
 
                 # Run pulse health check if due (updates .flags/ and metrics/)
-                self.run_pulse()
+                self.status_manager.run_pulse()
 
                 # Run main iteration
-                exit_code, start_time, ai_tool, session_id, selected_codex_model = self.run_iteration(audit_round=0)
+                exit_code, start_time, ai_tool, session_id, selected_codex_model = (
+                    self.run_iteration(audit_round=0)
+                )
 
                 if not self.running:
                     break
@@ -1723,6 +1607,11 @@ Auto-created by looper.py to prevent work loss.
                     wip_committed = self.commit_uncommitted_changes()
                     if wip_committed:
                         session_committed = True  # WIP commit counts as success
+
+                # Update pending metrics with main iteration outcome
+                if self._pending_metrics:
+                    self._pending_metrics.committed = session_committed
+                    self._pending_metrics.working_issues = self._working_issues.copy()
 
                 # Run follow-up audits only when issues have 'do-audit' label
                 # Label-driven: AI adds do-audit when claiming done, audit verifies
@@ -1763,17 +1652,27 @@ Auto-created by looper.py to prevent work loss.
                         # Re-check for do-audit labels (may have been removed by Manager)
                         current_do_audit = get_do_audit_issues()
                         if not current_do_audit:
-                            print(f"\n✓ {self.iteration}.{audit_round}: do-audit labels removed (reviewed)")
+                            print(
+                                f"\n✓ {self.iteration}.{audit_round}: do-audit labels removed (reviewed)"
+                            )
                             break
 
                         # Concise audit header showing issues being audited
                         print()
-                        print(f"--- {self.iteration}.{audit_round}: Audit {audit_issue_list} - find {audit_min_issues}+ issues or [DONE] ---")
+                        print(
+                            f"--- {self.iteration}.{audit_round}: Audit {audit_issue_list} - find {audit_min_issues}+ issues or [DONE] ---"
+                        )
 
                         # Run audit iteration with same tool, model, and context continuity
                         # - Claude: uses session resume (--resume)
                         # - Codex: uses last commit injection (no session resume support)
-                        audit_exit_code, audit_start_time, audit_ai_tool, session_id, _ = self.run_iteration(
+                        (
+                            audit_exit_code,
+                            audit_start_time,
+                            audit_ai_tool,
+                            session_id,
+                            _,
+                        ) = self.run_iteration(
                             audit_round=audit_round,
                             resume_session_id=session_id,
                             force_ai_tool=ai_tool,
@@ -1787,7 +1686,9 @@ Auto-created by looper.py to prevent work loss.
                         # Check STOP/STOP_<ROLE> file between audit rounds
                         stop_file = self._check_stop_file()
                         if stop_file:
-                            print(f"\n*** {stop_file} file detected - stopping audits ***")
+                            print(
+                                f"\n*** {stop_file} file detected - stopping audits ***"
+                            )
                             self._consume_stop_file(stop_file)
                             self.running = False
                             break
@@ -1802,7 +1703,9 @@ Auto-created by looper.py to prevent work loss.
                                 # Transition do-audit → needs-review for audited issues
                                 for issue_num in audit_issue_nums:
                                     if transition_audit_to_review(issue_num):
-                                        print(f"  → #{issue_num}: do-audit → needs-review")
+                                        print(
+                                            f"  → #{issue_num}: do-audit → needs-review"
+                                        )
                                 break
                             print(f"✓ {self.iteration}.{audit_round}: issues fixed")
                         else:
@@ -1812,7 +1715,12 @@ Auto-created by looper.py to prevent work loss.
 
                         # Use audit results for crash detection
                         if audit_exit_code != 0:
-                            self.log_crash(audit_exit_code, audit_ai_tool, round_committed)
+                            self.status_manager.log_crash(
+                                self.iteration,
+                                audit_exit_code,
+                                audit_ai_tool,
+                                round_committed,
+                            )
 
                     # Update audit_start_time to check ALL audit rounds for [INCOMPLETE]
                     # We need the earliest start time to catch any [INCOMPLETE] commits
@@ -1820,7 +1728,9 @@ Auto-created by looper.py to prevent work loss.
                         audit_start_time = min(audit_start_times)
 
                 if exit_code != 0:
-                    self.log_crash(exit_code, ai_tool, session_committed)
+                    self.status_manager.log_crash(
+                        self.iteration, exit_code, ai_tool, session_committed
+                    )
                     # Use shorter delay if session committed successfully
                     delay = (
                         self.config["restart_delay"]
@@ -1832,16 +1742,37 @@ Auto-created by looper.py to prevent work loss.
 
                 # Check for [INCOMPLETE] marker - continue immediately
                 # Check both main iteration and audit iteration (if it ran and committed)
-                main_incomplete = session_committed and self.check_incomplete_commit(start_time)
-                audit_incomplete = audit_committed and self.check_incomplete_commit(audit_start_time)
+                main_incomplete = session_committed and self.check_incomplete_commit(
+                    start_time
+                )
+                audit_incomplete = audit_committed and self.check_incomplete_commit(
+                    audit_start_time
+                )
                 if main_incomplete or audit_incomplete:
                     print()
                     print("📝 Session marked [INCOMPLETE] - continuing immediately")
                     delay = 0
 
+                # Finalize and record telemetry metrics
+                if self._pending_metrics:
+                    self._pending_metrics.audit_committed = audit_committed
+                    self._pending_metrics.audit_rounds_run = (
+                        len(audit_start_times) if should_audit else 0
+                    )
+                    self._pending_metrics.incomplete_marker = (
+                        main_incomplete or audit_incomplete
+                    )
+                    self._pending_metrics.done_marker = (
+                        audit_committed and self.check_done_commit(audit_start_time)
+                        if audit_start_time > 0
+                        else False
+                    )
+                    record_iteration(self._pending_metrics)
+                    self._pending_metrics = None
+
                 # Convert unchecked checkboxes to new issues (Worker only)
                 if self.mode == "worker" and session_committed:
-                    self.process_unchecked_checkboxes()
+                    self.issue_manager.process_unchecked_checkboxes()
 
                 # Increment and persist iteration
                 self.iteration += 1
@@ -1849,7 +1780,9 @@ Auto-created by looper.py to prevent work loss.
 
                 # Wait before next iteration (skip if no delay)
                 if delay > 0:
-                    self.write_status("waiting", extra={"next_iteration_in": delay})
+                    self.status_manager.write_status(
+                        self.iteration, "waiting", extra={"next_iteration_in": delay}
+                    )
                     if delay > 60:
                         print(f"Next iteration in {delay // 60} minutes...")
                     else:
@@ -1862,7 +1795,9 @@ Auto-created by looper.py to prevent work loss.
                         # Check for STOP/STOP_<ROLE> file during wait
                         stop_file = self._check_stop_file()
                         if stop_file:
-                            print(f"\n*** {stop_file} file detected - shutting down gracefully ***")
+                            print(
+                                f"\n*** {stop_file} file detected - shutting down gracefully ***"
+                            )
                             self._consume_stop_file(stop_file)
                             self.running = False
                             break
@@ -1931,7 +1866,7 @@ def show_prompt(mode: str) -> None:
             lines = value.split("\n")
             preview = lines[0][:60] + "..." if len(lines[0]) > 60 else lines[0]
             if len(lines) > 1:
-                preview += f" (+{len(lines)-1} more lines)"
+                preview += f" (+{len(lines) - 1} more lines)"
             print(f"  {key}: {preview}")
         else:
             print(f"  {key}: (empty)")
@@ -2012,7 +1947,9 @@ def show_prompt(mode: str) -> None:
     print()
     print(f"  Total prompt length: {len(final_prompt)} chars")
     print(f"  Total prompt lines: {final_prompt.count(chr(10)) + 1}")
-    print(f"  Injection markers replaced: {len([k for k, v in replacements.items() if v])}")
+    print(
+        f"  Injection markers replaced: {len([k for k, v in replacements.items() if v])}"
+    )
     print()
 
 
@@ -2037,7 +1974,9 @@ def main():
         print("Options:")
         print("  --show-prompt  Display the full system prompt and exit")
         print()
-        print("Stop: touch STOP (all roles) or STOP_WORKER/STOP_MANAGER/etc. (per-role)")
+        print(
+            "Stop: touch STOP (all roles) or STOP_WORKER/STOP_MANAGER/etc. (per-role)"
+        )
         print()
         print("Spawn all 4 loops: ./ai_template_scripts/spawn_all.sh")
         sys.exit(1)

@@ -1,0 +1,64 @@
+# .pre-commit-config.yaml
+# ai_template pre-commit configuration
+# See: https://pre-commit.com/
+#
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates
+# Licensed under the Apache License, Version 2.0
+
+default_install_hook_types: [pre-commit, commit-msg]
+default_stages: [pre-commit]
+
+repos:
+  # Standard file hygiene hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+
+  # Python linting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.14
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # Shell script linting (using system shellcheck)
+  - repo: local
+    hooks:
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck
+        language: system
+        types: [shell]
+
+  # Secret scanning
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+
+  # ai_template custom checks (headers, authors, ignore detection)
+  - repo: local
+    hooks:
+      - id: ai-template-custom
+        name: ai_template custom checks
+        entry: ai_template_scripts/pre-commit-hook.sh
+        language: script
+        pass_filenames: false
+
+      - id: ai-template-commit-msg
+        name: ai_template commit message hook
+        entry: ai_template_scripts/commit-msg-hook.sh
+        language: script
+        stages: [commit-msg]
+        pass_filenames: false

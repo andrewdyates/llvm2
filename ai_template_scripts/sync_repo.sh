@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates
+# Licensed under the Apache License, Version 2.0
+
 # sync_repo.sh - Sync template files to a target repo
 #
 # CANONICAL SOURCE: ayates_dbx/ai_template
@@ -336,21 +340,19 @@ fi
 # Ensure required labels exist
 echo ""
 log_info "Ensuring required labels exist..."
+
 if [[ "$DRY_RUN" == "true" ]]; then
-    echo "  [would create] needs-review, do-audit, in-progress, blocked, mail, P0-P3"
+    pushd "$TARGET_REPO" > /dev/null
+    "$SCRIPT_DIR/init_labels.sh" --dry-run
+    popd > /dev/null
 else
     pushd "$TARGET_REPO" > /dev/null
-    gh label create needs-review --color c5def5 --description "passed self-audit, needs manager review" 2>/dev/null || true
-    gh label create do-audit --color fbca04 --description "self-audit required before review" 2>/dev/null || true
-    gh label create in-progress --color 5319e7 --description "in progress" 2>/dev/null || true
-    gh label create blocked --color 000000 --description "blocked" 2>/dev/null || true
-    gh label create mail --color 1d76db --description "Inter-project mail message" 2>/dev/null || true
-    gh label create P0 --color b60205 --description "critical" 2>/dev/null || true
-    gh label create P1 --color d93f0b --description "high" 2>/dev/null || true
-    gh label create P2 --color fbca04 --description "medium" 2>/dev/null || true
-    gh label create P3 --color 0e8a16 --description "low" 2>/dev/null || true
+    if ! "$SCRIPT_DIR/init_labels.sh"; then
+        log_warn "Label creation encountered errors (see warnings above)"
+    else
+        log_ok "Labels synced"
+    fi
     popd > /dev/null
-    log_ok "Labels synced"
 fi
 
 echo ""
@@ -419,11 +421,15 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
     # Check looper.py can at least import (catches broken stubs)
     if [[ -f "$TARGET_REPO/looper.py" ]]; then
-        if python3 -c "import sys; sys.path.insert(0, '$TARGET_REPO'); exec(open('$TARGET_REPO/looper.py').read().split('if __name__')[0])" 2>/dev/null; then
-            echo "  ✓ looper.py syntax OK"
-        else
+        validation_output=$(python3 -c "import sys; sys.path.insert(0, '$TARGET_REPO'); exec(open('$TARGET_REPO/looper.py').read().split('if __name__')[0])" 2>&1) || {
             log_error "looper.py is broken - check if looper/ package was synced"
+            log_error "Validation output:"
+            # shellcheck disable=SC2001
+            echo "$validation_output" | sed 's/^/    /'
             VALIDATION_FAILED=true
+        }
+        if [[ "$VALIDATION_FAILED" != "true" ]]; then
+            echo "  ✓ looper.py syntax OK"
         fi
     fi
 

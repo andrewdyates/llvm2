@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates
+# Licensed under the Apache License, Version 2.0
+
 # init_from_template.sh - Enforce required project setup
 #
 # Creates GitHub labels and cleans up ai_template-specific files.
@@ -119,14 +123,9 @@ What success looks like. The end state we're building toward.
 EOF
 
 # Create required GitHub labels for AI workflow
-gh label create P0 --color b60205 --description "critical" 2>/dev/null || true
-gh label create P1 --color d93f0b --description "high" 2>/dev/null || true
-gh label create P2 --color fbca04 --description "medium" 2>/dev/null || true
-gh label create P3 --color 0e8a16 --description "low" 2>/dev/null || true
-gh label create in-progress --color 5319e7 --description "in progress" 2>/dev/null || true
-gh label create blocked --color 000000 --description "blocked" 2>/dev/null || true
-gh label create needs-review --color c5def5 --description "worker flagged as done, needs manager review" 2>/dev/null || true
-gh label create mail --color 1d76db --description "Inter-project mail message" 2>/dev/null || true
+if ! "$SCRIPT_DIR/init_labels.sh"; then
+    echo "WARNING: Label creation encountered errors"
+fi
 
 # Check dependencies
 echo ""

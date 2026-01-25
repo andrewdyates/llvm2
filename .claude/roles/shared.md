@@ -68,7 +68,7 @@ Each role sees different issues at session start:
 | Role | Sees | Notes |
 |------|------|-------|
 | Worker | All issues (priority-sampled) | Primary issue consumer |
-| Prover | P0 + `proof`, `test` issues | Verification work |
+| Prover | P0 + `testing` issues | Verification work |
 | Researcher | P0 + `research`, `design` issues | Research work |
 | Manager | P0 + `needs-review` issues | Closure + audit |
 
@@ -92,7 +92,7 @@ Other roles   → in-progress → needs-review → Manager closes
 | `do-audit` | Ready for self-audit (Worker only) |
 | `needs-review` | Awaiting Manager review |
 | `urgent` | Work on this NOW, ahead of same-P issues |
-| `proof`, `test` | Prover domain |
+| `testing` | Prover domain |
 | `research`, `design` | Researcher domain |
 
 ## MANDATORY: Commit Before Session Ends

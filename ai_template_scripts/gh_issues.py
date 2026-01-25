@@ -33,7 +33,9 @@ def run_gh(args: list[str]) -> tuple[int, str]:
 
 def get_repo() -> str:
     """Get current repo in owner/name format."""
-    code, output = run_gh(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
+    code, output = run_gh(
+        ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]
+    )
     if code != 0:
         print("Error: Not in a GitHub repo", file=sys.stderr)
         sys.exit(1)
@@ -44,7 +46,7 @@ def get_issue_id(repo: str, number: int) -> str:
     """Get GraphQL node ID for an issue."""
     query = f'''
     query {{
-        repository(owner: "{repo.split('/')[0]}", name: "{repo.split('/')[1]}") {{
+        repository(owner: "{repo.split("/")[0]}", name: "{repo.split("/")[1]}") {{
             issue(number: {number}) {{
                 id
             }}
@@ -68,9 +70,12 @@ def add_dependency(issue: int, blocker: int):
     print("ERROR: GitHub does not have an issue dependency API.", file=sys.stderr)
     print(file=sys.stderr)
     print("Instead, add 'Blocked: #N' to the issue body:", file=sys.stderr)
-    print(f"  gh issue edit {issue} --body \"$(gh issue view {issue} --json body -q .body)", file=sys.stderr)
+    print(
+        f'  gh issue edit {issue} --body "$(gh issue view {issue} --json body -q .body)',
+        file=sys.stderr,
+    )
     print(file=sys.stderr)
-    print(f"Blocked: #{blocker}\"", file=sys.stderr)
+    print(f'Blocked: #{blocker}"', file=sys.stderr)
     print(file=sys.stderr)
     print("Or edit the issue in your browser.", file=sys.stderr)
     sys.exit(1)
@@ -81,7 +86,7 @@ def remove_dependency(issue: int, blocker: int):
     print("ERROR: GitHub does not have an issue dependency API.", file=sys.stderr)
     print(file=sys.stderr)
     print("Instead, edit the issue body to remove 'Blocked: #N':", file=sys.stderr)
-    print(f"  gh issue edit {issue} --body \"...\"", file=sys.stderr)
+    print(f'  gh issue edit {issue} --body "..."', file=sys.stderr)
     print(file=sys.stderr)
     print("Or edit the issue in your browser.", file=sys.stderr)
     sys.exit(1)
@@ -92,7 +97,7 @@ def list_dependencies(issue: int):
     repo = get_repo()
     query = f'''
     query {{
-        repository(owner: "{repo.split('/')[0]}", name: "{repo.split('/')[1]}") {{
+        repository(owner: "{repo.split("/")[0]}", name: "{repo.split("/")[1]}") {{
             issue(number: {issue}) {{
                 trackedInIssues(first: 50) {{
                     nodes {{

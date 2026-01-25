@@ -1,5 +1,5 @@
 #!/bin/bash
-# spawn_session.sh - Spawn worker or manager in new iTerm2 tab
+# spawn_session.sh - Spawn worker, prover, researcher, or manager in new iTerm2 tab
 #
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates
@@ -9,10 +9,11 @@
 # terminal manager supporting multiple backends, session tracking, etc.
 #
 # Usage:
-#   ./ai_template_scripts/spawn_session.sh worker        # Spawn worker in current project
-#   ./ai_template_scripts/spawn_session.sh manager       # Spawn manager in current project
-#   ./ai_template_scripts/spawn_session.sh worker ~/z4   # Spawn worker in specific project
-#   ./ai_template_scripts/spawn_session.sh --help        # Show help
+#   ./ai_template_scripts/spawn_session.sh worker              # Spawn worker in current project
+#   ./ai_template_scripts/spawn_session.sh prover              # Spawn prover in current project
+#   ./ai_template_scripts/spawn_session.sh researcher ~/z4     # Spawn researcher in specific project
+#   ./ai_template_scripts/spawn_session.sh manager ~/z4        # Spawn manager in specific project
+#   ./ai_template_scripts/spawn_session.sh --help              # Show help
 
 set -e
 
@@ -138,12 +139,14 @@ if ! pgrep -f "iTerm.app" > /dev/null 2>&1; then
 fi
 
 # Create new tab and run command
-# Use "front window" to target the user's active window, not iTerm2's internal "current"
+# IMPORTANT: Capture the new tab reference explicitly - "current session" after
+# create tab doesn't reliably point to the new tab, causing the caller's tab
+# to be reused (#342)
 if ! osascript -e "
 tell application \"iTerm2\"
     tell front window
-        create tab with default profile
-        tell current session
+        set newTab to (create tab with default profile)
+        tell current session of newTab
             set name to \"$TAB_TITLE\"
             write text \"$CMD\"
         end tell

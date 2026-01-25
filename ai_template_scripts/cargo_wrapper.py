@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates
+# Licensed under the Apache License, Version 2.0
+
 """Cargo wrapper - Serializes cargo builds org-wide with mutex and orphan cleanup.
+
+Features:
+- Global serialization prevents concurrent cargo builds (OOM, lock deadlocks)
+- Re-entrant for nested calls: if lock is held by an ancestor process, bypasses locking
+- Orphan process cleanup for stale cargo/rustc processes
+- PID reuse detection via process start time comparison
+- Retry loop detection warns on repeated failures without code changes
 
 CANONICAL SOURCE: ayates_dbx/ai_template
 DO NOT EDIT in other repos - file issues to ai_template for changes.
@@ -51,6 +62,7 @@ def init_lock_paths() -> bool:
         # HOME not set
         return False
 
+
 # Global state for signal handler
 _lock_held = False
 _child_process = None
@@ -88,12 +100,28 @@ def get_process_start_time(pid: int) -> float | None:
         except ValueError:
             parts = lstart.split()
             if len(parts) >= 5:
-                month_map = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
-                             "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
+                month_map = {
+                    "Jan": 1,
+                    "Feb": 2,
+                    "Mar": 3,
+                    "Apr": 4,
+                    "May": 5,
+                    "Jun": 6,
+                    "Jul": 7,
+                    "Aug": 8,
+                    "Sep": 9,
+                    "Oct": 10,
+                    "Nov": 11,
+                    "Dec": 12,
+                }
                 month = month_map.get(parts[1], 1)
                 day = int(parts[2])
                 time_parts = parts[3].split(":")
-                hour, minute, sec = int(time_parts[0]), int(time_parts[1]), int(time_parts[2])
+                hour, minute, sec = (
+                    int(time_parts[0]),
+                    int(time_parts[1]),
+                    int(time_parts[2]),
+                )
                 year = int(parts[4])
                 dt = datetime(year, month, day, hour, minute, sec)
                 return dt.timestamp()
@@ -182,12 +210,14 @@ def find_cargo_processes() -> list[dict]:
                 continue
 
             age_seconds = parse_etime(etime)
-            processes.append({
-                "pid": int(pid),
-                "age_seconds": age_seconds,
-                "comm": comm,
-                "args": args[:100],
-            })
+            processes.append(
+                {
+                    "pid": int(pid),
+                    "age_seconds": age_seconds,
+                    "comm": comm,
+                    "args": args[:100],
+                }
+            )
     except Exception:
         pass
     return processes
@@ -207,7 +237,9 @@ def parse_etime(etime: str) -> int:
         if len(parts) == 2:  # MM:SS
             return days * 86400 + int(parts[0]) * 60 + int(parts[1])
         if len(parts) == 3:  # HH:MM:SS
-            return days * 86400 + int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            return (
+                days * 86400 + int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            )
     except Exception:
         pass
     return 0
@@ -270,7 +302,22 @@ def log_orphan(proc: dict) -> None:
 
 
 def is_lock_stale() -> bool:
-    """Check if existing lock is stale (holder dead, PID reused, or too old)."""
+    """Check if existing lock is stale (holder dead, PID reused, or too old).
+
+    REQUIRES: init_lock_paths() called (LOCK_FILE, LOCK_META initialized)
+    ENSURES: Returns True if any of:
+             - LOCK_FILE doesn't exist
+             - PID in LOCK_FILE no longer exists (process dead)
+             - Process start time differs from recorded by >2s (PID reuse detected)
+             - Lock age > STALE_PROCESS_AGE (2 hours)
+             - Any exception during check (JSON decode error, etc.)
+    ENSURES: Returns False only if lock holder is verified alive, recent,
+             and start time matches (within 2s tolerance)
+    ENSURES: Read-only - does not modify any state
+
+    NOTE: 2-second tolerance in PID reuse detection creates TOCTOU window.
+    See tla/cargo_lock_with_toctou.tla for formal model of this race.
+    """
     if not LOCK_FILE.exists():
         return True
 
@@ -337,7 +384,15 @@ def cleanup_stale_temp_files() -> None:
 
 
 def acquire_lock(context: dict) -> bool:
-    """Attempt to acquire the lock. Returns True if acquired."""
+    """Attempt to acquire the lock. Returns True if acquired.
+
+    REQUIRES: context contains 'project', 'role' keys (from get_env_context())
+    REQUIRES: init_lock_paths() called and returned True (LOCK_DIR initialized)
+    ENSURES: If returns True: _lock_held is True, LOCK_FILE contains os.getpid(),
+             LOCK_META contains context metadata with acquired_at timestamp
+    ENSURES: If returns False: no global state modified (_lock_held unchanged)
+    ENSURES: Atomic - uses O_CREAT|O_EXCL for race-free acquisition
+    """
     global _lock_held
     LOCK_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -374,7 +429,14 @@ def acquire_lock(context: dict) -> bool:
 
 
 def release_lock() -> None:
-    """Release the lock if we hold it."""
+    """Release the lock if we hold it.
+
+    REQUIRES: None (safe to call unconditionally)
+    ENSURES: If we held the lock (_lock_held was True and LOCK_FILE contained our PID):
+             _lock_held is False, LOCK_FILE and LOCK_META are deleted
+    ENSURES: If we didn't hold the lock: no state modified
+    ENSURES: Idempotent - safe to call multiple times
+    """
     global _lock_held
     if not _lock_held:
         return
@@ -392,7 +454,15 @@ def release_lock() -> None:
 
 
 def force_release_stale_lock() -> bool:
-    """Force release a stale lock atomically. Returns True if released."""
+    """Force release a stale lock atomically. Returns True if released.
+
+    REQUIRES: Should only be called after is_lock_stale() returns True
+    REQUIRES: init_lock_paths() called (LOCK_FILE, LOCK_META, LOCK_DIR initialized)
+    ENSURES: If returns True: LOCK_FILE and LOCK_META are deleted, lock available
+    ENSURES: If returns False: another process beat us to it (race-safe)
+    ENSURES: Atomic via rename - only one caller can win the race
+    ENSURES: Logs identity of released lock holder for forensics
+    """
     if not LOCK_FILE.exists():
         return True
 
@@ -403,8 +473,10 @@ def force_release_stale_lock() -> bool:
         if LOCK_META.exists():
             try:
                 meta = json.loads(LOCK_META.read_text())
-                log_stderr(f"[cargo] Force-releasing stale lock from {meta.get('project', '?')} "
-                           f"(acquired {meta.get('acquired_at', '?')})")
+                log_stderr(
+                    f"[cargo] Force-releasing stale lock from {meta.get('project', '?')} "
+                    f"(acquired {meta.get('acquired_at', '?')})"
+                )
             except Exception:
                 log_stderr("[cargo] Force-releasing stale lock")
             LOCK_META.unlink(missing_ok=True)
@@ -431,23 +503,29 @@ def get_lock_holder_info(verbose: bool = False) -> str:
             return basic
         # Full metadata for debugging
         parts = [basic]
-        if meta.get('session'):
+        if meta.get("session"):
             parts.append(f"session={meta['session']}")
-        if meta.get('iteration'):
+        if meta.get("iteration"):
             parts.append(f"iter={meta['iteration']}")
-        if meta.get('commit'):
+        if meta.get("commit"):
             parts.append(f"commit={meta['commit']}")
-        if meta.get('cwd'):
+        if meta.get("cwd"):
             parts.append(f"cwd={meta['cwd']}")
-        if meta.get('acquired_at'):
+        if meta.get("acquired_at"):
             parts.append(f"acquired={meta['acquired_at']}")
         return " | ".join(parts)
     except Exception:
         return "unknown"
 
 
-def log_build(context: dict, command: list[str], started: datetime,
-              finished: datetime, exit_code: int, timeout_sec: int) -> None:
+def log_build(
+    context: dict,
+    command: list[str],
+    started: datetime,
+    finished: datetime,
+    exit_code: int,
+    timeout_sec: int,
+) -> None:
     """Log build to builds.log."""
     entry = {
         **context,
@@ -476,9 +554,11 @@ def check_retry_loop(command: str, cwd: str, current_commit: str) -> None:
         for line in BUILDS_LOG.read_text().splitlines()[-30:]:  # Last 30 entries
             try:
                 entry = json.loads(line)
-                if (entry.get("command") == command
-                        and entry.get("cwd") == cwd
-                        and entry.get("exit_code", 0) != 0):
+                if (
+                    entry.get("command") == command
+                    and entry.get("cwd") == cwd
+                    and entry.get("exit_code", 0) != 0
+                ):
                     started = datetime.fromisoformat(entry["started_at"])
                     # Handle timezone-naive timestamps
                     if started.tzinfo is None:
@@ -497,16 +577,22 @@ def check_retry_loop(command: str, cwd: str, current_commit: str) -> None:
 
             if same_commit:
                 log_stderr("")
-                log_stderr(f"⚠️  RETRY LOOP: This command failed {len(failures)}x in 60s without code changes")
+                log_stderr(
+                    f"⚠️  RETRY LOOP: This command failed {len(failures)}x in 60s without code changes"
+                )
                 log_stderr(f"    Command: {command}")
                 log_stderr(f"    Commit:  {current_commit or 'unknown'}")
                 log_stderr("")
-                log_stderr("    HINT: Read the error output. Investigate or file an issue.")
+                log_stderr(
+                    "    HINT: Read the error output. Investigate or file an issue."
+                )
                 log_stderr(f"    Details: {BUILDS_LOG}")
                 log_stderr("")
             else:
                 # Failures but with code changes - just info
-                log_stderr(f"[cargo] ℹ️  Command failed {len(failures)}x in 60s (commits: {', '.join(commits)})")
+                log_stderr(
+                    f"[cargo] ℹ️  Command failed {len(failures)}x in 60s (commits: {', '.join(commits)})"
+                )
 
     except Exception:
         pass  # Don't fail the build due to retry detection errors
@@ -579,7 +665,9 @@ def run_cargo(args: list[str], timeout: int) -> int:
         _child_pgid = None
         return exit_code
     except subprocess.TimeoutExpired:
-        log_stderr(f"\n[cargo] ERROR: Build timed out after {timeout}s, killing process group")
+        log_stderr(
+            f"\n[cargo] ERROR: Build timed out after {timeout}s, killing process group"
+        )
         kill_child()
         return 124
 
@@ -602,7 +690,7 @@ def parse_cargo_run_args(args: list[str]) -> tuple[list[str], list[str], str | N
     if "--" in args:
         sep_idx = args.index("--")
         cargo_args = args[1:sep_idx]  # Skip 'run'
-        binary_args = args[sep_idx + 1:]
+        binary_args = args[sep_idx + 1 :]
     else:
         cargo_args = args[1:]  # Skip 'run'
 
@@ -628,16 +716,39 @@ def parse_cargo_run_args(args: list[str]) -> tuple[list[str], list[str], str | N
         elif arg.startswith("--bin="):
             build_args.append(arg)
             package_or_bin = arg.split("=", 1)[1]
-        elif arg in ("--release", "--profile", "--target", "--features", "--all-features",
-                     "--no-default-features", "--target-dir", "--manifest-path", "-F"):
+        elif arg in (
+            "--release",
+            "--profile",
+            "--target",
+            "--features",
+            "--all-features",
+            "--no-default-features",
+            "--target-dir",
+            "--manifest-path",
+            "-F",
+        ):
             build_args.append(arg)
             # Handle args that take a value
-            if arg in ("--profile", "--target", "--target-dir", "--manifest-path", "--features", "-F"):
+            if arg in (
+                "--profile",
+                "--target",
+                "--target-dir",
+                "--manifest-path",
+                "--features",
+                "-F",
+            ):
                 if i + 1 < len(cargo_args) and not cargo_args[i + 1].startswith("-"):
                     build_args.append(cargo_args[i + 1])
                     i += 1
-        elif arg.startswith(("--profile=", "--target=", "--features=", "--target-dir=",
-                             "--manifest-path=")):
+        elif arg.startswith(
+            (
+                "--profile=",
+                "--target=",
+                "--features=",
+                "--target-dir=",
+                "--manifest-path=",
+            )
+        ):
             build_args.append(arg)
         i += 1
 
@@ -697,6 +808,7 @@ def find_built_binary(package_or_bin: str | None, args: list[str]) -> str | None
     # Try to find from Cargo.toml
     try:
         import tomllib  # noqa: PLC0415 - lazy import, only needed if binary not found
+
         cargo_toml = Path("Cargo.toml")
         if cargo_toml.exists():
             data = tomllib.loads(cargo_toml.read_text())
@@ -749,11 +861,13 @@ def find_real_cargo() -> str | None:
         search_paths.append(Path.home() / ".cargo/bin/cargo")
     except RuntimeError:
         pass
-    search_paths.extend([
-        Path("/opt/homebrew/bin/cargo"),
-        Path("/usr/local/bin/cargo"),
-        Path("/usr/bin/cargo"),
-    ])
+    search_paths.extend(
+        [
+            Path("/opt/homebrew/bin/cargo"),
+            Path("/usr/local/bin/cargo"),
+            Path("/usr/bin/cargo"),
+        ]
+    )
     for loc in search_paths:
         if loc.exists() and os.access(loc, os.X_OK):
             return str(loc)
@@ -771,7 +885,9 @@ def ensure_lock_dir() -> bool:
         test_file.write_text("test")
         return True
     except (OSError, PermissionError) as e:
-        log_stderr(f"[cargo] WARNING: Lock directory unusable ({e}), running without serialization")
+        log_stderr(
+            f"[cargo] WARNING: Lock directory unusable ({e}), running without serialization"
+        )
         return False
     finally:
         test_file.unlink(missing_ok=True)
@@ -818,6 +934,24 @@ def main() -> int:
     # Clean up orphaned temp files once before acquire loop (not on every iteration)
     cleanup_stale_temp_files()
 
+    # Re-entrant check: if lock is held by an ancestor, bypass locking entirely.
+    # This handles nested cargo calls (e.g., cargo-kani internally calling 'cargo locate-project').
+    # The ancestor already holds the lock, so we can safely exec cargo without waiting.
+    if LOCK_FILE.exists():
+        try:
+            lock_pid = int(LOCK_FILE.read_text().strip())
+            if is_ancestor_of_self(lock_pid):
+                log_stderr(
+                    f"[cargo] Nested call detected (ancestor PID {lock_pid} holds lock), bypassing serialization"
+                )
+                cargo = os.environ.get("AIT_REAL_CARGO") or find_real_cargo()
+                if cargo:
+                    os.execv(cargo, [cargo] + args)
+                log_stderr("[cargo] ERROR: Could not find cargo for nested execution")
+                return 1
+        except (ValueError, FileNotFoundError):
+            pass  # Lock file invalid or disappeared, continue normal flow
+
     # Acquire lock with timeout
     start_wait = time.time()
     last_status = 0
@@ -845,13 +979,17 @@ def main() -> int:
         elapsed = time.time() - start_wait
         if elapsed - last_status >= STATUS_INTERVAL:
             holder = get_lock_holder_info()
-            log_stderr(f"[cargo] Still waiting for lock (held by {holder}, waited {int(elapsed)}s)...")
+            log_stderr(
+                f"[cargo] Still waiting for lock (held by {holder}, waited {int(elapsed)}s)..."
+            )
             last_status = elapsed
 
         time.sleep(1)
 
     if not acquired:
-        log_stderr(f"[cargo] ERROR: Could not acquire lock after {LOCK_ACQUIRE_TIMEOUT}s")
+        log_stderr(
+            f"[cargo] ERROR: Could not acquire lock after {LOCK_ACQUIRE_TIMEOUT}s"
+        )
         return 1
 
     # Special handling for 'cargo run': build under lock, run binary without lock
@@ -868,7 +1006,14 @@ def main() -> int:
         log_stderr(f"[cargo] Lock acquired, building: {build_command_str}")
         build_exit_code = run_cargo(build_args, BUILD_TIMEOUT)
         finished = datetime.now(timezone.utc)
-        log_build(context, ["cargo"] + build_args, started, finished, build_exit_code, BUILD_TIMEOUT)
+        log_build(
+            context,
+            ["cargo"] + build_args,
+            started,
+            finished,
+            build_exit_code,
+            BUILD_TIMEOUT,
+        )
 
         if build_exit_code != 0:
             release_lock()
@@ -887,7 +1032,9 @@ def main() -> int:
             return run_binary(binary_path, binary_args, BUILD_TIMEOUT)
 
         # Fallback: couldn't find binary, run cargo run directly (rare edge case)
-        log_stderr("[cargo] WARNING: Could not locate built binary, running cargo run directly")
+        log_stderr(
+            "[cargo] WARNING: Could not locate built binary, running cargo run directly"
+        )
         return run_cargo(args, BUILD_TIMEOUT)
 
     # Standard path: run cargo with lock held
@@ -901,7 +1048,9 @@ def main() -> int:
         log_stderr(f"[cargo] Lock acquired, running: {command_str}")
         exit_code = run_cargo(args, BUILD_TIMEOUT)
         finished = datetime.now(timezone.utc)
-        log_build(context, ["cargo"] + args, started, finished, exit_code, BUILD_TIMEOUT)
+        log_build(
+            context, ["cargo"] + args, started, finished, exit_code, BUILD_TIMEOUT
+        )
         return exit_code
     finally:
         release_lock()

@@ -82,22 +82,25 @@ CHECKS = {
         "desc": "Rust project (needs .cargo/config.toml for build parallelism limits)",
     },
     "kani": {
-        "detect": lambda: len(rglob_filtered("*.rs")) > 0 and
-                         run("grep -r 'kani::proof' --include='*.rs' src/ tests/ crates/ 2>/dev/null")[0] == 0,
+        "detect": lambda: len(rglob_filtered("*.rs")) > 0
+        and run(
+            "grep -rE 'kani::(proof|requires|ensures|modifies)' --include='*.rs' src/ tests/ crates/ 2>/dev/null"
+        )[0]
+        == 0,
         "check": lambda: check_command("kani"),
         "install": "cargo install kani-verifier && kani setup",
-        "desc": "Kani proofs found in Rust files",
+        "desc": "Kani proofs or contracts found in Rust files",
     },
     "tla": {
-        "detect": lambda: len(list(Path(".").glob("tla/*.tla"))) > 0 or
-                         len(list(Path(".").glob("*.tla"))) > 0,
+        "detect": lambda: len(list(Path(".").glob("tla/*.tla"))) > 0
+        or len(list(Path(".").glob("*.tla"))) > 0,
         "check": lambda: check_java()[0],
         "install": "brew install openjdk",
         "desc": "TLA+ specs found",
     },
     "fuzz": {
-        "detect": lambda: Path("fuzz/fuzz_targets").exists() and
-                         len(list(Path("fuzz/fuzz_targets").glob("*.rs"))) > 0,
+        "detect": lambda: Path("fuzz/fuzz_targets").exists()
+        and len(list(Path("fuzz/fuzz_targets").glob("*.rs"))) > 0,
         "check": lambda: run("cargo fuzz --help")[0] == 0,
         "install": "cargo install cargo-fuzz",
         "desc": "Fuzz targets found",

@@ -12,7 +12,7 @@ Licensed under the Apache License, Version 2.0
 """
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # Hook configurations - external files or fallback inline content
 HOOK_CONFIGS: dict[str, dict[str, Any]] = {
@@ -47,7 +47,7 @@ echo "$STAGED" | grep '\\.sh$' | xargs -r shellcheck 2>/dev/null || true
 }
 
 
-def _load_hook_content(config: dict[str, Any]) -> Optional[str]:
+def _load_hook_content(config: dict[str, Any]) -> str | None:
     """Load hook content from external file or return fallback.
 
     Args:

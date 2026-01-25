@@ -9,9 +9,17 @@ gh_post.py - Wrapper for gh that adds AI identity to issues and comments
 Handles:
 - gh issue create/comment - adds identity header and signature
 - gh issue edit --add-label in-progress - auto-comments to claim with identity
+- gh issue edit --add-label urgent (USER) - tracks USER ownership of label
+- gh issue edit --remove-label urgent - BLOCKED if USER set the label
 - gh issue close - BLOCKED unless MANAGER or USER role (enforces issue closure policy)
+- gh issue close - removes workflow labels to keep queues clean
 - Smart deduplication of existing identity markers via regex
 - Cross-repo issues auto-labeled with "mail"
+
+USER Label Protection:
+- When USER adds 'urgent' label, a tracking comment is added: <!-- USER_LABEL:urgent -->
+- When non-USER tries to remove a USER-protected label, the operation is blocked
+- Protected labels: urgent (extensible via PROTECTED_LABELS list)
 
 Copyright 2026 Dropbox, Inc.
 Licensed under the Apache License, Version 2.0
@@ -23,6 +31,26 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Labels that USER can protect from AI removal
+# When USER adds these labels, a tracking comment is added
+# When non-USER tries to remove them, the operation is blocked
+PROTECTED_LABELS = {"urgent"}
+
+# Workflow labels that should be cleared on issue close
+WORKFLOW_LABELS = (
+    "needs-review",
+    "do-audit",
+    "in-progress",
+    "blocked",
+    "tracking",
+    "urgent",
+)
+
+FROM_HEADER_RE = re.compile(r"^\*\*FROM:\*\*")
+METADATA_LINE_RE = re.compile(r"^(Project|Role|Iteration|Session|Commit|Timestamp):")
+COMPACT_SIG_RE = re.compile(r"^[\w_-]+ \| ")
+TITLE_PREFIX_RE = re.compile(r"^\[[^\]]*\](\[[A-Za-z]\])?(\d+)?\s*")
 
 
 def get_real_gh() -> str:
@@ -54,8 +82,50 @@ def get_real_gh() -> str:
     raise RuntimeError("Real gh not found in PATH")
 
 
+def _project_from_git_url(url: str) -> str:
+    """Extract project name from common git remote URL formats, normalizing .git suffixes and extra slashes."""
+    path = url.strip().replace("\\", "/")
+    path = path.split("?", 1)[0].split("#", 1)[0]
+    if not path:
+        return ""
+    if "://" in path:
+        path = path.split("://", 1)[1]
+        if "/" in path:
+            path = path.split("/", 1)[1]
+        else:
+            path = ""
+    elif "@" in path and ":" in path.split("@", 1)[1]:
+        path = path.split(":", 1)[1]
+    path = path.rstrip("/")
+    if path.lower().endswith(".git"):
+        path = path[:-4]
+    parts = [segment for segment in path.split("/") if segment]
+    return parts[-1] if parts else ""
+
+
+def _read_iteration_file(role: str) -> str:
+    """Read iteration from .iteration_{role} file as fallback.
+
+    Looks for worker_logs/.iteration_{role} relative to project root.
+    Returns empty string if not found.
+    """
+    role_lower = role.lower()
+    # Try relative to current directory (project root)
+    iteration_file = Path("worker_logs") / f".iteration_{role_lower}"
+    if iteration_file.is_file():
+        try:
+            return iteration_file.read_text().strip()
+        except Exception:
+            pass
+    return ""
+
+
 def get_identity() -> dict:
-    """Get AI identity from env vars or derive from git."""
+    """Get AI identity from env vars or derive from git.
+
+    For iteration, falls back to .iteration_{role} file if env var is missing or 1.
+    This handles USER sessions and looper sessions where AI_ITERATION may not be set correctly.
+    """
     identity = {
         "project": os.environ.get("AI_PROJECT", ""),
         "role": os.environ.get("AI_ROLE", "USER"),
@@ -63,19 +133,30 @@ def get_identity() -> dict:
         "session": os.environ.get("AI_SESSION", ""),
     }
 
+    # Fall back to .iteration_{role} file if env var is missing or "1" (default)
+    # USER role uses an empty iteration since it doesn't have looper iterations
+    if identity["role"] != "USER" and identity["iteration"] in ("", "1"):
+        file_iteration = _read_iteration_file(identity["role"])
+        if file_iteration and file_iteration.isdigit():
+            identity["iteration"] = file_iteration
+
     # Derive project from git if not set
     if not identity["project"]:
         try:
             url = subprocess.check_output(
                 ["git", "remote", "get-url", "origin"],
-                stderr=subprocess.DEVNULL, text=True
+                stderr=subprocess.DEVNULL,
+                text=True,
             ).strip()
             # Handle various URL formats:
             # https://github.com/owner/repo.git
             # https://github.com/owner/repo/  (trailing slash)
             # git@github.com:owner/repo.git
-            url = url.rstrip("/").rstrip(".git").rstrip("/")
-            identity["project"] = url.split("/")[-1]
+            project = _project_from_git_url(url)
+            if project:
+                identity["project"] = project
+            else:
+                identity["project"] = Path.cwd().name
         except Exception:
             identity["project"] = Path.cwd().name
 
@@ -87,7 +168,8 @@ def get_commit() -> str:
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "--short", "HEAD"],
-            stderr=subprocess.DEVNULL, text=True
+            stderr=subprocess.DEVNULL,
+            text=True,
         ).strip()
     except Exception:
         return "-"
@@ -97,8 +179,17 @@ def get_current_repo(real_gh: str) -> str:
     """Get current repo name."""
     try:
         return subprocess.check_output(
-            [real_gh, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-            stderr=subprocess.DEVNULL, text=True
+            [
+                real_gh,
+                "repo",
+                "view",
+                "--json",
+                "nameWithOwner",
+                "-q",
+                ".nameWithOwner",
+            ],
+            stderr=subprocess.DEVNULL,
+            text=True,
         ).strip()
     except Exception:
         return ""
@@ -112,6 +203,67 @@ def build_header(identity: dict) -> str:
     else:
         header += f" [{identity['role']}]"
     return header
+
+
+def is_label_user_protected(real_gh: str, issue_number: str, label: str) -> bool:
+    """Check if a label was set by USER (has protection marker in comments)."""
+    marker = f"<!-- USER_LABEL:{label} -->"
+    try:
+        # Get all issue comments
+        comments = subprocess.check_output(
+            [
+                real_gh,
+                "issue",
+                "view",
+                issue_number,
+                "--json",
+                "comments",
+                "-q",
+                ".comments[].body",
+            ],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return marker in comments
+    except Exception:
+        return False
+
+
+def add_user_label_marker(real_gh: str, issue_number: str, label: str) -> None:
+    """Add a tracking comment when USER adds a protected label."""
+    marker = f"<!-- USER_LABEL:{label} -->"
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    comment = f"{marker}\n🔒 USER protected label `{label}` at {timestamp}"
+    subprocess.run(
+        [real_gh, "issue", "comment", issue_number, "--body", comment],
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def cleanup_workflow_labels(
+    real_gh: str, issue_number: str, repo: str | None, role: str
+) -> None:
+    """Remove workflow labels when closing issues."""
+    if not issue_number:
+        return
+
+    labels_to_remove = []
+    for label in WORKFLOW_LABELS:
+        if label in PROTECTED_LABELS and role != "USER":
+            if is_label_user_protected(real_gh, issue_number, label):
+                continue
+        labels_to_remove.append(label)
+
+    if not labels_to_remove:
+        return
+
+    cmd = [real_gh, "issue", "edit", issue_number]
+    if repo:
+        cmd.extend(["--repo", repo])
+    for label in labels_to_remove:
+        cmd.extend(["--remove-label", label])
+
+    subprocess.run(cmd, check=False)
 
 
 def build_signature(identity: dict) -> str:
@@ -138,7 +290,7 @@ def clean_body(body: str) -> str:
     # Remove FROM header at start (handles multiple formats)
     # **FROM:** project [ROLE]123
     # **FROM:** project [ROLE]
-    while lines and re.match(r"^\*\*FROM:\*\*", lines[0]):
+    while lines and FROM_HEADER_RE.match(lines[0]):
         lines = lines[1:]
         # Remove blank line after FROM
         if lines and not lines[0].strip():
@@ -160,17 +312,17 @@ def clean_body(body: str) -> str:
                 sig_end = i + 1  # End of signature block (exclusive)
 
                 # Old format signatures (multi-line)
-                if re.match(r"^(Project|Role|Iteration|Session|Commit|Timestamp):", next_line):
+                if METADATA_LINE_RE.match(next_line):
                     is_signature = True
                     # Find end of old-format signature block
                     for j in range(i + 1, len(lines)):
-                        if re.match(r"^(Project|Role|Iteration|Session|Commit|Timestamp):", lines[j]):
+                        if METADATA_LINE_RE.match(lines[j]):
                             sig_end = j + 1
                         elif lines[j].strip():
                             # Non-empty line that's not signature field = content after
                             break
                 # New compact format: word | word | ... (single line)
-                elif re.match(r"^[\w_-]+ \| ", next_line):
+                elif COMPACT_SIG_RE.match(next_line):
                     is_signature = True
                     sig_end = i + 2  # --- line + signature line
 
@@ -216,7 +368,7 @@ def fix_title(title: str, identity: dict) -> str:
     #   [proj][W] Title        -> Title
     #   [proj][W]123 Title     -> Title
     #   [proj] [URGENT] Title  -> [URGENT] Title (preserves [URGENT])
-    title = re.sub(r"^\[[^\]]*\](\[[A-Za-z]\])?(\d+)?\s*", "", title)
+    title = TITLE_PREFIX_RE.sub("", title)
     return f"[{identity['project']}] {title}"
 
 
@@ -246,6 +398,8 @@ def parse_args(args: list[str]) -> dict:
         "has_mail_label": False,
         "adding_in_progress": False,  # For issue edit --add-label in-progress
         "issue_number": None,  # For issue edit/comment N
+        "add_labels": [],  # All labels being added
+        "remove_labels": [],  # All labels being removed
     }
 
     i = 0
@@ -263,8 +417,13 @@ def parse_args(args: list[str]) -> dict:
             if arg[8:] == "mail":
                 result["has_mail_label"] = True
         elif arg.startswith("--add-label="):
-            if arg[12:] == "in-progress":
+            label = arg[12:]  # len("--add-label=") = 12
+            result["add_labels"].append(label)
+            if label == "in-progress":
                 result["adding_in_progress"] = True
+        elif arg.startswith("--remove-label="):
+            label = arg[15:]  # len("--remove-label=") = 15
+            result["remove_labels"].append(label)
         # Handle --flag value and short flag formats
         elif arg in ("--body", "-b") and i + 1 < len(args):
             result["body_index"] = i + 1
@@ -274,8 +433,13 @@ def parse_args(args: list[str]) -> dict:
             result["repo"] = args[i + 1]
         elif arg in ("--label", "-l") and i + 1 < len(args) and args[i + 1] == "mail":
             result["has_mail_label"] = True
-        elif arg == "--add-label" and i + 1 < len(args) and args[i + 1] == "in-progress":
-            result["adding_in_progress"] = True
+        elif arg == "--add-label" and i + 1 < len(args):
+            label = args[i + 1]
+            result["add_labels"].append(label)
+            if label == "in-progress":
+                result["adding_in_progress"] = True
+        elif arg == "--remove-label" and i + 1 < len(args):
+            result["remove_labels"].append(args[i + 1])
         # Capture issue number (positional arg after subcommand, must be numeric)
         elif arg.isdigit() and result["issue_number"] is None:
             result["issue_number"] = arg
@@ -296,7 +460,12 @@ def main():
     parsed = parse_args(args)
 
     # Only process issue create/comment/edit/close
-    if parsed["command"] != "issue" or parsed["subcommand"] not in ("create", "comment", "edit", "close"):
+    if parsed["command"] != "issue" or parsed["subcommand"] not in (
+        "create",
+        "comment",
+        "edit",
+        "close",
+    ):
         os.execv(real_gh, [real_gh] + args)
 
     # ENFORCE: Only MANAGER or USER can close issues
@@ -308,22 +477,91 @@ def main():
             print(file=sys.stderr)
             print("❌ ERROR: Only MANAGER role can close issues", file=sys.stderr)
             print(f"   Current role: {role}", file=sys.stderr)
-            print("   File an issue or use 'Part of #N' in commits instead.", file=sys.stderr)
+            print(
+                "   File an issue or use 'Part of #N' in commits instead.",
+                file=sys.stderr,
+            )
             print(file=sys.stderr)
             sys.exit(1)
+        if parsed["issue_number"]:
+            cleanup_workflow_labels(
+                real_gh, parsed["issue_number"], parsed["repo"], role
+            )
         # Manager/User can close - pass through
         os.execv(real_gh, [real_gh] + args)
 
-    # Handle issue edit with --add-label in-progress (claiming)
-    if parsed["subcommand"] == "edit" and parsed["adding_in_progress"] and parsed["issue_number"]:
-        identity = get_identity()
-        # Execute the edit command first
+    # Handle issue edit operations
+    if parsed["subcommand"] == "edit" and parsed["issue_number"]:
+        role = os.environ.get("AI_ROLE", "USER")
+
+        # ENFORCE: Only WORKER can add do-audit label
+        # do-audit is Worker's self-audit checkpoint - other roles skip directly to needs-review
+        if "do-audit" in parsed["add_labels"] and role != "WORKER":
+            print(file=sys.stderr)
+            print(
+                "❌ ERROR: Only WORKER role can add 'do-audit' label", file=sys.stderr
+            )
+            print(f"   Current role: {role}", file=sys.stderr)
+            print(
+                "   Workflow: Worker → do-audit → needs-review → Manager closes",
+                file=sys.stderr,
+            )
+            print("   Other roles: → needs-review → Manager closes", file=sys.stderr)
+            print(file=sys.stderr)
+            sys.exit(1)
+
+        # ENFORCE: Non-USER cannot remove USER-protected labels
+        if role != "USER" and parsed["remove_labels"]:
+            for label in parsed["remove_labels"]:
+                if label in PROTECTED_LABELS:
+                    if is_label_user_protected(real_gh, parsed["issue_number"], label):
+                        print(file=sys.stderr)
+                        print(
+                            f"❌ ERROR: Cannot remove USER-protected label '{label}'",
+                            file=sys.stderr,
+                        )
+                        print(f"   Current role: {role}", file=sys.stderr)
+                        print(
+                            f"   The '{label}' label was set by USER and is protected.",
+                            file=sys.stderr,
+                        )
+                        print(
+                            "   Only USER can remove labels they set.", file=sys.stderr
+                        )
+                        print(file=sys.stderr)
+                        sys.exit(1)
+
+        # Execute the edit command
         result = subprocess.run([real_gh] + args)
-        if result.returncode == 0:
-            # Add a claiming comment
+        if result.returncode != 0:
+            sys.exit(result.returncode)
+
+        # Track: USER adding protected labels
+        if role == "USER" and parsed["add_labels"]:
+            for label in parsed["add_labels"]:
+                if label in PROTECTED_LABELS:
+                    # Check if already protected (avoid duplicate markers)
+                    if not is_label_user_protected(
+                        real_gh, parsed["issue_number"], label
+                    ):
+                        add_user_label_marker(real_gh, parsed["issue_number"], label)
+
+        # Add claiming comment for in-progress
+        if parsed["adding_in_progress"]:
+            identity = get_identity()
             claim_body = process_body("Claiming this issue.", identity)
-            subprocess.run([real_gh, "issue", "comment", parsed["issue_number"], "--body", claim_body])
-        sys.exit(result.returncode)
+            subprocess.run(
+                [
+                    real_gh,
+                    "issue",
+                    "comment",
+                    parsed["issue_number"],
+                    "--body",
+                    claim_body,
+                ]
+            )
+
+        sys.exit(0)
 
     # Pass through other edit commands unchanged
     if parsed["subcommand"] == "edit":
@@ -362,7 +600,11 @@ def main():
     # Add mail label for cross-repo issues
     if parsed["subcommand"] == "create" and parsed["repo"]:
         current_repo = get_current_repo(real_gh)
-        if current_repo and parsed["repo"] != current_repo and not parsed["has_mail_label"]:
+        if (
+            current_repo
+            and parsed["repo"] != current_repo
+            and not parsed["has_mail_label"]
+        ):
             args.extend(["--label", "mail"])
 
     # Execute

@@ -4,3 +4,7 @@
 # Testing
 pytest>=7.0.0
 pytest-cov>=4.0.0
+
+# GitHub automation
+PyJWT[crypto]>=2.0.0
+requests>=2.0.0

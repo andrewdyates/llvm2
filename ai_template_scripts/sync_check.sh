@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates
+# Licensed under the Apache License, Version 2.0
+
 # sync_check.sh - Check template drift across repos
 #
 # Reads .ai_template_version from repos and compares to current ai_template HEAD.
@@ -8,9 +12,6 @@
 #   ./ai_template_scripts/sync_check.sh              # Check all sibling repos
 #   ./ai_template_scripts/sync_check.sh /path/to/repos  # Check repos in directory
 #   ./ai_template_scripts/sync_check.sh repo1 repo2     # Check specific repos
-#
-# Copyright 2026 Dropbox, Inc.
-# Licensed under the Apache License, Version 2.0
 
 set -euo pipefail
 
@@ -37,34 +38,63 @@ echo ""
 
 # Collect repos to check
 REPOS=()
+SKIPPED=()
+ARGS=()
+CHECK_FILES_ARG=false
 
-if [[ $# -eq 0 ]]; then
+for arg in "$@"; do
+    case "$arg" in
+        --files) CHECK_FILES_ARG=true ;;
+        -*) echo "ERROR: Unknown option: $arg"; exit 1 ;;
+        *) ARGS+=("$arg") ;;
+    esac
+done
+
+if [[ ${#ARGS[@]} -eq 0 ]]; then
     # Default: check sibling directories (same parent as ai_template)
     PARENT_DIR="$(dirname "$AI_TEMPLATE_ROOT")"
     for dir in "$PARENT_DIR"/*/; do
         [[ -d "$dir/.git" ]] && [[ "$(basename "$dir")" != "ai_template" ]] && REPOS+=("$dir")
     done
-elif [[ $# -eq 1 && -d "$1" && ! -f "$1/.ai_template_version" ]]; then
+elif [[ ${#ARGS[@]} -eq 1 && -d "${ARGS[0]}" && ! -d "${ARGS[0]}/.git" ]]; then
     # Single directory argument that's not a repo - scan it
-    for dir in "$1"/*/; do
+    for dir in "${ARGS[0]}"/*/; do
         [[ -d "$dir/.git" ]] && REPOS+=("$dir")
     done
 else
     # Explicit repo list
-    for arg in "$@"; do
-        [[ -d "$arg/.git" ]] && REPOS+=("$arg")
+    for arg in "${ARGS[@]}"; do
+        if [[ -d "$arg/.git" ]]; then
+            REPOS+=("$arg")
+        else
+            SKIPPED+=("$arg")
+        fi
     done
 fi
 
 if [[ ${#REPOS[@]} -eq 0 ]]; then
     echo "No repos found to check."
+    if [[ ${#SKIPPED[@]} -gt 0 ]]; then
+        echo "Skipped non-repo paths:"
+        for skipped in "${SKIPPED[@]}"; do
+            echo "  - $skipped"
+        done
+    fi
     exit 0
+fi
+
+if [[ ${#SKIPPED[@]} -gt 0 ]]; then
+    echo "Warning: skipped non-repo paths:"
+    for skipped in "${SKIPPED[@]}"; do
+        echo "  - $skipped"
+    done
+    echo ""
 fi
 
 # Check each repo
 UP_TO_DATE=0
 BEHIND=0
-UNKNOWN=0
+UNTRACKED=0
 TOTAL=${#REPOS[@]}
 
 printf "%-30s %-10s %-10s %s\n" "REPO" "VERSION" "STATUS" "COMMITS BEHIND"
@@ -75,12 +105,12 @@ for repo in "${REPOS[@]}"; do
     version_file="$repo/.ai_template_version"
 
     if [[ ! -f "$version_file" ]]; then
-        printf "%-30s %-10s ${YELLOW}%-10s${NC} %s\n" "$repo_name" "-" "unknown" "no .ai_template_version"
-        ((UNKNOWN++))
+        printf "%-30s %-10s ${YELLOW}%-10s${NC} %s\n" "$repo_name" "-" "untracked" "no .ai_template_version"
+        ((UNTRACKED++))
         continue
     fi
 
-    repo_version=$(cat "$version_file" | tr -d '[:space:]')
+    repo_version=$(head -1 "$version_file" | tr -d '[:space:]')
 
     if [[ "$repo_version" == "$CURRENT_VERSION" ]]; then
         printf "%-30s %-10s ${GREEN}%-10s${NC}\n" "$repo_name" "${repo_version:0:7}" "current"
@@ -101,16 +131,16 @@ for repo in "${REPOS[@]}"; do
 done
 
 echo ""
-echo "Summary: $UP_TO_DATE current, $BEHIND behind, $UNKNOWN unknown (of $TOTAL repos)"
+echo "Summary: $UP_TO_DATE current, $BEHIND behind, $UNTRACKED untracked (of $TOTAL repos)"
 
-if [[ $BEHIND -gt 0 ]]; then
+if [[ $BEHIND -gt 0 || $UNTRACKED -gt 0 ]]; then
     echo ""
     echo "To sync a repo:"
     echo "  ./ai_template_scripts/sync_repo.sh /path/to/repo"
 fi
 
 # File-level drift detection (optional, slower)
-if [[ "${CHECK_FILES:-}" == "1" ]] || [[ "${1:-}" == "--files" ]]; then
+if [[ "${CHECK_FILES:-}" == "1" ]] || [[ "$CHECK_FILES_ARG" == "true" ]]; then
     echo ""
     echo "=== File-level drift check ==="
 

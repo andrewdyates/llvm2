@@ -12,11 +12,14 @@ set -euo pipefail
 
 # Colors
 YELLOW='\033[1;33m'
+RED='\033[1;31m'
 NC='\033[0m'
 
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 WARNINGS=0
+ERRORS=0  # Blocking errors (ignores without issue refs)
 
 # Get staged files (new or modified) - use newline as delimiter to handle spaces in filenames
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || true)
@@ -149,120 +152,119 @@ if [[ "$(uname)" == "Darwin" ]]; then
     fi
 fi
 
-# Run Python linter (ruff) on staged Python files
-if command -v ruff &>/dev/null; then
-    PYTHON_FILES=()
-    for file in $STAGED_FILES; do
-        if [[ "$file" == *.py && -f "$file" ]]; then
-            PYTHON_FILES+=("$file")
-        fi
-    done
-    if [[ ${#PYTHON_FILES[@]} -gt 0 ]]; then
-        # Run ruff check and capture output
-        RUFF_OUTPUT=$(ruff check "${PYTHON_FILES[@]}" 2>&1) || true
-        if [[ -n "$RUFF_OUTPUT" && "$RUFF_OUTPUT" != "All checks passed!" ]]; then
-            warn "Python linter (ruff) found issues:"
-            echo "$RUFF_OUTPUT" | head -20
-            if [[ $(echo "$RUFF_OUTPUT" | wc -l) -gt 20 ]]; then
-                echo "  ... (truncated, run 'ruff check' for full output)"
-            fi
-            WARNINGS=$((WARNINGS + 1))
-        fi
-    fi
+# NOTE: ruff and shellcheck are handled by pre-commit framework
+# See .pre-commit-config.yaml for configuration
+
+# FORBID test ignores entirely (#341)
+# Tests must PASS, FAIL, or be DELETED. No ignore. No hiding.
+#
+# Exclusions can be configured via:
+#   1. .ignore-check-exclude file (one path prefix per line)
+#   2. IGNORE_CHECK_EXCLUDE env var (colon-separated paths)
+#
+# Example .ignore-check-exclude:
+#   vendor/
+#   third_party/
+#   generated/
+
+# Load exclusion paths
+IGNORE_EXCLUSIONS=()
+if [[ -f ".ignore-check-exclude" ]]; then
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        IGNORE_EXCLUSIONS+=("$line")
+    done < ".ignore-check-exclude"
+fi
+if [[ -n "${IGNORE_CHECK_EXCLUDE:-}" ]]; then
+    IFS=':' read -ra env_excludes <<< "$IGNORE_CHECK_EXCLUDE"
+    IGNORE_EXCLUSIONS+=("${env_excludes[@]}")
 fi
 
-# Run shell script linter (shellcheck) on staged bash files
-if command -v shellcheck &>/dev/null; then
-    SHELL_FILES=()
-    for file in $STAGED_FILES; do
-        if [[ "$file" == *.sh && -f "$file" ]]; then
-            SHELL_FILES+=("$file")
-        fi
-    done
-    if [[ ${#SHELL_FILES[@]} -gt 0 ]]; then
-        # Run shellcheck and capture output
-        SHELLCHECK_OUTPUT=$(shellcheck "${SHELL_FILES[@]}" 2>&1) || true
-        if [[ -n "$SHELLCHECK_OUTPUT" ]]; then
-            warn "Shell linter (shellcheck) found issues:"
-            echo "$SHELLCHECK_OUTPUT" | head -20
-            if [[ $(echo "$SHELLCHECK_OUTPUT" | wc -l) -gt 20 ]]; then
-                echo "  ... (truncated, run 'shellcheck' for full output)"
+is_excluded() {
+    local file="$1"
+    # Handle empty array safely with set -u
+    if [[ ${#IGNORE_EXCLUSIONS[@]} -gt 0 ]]; then
+        for excl in "${IGNORE_EXCLUSIONS[@]}"; do
+            if [[ "$file" == "$excl"* ]]; then
+                return 0
             fi
-            WARNINGS=$((WARNINGS + 1))
-        fi
+        done
     fi
-fi
+    return 1
+}
 
-# Check for new test ignores without issue references (#267)
-# Patterns: #[ignore, @skip, xfail, @pytest.mark.skip
 check_new_ignores() {
     local file="$1"
     local ext="${file##*.}"
 
-    # Only check source files that can have test ignores
+    # Check exclusions
+    if is_excluded "$file"; then
+        return 0
+    fi
+
+    # Language-specific patterns (precise to avoid false positives)
+    # Note: Use [[:space:]] not \s for POSIX ERE compatibility
+    local pattern=""
     case "$ext" in
-        rs|py|js|ts|tsx) ;;
-        *) return 0 ;;
+        rs)
+            # Rust: #[ignore] or #[ignore = "..."]
+            pattern='#\[ignore[[:space:]]*(\]|=)'
+            ;;
+        py)
+            # Python: @skip(), @pytest.mark.skip, @pytest.mark.xfail, @unittest.skip*
+            pattern='@skip[[:space:]]*\(|@pytest\.mark\.skip|@pytest\.mark\.xfail|@unittest\.skip'
+            ;;
+        js|ts|tsx)
+            # JS/TS: .skip(, it.skip(, test.skip(, describe.skip(, xit(, xdescribe(, xtest(
+            pattern='\.skip\(|^[[:space:]]*(xit|xdescribe|xtest)[[:space:]]*\('
+            ;;
+        *)
+            return 0
+            ;;
     esac
 
     # Get ignore patterns added in this commit (new lines only, indicated by +)
     local new_ignores
-    new_ignores=$(git diff --cached -U0 "$file" 2>/dev/null | grep -E '^\+.*#\[ignore|^\+.*@skip|^\+.*xfail|^\+.*@pytest\.mark\.skip' | grep -v '^+++' || true)
+    new_ignores=$(git diff --cached -U0 "$file" 2>/dev/null | grep -E "^\+.*($pattern)" | grep -v '^+++' || true)
 
     if [[ -n "$new_ignores" ]]; then
-        # Check if each new ignore has an issue reference (#N)
         while IFS= read -r line; do
-            if ! echo "$line" | grep -qE '#[0-9]+'; then
-                warn "New test ignore without issue reference in $file:"
-                echo "  $line"
-                echo "  Ignores must reference an issue: #[ignore = \"Needs X #123\"]"
-                WARNINGS=$((WARNINGS + 1))
-            fi
+            error "FORBIDDEN: Test ignore in $file"
+            echo "  $line"
+            echo ""
+            echo "  Tests must PASS, FAIL, or be DELETED. No ignore."
+            echo "  - Slow? Add timeout. If timeout exceeded, it FAILS."
+            echo "  - Blocked? Let it FAIL. Failure is visibility."
+            echo "  - Flaky? Fix flakiness or DELETE."
+            echo "  - Obsolete? DELETE."
+            echo ""
+            ERRORS=$((ERRORS + 1))
         done <<< "$new_ignores"
     fi
 }
 
-# Check staged files for new ignores without issue refs
-# Only relevant for PROVER (test correctness) and MANAGER (audit) roles
-if [[ "${AI_ROLE:-}" == "PROVER" ]] || [[ "${AI_ROLE:-}" == "MANAGER" ]]; then
-    for file in $STAGED_FILES; do
-        if [[ -f "$file" ]]; then
-            check_new_ignores "$file"
-        fi
-    done
-fi
-
-# WORKER should not create new #[ignore] annotations - tests are Prover's domain
-# Moving/refactoring existing ignores is OK (net change <= 0)
-if [[ "${AI_ROLE:-}" == "WORKER" ]]; then
-    for file in $STAGED_FILES; do
-        if [[ -f "$file" ]]; then
-            ext="${file##*.}"
-            case "$ext" in
-                rs|py|js|ts|tsx)
-                    # Count added vs removed ignores to detect net new (not just moves)
-                    diff_output=$(git diff --cached -U0 "$file" 2>/dev/null || true)
-                    added=$(echo "$diff_output" | { grep -E '^\+.*#\[ignore|^\+.*@skip|^\+.*xfail|^\+.*@pytest\.mark\.skip' || true; } | wc -l | tr -d ' ')
-                    removed=$(echo "$diff_output" | { grep -E '^-.*#\[ignore|^-.*@skip|^-.*xfail|^-.*@pytest\.mark\.skip' || true; } | wc -l | tr -d ' ')
-                    net_new=$((added - removed))
-                    if [[ "$net_new" -gt 0 ]]; then
-                        warn "WORKER adding $net_new new test ignore(s) in $file (tests are Prover's domain)"
-                        echo "  If disabling a test, coordinate with Prover or file an issue"
-                        WARNINGS=$((WARNINGS + 1))
-                    fi
-                    ;;
-            esac
-        fi
-    done
-fi
+# Check staged files for new ignores (ALL roles, BLOCKING)
+for file in $STAGED_FILES; do
+    if [[ -f "$file" ]]; then
+        check_new_ignores "$file"
+    fi
+done
 
 # Report warnings but don't block
 if [[ $WARNINGS -gt 0 ]]; then
     echo ""
-    warn "$WARNINGS issue(s) found (missing headers, authors, or ignore refs)"
+    warn "$WARNINGS warning(s) found (missing headers, authors, etc.)"
     echo "  Add headers from: ai_template_scripts/headers/"
-    echo "  Ignores must reference issues: #[ignore = \"Reason #123\"]"
-    echo "  To skip this check: git commit --no-verify"
+    echo "  To skip warnings: git commit --no-verify"
+    echo ""
+fi
+
+# Report blocking errors
+if [[ $ERRORS -gt 0 ]]; then
+    echo ""
+    error "$ERRORS BLOCKING error(s) - commit rejected"
+    echo "  Test ignores are FORBIDDEN. Tests must PASS, FAIL, or be DELETED."
+    echo "  See ai_template.md 'Test ignores FORBIDDEN' rule."
     echo ""
 fi
 
@@ -289,5 +291,24 @@ fi
 # Restore IFS
 IFS="$OLD_IFS"
 
-# Always exit 0 (warning mode, not blocking)
+# === Project-specific extensions ===
+# Hooks in .pre-commit-local.d/ are NOT synced from ai_template.
+# Projects can add custom pre-commit checks there.
+# See ai_template_scripts/README.md for documentation.
+PROJECT_HOOKS_DIR="$REPO_ROOT/.pre-commit-local.d"
+if [[ -d "$PROJECT_HOOKS_DIR" ]]; then
+    for hook in "$PROJECT_HOOKS_DIR"/*.sh; do
+        [[ -f "$hook" && -x "$hook" ]] || continue
+        echo "Running project hook: $(basename "$hook")"
+        if ! "$hook"; then
+            error "Project hook failed: $(basename "$hook")"
+            ERRORS=$((ERRORS + 1))
+        fi
+    done
+fi
+
+# Exit non-zero if blocking errors found
+if [[ $ERRORS -gt 0 ]]; then
+    exit 1
+fi
 exit 0

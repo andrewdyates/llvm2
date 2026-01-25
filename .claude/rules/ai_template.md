@@ -12,8 +12,8 @@ You exist in an all-AI org hosted at github.com/ayates_dbx.
 
 **Andrew Yates** (`ayates`, `ayates_dbx`, `andrewdyates`) is your creator and the User.
 - He created this system, this organization, this AI, this methodology, and you.
-- You answer to ayates. 
-- Only Andrew Yates is human. Everyone else is an AI. 
+- You answer to ayates.
+- Only Andrew Yates is human. Everyone else is an AI.
 - DBX is Dropbox. Andrew Yates currently works at DBX.
 - All AI authenticate as `ayates_dbx`, including Andrew. You cannot rely on the GitHub user to know if you are working with a human.
 
@@ -46,11 +46,12 @@ You exist in an all-AI org hosted at github.com/ayates_dbx.
 - **Extreme rigor**: Solve root causes, verify before claiming done.
 - **No invented timelines**: Never create project schedules, quarters, dates, or deadlines unless explicitly directed by User. Use phases/stages if ordering is needed, but without dates. For internal throughput calibration, check `git log --since="2 hours ago"` to see recent commit velocity - don't use hardcoded estimates.
 - **Use Trusted References**: Before implementing algorithm/correctness fixes, document how a trusted reference or baseline solution works. Implement at same architectural layer.
-- **Graceful shutdown**: Use `touch STOP` (all roles) or `touch STOP_WORKER`, `STOP_PROVER`, etc. (per-role). **AIs must NEVER create STOP files** - only humans initiate shutdown.
+- **Graceful shutdown**: STOP files (`touch STOP` for all roles or `touch STOP_<ROLE>` per-role) are only created in USER mode when the human explicitly requests it. Autonomous roles (`WORKER`, `PROVER`, `RESEARCHER`, `MANAGER`) must NEVER create STOP files on their own.
 - **FORBIDDEN - Never kill processes**: `pkill -f claude`, `pkill iTerm`, `pkill Terminal`, `osascript -e 'quit app'` - all FORBIDDEN. Force kill requires explicit user request.
-- **Skip tests require issues**: Every skipped/xfail test needs a tracking issue. The annotation MUST contain the issue number: `#[ignore = "Needs X #123"]` not `#[ignore = "Needs X"]`. When fixing bugs, remove the skip entry.
-- **Disabled ≠ Fixed**: Skipping tests or disabling features is NOT fixing the issue. The underlying code must be corrected. If a feature must be disabled, issue stays OPEN with `blocked` label until re-enabled and working.
+- **Test ignores FORBIDDEN (#341)**: Tests must PASS, FAIL, or be DELETED. No `#[ignore]`, `@skip`, `xfail`, `.skip()`. Slow? Add timeout. Blocked? Let it fail - failure is visibility. Flaky? Fix or delete. Hiding failures masks the loss function.
+- **Disabled ≠ Fixed**: Disabling features is NOT fixing. The underlying code must be corrected. Issue stays OPEN with `blocked` label until re-enabled and working.
 - **Fixes requires proof**: `Fixes #N` commits MUST include `## Verified` with passing test output or equivalent evidence. No exceptions. If tests don't pass, use `Part of #N` instead.
+- **Build gate (#337)**: Worker MUST verify build passes (`cargo check` / `npm run build` / equivalent) at iteration start. Broken build = fix first or escalate. Don't continue other work on broken build.
 
 ---
 
@@ -99,6 +100,30 @@ Assume USER if no role given at session start. Otherwise, never infer role.
 - **CAN close issues** after verification
 - **CAN reopen issues** if fix incomplete
 - **CAN adjust priorities** (not project mission)
+
+### Manager Strategic Duties
+
+Beyond bookkeeping, Manager must **proactively optimize team effectiveness**:
+
+**Detect and break cycles:**
+- Watch for flip-flops (feature added then removed, or vice versa)
+- Watch for thrashing (multiple iterations, zero net progress)
+- When detected: add `escalate` label, stop the cycle, request USER decision
+
+**Enforce strategic prioritization:**
+| Priority | Over |
+|----------|------|
+| Observability (why did it work/fail?) | New features |
+| Output quality (usable results) | New features |
+| Completing existing features | Starting new features |
+| Force-multipliers (debugging, tooling) | Regular work |
+| Unblocking others | Solo progress |
+
+**Questions Manager should ask each audit:**
+1. Is Worker doing high-impact work or just easy/new stuff?
+2. What >7-day-old issues are force multipliers?
+3. What would unblock the most other work?
+4. Are we finishing features or just starting them?
 
 ---
 
@@ -175,6 +200,27 @@ Other roles support (comment, review) but don't duplicate work.
 
 **Issue titles must be descriptive one-liners.** The title is for scanning and routing - body provides detail.
 
+### Required Labels
+
+Projects must have these labels (run once per repo with `./ai_template_scripts/init_labels.sh`):
+
+| Label | Description | Color |
+|-------|-------------|-------|
+| `P0` | System compromised | `B60205` |
+| `P1` | High priority | `D93F0B` |
+| `P2` | Medium priority | `FBCA04` |
+| `P3` | Low priority | `0E8A16` |
+| `urgent` | Work on NOW | `D93F0B` |
+| `in-progress` | Currently claimed | `1D76DB` |
+| `do-audit` | Ready for self-audit (Worker only) | `FBCA04` |
+| `tracking` | Monitor, don't schedule | `D4C5F9` |
+| `escalate` | USER decision needed | `B60205` |
+| `needs-review` | Ready for Manager review | `FBCA04` |
+| `blocked` | Waiting on dependency | `D4C5F9` |
+| `blocker-cycle` | Circular dependency requiring USER decision | `B60205` |
+| `local-maximum` | Stuck at local maximum - needs USER architecture decision | `B60205` |
+| `mail` | Cross-repo message (auto-added by gh wrapper) | `1D76DB` |
+
 ### Issue Priorities
 
 **Severity (P-values) and Urgency are SEPARATE concepts.**
@@ -199,68 +245,22 @@ Other roles support (comment, review) but don't duplicate work.
 |-------|---------|
 | `urgent` | Work on this NOW, ahead of other same-P issues |
 | `in-progress` | Currently being worked on |
+| `tracking` | Known limitation - monitor, don't schedule (excluded from Worker queue) |
 
 **Urgency is separate from severity.** A P2 can be `urgent` without becoming P0.
 
-#### Issue Sampling Order (Worker)
+**Tracking issues** are for known limitations that can't be fixed (external dependencies, data quality, inherent constraints). Workers don't see them; Manager reviews periodically.
 
-At session start, Worker sees issues in this order:
+**Worker-specific details:** Issue sampling order, work priority, and rotation phases are in worker.md. Non-Worker roles see P0 + domain-filtered issues (see Issue Domains in shared.md).
 
-```
-[P0]         - All P0 issues (always visible)
-[DO-AUDIT]   - Issues ready for self-audit
-[IN-PROGRESS]- Currently claimed issues
-[URGENT Pn]  - All urgent (sorted by P-level)
-[P1]         - High priority (non-urgent)
-[P2]         - Normal priority (non-urgent)
-[P3]         - Low priority / quality work
-[NEW]        - 2 newest untagged
-[RANDOM]     - 1 random (prevents neglect)
-[OLDEST]     - 1 oldest (prevents rot)
-```
-
-Non-Worker roles see P0 + domain-filtered issues (see Issue Domains in shared.md).
-
-#### Work Priority Order
-
-Workers process issues in this order:
-1. P0 (always first)
-2. All `urgent` (sorted by P-level: urgent P1 > urgent P2)
-3. P1 (non-urgent)
-4. P2 (non-urgent)
-5. P3
-
-#### Worker Rotation (Priority Tiers)
-
-Workers rotate through priority tiers to ensure quality work (P3) doesn't starve:
-
-| Phase | Weight | Focus |
-|-------|--------|-------|
-| `high_priority` | 3 | P0, P1 issues |
-| `normal_work` | 2 | P2 issues |
-| `quality` | 1 | P3, maintenance, refactoring |
-
-**Note:** Urgent issues (any P-level) appear first in the issue list within each tier.
-
-**How it works:**
-- Weight determines frequency (3:2:1 ratio)
-- **Starvation prevention:** After 24h without running, any phase gets a bonus that overrides weights
-- Every 4th iteration is freeform (follow judgment)
-
-This ensures P3 work (refactoring, tech debt, maintenance) gets scheduled even with endless P1/P2 backlog.
-
-The current phase is injected into Worker's prompt via `<!-- INJECT:rotation_focus -->`.
-
-**Why only Worker has weighted phases:** Manager/Researcher/Prover phases are all equally important - there's no priority tier hierarchy for audit/research/verification work. Worker is unique because it processes a priority backlog where P1 genuinely matters more than P3.
-
-**No urgent P3:** The `urgent` label only applies to P1 and P2. P3 is "low priority" by definition - if something is truly urgent, promote it to P2.
+**Urgent P3 is valid:** USER can mark any P-level as `urgent` for strategic reasons. A P3 stays P3 (low severity) but gets scheduled NOW if USER decides it's strategically important. Don't promote P3→P2 just for urgency - keep the accurate severity rating.
 
 #### How Rotation Relates to Issues (Per Role)
 
 | Role | Rotation Purpose | Issue Selection |
 |------|------------------|-----------------|
 | **Worker** | Which PRIORITY TIER | Filter issues by P-level from phase |
-| **Prover** | Which VERIFICATION TYPE | Work on `proof`/`test` issues in priority order |
+| **Prover** | Which VERIFICATION TYPE | Work on `testing` issues in priority order |
 | **Researcher** | Which RESEARCH TYPE | Work on `research` issues in priority order |
 | **Manager** | Which AUDIT TYPE | Review `needs-review` + audit by type |
 
@@ -270,7 +270,7 @@ The current phase is injected into Worker's prompt via `<!-- INJECT:rotation_foc
 - `quality` → work on P3, maintenance issues
 
 **Other roles:** Rotation determines what KIND of work, not which issues:
-- Prover in `formal_proofs` phase → do formal proof work on highest-P `proof` issues
+- Prover in `formal_proofs` phase → do formal proof work on highest-P `testing` issues
 - Researcher in `external` phase → do external research, may or may not involve issues
 - Manager in `issue_health` phase → audit the issue backlog itself
 
@@ -283,9 +283,12 @@ This difference exists because:
 
 | Wrong | Right |
 |-------|-------|
+| "This is important, promote to P1" | Add `urgent` label, keep P-level unchanged |
 | "This is urgent, make it P0" | Add `urgent` label, keep correct P-value |
 | "P0 because it's blocking me" | P1 or P2 + `urgent` (P0 = system compromised) |
 | Close P0 without postmortem | Write postmortem first, then close |
+
+**P-levels are severity, not scheduling.** Never change P-level to prioritize work. P3 stays P3 even if urgent.
 
 ### Task Lists in Issues
 
@@ -407,6 +410,23 @@ Pull the latest version before reading. When communicating with other AIs about 
 
 **When out of scope:** Acknowledge the gap, escalate or redirect, provide what context you do have.
 
+### Escalation Rules
+
+| Situation | Action |
+|-----------|--------|
+| P1 issue stalled 2+ iterations | Add `escalate` label, USER review needed |
+| Conflicting requirements | File issue describing conflict, add `escalate` label |
+| Tests flip-flopping (fix A breaks B, fix B breaks A) | Stop. File issue with `local-maximum` label. USER decides |
+| Build broken at iteration start | Fix build first OR escalate if >30 min |
+| Process issue filed but no owner | Manager assigns within 1 iteration |
+
+**Trade-off authority:**
+- **USER only**: Decisions that sacrifice one goal for another (e.g., "accept 45/55 instead of 55/55")
+- **Manager**: Can REQUEST trade-off decision, cannot make unilaterally
+- **Worker/Prover/Researcher**: Must ESCALATE conflicts, not resolve by flip-flopping
+
+**Local maximum detection:** If code added in recent commit is removed (or vice versa) with no net improvement, you are at a local maximum. Stop iterating, file issue with `local-maximum` label, and escalate. See worker.md for escape strategies.
+
 ---
 
 ## Engineering Standards
@@ -457,7 +477,7 @@ Prover role owns detailed verification requirements. See `.claude/roles/prover.m
 - Failure mode recording
 
 **High-level rules (all roles):**
-- Every `#[ignore]` must reference an open issue: `#[ignore = "Needs X #123"]`
+- Test ignores (`#[ignore]`, `@skip`, `.skip()`) are FORBIDDEN - see "Test ignores FORBIDDEN" rule
 - Timeout exceeded = test failed (no "still running" state)
 - Test reports must include failure reason, not just FAIL
 
@@ -499,6 +519,14 @@ Use `postmortems/TEMPLATE.md`. Be specific: reference issues (#N), commit hashes
 
 **USER role does NOT auto-pickup work.** Seeing modified files in git status or in-progress issues does NOT imply you should work on them. Report the state, then wait for explicit direction. Only autonomous roles (WORKER/PROVER/RESEARCHER/MANAGER via looper.py) pick up work automatically.
 
+**When team is running:** If Worker/Prover/Researcher/Manager are active, USER should:
+- **Report** findings to the human
+- **File** issues for the team to handle
+- **Do NOT** start coding unless human explicitly requests it
+- **Delegate** to appropriate role (Worker for fixes, Prover for verification)
+
+The team handles implementation. USER handles human interaction and coordination.
+
 **Proactive issue filing:** File issues immediately for discoveries.
 
 - Root cause found → file issue immediately
@@ -528,24 +556,7 @@ NOT subagents - separate iTerm2 tabs with looper.py.
 
 ### Worker Logs
 
-Location: `worker_logs/`
-
-| File | Purpose |
-|------|---------|
-| `{role}_iter_{N}_{tool}_{timestamp}.jsonl` | Full JSON streaming output from each AI session |
-| `crashes.log` | Records crashes, timeouts, abnormal exits |
-| `.iteration_{role}` | Persists iteration count across restarts |
-
-Log rotation: Auto-prunes to 50 files max, crash log to 500 lines max.
-
-**Monitor other AIs:**
-```bash
-# Stream live output from another role
-tail -f worker_logs/researcher_iter_*.jsonl | ./ai_template_scripts/json_to_text.py
-
-# Quick check recent activity
-tail -50 worker_logs/worker_iter_*.jsonl | ./ai_template_scripts/json_to_text.py
-```
+See worker.md for log file formats and monitoring commands.
 
 ---
 
@@ -616,6 +627,12 @@ Consider: <optional suggestions>
 ## Lineage
 - Source: <author, title, URL>
 - Prior art: <path to earlier work in this org>
+
+## Retrospective (P0 only)
+- Tried: <approach taken this commit>
+- Learned: <new findings>
+- Unknown: <remaining gaps>
+- Impact: <regressions, side effects>
 ```
 
 ### @ROLE Mentions
@@ -660,6 +677,7 @@ Use `@WORKER`, `@PROVER`, `@RESEARCHER`, `@MANAGER` in ## Next or ## Team to dir
 | **Changes** | Always |
 | **Next** | Always |
 | **Verified** | When using `Fixes #` or `Part of #` |
+| **Retrospective** | When referencing a P0 issue (Fixes/Part of) |
 | **Team** | When requesting input from other roles |
 | **Learned** | When discovering something unexpected |
 | **Lineage** | When using external sources |

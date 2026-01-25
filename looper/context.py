@@ -1,3 +1,7 @@
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates
+# Licensed under the Apache License, Version 2.0
+
 """
 looper/context.py - Session context gathering
 
@@ -18,8 +22,11 @@ Licensed under the Apache License, Version 2.0
 import json
 import random
 import re
+import shutil
 import subprocess
 from pathlib import Path
+
+from looper.telemetry import get_health_summary
 
 
 def run_session_start_commands(role: str) -> dict[str, str]:
@@ -88,19 +95,21 @@ def _get_sampled_issues(role: str = "worker") -> str:
     - P0 (always first - system compromised)
     - do-audit (workflow gate)
     - in-progress (current work)
-    - All urgent (sorted by P-level: urgent P1 > urgent P2)
+    - All urgent (sorted by P-level: urgent P1 > urgent P2 > urgent P3)
     - P1, P2, P3 (non-urgent by priority)
     - Newest, random, oldest (discovery)
 
     Non-Worker roles see P0 + domain-specific issues:
     - Manager: needs-review
-    - Prover: proof, test
+    - Prover: testing
     - Researcher: research, design
     """
     # Role domain labels
+    # NOTE: Labels must match what's configured in the repo. Use gh label list to verify.
+    # "testing" is the standard label for test/proof work (not "test" or "proof")
     role_domains: dict[str, list[str]] = {
         "manager": ["needs-review"],
-        "prover": ["proof", "test"],
+        "prover": ["testing"],
         "researcher": ["research", "design"],
     }
 
@@ -152,9 +161,19 @@ def _get_sampled_issues(role: str = "worker") -> str:
         # Non-Worker: show P0 + domain issues only
         domain_labels = role_domains.get(role)
         if domain_labels:
-            return _get_domain_issues(issues, domain_labels, format_issue, has_label, has_any_label, get_p_level)
+            return _get_domain_issues(
+                issues,
+                domain_labels,
+                format_issue,
+                has_label,
+                has_any_label,
+                get_p_level,
+            )
 
         # Worker: full priority sampling
+        # Exclude tracking issues - known limitations, not actionable work
+        issues = [i for i in issues if not has_label(i, "tracking")]
+
         shown: set[int] = set()
         lines: list[str] = []
 
@@ -165,19 +184,27 @@ def _get_sampled_issues(role: str = "worker") -> str:
             shown.add(issue["number"])
 
         # do-audit second (workflow gate - ready for self-audit)
-        do_audit = [i for i in issues if has_label(i, "do-audit") and i["number"] not in shown]
+        do_audit = [
+            i for i in issues if has_label(i, "do-audit") and i["number"] not in shown
+        ]
         for issue in do_audit[:5]:
             lines.append(f"[DO-AUDIT] {format_issue(issue)}")
             shown.add(issue["number"])
 
         # In-progress third (current work)
-        in_progress = [i for i in issues if has_label(i, "in-progress") and i["number"] not in shown]
+        in_progress = [
+            i
+            for i in issues
+            if has_label(i, "in-progress") and i["number"] not in shown
+        ]
         for issue in in_progress[:5]:
             lines.append(f"[IN-PROGRESS] {format_issue(issue)}")
             shown.add(issue["number"])
 
         # ALL urgent issues first (sorted by P-level within)
-        urgent = [i for i in issues if has_label(i, "urgent") and i["number"] not in shown]
+        urgent = [
+            i for i in issues if has_label(i, "urgent") and i["number"] not in shown
+        ]
         urgent.sort(key=get_p_level)
         for issue in urgent[:5]:
             p = get_p_level(issue)
@@ -259,7 +286,11 @@ def _get_domain_issues(
         shown.add(issue["number"])
 
     # Domain issues: filter by label
-    domain = [i for i in issues if has_any_label(i, domain_labels) and i["number"] not in shown]
+    domain = [
+        i
+        for i in issues
+        if has_any_label(i, domain_labels) and i["number"] not in shown
+    ]
 
     # Sort: urgent first, then by P-level
     def domain_sort_key(issue: dict) -> tuple[int, int]:
@@ -515,14 +546,10 @@ def _get_system_status() -> str:
     Returns one line: "Mem: XX% | Disk: XX%" or empty if unavailable.
     """
     try:
-        import shutil
-
         parts = []
 
         # Memory - macOS via vm_stat
-        result = subprocess.run(
-            ["vm_stat"], capture_output=True, text=True, timeout=5
-        )
+        result = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
         if result.returncode == 0:
             lines = result.stdout.split("\n")
             free = active = inactive = wired = 0
@@ -558,6 +585,14 @@ def _get_system_status() -> str:
                 status += " ⚠️ CRITICAL"
             elif mem_val >= 80:
                 status += " ⚠️ HIGH"
+
+        # Add looper health summary if available
+        try:
+            looper_health = get_health_summary(24)
+            if looper_health:
+                status += f"\nLooper: {looper_health}"
+        except Exception:
+            pass  # Telemetry unavailable or failed
 
         return status
 

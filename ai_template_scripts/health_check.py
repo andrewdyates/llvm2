@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates
+# Licensed under the Apache License, Version 2.0
+
 """
 health_check.py - System health monitoring for AI fleet workers
 
@@ -119,8 +123,13 @@ def count_iterations_since(since: datetime) -> int:
     try:
         # Count all role commits: [W], [M], [P], [R]
         result = subprocess.run(
-            ["git", "log", f"--since={since_str}", "--oneline",
-             "--grep=\\[W\\]\\|\\[M\\]\\|\\[P\\]\\|\\[R\\]"],
+            [
+                "git",
+                "log",
+                f"--since={since_str}",
+                "--oneline",
+                "--grep=\\[W\\]\\|\\[M\\]\\|\\[P\\]\\|\\[R\\]",
+            ],
             capture_output=True,
             text=True,
             check=False,

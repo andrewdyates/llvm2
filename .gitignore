@@ -67,3 +67,4 @@ secrets.json
 # === Project-specific (preserved during sync) ===
 # Add project-specific gitignore entries below this line.
 # They will be preserved when sync_repo.sh updates this file.
+.hypothesis

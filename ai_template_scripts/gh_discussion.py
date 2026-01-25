@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates
+# Licensed under the Apache License, Version 2.0
+
 """
 gh_discussion.py - Create GitHub discussions with AI identity
 
@@ -78,8 +82,17 @@ def get_repo_id(real_gh: str, repo: str) -> str:
     query = f'query {{ repository(owner:"{owner}", name:"{name}") {{ id }} }}'
     try:
         return subprocess.check_output(
-            [real_gh, "api", "graphql", "-f", f"query={query}", "-q", ".data.repository.id"],
-            stderr=subprocess.DEVNULL, text=True
+            [
+                real_gh,
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-q",
+                ".data.repository.id",
+            ],
+            stderr=subprocess.DEVNULL,
+            text=True,
         ).strip()
     except Exception:
         return ""
@@ -98,7 +111,8 @@ def get_category_id(real_gh: str, repo: str, category: str) -> str:
     try:
         result = subprocess.check_output(
             [real_gh, "api", "graphql", "-f", f"query={query}"],
-            stderr=subprocess.DEVNULL, text=True
+            stderr=subprocess.DEVNULL,
+            text=True,
         )
         data = json.loads(result)
         for node in data["data"]["repository"]["discussionCategories"]["nodes"]:
@@ -158,7 +172,9 @@ def create_discussion(args: list[str]) -> str:
         category_id = CATEGORY_IDS.get(category)
         if not category_id:
             valid = ", ".join(CATEGORY_IDS.keys())
-            print(f"Error: Unknown category: {category}. Valid: {valid}", file=sys.stderr)
+            print(
+                f"Error: Unknown category: {category}. Valid: {valid}", file=sys.stderr
+            )
             sys.exit(1)
     else:
         repo_id = get_repo_id(real_gh, repo)
@@ -189,8 +205,17 @@ def create_discussion(args: list[str]) -> str:
 
     try:
         return subprocess.check_output(
-            [real_gh, "api", "graphql", "-f", f"query={mutation}", "-q", ".data.createDiscussion.discussion.url"],
-            stderr=subprocess.PIPE, text=True
+            [
+                real_gh,
+                "api",
+                "graphql",
+                "-f",
+                f"query={mutation}",
+                "-q",
+                ".data.createDiscussion.discussion.url",
+            ],
+            stderr=subprocess.PIPE,
+            text=True,
         ).strip()
     except subprocess.CalledProcessError as e:
         print(f"Error: Failed to create discussion: {e.stderr}", file=sys.stderr)
@@ -208,7 +233,8 @@ def get_discussion_id(real_gh: str, repo: str, number: int) -> str:
     try:
         result = subprocess.check_output(
             [real_gh, "api", "graphql", "-f", f"query={query}"],
-            stderr=subprocess.DEVNULL, text=True
+            stderr=subprocess.DEVNULL,
+            text=True,
         )
         data = json.loads(result)
         return data["data"]["repository"]["discussion"]["id"]
@@ -276,8 +302,17 @@ def comment_discussion(args: list[str]) -> str:
 
     try:
         return subprocess.check_output(
-            [real_gh, "api", "graphql", "-f", f"query={mutation}", "-q", ".data.addDiscussionComment.comment.url"],
-            stderr=subprocess.PIPE, text=True
+            [
+                real_gh,
+                "api",
+                "graphql",
+                "-f",
+                f"query={mutation}",
+                "-q",
+                ".data.addDiscussionComment.comment.url",
+            ],
+            stderr=subprocess.PIPE,
+            text=True,
         ).strip()
     except subprocess.CalledProcessError as e:
         print(f"Error: Failed to add comment: {e.stderr}", file=sys.stderr)

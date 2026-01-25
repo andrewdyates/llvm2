@@ -220,16 +220,22 @@ def load_role_config(mode: str) -> tuple[dict, str]:
     # Validate rotation_phases vs PHASE blocks
     rotation_phases = merged_config.get("rotation_phases", [])
     if rotation_phases:
-        config_phases = set(rotation_phases) if isinstance(rotation_phases, list) else set()
+        config_phases = (
+            set(rotation_phases) if isinstance(rotation_phases, list) else set()
+        )
         block_phases = set(phase_data.keys()) if phase_data else set()
 
         missing_blocks = config_phases - block_phases
         extra_blocks = block_phases - config_phases
 
         if missing_blocks:
-            print(f"Warning [{mode}]: rotation_phases lists phases without PHASE blocks: {missing_blocks}")
+            print(
+                f"Warning [{mode}]: rotation_phases lists phases without PHASE blocks: {missing_blocks}"
+            )
         if extra_blocks:
-            print(f"Warning [{mode}]: PHASE blocks exist but not in rotation_phases: {extra_blocks}")
+            print(
+                f"Warning [{mode}]: PHASE blocks exist but not in rotation_phases: {extra_blocks}"
+            )
 
     prompt = f"{shared_body.strip()}\n\n{role_body.strip()}"
 

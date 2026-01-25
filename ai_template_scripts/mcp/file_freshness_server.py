@@ -100,9 +100,9 @@ def handle_tool_call(name: str, arguments: dict) -> dict:
         record_read(file_path)
 
         # Return content with line numbers
-        lines = content.split('\n')
-        numbered = [f"{i+1:6d}\t{line}" for i, line in enumerate(lines)]
-        return {"content": '\n'.join(numbered)}
+        lines = content.split("\n")
+        numbered = [f"{i + 1:6d}\t{line}" for i, line in enumerate(lines)]
+        return {"content": "\n".join(numbered)}
 
     if name == "fresh_edit":
         file_path = arguments.get("file_path", "")
@@ -133,7 +133,9 @@ def handle_tool_call(name: str, arguments: dict) -> dict:
             return {"error": f"old_string not found in {file_path}"}
 
         if content.count(old_string) > 1:
-            return {"error": f"old_string appears multiple times in {file_path}. Make it unique."}
+            return {
+                "error": f"old_string appears multiple times in {file_path}. Make it unique."
+            }
 
         new_content = content.replace(old_string, new_string, 1)
 
@@ -171,11 +173,8 @@ def handle_request(request: dict) -> dict:
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {
-                    "name": "file-freshness-server",
-                    "version": "1.0.0"
-                }
-            }
+                "serverInfo": {"name": "file-freshness-server", "version": "1.0.0"},
+            },
         }
 
     if method == "tools/list":
@@ -192,11 +191,11 @@ def handle_request(request: dict) -> dict:
                             "properties": {
                                 "file_path": {
                                     "type": "string",
-                                    "description": "Path to the file to read"
+                                    "description": "Path to the file to read",
                                 }
                             },
-                            "required": ["file_path"]
-                        }
+                            "required": ["file_path"],
+                        },
                     },
                     {
                         "name": "fresh_edit",
@@ -206,19 +205,19 @@ def handle_request(request: dict) -> dict:
                             "properties": {
                                 "file_path": {
                                     "type": "string",
-                                    "description": "Path to the file to edit"
+                                    "description": "Path to the file to edit",
                                 },
                                 "old_string": {
                                     "type": "string",
-                                    "description": "The exact string to replace"
+                                    "description": "The exact string to replace",
                                 },
                                 "new_string": {
                                     "type": "string",
-                                    "description": "The replacement string"
-                                }
+                                    "description": "The replacement string",
+                                },
                             },
-                            "required": ["file_path", "old_string", "new_string"]
-                        }
+                            "required": ["file_path", "old_string", "new_string"],
+                        },
                     },
                     {
                         "name": "check_freshness",
@@ -228,14 +227,14 @@ def handle_request(request: dict) -> dict:
                             "properties": {
                                 "file_path": {
                                     "type": "string",
-                                    "description": "Path to check"
+                                    "description": "Path to check",
                                 }
                             },
-                            "required": ["file_path"]
-                        }
-                    }
+                            "required": ["file_path"],
+                        },
+                    },
                 ]
-            }
+            },
         }
 
     if method == "tools/call":
@@ -249,16 +248,14 @@ def handle_request(request: dict) -> dict:
                 "id": req_id,
                 "result": {
                     "content": [{"type": "text", "text": result["error"]}],
-                    "isError": True
-                }
+                    "isError": True,
+                },
             }
         text = result.get("content") or result.get("message") or json.dumps(result)
         return {
             "jsonrpc": JSONRPC_VERSION,
             "id": req_id,
-            "result": {
-                "content": [{"type": "text", "text": text}]
-            }
+            "result": {"content": [{"type": "text", "text": text}]},
         }
 
     if method == "notifications/initialized":
@@ -268,10 +265,7 @@ def handle_request(request: dict) -> dict:
     return {
         "jsonrpc": JSONRPC_VERSION,
         "id": req_id,
-        "error": {
-            "code": -32601,
-            "message": f"Method not found: {method}"
-        }
+        "error": {"code": -32601, "message": f"Method not found: {method}"},
     }
 
 
@@ -294,10 +288,7 @@ def main():
             error_response = {
                 "jsonrpc": JSONRPC_VERSION,
                 "id": None,
-                "error": {
-                    "code": -32700,
-                    "message": f"Parse error: {e}"
-                }
+                "error": {"code": -32700, "message": f"Parse error: {e}"},
             }
             sys.stdout.write(json.dumps(error_response) + "\n")
             sys.stdout.flush()

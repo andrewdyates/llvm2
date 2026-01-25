@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates
+# Licensed under the Apache License, Version 2.0
+
 """
 pulse.py - Programmatic stats collection and threshold checking
 
@@ -21,6 +25,7 @@ Metrics collected:
     - Git status (branch, commits, dirty state)
     - System resources (memory, disk, build artifacts)
     - Active AI sessions
+    - Template consolidation debt (lines in .claude/ over target)
 
 Flags set in .flags/ when thresholds exceeded:
     - large_files, crashes, blocked_issues, no_work, gh_error
@@ -35,11 +40,14 @@ Licensed under the Apache License, Version 2.0
 """
 
 import argparse
+import glob as glob_module
 import json
 import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+
+import tomllib
 
 # Directories
 METRICS_DIR = Path("metrics")
@@ -49,8 +57,8 @@ FLAGS_DIR = Path(".flags")
 EXCLUDE_DIRS = ["reference", "vendor", "third_party", "external"]
 
 # Pre-built exclusion patterns for find and grep
-FIND_EXCLUDE = ' '.join([f'-not -path "./{d}/*"' for d in EXCLUDE_DIRS])
-GREP_EXCLUDE = '|'.join([f'/{d}/' for d in EXCLUDE_DIRS])
+FIND_EXCLUDE = " ".join([f'-not -path "./{d}/*"' for d in EXCLUDE_DIRS])
+GREP_EXCLUDE = "|".join([f"/{d}/" for d in EXCLUDE_DIRS])
 
 # Thresholds (customize per project)
 THRESHOLDS = {
@@ -84,7 +92,9 @@ def run_cmd_with_retry(
     last_stderr = ""
     for attempt in range(retries + 1):
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout
+            )
             if result.returncode == 0:
                 return result.returncode, result.stdout, result.stderr
             last_stderr = result.stderr
@@ -103,13 +113,23 @@ def count_lines_by_type() -> dict[str, int]:
     """Count lines of code by file type. Tries tokei first, falls back to find+wc."""
     # Try tokei first (fastest - single pass, all languages)
     # Exclude reference/vendor directories
-    tokei_cmd = ["tokei", "-o", "json"] + [arg for d in EXCLUDE_DIRS for arg in ["-e", d]]
+    tokei_cmd = ["tokei", "-o", "json"] + [
+        arg for d in EXCLUDE_DIRS for arg in ["-e", d]
+    ]
     code, output = run_cmd(tokei_cmd, timeout=60)
     if code == 0 and output.strip():
         try:
             data = json.loads(output)
             counts = {}
-            lang_map = {"Python": "python", "Rust": "rust", "Go": "go", "C++": "cpp", "C": "c", "JavaScript": "javascript", "TypeScript": "typescript"}
+            lang_map = {
+                "Python": "python",
+                "Rust": "rust",
+                "Go": "go",
+                "C++": "cpp",
+                "C": "c",
+                "JavaScript": "javascript",
+                "TypeScript": "typescript",
+            }
             for lang, stats in data.items():
                 if lang in lang_map and isinstance(stats, dict):
                     lines = stats.get("code", 0)
@@ -122,18 +142,30 @@ def count_lines_by_type() -> dict[str, int]:
 
     # Fall back to find+wc (works everywhere, parallel across languages)
     counts = {}
-    extensions = {".py": "python", ".rs": "rust", ".go": "go", ".cpp": "cpp", ".c": "c", ".js": "javascript", ".ts": "typescript"}
+    extensions = {
+        ".py": "python",
+        ".rs": "rust",
+        ".go": "go",
+        ".cpp": "cpp",
+        ".c": "c",
+        ".js": "javascript",
+        ".ts": "typescript",
+    }
 
     # Run all find+wc in parallel using shell backgrounding
     code, output = run_cmd(
-        ["bash", "-c", f"""
+        [
+            "bash",
+            "-c",
+            f"""
 for ext in .py .rs .go .cpp .c .js .ts; do
     (count=$(find . -name "*$ext" -type f -not -path './.git/*' {FIND_EXCLUDE} -print0 2>/dev/null | xargs -0 wc -l 2>/dev/null | tail -1 | awk '{{print $1}}')
      [ -n "$count" ] && [ "$count" -gt 0 ] && echo "$ext:$count") &
 done
 wait
-"""],
-        timeout=60
+""",
+        ],
+        timeout=60,
     )
 
     if code == 0 and output.strip():
@@ -160,8 +192,12 @@ def find_large_files(max_lines: int) -> list[dict]:
 
     # Single find+wc call, filter large files with awk
     code, output = run_cmd(
-        ["bash", "-c", f'find . \\( {name_args} \\) -type f -not -path "./.git/*" {FIND_EXCLUDE} -print0 2>/dev/null | xargs -0 wc -l 2>/dev/null | awk -v max={max_lines} \'$1>max && $2!="total" {{print $1, $2}}\''],
-        timeout=60
+        [
+            "bash",
+            "-c",
+            f'find . \\( {name_args} \\) -type f -not -path "./.git/*" {FIND_EXCLUDE} -print0 2>/dev/null | xargs -0 wc -l 2>/dev/null | awk -v max={max_lines} \'$1>max && $2!="total" {{print $1, $2}}\'',
+        ],
+        timeout=60,
     )
 
     if code == 0 and output.strip():
@@ -196,7 +232,9 @@ def get_test_status() -> dict:
 
     # Python: count "def test_" patterns in standard locations
     pytest_count = 0
-    code, output = run_cmd(["bash", "-c", "grep -r 'def test_' tests/ test/ 2>/dev/null | wc -l"])
+    code, output = run_cmd(
+        ["bash", "-c", "grep -r 'def test_' tests/ test/ 2>/dev/null | wc -l"]
+    )
     if code == 0 and output.strip():
         try:
             pytest_count = int(output.strip())
@@ -205,7 +243,9 @@ def get_test_status() -> dict:
 
     # Rust: count #[test] attributes in tests/ AND src/ (inline tests are valid)
     cargo_count = 0
-    code, output = run_cmd(["bash", "-c", "grep -rE '#\\[test\\]' tests/ src/ crates/ 2>/dev/null | wc -l"])
+    code, output = run_cmd(
+        ["bash", "-c", "grep -rE '#\\[test\\]' tests/ src/ crates/ 2>/dev/null | wc -l"]
+    )
     if code == 0 and output.strip():
         try:
             cargo_count = int(output.strip())
@@ -239,12 +279,34 @@ def get_test_status() -> dict:
     #   - reference/ (cloned external repos for reference)
     #   - scripts/ (utility scripts, not test files)
     #   - examples/ (example code, not project tests)
-    if pytest_count > 0 or Path("pytest.ini").exists() or Path("pyproject.toml").exists():
+    if (
+        pytest_count > 0
+        or Path("pytest.ini").exists()
+        or Path("pyproject.toml").exists()
+    ):
         # Build exclusion pattern from EXCLUDE_DIRS + standard exclusions
-        exclude_pattern = '|'.join([f'/{d}/' for d in EXCLUDE_DIRS] + ['/tests/', '/test/', '__pycache__', '/.venv/', '/venv/', '/env/', '/site-packages/', '/scripts/', '/examples/'])
-        code, output = run_cmd(["bash", "-c",
-            f"grep -rlE '^[[:space:]]*def test_' . --include='*.py' 2>/dev/null | "
-            f"grep -v -E '{exclude_pattern}'"])
+        exclude_pattern = "|".join(
+            [f"/{d}/" for d in EXCLUDE_DIRS]
+            + [
+                "/tests/",
+                "/test/",
+                "__pycache__",
+                "/.venv/",
+                "/venv/",
+                "/env/",
+                "/site-packages/",
+                "/scripts/",
+                "/examples/",
+            ]
+        )
+        code, output = run_cmd(
+            [
+                "bash",
+                "-c",
+                f"grep -rlE '^[[:space:]]*def test_' . --include='*.py' 2>/dev/null | "
+                f"grep -v -E '{exclude_pattern}'",
+            ]
+        )
         if code == 0 and output.strip():
             orphaned = [f.strip() for f in output.strip().split("\n") if f.strip()]
             if orphaned:
@@ -302,7 +364,17 @@ def get_issue_counts() -> dict:
 
     # Single call for all issues with retry (network can be flaky)
     code, output, stderr = run_cmd_with_retry(
-        ["gh", "issue", "list", "--state", "all", "--json", "state,labels", "--limit", "500"],
+        [
+            "gh",
+            "issue",
+            "list",
+            "--state",
+            "all",
+            "--json",
+            "state,labels",
+            "--limit",
+            "500",
+        ],
         timeout=60,
         retries=2,
     )
@@ -339,11 +411,50 @@ def get_issue_counts() -> dict:
     return counts
 
 
+def _get_workspace_member_dirs(cargo_toml_path: Path) -> list[str]:
+    """Get workspace member directories from Cargo.toml.
+
+    Parses [workspace] members array and expands glob patterns.
+    Returns list of existing directories containing src/ or tests/.
+    """
+    try:
+        content = cargo_toml_path.read_text()
+        cargo = tomllib.loads(content)
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+
+    members = cargo.get("workspace", {}).get("members", [])
+    if not members:
+        return []
+
+    member_dirs = []
+    for pattern in members:
+        # Expand glob patterns (e.g., "crates/*", "libs/*")
+        matches = glob_module.glob(pattern)
+        if matches:
+            member_dirs.extend(matches)
+        elif Path(pattern).exists():
+            # Literal path exists
+            member_dirs.append(pattern)
+
+    # For each member, add src/ and tests/ subdirs if they exist
+    search_dirs = []
+    for member in member_dirs:
+        member_path = Path(member)
+        if member_path.is_dir():
+            for sub in ["src", "tests"]:
+                sub_path = member_path / sub
+                if sub_path.exists():
+                    search_dirs.append(str(sub_path))
+
+    return search_dirs
+
+
 def get_proof_coverage() -> dict:
     """Detect formal verification coverage across proof systems.
 
     Systems detected:
-    - Kani: Rust bounded model checking (#[kani::proof], contracts)
+    - Kani: Rust bounded model checking (#[kani::proof], requires/ensures/modifies)
     - TLA+: Distributed system specs (.tla files)
     - Lean: Theorem proving (.lean files)
     - SMT: SAT/SMT solving (.smt2 files, z4:: usage)
@@ -352,29 +463,97 @@ def get_proof_coverage() -> dict:
     coverage = {}
 
     # Kani (Rust bounded model checking)
-    if Path("Cargo.toml").exists():
-        # Count kani proof harnesses
-        code, output = run_cmd(["bash", "-c", "grep -r '#\\[kani::proof\\]' src/ tests/ 2>/dev/null | wc -l"])
-        proofs = int(output.strip()) if code == 0 and output.strip() else 0
+    cargo_toml = Path("Cargo.toml")
+    if cargo_toml.exists():
+        # Build search paths: root src/tests, workspace member src/tests
+        search_dirs = [d for d in ["src", "tests"] if Path(d).exists()]
 
-        # Count kani contracts (requires/ensures)
-        code, output = run_cmd(["bash", "-c", "grep -rE '#\\[kani::(requires|ensures)\\]' src/ 2>/dev/null | wc -l"])
-        contracts = int(output.strip()) if code == 0 and output.strip() else 0
+        # Add workspace members (parses [workspace] members and expands globs)
+        search_dirs.extend(_get_workspace_member_dirs(cargo_toml))
 
-        # Count total functions (approximate)
-        code, output = run_cmd(["bash", "-c", "grep -rE '^\\s*(pub )?fn ' src/ 2>/dev/null | wc -l"])
-        total_fns = int(output.strip()) if code == 0 and output.strip() else 0
+        # Legacy fallback: include crates/ even if not in workspace.members
+        crates_dir = Path("crates")
+        if crates_dir.exists():
+            for crate_dir in crates_dir.iterdir():
+                if crate_dir.is_dir():
+                    for sub in ["src", "tests"]:
+                        sub_path = str(crate_dir / sub)
+                        if Path(sub_path).exists() and sub_path not in search_dirs:
+                            search_dirs.append(sub_path)
 
-        if proofs > 0 or contracts > 0:
-            coverage["kani"] = {
-                "proofs": proofs,
-                "contracts": contracts,
-                "total_functions": total_fns,
-                "coverage_pct": round(100 * contracts / total_fns, 1) if total_fns > 0 else 0,
-            }
+        if search_dirs:
+            search_path = " ".join(search_dirs)
+
+            # Count kani proof harnesses
+            code, output = run_cmd(
+                [
+                    "bash",
+                    "-c",
+                    f"grep -r '#\\[kani::proof\\]' {search_path} 2>/dev/null | wc -l",
+                ]
+            )
+            proofs = int(output.strip()) if code == 0 and output.strip() else 0
+
+            # Count kani contract attributes (requires/ensures/modifies)
+            code, output = run_cmd(
+                [
+                    "bash",
+                    "-c",
+                    f"grep -rE '#\\[kani::(requires|ensures|modifies)' {search_path} 2>/dev/null | wc -l",
+                ]
+            )
+            contract_attrs = int(output.strip()) if code == 0 and output.strip() else 0
+
+            # Count unique functions with contracts (for accurate coverage_pct)
+            # A function with both requires and ensures should count as 1, not 2
+            # Note: no ^ anchor because grep -r prefixes filename to each line
+            code, output = run_cmd(
+                [
+                    "bash",
+                    "-c",
+                    f"grep -rE -A1 '#\\[kani::(requires|ensures|modifies)' {search_path} 2>/dev/null "
+                    "| grep -E '(pub\\s+)?(async\\s+)?fn\\s+' "
+                    "| sed -E 's/.*fn[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*).*/\\1/' "
+                    "| sort -u | wc -l",
+                ]
+            )
+            contracted_fns = int(output.strip()) if code == 0 and output.strip() else 0
+
+            # Count total functions (approximate) - only in src dirs for accuracy
+            src_dirs = " ".join(
+                d for d in search_dirs if d.endswith("src") or "/src" in d
+            )
+            if src_dirs:
+                code, output = run_cmd(
+                    [
+                        "bash",
+                        "-c",
+                        f"grep -rE '^\\s*(pub )?fn ' {src_dirs} 2>/dev/null | wc -l",
+                    ]
+                )
+                total_fns = int(output.strip()) if code == 0 and output.strip() else 0
+            else:
+                total_fns = 0
+
+            if proofs > 0 or contract_attrs > 0:
+                coverage["kani"] = {
+                    "proofs": proofs,
+                    "contract_attrs": contract_attrs,  # Total contract attributes
+                    "contracted_fns": contracted_fns,  # Unique functions with contracts
+                    "total_functions": total_fns,
+                    "coverage_pct": round(100 * contracted_fns / total_fns, 1)
+                    if total_fns > 0
+                    else 0,
+                }
 
     # TLA+ specifications
-    code, output = run_cmd(["bash", "-c", f"find . -name '*.tla' -not -path './.git/*' {FIND_EXCLUDE} 2>/dev/null"])
+    code, output = run_cmd(
+        [
+            "bash",
+            "-c",
+            f"find . -name '*.tla' -not -path './.git/*' {FIND_EXCLUDE} 2>/dev/null",
+        ]
+    )
     if code == 0 and output.strip():
         tla_files = [f.strip() for f in output.strip().split("\n") if f.strip()]
         if tla_files:
@@ -386,10 +565,20 @@ def get_proof_coverage() -> dict:
                     invariants += content.count("INVARIANT") + content.count("PROPERTY")
                 except (FileNotFoundError, UnicodeDecodeError):
                     pass
-            coverage["tla2"] = {"files": len(tla_files), "specs": specs, "invariants": invariants}
+            coverage["tla2"] = {
+                "files": len(tla_files),
+                "specs": specs,
+                "invariants": invariants,
+            }
 
     # Lean proofs
-    code, output = run_cmd(["bash", "-c", f"find . -name '*.lean' -not -path './.git/*' {FIND_EXCLUDE} 2>/dev/null | head -100"])
+    code, output = run_cmd(
+        [
+            "bash",
+            "-c",
+            f"find . -name '*.lean' -not -path './.git/*' {FIND_EXCLUDE} 2>/dev/null | head -100",
+        ]
+    )
     if code == 0 and output.strip():
         lean_files = [f.strip() for f in output.strip().split("\n") if f.strip()]
         if lean_files:
@@ -403,7 +592,13 @@ def get_proof_coverage() -> dict:
             coverage["lean"] = {"files": len(lean_files), "theorems": theorems}
 
     # SMT-LIB files (z4/Z3)
-    code, output = run_cmd(["bash", "-c", f"find . -name '*.smt2' -not -path './.git/*' {FIND_EXCLUDE} 2>/dev/null | wc -l"])
+    code, output = run_cmd(
+        [
+            "bash",
+            "-c",
+            f"find . -name '*.smt2' -not -path './.git/*' {FIND_EXCLUDE} 2>/dev/null | wc -l",
+        ]
+    )
     smt_count = int(output.strip()) if code == 0 and output.strip() else 0
 
     # Also check for z4 usage in Rust
@@ -414,14 +609,29 @@ def get_proof_coverage() -> dict:
         coverage["smt"] = {"smt2_files": smt_count, "z4_usage": z4_usage}
 
     # Neural network verification (gamma-crown style)
-    code, output = run_cmd(["bash", "-c", f"find . -name '*.onnx' -not -path './.git/*' {FIND_EXCLUDE} 2>/dev/null | wc -l"])
+    code, output = run_cmd(
+        [
+            "bash",
+            "-c",
+            f"find . -name '*.onnx' -not -path './.git/*' {FIND_EXCLUDE} 2>/dev/null | wc -l",
+        ]
+    )
     onnx_count = int(output.strip()) if code == 0 and output.strip() else 0
 
-    code, output = run_cmd(["bash", "-c", f"find . -name '*.vnnlib' -not -path './.git/*' {FIND_EXCLUDE} 2>/dev/null | wc -l"])
+    code, output = run_cmd(
+        [
+            "bash",
+            "-c",
+            f"find . -name '*.vnnlib' -not -path './.git/*' {FIND_EXCLUDE} 2>/dev/null | wc -l",
+        ]
+    )
     vnnlib_count = int(output.strip()) if code == 0 and output.strip() else 0
 
     if onnx_count > 0 or vnnlib_count > 0:
-        coverage["nn_verification"] = {"onnx_models": onnx_count, "vnnlib_specs": vnnlib_count}
+        coverage["nn_verification"] = {
+            "onnx_models": onnx_count,
+            "vnnlib_specs": vnnlib_count,
+        }
 
     return coverage
 
@@ -463,8 +673,13 @@ def get_code_quality() -> dict:
     quality = {}
 
     # Count TODO/FIXME comments (tech debt indicator)
-    code, output = run_cmd(["bash", "-c",
-        f"grep -rE '(TODO|FIXME|XXX|HACK):?' . --include='*.py' --include='*.rs' --include='*.go' --include='*.js' --include='*.ts' 2>/dev/null | grep -v node_modules | grep -v target | grep -vE '{GREP_EXCLUDE}' | wc -l"])
+    code, output = run_cmd(
+        [
+            "bash",
+            "-c",
+            f"grep -rE '(TODO|FIXME|XXX|HACK):?' . --include='*.py' --include='*.rs' --include='*.go' --include='*.js' --include='*.ts' 2>/dev/null | grep -v node_modules | grep -v target | grep -vE '{GREP_EXCLUDE}' | wc -l",
+        ]
+    )
     if code == 0 and output.strip():
         try:
             quality["todo_count"] = int(output.strip())
@@ -472,12 +687,22 @@ def get_code_quality() -> dict:
             pass
 
     # Test/code ratio
-    code, output = run_cmd(["bash", "-c",
-        "find tests/ test/ -name '*.py' -o -name '*.rs' 2>/dev/null | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}'"])
+    code, output = run_cmd(
+        [
+            "bash",
+            "-c",
+            "find tests/ test/ -name '*.py' -o -name '*.rs' 2>/dev/null | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}'",
+        ]
+    )
     test_lines = int(output.strip()) if code == 0 and output.strip() else 0
 
-    code, output = run_cmd(["bash", "-c",
-        "find src/ lib/ -name '*.py' -o -name '*.rs' 2>/dev/null | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}'"])
+    code, output = run_cmd(
+        [
+            "bash",
+            "-c",
+            "find src/ lib/ -name '*.py' -o -name '*.rs' 2>/dev/null | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}'",
+        ]
+    )
     src_lines = int(output.strip()) if code == 0 and output.strip() else 0
 
     if src_lines > 0:
@@ -486,13 +711,23 @@ def get_code_quality() -> dict:
     # Python type coverage (count typed functions vs total)
     if Path("pyproject.toml").exists() or list(Path(".").glob("*.py")):
         # Count functions with type annotations
-        code, output = run_cmd(["bash", "-c",
-            f"grep -rE 'def [a-z_]+\\([^)]*:' . --include='*.py' 2>/dev/null | grep -v __pycache__ | grep -vE '{GREP_EXCLUDE}' | wc -l"])
+        code, output = run_cmd(
+            [
+                "bash",
+                "-c",
+                f"grep -rE 'def [a-z_]+\\([^)]*:' . --include='*.py' 2>/dev/null | grep -v __pycache__ | grep -vE '{GREP_EXCLUDE}' | wc -l",
+            ]
+        )
         typed_fns = int(output.strip()) if code == 0 and output.strip() else 0
 
         # Count all functions
-        code, output = run_cmd(["bash", "-c",
-            f"grep -rE '^\\s*def [a-z_]+\\(' . --include='*.py' 2>/dev/null | grep -v __pycache__ | grep -vE '{GREP_EXCLUDE}' | wc -l"])
+        code, output = run_cmd(
+            [
+                "bash",
+                "-c",
+                f"grep -rE '^\\s*def [a-z_]+\\(' . --include='*.py' 2>/dev/null | grep -v __pycache__ | grep -vE '{GREP_EXCLUDE}' | wc -l",
+            ]
+        )
         total_fns = int(output.strip()) if code == 0 and output.strip() else 0
 
         if total_fns > 0:
@@ -501,8 +736,13 @@ def get_code_quality() -> dict:
     # Documentation coverage (Python docstrings)
     if Path("pyproject.toml").exists() or list(Path(".").glob("*.py")):
         # Count functions with docstrings (triple quotes after def line)
-        code, output = run_cmd(["bash", "-c",
-            f"grep -rPzo 'def [^:]+:\\s*\\n\\s*\"\"\"' . --include='*.py' 2>/dev/null | grep -vE '{GREP_EXCLUDE}' | grep -c 'def ' || echo 0"])
+        code, output = run_cmd(
+            [
+                "bash",
+                "-c",
+                f"grep -rPzo 'def [^:]+:\\s*\\n\\s*\"\"\"' . --include='*.py' 2>/dev/null | grep -vE '{GREP_EXCLUDE}' | grep -c 'def ' || echo 0",
+            ]
+        )
         if code == 0 and output.strip():
             try:
                 # This is approximate - pcregrep would be better
@@ -518,8 +758,13 @@ def get_issue_velocity() -> dict:
     velocity = {}
 
     # Issues opened in last 7 days
-    code, output = run_cmd(["bash", "-c",
-        "gh issue list --state all --json createdAt --limit 200 2>/dev/null"])
+    code, output = run_cmd(
+        [
+            "bash",
+            "-c",
+            "gh issue list --state all --json createdAt --limit 200 2>/dev/null",
+        ]
+    )
     if code == 0 and output.strip():
         try:
             issues = json.loads(output)
@@ -538,8 +783,13 @@ def get_issue_velocity() -> dict:
             pass
 
     # Issues closed in last 7 days
-    code, output = run_cmd(["bash", "-c",
-        "gh issue list --state closed --json closedAt --limit 200 2>/dev/null"])
+    code, output = run_cmd(
+        [
+            "bash",
+            "-c",
+            "gh issue list --state closed --json closedAt --limit 200 2>/dev/null",
+        ]
+    )
     if code == 0 and output.strip():
         try:
             issues = json.loads(output)
@@ -562,6 +812,59 @@ def get_issue_velocity() -> dict:
         velocity["net_7d"] = velocity["closed_7d"] - velocity["opened_7d"]
 
     return velocity
+
+
+def count_template_lines() -> dict:
+    """Count total template lines that sync to all repos.
+
+    Template files are in .claude/rules/ and .claude/roles/ - these get synced
+    to all projects in the org. Line count tracks consolidation effort.
+
+    Returns dict with per-file counts, total, and target from VISION.md.
+    """
+    template_patterns = [
+        ".claude/rules/ai_template.md",
+        ".claude/rules/org_chart.md",
+        ".claude/roles/*.md",
+    ]
+
+    counts = {}
+    total = 0
+
+    for pattern in template_patterns:
+        files = list(Path(".").glob(pattern))
+        for f in files:
+            try:
+                lines = len(f.read_text().splitlines())
+                counts[str(f)] = lines
+                total += lines
+            except (FileNotFoundError, UnicodeDecodeError):
+                pass
+
+    return {
+        "files": counts,
+        "total": total,
+        "target": 1200,  # From VISION.md consolidation phase goal
+    }
+
+
+def get_consolidation_debt() -> dict:
+    """Calculate consolidation debt (lines over target).
+
+    Returns dict with current total, target, and debt.
+    Debt = max(0, actual - target) so negative values aren't shown.
+    """
+    template = count_template_lines()
+    actual = template["total"]
+    target = template["target"]
+    debt = max(0, actual - target)
+
+    return {
+        "total": actual,
+        "target": target,
+        "debt": debt,
+        "files": template["files"],
+    }
 
 
 def get_active_sessions() -> int:
@@ -745,6 +1048,7 @@ def collect_metrics() -> dict:
         "active_sessions": get_active_sessions(),
         "quality": get_code_quality(),
         "velocity": get_issue_velocity(),
+        "consolidation": get_consolidation_debt(),
     }
 
 
@@ -783,9 +1087,15 @@ def check_thresholds(metrics: dict) -> list[str]:
         flags.append("test_failures")
 
     # Low proof coverage (Rust project with Kani but <10% coverage)
+    # Don't flag if project has proof harnesses - those provide verification too
     proofs = metrics.get("proofs", {})
     kani = proofs.get("kani", {})
-    if kani.get("total_functions", 0) > 10 and kani.get("coverage_pct", 0) < 10:
+    has_proofs = kani.get("proofs", 0) > 0
+    if (
+        kani.get("total_functions", 0) > 10
+        and kani.get("coverage_pct", 0) < 10
+        and not has_proofs
+    ):
         flags.append("low_proof_coverage")
 
     # System resource checks
@@ -863,7 +1173,7 @@ def pulse_once(quiet: bool = False):
         return
 
     # Output as readable markdown-style
-    ts = datetime.now().strftime('%H:%M:%S')
+    ts = datetime.now().strftime("%H:%M:%S")
     git = metrics.get("git", {})
     dirty = "dirty" if git.get("dirty") else "clean"
 
@@ -880,6 +1190,14 @@ def pulse_once(quiet: bool = False):
     large = metrics.get("large_files", [])
     print(f"**Large files:** {len(large)}")
 
+    # Consolidation debt (only in ai_template repo)
+    consolidation = metrics.get("consolidation", {})
+    if consolidation.get("total", 0) > 0:
+        total = consolidation.get("total", 0)
+        target = consolidation.get("target", 0)
+        debt = consolidation.get("debt", 0)
+        print(f"**Template Lines:** {total} (target: {target}, debt: {debt})")
+
     # Tests
     tests = metrics.get("tests", {})
     by_framework = tests.get("by_framework", {})
@@ -888,10 +1206,14 @@ def pulse_once(quiet: bool = False):
         breakdown = ", ".join(f"{fw}:{n}" for fw, n in sorted(by_framework.items()))
         print(f"**Tests:** {tests.get('count', 0)} (mixed: {breakdown})")
     else:
-        print(f"**Tests:** {tests.get('count', 0)} ({tests.get('framework', 'unknown')})")
+        print(
+            f"**Tests:** {tests.get('count', 0)} ({tests.get('framework', 'unknown')})"
+        )
     recent = tests.get("recent_24h", {})
     if recent:
-        print(f"**Test runs (24h):** {recent.get('runs', 0)} runs, {recent.get('passed', 0)} passed, {recent.get('failed', 0)} failed")
+        print(
+            f"**Test runs (24h):** {recent.get('runs', 0)} runs, {recent.get('passed', 0)} passed, {recent.get('failed', 0)} failed"
+        )
     orphaned = tests.get("orphaned_tests", [])
     if orphaned:
         print(f"**Orphaned tests:** {', '.join(orphaned[:5])}")
@@ -901,7 +1223,9 @@ def pulse_once(quiet: bool = False):
     if issues.get("_error"):
         print(f"**Issues:** ⚠️ {issues.get('_error')}")
     else:
-        print(f"**Issues:** {issues.get('open', 0)} open, {issues.get('in_progress', 0)} in-progress, {issues.get('blocked', 0)} blocked")
+        print(
+            f"**Issues:** {issues.get('open', 0)} open, {issues.get('in_progress', 0)} in-progress, {issues.get('blocked', 0)} blocked"
+        )
 
     # System
     system = metrics.get("system", {})
@@ -910,9 +1234,13 @@ def pulse_once(quiet: bool = False):
     artifacts = system.get("build_artifacts", {})
 
     if memory:
-        print(f"**Memory:** {memory.get('percent_used', '?')}% ({memory.get('used_gb', '?')}GB / {memory.get('total_gb', '?')}GB)")
+        print(
+            f"**Memory:** {memory.get('percent_used', '?')}% ({memory.get('used_gb', '?')}GB / {memory.get('total_gb', '?')}GB)"
+        )
     if disk:
-        print(f"**Disk:** {disk.get('percent_used', '?')} ({disk.get('used', '?')} / {disk.get('total', '?')})")
+        print(
+            f"**Disk:** {disk.get('percent_used', '?')} ({disk.get('used', '?')} / {disk.get('total', '?')})"
+        )
     if artifacts:
         artifact_str = ", ".join(f"{k}={v}" for k, v in artifacts.items())
         print(f"**Build artifacts:** {artifact_str}")
@@ -950,11 +1278,13 @@ def metrics_to_broadcast(metrics: dict) -> str:
 
     # Sum all proof types
     proofs = metrics.get("proofs", {})
-    proof_count = sum([
-        proofs.get("kani", {}).get("proofs", 0),
-        proofs.get("tla2", {}).get("specs", 0),
-        proofs.get("lean", {}).get("theorems", 0),
-    ])
+    proof_count = sum(
+        [
+            proofs.get("kani", {}).get("proofs", 0),
+            proofs.get("tla2", {}).get("specs", 0),
+            proofs.get("lean", {}).get("theorems", 0),
+        ]
+    )
 
     issues = metrics.get("issues", {}).get("open", 0)
     mem = metrics.get("system", {}).get("memory", {}).get("percent_used", 0)
@@ -977,10 +1307,23 @@ def pulse_watch(interval: int = 300):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Collect project metrics and detect issues")
-    parser.add_argument("--watch", action="store_true", help="Run continuously (silent, writes to metrics/)")
-    parser.add_argument("--interval", type=int, default=300, help="Watch interval in seconds (default: 300)")
-    parser.add_argument("--broadcast", action="store_true", help="Output single line for org collection")
+    parser = argparse.ArgumentParser(
+        description="Collect project metrics and detect issues"
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Run continuously (silent, writes to metrics/)",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=300,
+        help="Watch interval in seconds (default: 300)",
+    )
+    parser.add_argument(
+        "--broadcast", action="store_true", help="Output single line for org collection"
+    )
     args = parser.parse_args()
 
     if args.broadcast:
