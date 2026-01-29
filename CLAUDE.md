@@ -12,11 +12,30 @@ Verified compiler backend - formally proven correct code generation from tMIR to
 
 ## Mission
 
-Build the verified successor to LLVM. Every instruction lowering and optimization is proven correct using SMT solving (z4).
+Build a purpose-built verified codegen for tMIR. Not a fork of LLVM or Cranelift - a focused compiler backend designed specifically for the t* stack.
 
-**Why this matters:** Compiler bugs cause silent miscompilation - code that compiles but behaves incorrectly. LLVM2 eliminates this class of bugs through mathematical proof.
+**Key properties:**
 
-**The vision:** Universal verified backend for all t* languages.
+| Property | Benefit |
+|----------|---------|
+| **Written in tRust** | Self-hosting. The compiler is verified by the system it compiles. |
+| **tMIR-native** | Optimizations tuned for tMIR semantics, not general-purpose IR. |
+| **Faster compilation** | Focused scope means less complexity than LLVM's 20+ year codebase. |
+| **Faster output** | tMIR carries proof information that enables optimizations LLVM can't do. |
+| **Proof-preserving** | Verification chain from source to binary is unbroken. |
+
+**Why not LLVM?**
+- LLVM is 20M+ LOC of unverified C++
+- General-purpose means bloat for our use case
+- Can't prove LLVM correct (too large, wrong language)
+- LLVM optimizations don't leverage tMIR's proof information
+
+**Why not Cranelift?**
+- Cranelift is verification-unaware
+- Designed for fast compilation, not verified compilation
+- Would need extensive modification to preserve proofs
+
+**The vision:** Every instruction lowering and optimization is proven correct using z4. The binary provably does what the tMIR says.
 
 ```
 tRust  (Rust + proofs)  ──► tMIR ──┐
