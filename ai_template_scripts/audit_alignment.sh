@@ -49,9 +49,9 @@ usage() {
 CLEAN=false
 for arg in "$@"; do
     case "$arg" in
-        --clean) CLEAN=true ;;
-        --version) version ;;
-        -h|--help) usage ;;
+    --clean) CLEAN=true ;;
+    --version) version ;;
+    -h | --help) usage ;;
     esac
 done
 
@@ -66,7 +66,7 @@ echo "=== Template Alignment Audit ==="
 echo
 
 # Verify we're in a git repo
-if ! git rev-parse --git-dir > /dev/null 2>&1; then
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
     echo -e "${RED}ERROR: Not in a git repository${NC}"
     exit 1
 fi
@@ -112,14 +112,14 @@ OBSOLETE=(
 
 # Patterns for obsolete root files (use glob expansion)
 OBSOLETE_PATTERNS=(
-    "MANAGER_DIRECTIVE*"                        # Legacy directive files
-    "WORKER_DIRECTIVE*"                         # Legacy directive files
-    "PLAN-*"                                    # Legacy plan files
+    "MANAGER_DIRECTIVE*" # Legacy directive files
+    "WORKER_DIRECTIVE*"  # Legacy directive files
+    "PLAN-*"             # Legacy plan files
 )
 
 # Patterns that should NOT exist (forbidden)
 FORBIDDEN_PATTERNS=(
-    ".github/workflows/*"       # No CI/CD - GitHub Actions not available
+    ".github/workflows/*" # No CI/CD - GitHub Actions not available
 )
 
 # Check if we're in ai_template itself (by git remote, not directory)
@@ -134,10 +134,10 @@ fi
 
 # Files that look deletable but AREN'T
 KEEP=(
-    "worker_logs"           # Used by looper.py - contains iteration logs
-    "AGENTS.md"             # Used by Codex
-    "GEMINI.md"             # Used by Gemini
-    ".mcp.json"             # MCP config
+    "worker_logs" # Used by looper.py - contains iteration logs
+    "AGENTS.md"   # Used by Codex
+    "GEMINI.md"   # Used by Gemini
+    ".mcp.json"   # MCP config
 )
 
 echo -e "${GREEN}Required files:${NC}"
@@ -365,15 +365,15 @@ if [[ -d "worker_logs" ]]; then
             if [[ "$matches" =~ ^[0-9]+$ ]] && [[ $matches -gt 0 ]]; then
                 # Extract descriptive name from pattern - simplified extraction
                 case "$pattern" in
-                    *pkill*claude*) pattern_name="pkill claude" ;;
-                    *pkill*iTerm*) pattern_name="pkill iTerm" ;;
-                    *pkill*Terminal*) pattern_name="pkill Terminal" ;;
-                    *osascript*quit*) pattern_name="osascript quit" ;;
-                    *kill\ -9*) pattern_name="kill -9" ;;
-                    *) pattern_name="$pattern" ;;
+                *pkill*claude*) pattern_name="pkill claude" ;;
+                *pkill*iTerm*) pattern_name="pkill iTerm" ;;
+                *pkill*Terminal*) pattern_name="pkill Terminal" ;;
+                *osascript*quit*) pattern_name="osascript quit" ;;
+                *kill\ -9*) pattern_name="kill -9" ;;
+                *) pattern_name="$pattern" ;;
                 esac
                 echo -e "  ${RED}! $logfile: $matches command(s) with '$pattern_name'${NC}"
-                ((forbidden_cmd_count+=matches)) || true
+                ((forbidden_cmd_count += matches)) || true
             fi
         done
     done
@@ -400,7 +400,7 @@ if ! $IS_TEMPLATE; then
         [[ "$file" =~ \.(lock|sum|svg|png|jpg|jpeg|gif|pdf|woff|woff2|ttf|eot)$ ]] && continue
         [[ "$file" =~ (package-lock\.json|yarn\.lock|Cargo\.lock)$ ]] && continue
 
-        lines=$(wc -l < "$file" 2>/dev/null | tr -d ' ')
+        lines=$(wc -l <"$file" 2>/dev/null | tr -d ' ')
         if [[ $lines -gt 5000 ]]; then
             echo -e "  ${YELLOW}! $file: $lines lines${NC}"
             ((oversized_count++)) || true
@@ -489,7 +489,7 @@ if [[ -f ".ai_template_features" ]]; then
             echo -e "  ${YELLOW}! $line (enabled but missing - run sync_repo.sh)${NC}"
             ((optional_issues++)) || true
         fi
-    done < ".ai_template_features"
+    done <".ai_template_features"
 else
     echo "  (no .ai_template_features - optional features not enabled)"
 fi
@@ -557,7 +557,7 @@ warnings=0
 # Critical failures (exit non-zero)
 if [[ $missing -gt 0 ]]; then
     echo -e "${RED}[FAIL] Missing $missing required file(s) - run sync_repo.sh${NC}"
-    ((failures+=missing)) || true
+    ((failures += missing)) || true
     exit_code=1
 fi
 if [[ $found_forbidden -gt 0 ]]; then
@@ -565,28 +565,28 @@ if [[ $found_forbidden -gt 0 ]]; then
         echo -e "${GREEN}[OK] Deleted $found_forbidden forbidden file(s)${NC}"
     else
         echo -e "${RED}[FAIL] Found $found_forbidden forbidden file(s) - DELETE IMMEDIATELY${NC}"
-        ((failures+=found_forbidden)) || true
+        ((failures += found_forbidden)) || true
         exit_code=1
     fi
 fi
 if [[ $hooks_missing -gt 0 ]]; then
     echo -e "${RED}[FAIL] $hooks_missing git hook(s) not installed - run ./ai_template_scripts/install_hooks.sh${NC}"
-    ((failures+=hooks_missing)) || true
+    ((failures += hooks_missing)) || true
     exit_code=1
 fi
 if [[ $ignore_count -gt 0 ]]; then
     echo -e "${RED}[FAIL] $ignore_count test ignore(s) found - FORBIDDEN per #341${NC}"
-    ((failures+=ignore_count)) || true
+    ((failures += ignore_count)) || true
     exit_code=1
 fi
 if [[ $forbidden_cmd_count -gt 0 ]]; then
     echo -e "${RED}[FAIL] $forbidden_cmd_count forbidden command(s) in logs - SAFETY VIOLATION${NC}"
-    ((failures+=forbidden_cmd_count)) || true
+    ((failures += forbidden_cmd_count)) || true
     exit_code=1
 fi
 if [[ $health_failures -gt 0 ]]; then
     echo -e "${RED}[FAIL] $health_failures system health issue(s) - check .flags/ directory${NC}"
-    ((failures+=health_failures)) || true
+    ((failures += health_failures)) || true
     exit_code=1
 fi
 
@@ -596,12 +596,12 @@ if [[ $found_obsolete -gt 0 ]]; then
         echo -e "${GREEN}[OK] Deleted $found_obsolete obsolete file(s)${NC}"
     else
         echo -e "${YELLOW}[WARN] Found $found_obsolete obsolete file(s) - run with --clean to delete${NC}"
-        ((warnings+=found_obsolete)) || true
+        ((warnings += found_obsolete)) || true
     fi
 fi
 if [[ $claude_issues -gt 0 ]]; then
     echo -e "${YELLOW}[WARN] Found $claude_issues CLAUDE.md content issue(s) - clean up recommended${NC}"
-    ((warnings+=claude_issues)) || true
+    ((warnings += claude_issues)) || true
 fi
 if [[ $vision_missing -eq 1 ]]; then
     echo -e "${YELLOW}[WARN] VISION.md missing - create to document strategic direction${NC}"
@@ -609,7 +609,7 @@ if [[ $vision_missing -eq 1 ]]; then
 fi
 if [[ $dirs_missing -gt 0 ]]; then
     echo -e "${YELLOW}[WARN] Missing $dirs_missing required directory(s) (ideas/)${NC}"
-    ((warnings+=dirs_missing)) || true
+    ((warnings += dirs_missing)) || true
 fi
 if [[ $looper_missing -gt 0 ]]; then
     echo -e "${YELLOW}[WARN] .looper_config.json missing - looper will use defaults${NC}"
@@ -617,15 +617,15 @@ if [[ $looper_missing -gt 0 ]]; then
 fi
 if [[ $oversized_count -gt 0 ]]; then
     echo -e "${YELLOW}[WARN] $oversized_count oversized file(s) >5000 lines${NC}"
-    ((warnings+=oversized_count)) || true
+    ((warnings += oversized_count)) || true
 fi
 if [[ $missing_author -gt 0 ]]; then
     echo -e "${YELLOW}[WARN] $missing_author file(s) missing author header${NC}"
-    ((warnings+=missing_author)) || true
+    ((warnings += missing_author)) || true
 fi
 if [[ $optional_issues -gt 0 ]]; then
     echo -e "${YELLOW}[WARN] $optional_issues optional feature issue(s) - run sync_repo.sh${NC}"
-    ((warnings+=optional_issues)) || true
+    ((warnings += optional_issues)) || true
 fi
 
 # Final summary
@@ -647,7 +647,7 @@ if [[ $failures -gt 0 || $warnings -gt 0 ]]; then
     if [[ -f "docs/MIGRATION_CHECKLIST.md" ]]; then
         echo -e "${YELLOW}See docs/MIGRATION_CHECKLIST.md for step-by-step alignment guide${NC}"
     else
-        echo -e "${YELLOW}See docs/MIGRATION_CHECKLIST.md in ai_template (https://github.com/ayates_dbx/ai_template/blob/main/docs/MIGRATION_CHECKLIST.md)${NC}"
+        echo -e "${YELLOW}See docs/MIGRATION_CHECKLIST.md in ai_template (https://github.com/dropbox-ai-prototypes/ai_template/blob/main/docs/MIGRATION_CHECKLIST.md)${NC}"
         echo -e "${YELLOW}Or run ./ai_template_scripts/sync_repo.sh from the ai_template repo${NC}"
     fi
 fi

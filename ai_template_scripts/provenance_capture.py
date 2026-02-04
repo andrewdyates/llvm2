@@ -114,7 +114,7 @@ def get_builder_info() -> dict[str, Any]:
              'python_version', 'user' keys
     """
     return {
-        "id": f"https://github.com/ayates_dbx/ai_template/builder/{platform.node()}",
+        "id": f"https://github.com/dropbox-ai-prototypes/ai_template/builder/{platform.node()}",
         "hostname": platform.node(),
         "platform": platform.system(),
         "platform_version": platform.release(),
@@ -205,7 +205,7 @@ def create_provenance(
     # SLSA BuildDefinition
     resolved_dependencies: list[dict[str, Any]] = []
     build_definition: dict[str, Any] = {
-        "buildType": f"https://github.com/ayates_dbx/ai_template/build/{build_type}",
+        "buildType": f"https://github.com/dropbox-ai-prototypes/ai_template/build/{build_type}",
         "externalParameters": {
             "command": command,
             "cwd": str(Path.cwd()),

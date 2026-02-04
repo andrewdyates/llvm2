@@ -266,9 +266,15 @@ def get_long_running_processes(
 def _classify_crash(message: str) -> str:
     """Classify a crash message into category.
 
-    Same categories as health_check.py:analyze_crash_patterns.
+    Same categories as crash_analysis.crash_detector._get_crash_category().
+    Categories: idle_abort, signal_kill, timeout, stale_connection, exit_error, unknown.
+
+    Part of #2311: Added idle_abort detection to match crash_analysis behavior.
     """
     msg = message.lower()
+    # Idle abort: expected exit when no issues are assigned
+    if "no issues assigned" in msg and "abort" in msg:
+        return "idle_abort"
     if "signal" in msg:
         return "signal_kill"
     if "timed out" in msg:
@@ -284,19 +290,27 @@ def get_recent_crashes() -> dict:
     """Count crashes in last 24 hours from crashes.log, by type.
 
     Returns dict with:
-      - total: all crashes in 24h
-      - real: crashes excluding stale_connection (what health_check counts)
+      - total: all entries in 24h (crashes + idle_aborts + stale_connection)
+      - real: crashes excluding stale_connection and idle_abort (actual failures)
       - stale_connection: count of stale_connection restarts (excluded from flags)
+      - idle_aborts: count of expected exits when no issues assigned (Part of #2311)
       - by_type: breakdown by category (or None if no crashes)
 
     REQUIRES: None (works with or without crash log)
-    ENSURES: Returns dict with 'total', 'real', 'stale_connection' (all non-negative integers)
+    ENSURES: Returns dict with 'total', 'real', 'stale_connection', 'idle_aborts'
+             (all non-negative integers)
     ENSURES: Returns 'by_type' as dict or None
     ENSURES: Never raises (returns zero counts on error)
     """
     crash_log = Path("worker_logs/crashes.log")
     if not crash_log.exists():
-        return {"total": 0, "real": 0, "stale_connection": 0, "by_type": None}
+        return {
+            "total": 0,
+            "real": 0,
+            "stale_connection": 0,
+            "idle_aborts": 0,
+            "by_type": None,
+        }
 
     # Uses module-level CRASH_LOG_PATTERN for consistency with health_check.py (#1698)
     counts: dict[str, int] = {}
@@ -321,9 +335,11 @@ def get_recent_crashes() -> dict:
 
     total = sum(counts.values())
     stale = counts.get("stale_connection", 0)
+    idle = counts.get("idle_abort", 0)
     return {
         "total": total,
-        "real": total - stale,  # Crashes that count toward failure rate
+        "real": total - stale - idle,  # Actual failures (excludes expected exits)
         "stale_connection": stale,
+        "idle_aborts": idle,
         "by_type": counts if counts else None,
     }

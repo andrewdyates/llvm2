@@ -165,20 +165,25 @@ def _print_system_status(metrics: dict) -> None:
     if active > 0:
         print(f"**Active AI sessions:** {active}")
 
+    # Part of #2311: Split crashes vs idle aborts for clarity
     crashes_data = metrics.get("crashes_24h", {})
     if isinstance(crashes_data, dict):
         real = crashes_data.get("real", 0)
         stale = crashes_data.get("stale_connection", 0)
-        if real > 0 or stale > 0:
-            if real > 0 and stale > 0:
-                print(f"**Crashes (24h):** {real} real, {stale} restarts")
-            elif real > 0:
-                print(f"**Crashes (24h):** {real}")
-            else:
-                print(f"**Restarts (24h):** {stale} (stale_connection)")
+        idle = crashes_data.get("idle_aborts", 0)
+        # Only show if there's something to report
+        if real > 0 or stale > 0 or idle > 0:
+            parts = []
+            if real > 0:
+                parts.append(f"{real} crash{'es' if real != 1 else ''}")
+            if stale > 0:
+                parts.append(f"{stale} restart{'s' if stale != 1 else ''}")
+            if idle > 0:
+                parts.append(f"{idle} idle abort{'s' if idle != 1 else ''}")
+            print(f"**Failures (24h):** {', '.join(parts)}")
     elif crashes_data > 0:
         # Legacy: int value
-        print(f"**Crashes (24h):** {crashes_data}")
+        print(f"**Failures (24h):** {crashes_data}")
 
 
 def _print_proof_status(metrics: dict) -> None:

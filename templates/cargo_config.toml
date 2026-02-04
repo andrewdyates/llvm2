@@ -1,4 +1,4 @@
-# Cargo configuration for ayates_dbx Rust projects
+# Cargo configuration for dropbox-ai-prototypes Rust projects
 #
 # Copy to .cargo/config.toml in project root
 # Limits parallelism to prevent OOM during builds

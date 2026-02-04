@@ -347,10 +347,13 @@ def _flag_summary(flag: str, metrics: dict) -> str:
                 lines.append(f"  ... and {len(states_dirs) - 3} more")
 
     elif flag == "crashes":
+        # Part of #2311: Include idle_aborts in flag detail
         crashes = metrics.get("crashes_24h", {})
         if isinstance(crashes, dict):
             lines.append(
-                f"Real: {crashes.get('real', 0)}, Stale: {crashes.get('stale_connection', 0)}"
+                f"Real: {crashes.get('real', 0)}, "
+                f"Stale: {crashes.get('stale_connection', 0)}, "
+                f"Idle: {crashes.get('idle_aborts', 0)}"
             )
         else:
             lines.append(f"Count: {crashes}")

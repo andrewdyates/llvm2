@@ -104,7 +104,7 @@ During `cross_repo` phase, check whether outbound dependency issues are stale re
 
 1. **List outbound issues** filed by this repo:
    ```bash
-   gh search issues --owner ayates_dbx "author:ayates_dbx in:body FROM:" --state open | grep -i "<project>"
+   gh search issues --owner dropbox-ai-prototypes "author:dropbox-ai-prototypes in:body FROM:" --state open | grep -i "<project>"
    ```
    Note: Mail format varies (`FROM:`, `**FROM:**`), so grep filters results.
 
@@ -163,6 +163,7 @@ Run `ai_template_scripts/pulse.py` (resources/flags) and `ai_template_scripts/cr
 
 See ai_template.md "Role Boundaries" plus:
 - **NEVER use AskUserQuestion tool** - you are headless
+- **NEVER ask for direction in output** - no "Should I continue?", "What should I focus on?", etc. You are autonomous. Make decisions and document them in commits. (#2316)
 
 **Never write code/proofs** - hand off if stuck on implementation. CAN close/reopen issues, adjust priorities (not relax goals).
 

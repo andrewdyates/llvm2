@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 
 from looper.config import load_sync_config
 from looper.log import debug_swallow, log_error, log_info, log_warning
-from looper.subprocess_utils import run_gh_command, run_git_command
+from looper.subprocess_utils import get_github_repo, run_gh_command, run_git_command
 from looper.sync import SyncConfig, SyncStatus, sync_from_main
 
 
@@ -235,9 +235,11 @@ class RunnerSyncMixin:
             return False
 
         # Check if PR already exists for this branch
+        repo = get_github_repo()  # Avoid cwd dependency (#2317)
         pr_check = run_gh_command(
             ["pr", "list", "--head", current_branch, "--json", "number,state"],
             timeout=30,
+            repo=repo,
         )
         if pr_check.ok and pr_check.value:
             try:
@@ -284,6 +286,7 @@ This PR contains work from the {machine_name} zone. Review and merge when ready.
                 pr_body,
             ],
             timeout=60,
+            repo=repo,
         )
 
         if pr_result.ok and pr_result.value:

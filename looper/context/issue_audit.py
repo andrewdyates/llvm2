@@ -19,7 +19,7 @@ from looper.config import load_project_config, load_timeout_config
 from looper.context.helpers import is_pending_issue
 from looper.context.issue_cache import IterationIssueCache
 from looper.result import Result
-from looper.subprocess_utils import is_full_local_mode, run_gh_command
+from looper.subprocess_utils import get_github_repo, is_full_local_mode, run_gh_command
 
 # Import LocalIssueStore for full local mode
 try:
@@ -129,10 +129,14 @@ def transition_audit_to_review(issue_num: int | str) -> Result[bool]:
     project_config = load_project_config()
     gh_view_timeout = load_timeout_config(project_config).get("gh_view", 10)
 
+    # Get repo for --repo flag to avoid cwd dependency (#2317)
+    repo = get_github_repo()
+
     # Remove do-audit
     remove_result = run_gh_command(
         ["issue", "edit", str(issue_num), "--remove-label", "do-audit"],
         timeout=gh_view_timeout,
+        repo=repo,
     )
     if not remove_result.ok:
         error = remove_result.error or "unknown error"
@@ -142,6 +146,7 @@ def transition_audit_to_review(issue_num: int | str) -> Result[bool]:
     add_result = run_gh_command(
         ["issue", "edit", str(issue_num), "--add-label", "needs-review"],
         timeout=gh_view_timeout,
+        repo=repo,
     )
     if not add_result.ok:
         error = add_result.error or "unknown error"

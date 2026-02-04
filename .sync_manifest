@@ -102,3 +102,4 @@ evals/schema/results.schema.json
 !**/*.pyc
 !.looper_config.json
 !.pre-commit-local.d/
+!.gh_apps_creds.enc

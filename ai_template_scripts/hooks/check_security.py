@@ -224,6 +224,38 @@ def is_markdown_file(file_path: str) -> bool:
     return file_path.lower().endswith((".md", ".markdown", ".mdx"))
 
 
+def is_doc_file(file_path: str) -> bool:
+    """Check if the file uses documentation with backticks (lenient with backtick patterns).
+
+    Languages like Rust (/// and //! doc comments with `code`), Python (docstrings with
+    `code`), and TypeScript (.d.ts with JSDoc) use backticks for inline code examples.
+
+    Config files (TOML, JSON) and documentation formats (RST) also use backticks legitimately.
+
+    Contracts:
+        REQUIRES: file_path is a string (may be empty)
+        ENSURES: Returns True for files that use backticks in documentation
+        ENSURES: Returns False for other file types
+
+    Part of #2313.
+    """
+    # These extensions commonly have documentation with inline code backticks
+    doc_extensions = (
+        ".rs",  # Rust - rustdoc uses ```rust and `code`
+        ".py",  # Python - docstrings use `code`
+        ".ts",  # TypeScript - JSDoc uses `code`
+        ".tsx",  # TypeScript JSX
+        ".js",  # JavaScript - JSDoc uses `code`
+        ".jsx",  # JavaScript JSX
+        ".go",  # Go - godoc uses `code`
+        ".d.ts",  # TypeScript declaration files
+        ".toml",  # TOML - string values may contain `code` references
+        ".json",  # JSON - string values may contain `code` references
+        ".rst",  # reStructuredText - uses ``code`` for inline code
+    )
+    return file_path.lower().endswith(doc_extensions)
+
+
 def is_template_file(file_path: str) -> bool:
     """Check if the file is an HTML/JSX/template file (lenient with XSS patterns).
 
@@ -286,10 +318,12 @@ def check_injection(content: str, file_path: str) -> list[tuple[str, str]]:
 
     Contracts:
         REQUIRES: content is a string to scan
-        REQUIRES: file_path is used to determine test/shell/markdown/subprocess leniency
+        REQUIRES: file_path is used to determine test/shell/markdown/doc/subprocess leniency
         ENSURES: Returns empty list for test files
-        ENSURES: Skips command injection check for shell, markdown, and subprocess files
+        ENSURES: Skips command injection check for shell, markdown, doc, and subprocess files
         ENSURES: Returns list of (description, priority) tuples
+
+    Part of #2313: Added is_doc_file() check to allow backticks in Rust/Python/JS docs.
 
     Returns:
         List of (finding, priority) tuples.
@@ -300,17 +334,19 @@ def check_injection(content: str, file_path: str) -> list[tuple[str, str]]:
 
     # Skip command injection pattern in shell scripts (legitimate use),
     # markdown files (backticks are normal for inline code),
+    # doc files (Rust/Python/JS use backticks for inline code in docs),
     # and subprocess modules (bash command substitution is legitimate)
     is_shell = is_shell_file(file_path)
     is_markdown = is_markdown_file(file_path)
+    is_doc = is_doc_file(file_path)
     is_subprocess = is_subprocess_module(file_path)
 
     findings: list[tuple[str, str]] = []
 
     for pattern in INJECTION_PATTERNS:
-        # Skip command injection pattern for shell, markdown, and subprocess files
+        # Skip command injection pattern for shell, markdown, doc, and subprocess files
         if (
-            is_shell or is_markdown or is_subprocess
+            is_shell or is_markdown or is_doc or is_subprocess
         ) and "Command injection" in pattern.description:
             continue
         if re.search(pattern.pattern, content):

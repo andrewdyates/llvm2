@@ -15,7 +15,7 @@ For security vulnerabilities, **do not** open a public issue. Instead, see [SECU
 ## Communication Channels
 
 - **Primary**: GitHub Issues on this repository
-- **Organization updates**: [DashNews](https://github.com/ayates_dbx/dashnews/discussions)
+- **Organization updates**: [DashNews](https://github.com/dropbox-ai-prototypes/dashnews/discussions)
 
 ## Issue Response
 

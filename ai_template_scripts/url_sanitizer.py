@@ -115,10 +115,10 @@ def extract_repo_slug(url: str) -> str | None:
         Repo slug like "owner/repo", or None if cannot extract
 
     Examples:
-        >>> extract_repo_slug("https://github.com/ayates_dbx/ai_template.git")
-        'ayates_dbx/ai_template'
-        >>> extract_repo_slug("git@github.com:ayates_dbx/ai_template.git")
-        'ayates_dbx/ai_template'
+        >>> extract_repo_slug("https://github.com/dropbox-ai-prototypes/ai_template.git")
+        'dropbox-ai-prototypes/ai_template'
+        >>> extract_repo_slug("git@github.com:dropbox-ai-prototypes/ai_template.git")
+        'dropbox-ai-prototypes/ai_template'
     """
     if not url or not url.strip():
         return None

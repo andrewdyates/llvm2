@@ -19,6 +19,7 @@ __all__ = [
 import json
 import os
 import random
+import re
 import sys
 
 from looper.config import load_project_config, load_timeout_config
@@ -34,7 +35,12 @@ from looper.context.helpers import (
 from looper.context.issue_cache import IterationIssueCache, is_feature_freeze
 from looper.log import debug_swallow
 from looper.result import Result
-from looper.subprocess_utils import is_full_local_mode, is_local_mode, run_gh_command
+from looper.subprocess_utils import (
+    get_github_repo,
+    is_full_local_mode,
+    is_local_mode,
+    run_gh_command,
+)
 
 # Import batch_issue_view at module level for testability
 # The function falls back to individual fetches if import fails
@@ -335,29 +341,27 @@ def _sample_priority_issues(
 def _claimed_by_suffix(issue: Issue, worker_id: str | None) -> str | None:
     """Return suffix indicating claim by another role, if applicable.
 
-    Shows "(claimed by X#)" for any in-progress-{X}{N} label where:
-    - X is W (worker), P (prover), R (researcher), or M (manager)
-    - N is the instance ID
-    - For workers, only shows if claimed by a DIFFERENT worker
+    Per ai_template.md: `in-progress` + `XN` labels = claimed (X=W/P/R/M, N=instance).
+    Worker ownership labels are W1, W2, etc. P0-P3 are priority labels (NOT ownership).
+
+    Returns:
+        "+YOU" if claimed by current worker
+        "+W{N}" if claimed by another worker
+        None if not claimed by any worker
     """
     # Handle both GraphQL (dict) and REST (string) label formats
     raw_labels = issue.get("labels", [])
     labels = [lbl["name"] if isinstance(lbl, dict) else lbl for lbl in raw_labels]
+
+    # Look for worker ownership labels: W1, W2, W3, etc.
+    # Note: P0-P3 are priority labels, not Prover ownership
     for label in labels:
-        if label.startswith("in-progress-"):
-            role_id = label[len("in-progress-") :]
-            if not role_id:
-                continue
-            role = role_id[0] if role_id else ""
-            instance = role_id[1:] if len(role_id) > 1 else ""
-            # For workers, only show if claimed by a DIFFERENT worker
-            if role == "W" and worker_id:
-                if instance and instance != worker_id:
-                    return f"(claimed by W{instance})"
-                return None  # Same worker or no instance
-            # For other roles (P, R, M), always show the claim
-            if role in ("P", "R", "M") and instance:
-                return f"(claimed by {role}{instance})"
+        match = re.match(r"^W(\d+)$", label)
+        if match:
+            instance = match.group(1)
+            if worker_id and instance == worker_id:
+                return "+YOU"  # Current worker
+            return f"+W{instance}"  # Other worker
     return None
 
 
@@ -687,6 +691,7 @@ def get_issues_by_numbers(issue_nums: list[int]) -> dict[int, str]:
 
     # Fallback: individual fetches (old behavior, if batch_issue_view unavailable)
     results = {}
+    repo = get_github_repo()  # Avoid cwd dependency (#2317)
     for num in issue_nums:
         result = run_gh_command(
             [
@@ -697,6 +702,7 @@ def get_issues_by_numbers(issue_nums: list[int]) -> dict[int, str]:
                 "number,title,labels,state",
             ],
             timeout=gh_view_timeout,
+            repo=repo,
         )
         if not result.ok or not result.value:
             results[num] = ""

@@ -1,4 +1,4 @@
-# Clippy configuration for ayates_dbx Rust projects
+# Clippy configuration for dropbox-ai-prototypes Rust projects
 #
 # Copy to project root as clippy.toml or .clippy.toml
 # Run: cargo clippy -- -D warnings
@@ -6,7 +6,7 @@
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 
-# Clippy lints for ayates_dbx Rust projects
+# Clippy lints for dropbox-ai-prototypes Rust projects
 # Note: warn/deny at top level is TOML array syntax - can only appear once per key
 # To configure multiple lint groups, use Cargo.toml [lints.clippy] section instead
 

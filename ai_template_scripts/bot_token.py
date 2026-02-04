@@ -201,7 +201,7 @@ def get_installation_id(jwt_token: str, owner: str, repo: str) -> int:
 
     Args:
         jwt_token: JWT for app authentication
-        owner: Repository owner (e.g., "ayates_dbx")
+        owner: Repository owner (e.g., "dropbox-ai-prototypes")
         repo: Repository name (e.g., "z4")
 
     Returns:
@@ -295,8 +295,8 @@ def main(args: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--owner",
-        default="ayates_dbx",
-        help="GitHub owner (default: ayates_dbx)",
+        default="dropbox-ai-prototypes",
+        help="GitHub owner (default: dropbox-ai-prototypes)",
     )
     parser.add_argument(
         "--check",

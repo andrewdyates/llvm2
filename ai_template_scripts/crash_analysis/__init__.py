@@ -101,6 +101,7 @@ from ai_template_scripts.crash_analysis.types import (  # noqa: E402
     CRASHES_LOG,
     FAILURE_RATE_CRITICAL,
     FAILURE_RATE_WARNING,
+    FAILURES_LOG,
     RECENT_HOURS,
     CrashEntry,
     CrashFingerprint,
@@ -111,7 +112,8 @@ from ai_template_scripts.crash_analysis.types import (  # noqa: E402
 from ai_template_scripts.version import get_version  # noqa: E402
 
 __all__ = [
-    "CRASHES_LOG",
+    "CRASHES_LOG",  # Legacy alias
+    "FAILURES_LOG",  # New canonical name per #2310
     "FAILURE_RATE_WARNING",
     "FAILURE_RATE_CRITICAL",
     "RECENT_HOURS",

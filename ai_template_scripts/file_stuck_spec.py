@@ -50,7 +50,7 @@ Filed by: file_stuck_spec.py from {repo}
 
     cmd = [
         "gh", "issue", "create",
-        "--repo", "ayates_dbx/zani",
+        "--repo", "dropbox-ai-prototypes/zani",
         "--title", title,
         "--body", body,
         "--label", "stuck-proof",
@@ -98,7 +98,7 @@ Filed by: file_stuck_spec.py from {repo}
 
     cmd = [
         "gh", "issue", "create",
-        "--repo", "ayates_dbx/tla2",
+        "--repo", "dropbox-ai-prototypes/tla2",
         "--title", title,
         "--body", body,
         "--label", "stuck-spec",

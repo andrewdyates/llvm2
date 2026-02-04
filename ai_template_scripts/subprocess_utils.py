@@ -260,7 +260,7 @@ def get_github_repo(gh_path: str = "gh", cwd: Path | None = None) -> CmdResult:
     Example:
         result = get_github_repo()
         if result.ok:
-            repo = result.stdout  # e.g., "ayates_dbx/ai_template"
+            repo = result.stdout  # e.g., "dropbox-ai-prototypes/ai_template"
         else:
             print(f"Not in GitHub repo: {result.error}")
     """

@@ -23,6 +23,7 @@ __all__ = [
     "is_local_mode",
     "is_full_local_mode",
     "set_local_mode_from_config",
+    "get_github_repo",
 ]
 
 import os
@@ -145,12 +146,39 @@ def run_git_command(
     return Result.success(proc.stdout or "")
 
 
+def get_github_repo() -> str | None:
+    """Get GitHub repo in owner/repo format from git remote.
+
+    Returns:
+        owner/repo string (e.g., "dropbox-ai-prototypes/ai_template") or None if not resolvable.
+
+    Note:
+        This function runs git to get the origin URL. For performance-critical
+        paths, consider caching the result or passing repo explicitly.
+    """
+    try:
+        from ai_template_scripts.gh_rate_limit.repo_context import RepoContext
+
+        ctx = RepoContext()
+        return ctx.get_owner_repo()
+    except Exception:
+        return None
+
+
 def run_gh_command(
     args: list[str],
     timeout: int = 15,
     cwd: Path | None = None,
+    repo: str | None = None,
 ) -> Result[str]:
     """Run gh CLI command with standardized error handling.
+
+    Args:
+        args: gh CLI arguments (without "gh" prefix).
+        timeout: Command timeout in seconds.
+        cwd: Working directory for command execution.
+        repo: GitHub repo in owner/repo format. When provided and command is
+            issue/pr, --repo is injected to avoid cwd dependency (#2317).
 
     Contracts:
         REQUIRES: args is a non-empty list of gh arguments (without "gh")
@@ -169,7 +197,13 @@ def run_gh_command(
             "local_mode: GitHub API calls disabled", value="(local mode)"
         )
 
-    result = run_cmd(["gh", *args], timeout=timeout, cwd=cwd)
+    # Inject --repo for issue/pr commands to avoid cwd dependency (#2317)
+    final_args = list(args)
+    if repo and len(args) >= 2 and args[0] in ("issue", "pr"):
+        # Insert --repo after subcommand: gh issue list --repo owner/repo ...
+        final_args = [args[0], args[1], "--repo", repo, *args[2:]]
+
+    result = run_cmd(["gh", *final_args], timeout=timeout, cwd=cwd)
     if not result.ok:
         return Result.failure(result.error or "gh command failed")
     proc = result.value

@@ -183,6 +183,10 @@ class ProcessManager:
                         if silence_timed_out:
                             # Actually timed out (not sleep)
                             silence_killed = True
+                            # Capture timeout context for classification (#2310)
+                            _capture_timeout_context(
+                                last_command, last_command_start
+                            )
                             break
                         # Check if sleep was detected (wall >> mono by >60s)
                         # Reset timers so we don't keep detecting the same sleep
@@ -549,3 +553,42 @@ class ProcessManager:
                 except OSError as e:
                     debug_swallow("ai_proc_stdout_close_cleanup", e)
             self.current_process = None
+
+
+def _capture_timeout_context(
+    last_command: str | None, last_command_start: float | None
+) -> None:
+    """Capture timeout context for later classification.
+
+    Called when silence timeout occurs to preserve context for timeout_classifier.py.
+    Writes JSON entry to worker_logs/timeout_context.jsonl.
+
+    Args:
+        last_command: The command that was running when timeout occurred
+        last_command_start: Unix timestamp when the command started
+
+    Contracts:
+        ENSURES: Appends JSON entry to timeout context file
+        ENSURES: Never raises - catches all exceptions
+    """
+    from datetime import datetime
+
+    try:
+        context_file = Path("worker_logs/timeout_context.jsonl")
+        context_file.parent.mkdir(exist_ok=True)
+
+        duration = None
+        if last_command_start:
+            duration = int(time.time() - last_command_start)
+
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "last_command": last_command,
+            "command_duration_sec": duration,
+        }
+
+        with open(context_file, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        # Best effort - don't fail timeout handling
+        debug_swallow("capture_timeout_context", e)

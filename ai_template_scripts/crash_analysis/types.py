@@ -14,6 +14,9 @@ from datetime import datetime
 from pathlib import Path
 
 # Paths
+# Primary log file - renamed from crashes.log per #2310
+FAILURES_LOG = Path("worker_logs/failures.log")
+# Legacy alias for backwards compatibility
 CRASHES_LOG = Path("worker_logs/crashes.log")
 
 # Thresholds
@@ -99,7 +102,8 @@ class HealthReport:
 
 
 __all__ = [
-    "CRASHES_LOG",
+    "CRASHES_LOG",  # Legacy alias
+    "FAILURES_LOG",  # New canonical name per #2310
     "FAILURE_RATE_WARNING",
     "FAILURE_RATE_CRITICAL",
     "RECENT_HOURS",

@@ -6,7 +6,7 @@
 """
 pulse - Programmatic stats collection and threshold checking.
 
-CANONICAL SOURCE: ayates_dbx/ai_template
+CANONICAL SOURCE: dropbox-ai-prototypes/ai_template
 DO NOT EDIT in other repos - file issues to ai_template for changes.
 
 This package collects metrics, detects issues, and writes flags for managers.

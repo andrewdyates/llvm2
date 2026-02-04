@@ -6,12 +6,18 @@
 """cargo_lock_info.py - Diagnose the org-wide serialized cargo lock.
 
 Purpose:
-  Print who holds a `~/.ait_cargo_lock` lock (PID, command, start time, etc) and
-  whether the lock appears stale. Intended as an AI-safe diagnostic tool for #433.
+  Print who holds a per-repo `~/.ait_cargo_lock/<repo>/` lock (PID, command,
+  start time, etc) and whether the lock appears stale. Intended as an AI-safe
+  diagnostic tool for #433.
+
+Note:
+  The cargo wrapper uses per-repo lock directories (Part of #2315). This script
+  auto-detects the current repository and checks the appropriate lock directory.
 
 Public API (library usage):
     from ai_template_scripts.cargo_lock_info import (
         STALE_LOCK_AGE_SEC,  # Threshold for stale lock detection
+        get_repo_lock_dir,   # Get per-repo lock directory path
         pid_alive,           # Check if process is running
         parse_etime,         # Parse ps etime format to seconds
         run_ps,              # Get ps fields for a PID
@@ -19,8 +25,9 @@ Public API (library usage):
     )
 
 CLI usage:
-    ./cargo_lock_info.py                 # Print build lock holder info
+    ./cargo_lock_info.py                 # Print build lock holder (auto-detects repo)
     ./cargo_lock_info.py --kind test     # Inspect test lock
+    ./cargo_lock_info.py --repo z4       # Inspect specific repo's lock
     ./cargo_lock_info.py --json          # Emit JSON and exit
 
 Copyright 2026 Dropbox, Inc.
@@ -36,6 +43,7 @@ __all__ = [
     "parse_etime",
     "run_ps",
     "format_duration",
+    "get_repo_lock_dir",
     "main",
 ]
 
@@ -52,9 +60,35 @@ _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
+from ai_template_scripts.subprocess_utils import get_repo_name  # noqa: E402
 from ai_template_scripts.version import get_version  # noqa: E402
 
 STALE_LOCK_AGE_SEC = 2 * 60 * 60
+
+
+def get_repo_lock_dir(repo: str | None = None) -> Path:
+    """Get the per-repo lock directory path.
+
+    Auto-detects repo from git remote if not provided. Falls back to
+    ~/.ait_cargo_lock if detection fails.
+
+    Args:
+        repo: Optional explicit repo name
+
+    Returns:
+        Path to ~/.ait_cargo_lock/<repo>/ or ~/.ait_cargo_lock/ if no repo
+
+    Part of #2315.
+    """
+    base = Path.home() / ".ait_cargo_lock"
+    if repo:
+        return base / repo
+    # Auto-detect from git remote
+    result = get_repo_name()
+    if result.stdout:
+        return base / result.stdout
+    # Fallback to base (legacy behavior)
+    return base
 
 
 def log(msg: str) -> None:
@@ -198,7 +232,7 @@ def main() -> int:
              or 3 (stale lock detected)
     """
     parser = argparse.ArgumentParser(
-        description="Inspect ~/.ait_cargo_lock lock holder"
+        description="Inspect ~/.ait_cargo_lock/<repo>/ lock holder"
     )
     parser.add_argument(
         "--version",
@@ -206,9 +240,12 @@ def main() -> int:
         version=get_version("cargo_lock_info.py"),
     )
     parser.add_argument(
+        "--repo",
+        help="Repository name (auto-detected from git remote if not specified)",
+    )
+    parser.add_argument(
         "--lock-dir",
-        default=str(Path.home() / ".ait_cargo_lock"),
-        help="Lock directory (default: ~/.ait_cargo_lock)",
+        help="Explicit lock directory (overrides --repo and auto-detection)",
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON and exit")
     parser.add_argument(
@@ -219,7 +256,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    lock_dir = Path(args.lock_dir).expanduser()
+    # Determine lock directory: explicit > --repo > auto-detect
+    if args.lock_dir:
+        lock_dir = Path(args.lock_dir).expanduser()
+    else:
+        lock_dir = get_repo_lock_dir(args.repo)
     basename = lock_basename(args.kind)
     lock_pid_path = lock_dir / f"{basename}.pid"
     lock_meta_path = lock_dir / f"{basename}.json"

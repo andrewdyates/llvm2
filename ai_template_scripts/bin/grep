@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # grep wrapper - Blocks dangerous recursive grep under memory pressure
 #
-# CANONICAL SOURCE: ayates_dbx/ai_template
+# CANONICAL SOURCE: dropbox-ai-prototypes/ai_template
 # DO NOT EDIT in other repos - file issues to ai_template for changes.
 #
 # This wrapper sits in PATH before the real grep and:
@@ -32,7 +32,7 @@ done
 
 # Fall back to PATH search if not found
 if [[ -z "$REAL_GREP" ]]; then
-    IFS=':' read -ra PATH_DIRS <<< "$PATH"
+    IFS=':' read -ra PATH_DIRS <<<"$PATH"
     for p in "${PATH_DIRS[@]}"; do
         [[ -d "$p" ]] || continue
         grep_candidate="$p/grep"
@@ -53,10 +53,10 @@ fi
 IS_RECURSIVE=false
 for arg in "$@"; do
     case "$arg" in
-        -r|-R|--recursive|-rn|-nr|-Rn|-nR|--include=*|--exclude-dir=*)
-            IS_RECURSIVE=true
-            break
-            ;;
+    -r | -R | --recursive | -rn | -nr | -Rn | -nR | --include=* | --exclude-dir=*)
+        IS_RECURSIVE=true
+        break
+        ;;
     esac
     # Also check combined short flags like -rn, -nri, etc.
     if [[ "$arg" =~ ^-[^-]*[rR] ]]; then
@@ -90,7 +90,7 @@ if [[ "$IS_RECURSIVE" == true ]] && [[ "$OSTYPE" == darwin* ]]; then
 
         # Calculate percentage used
         if [[ $PAGES_TOTAL -gt 0 ]]; then
-            PERCENT_USED=$(( (PAGES_TOTAL - PAGES_AVAILABLE) * 100 / PAGES_TOTAL ))
+            PERCENT_USED=$(((PAGES_TOTAL - PAGES_AVAILABLE) * 100 / PAGES_TOTAL))
 
             # Memory pressure levels:
             # - Normal: <70% used

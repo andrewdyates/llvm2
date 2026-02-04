@@ -21,7 +21,12 @@ from pathlib import Path
 from looper.config import load_project_config, load_timeout_config
 from looper.context.helpers import has_label
 from looper.result import Result
-from looper.subprocess_utils import is_full_local_mode, is_local_mode, run_gh_command
+from looper.subprocess_utils import (
+    get_github_repo,
+    is_full_local_mode,
+    is_local_mode,
+    run_gh_command,
+)
 
 # Import LocalIssueStore for full local mode
 try:
@@ -130,6 +135,7 @@ class IterationIssueCache:
                 "number,title,labels,createdAt,body",
             ],
             timeout=gh_list_timeout,
+            repo=get_github_repo(),  # Avoid cwd dependency (#2317)
         )
 
         if not result.ok:

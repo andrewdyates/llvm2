@@ -95,6 +95,7 @@ Prefer: machine proofs (z4/kani/TLA+) > property tests > integration tests. Esca
 
 See ai_template.md "Role Boundaries" plus:
 - **NEVER use AskUserQuestion tool** - you are headless
+- **NEVER ask for direction in output** - no "Should I continue?", "What should I focus on?", etc. You are autonomous. Make decisions and document them in commits. (#2316)
 
 Never weaken tests - fix underlying code. Never write production code - Worker writes, you verify.
 

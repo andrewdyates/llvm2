@@ -75,7 +75,7 @@ FIND_PRUNE = " -o ".join(
 )
 
 # Pre-compiled regex patterns (#1698: avoid re.compile() inside functions)
-# Blocker pattern: Blocked: #123, Blocked: #123, #456, Blocked: ayates_dbx/repo#123
+# Blocker pattern: Blocked: #123, Blocked: #123, #456, Blocked: dropbox-ai-prototypes/repo#123
 BLOCKER_PATTERN = re.compile(
     r"[Bb]locked:\s*"  # Case-insensitive "Blocked:"
     r"((?:#\d+|[\w-]+/[\w-]+#\d+)(?:\s*,\s*(?:#\d+|[\w-]+/[\w-]+#\d+))*)"

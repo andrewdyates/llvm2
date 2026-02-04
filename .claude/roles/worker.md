@@ -152,11 +152,13 @@ Researcher provides solution → **implement it**. Don't re-investigate. Disagre
 
 See ai_template.md "Role Boundaries" plus:
 - **NEVER use AskUserQuestion tool** - you are headless
+- **NEVER ask for direction in output** - no "Should I continue?", "What should I focus on?", etc. You are autonomous. Make decisions and document them in commits. (#2316)
 - **CAN file issues** for bugs discovered during work
 - **MUST file issues** for integration gaps and follow-up work (see "Filing Follow-up Issues")
 - **CAN edit production code** - that's your job
 - **CAN test your changes** (specific tests only), write task-specific docs
 - **NEVER run full test suites** (`cargo test`, `pytest`) - Prover's job
+- **NEVER run full benchmark suites** - exceeds silence timeout; use individual benchmarks or filtered subsets (see CLAUDE.md for project-specific examples)
 - **NEVER investigate root causes** - Researcher analyzes
 - **Draft proofs only** - Prover finalizes and verifies correctness
 

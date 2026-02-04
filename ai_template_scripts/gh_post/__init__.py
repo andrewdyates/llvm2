@@ -61,7 +61,7 @@ except ImportError:
     _HAS_RATE_LIMIT = False
 
 # GitHub Project integration (P0 #1190)
-PROJECT_OWNER = "ayates_dbx"
+PROJECT_OWNER = "dropbox-ai-prototypes"
 PROJECT_NUMBER = 1
 PROJECT_SCHEMA_CACHE_FILE = Path.home() / ".ait_gh_cache" / "project_schema.json"
 PROJECT_SCHEMA_TTL_SECONDS = 86400  # 24 hours
@@ -266,11 +266,11 @@ def main() -> None:
             )
             print(
                 "   python3 ai_template_scripts/gh_discussion.py create "
-                '--repo ayates_dbx/dashnews --category News --title "..." --body "..."',
+                '--repo dropbox-ai-prototypes/dashnews --category News --title "..." --body "..."',
                 file=sys.stderr,
             )
             print(
-                "   See: https://github.com/ayates_dbx/dashnews",
+                "   See: https://github.com/dropbox-ai-prototypes/dashnews",
                 file=sys.stderr,
             )
             print(file=sys.stderr)

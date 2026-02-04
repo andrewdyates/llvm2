@@ -24,13 +24,13 @@ Usage:
         '''query($owner: String!, $name: String!) {
             repository(owner: $owner, name: $name) { id }
         }''',
-        variables={'owner': 'ayates_dbx', 'name': 'ai_template'}
+        variables={'owner': 'dropbox-ai-prototypes', 'name': 'ai_template'}
     )
 
     # Batch multiple queries
     result = graphql_batch([
-        ('repo1', 'repository(owner:"ayates_dbx", name:"ai_template") { id }'),
-        ('repo2', 'repository(owner:"ayates_dbx", name:"leadership") { id }'),
+        ('repo1', 'repository(owner:"dropbox-ai-prototypes", name:"ai_template") { id }'),
+        ('repo2', 'repository(owner:"dropbox-ai-prototypes", name:"leadership") { id }'),
     ])
 """
 
@@ -178,7 +178,7 @@ def graphql(
 
         >>> result = graphql(
         ...     'query($owner: String!) { user(login: $owner) { id } }',
-        ...     variables={'owner': 'ayates_dbx'}
+        ...     variables={'owner': 'dropbox-ai-prototypes'}
         ... )
     """
     cmd = [_get_real_gh(), "api", "graphql", "-f", f"query={query}"]
@@ -241,8 +241,8 @@ def graphql_batch(
 
     Example:
         >>> result = graphql_batch([
-        ...     ('repo1', 'repository(owner:"ayates_dbx", name:"ai_template") { id }'),
-        ...     ('repo2', 'repository(owner:"ayates_dbx", name:"leadership") { id }'),
+        ...     ('repo1', 'repository(owner:"dropbox-ai-prototypes", name:"ai_template") { id }'),
+        ...     ('repo2', 'repository(owner:"dropbox-ai-prototypes", name:"leadership") { id }'),
         ... ])
         >>> if result.ok:
         ...     print(result.data['repo1']['id'])
@@ -293,7 +293,7 @@ def build_variables(*pairs: tuple[str, Any]) -> dict[str, Any]:
 
     Example:
         >>> variables = build_variables(
-        ...     ('owner', 'ayates_dbx'),
+        ...     ('owner', 'dropbox-ai-prototypes'),
         ...     ('name', 'ai_template'),
         ...     ('first', 10),
         ... )

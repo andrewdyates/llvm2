@@ -55,7 +55,7 @@ from ai_template_scripts.gh_apps.config import CONFIG_DIR, CONFIG_FILE
 
 # Constants
 ORG = "dropbox-ai-prototypes"
-TARGET_USER = "ayates_dbx"
+TARGET_USER = "dropbox-ai-prototypes"
 BROWSER_PROFILE = Path.home() / ".playwright_github"
 
 # Priority tiers for batch creation

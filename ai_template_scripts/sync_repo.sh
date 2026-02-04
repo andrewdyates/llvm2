@@ -5,7 +5,7 @@
 
 # sync_repo.sh - Sync template files to a target repo
 #
-# CANONICAL SOURCE: ayates_dbx/ai_template
+# CANONICAL SOURCE: dropbox-ai-prototypes/ai_template
 # DO NOT EDIT in other repos - file issues to ai_template for changes.
 #
 # Copies template files from ai_template to a target repository, commits,
@@ -46,7 +46,7 @@ version() {
 # Cache for archived repos (avoid repeated API calls)
 ARCHIVED_CACHE_DIR="${HOME}/.cache/ai_template"
 ARCHIVED_CACHE_FILE="${ARCHIVED_CACHE_DIR}/archived_repos.txt"
-ARCHIVED_CACHE_AGE=3600  # 1 hour
+ARCHIVED_CACHE_AGE=3600 # 1 hour
 
 # Check if repo is archived (with REST fallback and caching)
 is_repo_archived() {
@@ -62,21 +62,21 @@ is_repo_archived() {
     local result stderr_file
     stderr_file=$(mktemp)
     # NOTE: Do NOT use gh -q or --jq - has caching bugs in v2.83.2+ (#1047)
-    if result=$(gh repo view "ayates_dbx/$repo_name" --json isArchived 2>"$stderr_file" | jq -r '.isArchived'); then
+    if result=$(gh repo view "dropbox-ai-prototypes/$repo_name" --json isArchived 2>"$stderr_file" | jq -r '.isArchived'); then
         rm -f "$stderr_file"
         if [[ "$result" == "true" ]]; then
             mkdir -p "$ARCHIVED_CACHE_DIR"
-            echo "$repo_name" >> "$ARCHIVED_CACHE_FILE"
+            echo "$repo_name" >>"$ARCHIVED_CACHE_FILE"
             return 0
         fi
         return 1
     fi
     if grep -qiE 'rate.?limit' "$stderr_file" 2>/dev/null; then
         rm -f "$stderr_file"
-        if result=$(gh api "repos/ayates_dbx/$repo_name" 2>/dev/null | jq -r '.archived'); then
+        if result=$(gh api "repos/dropbox-ai-prototypes/$repo_name" 2>/dev/null | jq -r '.archived'); then
             if [[ "$result" == "true" ]]; then
                 mkdir -p "$ARCHIVED_CACHE_DIR"
-                echo "$repo_name" >> "$ARCHIVED_CACHE_FILE"
+                echo "$repo_name" >>"$ARCHIVED_CACHE_FILE"
                 return 0
             fi
             return 1
@@ -111,32 +111,48 @@ declare -a ONLY_PATTERNS=()
 # Parse arguments (need manual loop for --only with value)
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --version) version ;;
-        --dry-run) DRY_RUN=true; shift ;;
-        --no-push) NO_PUSH=true; shift ;;
-        --clean) CLEAN=true; shift ;;
-        --diff) SHOW_DIFF=true; DRY_RUN=true; shift ;;
-        -h|--help) SHOW_HELP=true; shift ;;
-        --only)
-            if [[ -z "${2:-}" ]]; then
-                log_error "--only requires a glob pattern argument"
-                exit 1
-            fi
-            ONLY_PATTERNS+=("$2")
-            shift 2
-            ;;
-        --only=*)
-            ONLY_PATTERNS+=("${1#--only=}")
-            shift
-            ;;
-        -*)
-            log_error "Unknown option: $1"
+    --version) version ;;
+    --dry-run)
+        DRY_RUN=true
+        shift
+        ;;
+    --no-push)
+        NO_PUSH=true
+        shift
+        ;;
+    --clean)
+        CLEAN=true
+        shift
+        ;;
+    --diff)
+        SHOW_DIFF=true
+        DRY_RUN=true
+        shift
+        ;;
+    -h | --help)
+        SHOW_HELP=true
+        shift
+        ;;
+    --only)
+        if [[ -z "${2:-}" ]]; then
+            log_error "--only requires a glob pattern argument"
             exit 1
-            ;;
-        *)
-            TARGET_REPO="$1"
-            shift
-            ;;
+        fi
+        ONLY_PATTERNS+=("$2")
+        shift 2
+        ;;
+    --only=*)
+        ONLY_PATTERNS+=("${1#--only=}")
+        shift
+        ;;
+    -*)
+        log_error "Unknown option: $1"
+        exit 1
+        ;;
+    *)
+        TARGET_REPO="$1"
+        shift
+        ;;
     esac
 done
 
@@ -183,7 +199,10 @@ else
     exit 1
 fi
 
-[[ -d "$TARGET_REPO/.git" ]] || { log_error "Target is not a git repo: $TARGET_REPO"; exit 1; }
+[[ -d "$TARGET_REPO/.git" ]] || {
+    log_error "Target is not a git repo: $TARGET_REPO"
+    exit 1
+}
 
 # SAFETY: Prevent syncing TO ai_template itself (#2203)
 # Two checks for defense-in-depth:
@@ -228,12 +247,12 @@ fi
 if [[ "$DRY_RUN" != "true" ]]; then
     echo ""
     log_info "Checking target repo git state..."
-    pushd "$TARGET_REPO" > /dev/null
+    pushd "$TARGET_REPO" >/dev/null
 
     # Check for uncommitted changes
     if ! git diff --quiet || ! git diff --cached --quiet; then
         log_error "Target repo has uncommitted changes. Commit first (never stash)."
-        popd > /dev/null
+        popd >/dev/null
         exit 1
     fi
 
@@ -247,17 +266,21 @@ if [[ "$DRY_RUN" != "true" ]]; then
     if [[ "$LOCAL" != "$REMOTE" && "$REMOTE" != "none" ]]; then
         if [[ "$LOCAL" == "$BASE" ]]; then
             log_info "Pulling latest changes from remote..."
-            git pull --ff-only || { log_error "Pull failed (not fast-forward). Resolve divergence manually."; popd > /dev/null; exit 1; }
+            git pull --ff-only || {
+                log_error "Pull failed (not fast-forward). Resolve divergence manually."
+                popd >/dev/null
+                exit 1
+            }
         elif [[ "$REMOTE" == "$BASE" ]]; then
             log_info "Local is ahead of remote (will push after sync)"
         else
             log_error "Local and remote have diverged. Resolve manually."
-            popd > /dev/null
+            popd >/dev/null
             exit 1
         fi
     fi
 
-    popd > /dev/null
+    popd >/dev/null
 fi
 
 # Files and directories to sync
@@ -277,7 +300,7 @@ sync_file() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         if [[ -e "$dst" ]]; then
-            if diff -q "$src" "$dst" > /dev/null 2>&1; then
+            if diff -q "$src" "$dst" >/dev/null 2>&1; then
                 echo "  [unchanged] $src"
             else
                 echo "  [update] $src"
@@ -292,7 +315,7 @@ sync_file() {
             if [[ "$SHOW_DIFF" == "true" ]]; then
                 echo "    ────────────────────────────────────────"
                 head -20 "$src" | sed 's/^/    + /'
-                line_count=$(wc -l < "$src" | tr -d ' ')
+                line_count=$(wc -l <"$src" | tr -d ' ')
                 [[ $line_count -gt 20 ]] && echo "    ... ($line_count lines total)"
                 echo "    ────────────────────────────────────────"
             fi
@@ -368,7 +391,7 @@ sync_gitignore() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         if [[ -e "$dst" ]]; then
-            if diff -q "$src" "$dst" > /dev/null 2>&1; then
+            if diff -q "$src" "$dst" >/dev/null 2>&1; then
                 echo "  [unchanged] .gitignore"
             else
                 echo "  [update] .gitignore (preserving project-specific entries)"
@@ -402,7 +425,7 @@ sync_gitignore() {
 
     # Append project-specific entries if any exist
     if [[ -n "$project_entries" ]]; then
-        echo "$project_entries" >> "$dst"
+        echo "$project_entries" >>"$dst"
         echo "  .gitignore (preserved project-specific entries)"
     else
         echo "  .gitignore"
@@ -422,14 +445,14 @@ log_info "Reading .sync_manifest..."
 # Collect exclusions first
 declare -a EXCLUSIONS=()
 while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line%%#*}"  # Remove comments
-    line="${line%"${line##*[![:space:]]}"}"  # Trim trailing whitespace
-    line="${line#"${line%%[![:space:]]*}"}"  # Trim leading whitespace
+    line="${line%%#*}"                      # Remove comments
+    line="${line%"${line##*[![:space:]]}"}" # Trim trailing whitespace
+    line="${line#"${line%%[![:space:]]*}"}" # Trim leading whitespace
     [[ -z "$line" ]] && continue
     if [[ "$line" == !* ]]; then
         EXCLUSIONS+=("${line#!}")
     fi
-done < "$MANIFEST"
+done <"$MANIFEST"
 
 is_excluded() {
     local file="$1"
@@ -437,7 +460,7 @@ is_excluded() {
         # Handle **/*.ext patterns - bash [[ == ]] doesn't support ** recursive glob
         # Convert to basename match: **/*.pyc matches foo.pyc, a/foo.pyc, a/b/foo.pyc
         if [[ "$pattern" == "**/"* ]]; then
-            local suffix="${pattern#\*\*/}"  # Extract suffix after **/
+            local suffix="${pattern#\*\*/}" # Extract suffix after **/
             local basename="${file##*/}"
             # shellcheck disable=SC2053
             if [[ "$basename" == $suffix ]]; then
@@ -479,12 +502,12 @@ TARGET_SKIP_FILE="$TARGET_REPO/.ai_template_skip"
 if [[ -f "$TARGET_SKIP_FILE" ]]; then
     log_info "Reading target skip patterns from .ai_template_skip..."
     while IFS= read -r line || [[ -n "$line" ]]; do
-        line="${line%%#*}"  # Remove comments
-        line="${line%"${line##*[![:space:]]}"}"  # Trim trailing whitespace
-        line="${line#"${line%%[![:space:]]*}"}"  # Trim leading whitespace
+        line="${line%%#*}"                      # Remove comments
+        line="${line%"${line##*[![:space:]]}"}" # Trim trailing whitespace
+        line="${line#"${line%%[![:space:]]*}"}" # Trim leading whitespace
         [[ -z "$line" ]] && continue
         TARGET_SKIPS+=("$line")
-    done < "$TARGET_SKIP_FILE"
+    done <"$TARGET_SKIP_FILE"
     echo "  ${#TARGET_SKIPS[@]} skip pattern(s) loaded"
 fi
 
@@ -516,7 +539,7 @@ matches_only_pattern() {
     # If no --only patterns, match everything
     [[ ${#ONLY_PATTERNS[@]} -eq 0 ]] && return 0
 
-    local entry_base="${entry%/}"  # Remove trailing slash for directory entries
+    local entry_base="${entry%/}" # Remove trailing slash for directory entries
 
     for pattern in "${ONLY_PATTERNS[@]}"; do
         # Handle directory pattern matching: looper/ should match looper/ and looper/foo.py
@@ -567,11 +590,11 @@ if [[ ${#ONLY_PATTERNS[@]} -gt 0 ]]; then
 fi
 log_info "Syncing from manifest..."
 while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line%%#*}"  # Remove comments
-    line="${line%"${line##*[![:space:]]}"}"  # Trim trailing whitespace
-    line="${line#"${line%%[![:space:]]*}"}"  # Trim leading whitespace
+    line="${line%%#*}"                      # Remove comments
+    line="${line%"${line##*[![:space:]]}"}" # Trim trailing whitespace
+    line="${line#"${line%%[![:space:]]*}"}" # Trim leading whitespace
     [[ -z "$line" ]] && continue
-    [[ "$line" == !* ]] && continue  # Skip exclusions (already processed)
+    [[ "$line" == !* ]] && continue # Skip exclusions (already processed)
 
     # Filter by --only patterns if specified (#785)
     if ! matches_only_pattern "$line"; then
@@ -629,39 +652,39 @@ while IFS= read -r line || [[ -n "$line" ]]; do
             sync_file "$line"
         fi
     fi
-done < "$MANIFEST"
+done <"$MANIFEST"
 
 # Check for obsolete template files that should be deleted from target
 echo ""
 log_info "Checking for obsolete template files..."
 OLD_TEMPLATE_FILES=(
-    "ai_template_scripts/gh_discussion.sh"  # Replaced by gh_discussion.py
-    "ai_template_scripts/gh_post.sh"        # Replaced by gh_post.py
-    "ai_template_scripts/init.sh"           # Renamed to install_dev_tools.sh
-    "ai_template_scripts/create_github_apps.py"  # Orphaned, never part of template
-    "ai_template_scripts/stop_all.sh"       # Removed - just use: touch STOP
-    "ai_template_scripts/verify_closure.py" # Removed - Manager searches intelligently
-    "ai_template_scripts/frontpage.sh"      # DashNews-specific, not template
-    "run_loop.py"                           # Renamed to looper.py
-    "run_loop_context.md"                   # Renamed to looper_context.md
-    "tests/test_run_loop.py"                # Renamed to tests/test_looper.py
-    ".claude/rules/postmortems.md"          # Merged into ai_template.md
-    "looper/context.py"                     # Replaced by looper/context/ subpackage (#748)
+    "ai_template_scripts/gh_discussion.sh"      # Replaced by gh_discussion.py
+    "ai_template_scripts/gh_post.sh"            # Replaced by gh_post.py
+    "ai_template_scripts/init.sh"               # Renamed to install_dev_tools.sh
+    "ai_template_scripts/create_github_apps.py" # Orphaned, never part of template
+    "ai_template_scripts/stop_all.sh"           # Removed - just use: touch STOP
+    "ai_template_scripts/verify_closure.py"     # Removed - Manager searches intelligently
+    "ai_template_scripts/frontpage.sh"          # DashNews-specific, not template
+    "run_loop.py"                               # Renamed to looper.py
+    "run_loop_context.md"                       # Renamed to looper_context.md
+    "tests/test_run_loop.py"                    # Renamed to tests/test_looper.py
+    ".claude/rules/postmortems.md"              # Merged into ai_template.md
+    "looper/context.py"                         # Replaced by looper/context/ subpackage (#748)
     # Legacy root-level scripts (replaced by ai_template_scripts/ versions)
-    "init.sh"                               # Use ai_template_scripts/install_dev_tools.sh
-    "setup_labels.sh"                       # Use ai_template_scripts/init_labels.sh
-    "json_to_text.py"                       # Use ai_template_scripts/json_to_text.py
-    "code_stats.py"                         # Use ai_template_scripts/code_stats.py
-    "markdown_to_issues.py"                 # Use ai_template_scripts/markdown_to_issues.py
-    "frontpage.sh"                          # DashNews-specific, not template
-    "mail.sh"                               # Legacy mail system removed
-    "roadmap_to_issues.sh"                  # Legacy roadmap system removed
-    "scripts/validate_claim.py"             # Moved to ai_template_scripts/validate_claim.py
+    "init.sh"                   # Use ai_template_scripts/install_dev_tools.sh
+    "setup_labels.sh"           # Use ai_template_scripts/init_labels.sh
+    "json_to_text.py"           # Use ai_template_scripts/json_to_text.py
+    "code_stats.py"             # Use ai_template_scripts/code_stats.py
+    "markdown_to_issues.py"     # Use ai_template_scripts/markdown_to_issues.py
+    "frontpage.sh"              # DashNews-specific, not template
+    "mail.sh"                   # Legacy mail system removed
+    "roadmap_to_issues.sh"      # Legacy roadmap system removed
+    "scripts/validate_claim.py" # Moved to ai_template_scripts/validate_claim.py
 )
 
 # Legacy directories to remove
 OLD_TEMPLATE_DIRS=(
-    "mail"                                  # Legacy mail system removed
+    "mail" # Legacy mail system removed
 )
 
 for old_file in "${OLD_TEMPLATE_FILES[@]}"; do
@@ -721,7 +744,7 @@ if [[ -f "$FEATURES_FILE" ]]; then
         fi
 
         ENABLED_FEATURES+=("$line")
-    done < "$FEATURES_FILE"
+    done <"$FEATURES_FILE"
 fi
 
 # Sync enabled features
@@ -783,7 +806,7 @@ SYNC_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 if [[ "$DRY_RUN" == "true" ]]; then
     log_info "Would write .ai_template_version: $AI_TEMPLATE_VERSION @ $SYNC_TIMESTAMP"
 else
-    cat > "$TARGET_REPO/.ai_template_version" <<EOF
+    cat >"$TARGET_REPO/.ai_template_version" <<EOF
 $AI_TEMPLATE_VERSION_FULL
 $SYNC_TIMESTAMP
 EOF
@@ -795,17 +818,17 @@ echo ""
 log_info "Ensuring required labels exist..."
 
 if [[ "$DRY_RUN" == "true" ]]; then
-    pushd "$TARGET_REPO" > /dev/null
+    pushd "$TARGET_REPO" >/dev/null
     "$SCRIPT_DIR/init_labels.sh" --dry-run
-    popd > /dev/null
+    popd >/dev/null
 else
-    pushd "$TARGET_REPO" > /dev/null
+    pushd "$TARGET_REPO" >/dev/null
     if ! "$SCRIPT_DIR/init_labels.sh"; then
         log_warn "Label creation encountered errors (see warnings above)"
     else
         log_ok "Labels synced"
     fi
-    popd > /dev/null
+    popd >/dev/null
 fi
 
 echo ""
@@ -814,7 +837,7 @@ if [[ "$DRY_RUN" == "true" ]]; then
 else
     # Commit and push
     log_info "Committing changes..."
-    pushd "$TARGET_REPO" > /dev/null
+    pushd "$TARGET_REPO" >/dev/null
 
     git add -A
     if git diff --cached --quiet; then
@@ -827,7 +850,11 @@ else
             log_info "Skipping push (--no-push specified)"
         else
             log_info "Pushing to remote..."
-            git push || { log_error "Push failed. Push manually."; popd > /dev/null; exit 1; }
+            git push || {
+                log_error "Push failed. Push manually."
+                popd >/dev/null
+                exit 1
+            }
             log_ok "Pushed to remote"
         fi
     fi
@@ -836,7 +863,7 @@ else
     HOOKS_DIR=$(git rev-parse --git-path hooks 2>/dev/null || true)
     if [[ -z "$HOOKS_DIR" ]]; then
         log_error "Failed to resolve hooks directory"
-        popd > /dev/null
+        popd >/dev/null
         exit 1
     fi
     if [[ "$HOOKS_DIR" != /* ]]; then
@@ -953,6 +980,6 @@ else
         fi
     fi
 
-    popd > /dev/null
+    popd >/dev/null
     log_ok "Sync complete!"
 fi

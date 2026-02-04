@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # gh wrapper - Transparent rate limiting, caching, and AI identity for GitHub CLI
 #
-# CANONICAL SOURCE: ayates_dbx/ai_template
+# CANONICAL SOURCE: dropbox-ai-prototypes/ai_template
 # DO NOT EDIT in other repos - file issues to ai_template for changes.
 #
 # This wrapper sits in PATH before the real gh and:

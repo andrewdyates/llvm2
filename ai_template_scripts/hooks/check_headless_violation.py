@@ -110,8 +110,16 @@ def extract_text_from_jsonl(log_file: Path) -> list[str]:
                                         if isinstance(text, str):
                                             texts.append(text)
                         # Codex item.completed format: {"type": "item.completed", "item": {"text": "..."}}
+                        # Skip non-user-facing item types (#2314, #2327):
+                        # - reasoning: Internal AI reasoning
+                        # - file_change: File diffs (may contain violation patterns in comments)
+                        # - command_execution: Shell output (may echo violation phrases)
+                        # Only agent_message items are user-facing and should be checked.
                         elif data.get("type") == "item.completed":
                             item = data.get("item", {})
+                            item_type = item.get("type")
+                            if item_type in ("reasoning", "file_change", "command_execution"):
+                                continue
                             text = item.get("text")
                             if isinstance(text, str):
                                 texts.append(text)

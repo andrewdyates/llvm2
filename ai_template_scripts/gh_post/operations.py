@@ -143,7 +143,7 @@ def _notify_mail_sender_on_close(
             "issue",
             "create",
             "--repo",
-            f"ayates_dbx/{sender}",
+            f"dropbox-ai-prototypes/{sender}",
             "--title",
             notif_title,
             "--body",

@@ -248,11 +248,11 @@ class RateLimiter:
         Args:
             args: Command arguments that triggered the write
             repo: Target repo for cross-repo operations (#2066). Can be owner/repo
-                format (e.g., "ayates_dbx/kafka2") or just repo name ("kafka2").
+                format (e.g., "dropbox-ai-prototypes/kafka2") or just repo name ("kafka2").
                 If not provided, uses current directory's repo.
         """
         # Normalize repo to just the directory name for cache key matching (#2066)
-        # Cache stores "kafka2", not "ayates_dbx/kafka2"
+        # Cache stores "kafka2", not "dropbox-ai-prototypes/kafka2"
         if repo and "/" in repo:
             target_repo = repo.split("/")[-1]
         else:

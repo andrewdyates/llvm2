@@ -10,7 +10,7 @@
 #
 # Configuration (cargo_wrapper.toml):
 #   [auto_bump]
-#   repos = ["https://github.com/ayates_dbx/z4", "https://github.com/ayates_dbx/tMIR"]
+#   repos = ["https://github.com/dropbox-ai-prototypes/z4", "https://github.com/dropbox-ai-prototypes/tMIR"]
 #
 # Skip behavior:
 #   - Skips if "Blocked by" found in any Cargo.toml
@@ -111,7 +111,7 @@ while IFS= read -r repo; do
             ((BUMPED++)) || true
         fi
     fi
-done <<< "$REPOS"
+done <<<"$REPOS"
 
 if [[ $BUMPED -gt 0 ]]; then
     log_ok "Bumped $BUMPED dependency(ies). Run 'cargo check' to verify."

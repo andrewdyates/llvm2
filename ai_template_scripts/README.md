@@ -37,6 +37,10 @@ Some modules exist as both a **wrapper script** (`foo.py`) and a **package** (`f
 
 | Component | Purpose | When to Use |
 |-----------|---------|-------------|
+| `code_stats.py` | CLI wrapper script | `./ai_template_scripts/code_stats.py --help` |
+| `code_stats/` | Package with complexity analysis | `from ai_template_scripts.code_stats import analyze_complexity` |
+| `crash_analysis.py` | CLI wrapper script | `./ai_template_scripts/crash_analysis.py --help` |
+| `crash_analysis/` | Package with log analysis | `from ai_template_scripts.crash_analysis import analyze_crashes` |
 | `pulse.py` | CLI wrapper script | `./ai_template_scripts/pulse.py --help` |
 | `pulse/` | Package with internal modules | `from ai_template_scripts.pulse import get_issue_counts` |
 | `json_to_text.py` | CLI wrapper (stdin → formatted output) | `cat log.jsonl \| ./ai_template_scripts/json_to_text.py` |
@@ -73,8 +77,10 @@ Entries are listed alphabetically by script name (LC_ALL=C / ASCII byte order).
 | `cleanup_old_reports.py` | Remove old ephemeral reports to prevent repo bloat | AI, human |
 | `cleanup_tla_states.sh` | Remove TLA+ state files to prevent disk bloat | AI, human |
 | `code_stats.py` | Code complexity analysis | MANAGER, human |
+| `code_stats/` | Package with complexity analysis modules | `code_stats.py` |
 | `commit-msg-hook.sh` | Git hook for structured commits | Git |
 | `crash_analysis.py` | Crash log analysis, system health | MANAGER, human |
+| `crash_analysis/` | Package with log analysis modules | `crash_analysis.py` |
 | `design_issue_audit.py` | Audit design docs and issue cross-references | MANAGER, human |
 | `doc_health_check.py` | Check CLAUDE.md completeness for AI operations | MANAGER doc_health phase |
 | `exclude_patterns.py` | Shared directory exclusion patterns for codebase analysis | Import only |
@@ -103,6 +109,7 @@ Entries are listed alphabetically by script name (LC_ALL=C / ASCII byte order).
 | `install_tla_tools.sh` | Install TLA+ tools (TLC) and configure env | Human, `check_deps.py --fix` |
 | `integration_audit.py` | Detect orphan modules not reachable from entry points | MANAGER, human |
 | `json_to_text.py` | Format Claude/Codex JSON output for terminal | `looper.py` |
+| `kani_runner.py` | Run Kani proofs with timeout management and status tracking | PROVER, AI |
 | `labels.py` | Shared label constants for GitHub issue management | Import only |
 | `lint_applescript.sh` | Validate AppleScript syntax in shell scripts | AI, human |
 | `local_issue_store.py` | File-based issue storage for offline development mode | `gh_local.py` |
@@ -113,6 +120,7 @@ Entries are listed alphabetically by script name (LC_ALL=C / ASCII byte order).
 | `path_utils.py` | Path utilities with deprecation support | Import only |
 | `pip_audit.sh` | Scan requirements.txt for known vulnerabilities | Human, MANAGER |
 | `post-commit-hook.sh` | Git hook for post-commit actions | Git |
+| `post-merge-hook.sh` | Git hook for auto-bumping git dependencies after pull/merge | Git |
 | `pre-commit-hook.sh` | Git hook for copyright/author validation | Git |
 | `pre-push-hook.sh` | Git hook for claim validation before push | Git |
 | `provenance_capture.py` | Capture SLSA-style build/test provenance | AI, human |
@@ -130,6 +138,7 @@ Entries are listed alphabetically by script name (LC_ALL=C / ASCII byte order).
 | `sync_local_issues.py` | Sync local issues to GitHub | Human, AI |
 | `sync_repo.sh` | Sync template files to target repo | Human, scripts |
 | `test_utils.py` | Test subprocess utilities with default timeouts | Tests |
+| `timeout_classifier.py` | Classify timeout events (long_command, stuck_query, etc.) | MANAGER, human |
 | `update_claude_user_settings.py` | Update ~/.claude/settings.json with recommended env vars | `init_from_template.sh`, Human |
 | `update_line_counts.py` | Update CLAUDE.md "Files Loaded Per Session" table line counts | Human, scripts |
 | `url_sanitizer.py` | Git URL sanitizer - removes credentials for safe logging | Scripts, import |
@@ -169,6 +178,29 @@ Usage:
 ### json_to_text.py
 Converts Claude/Codex streaming JSON output to readable terminal text. Critical for `looper.py` - all AI output is piped through this.
 
+### kani_runner.py
+Runs Kani proofs with configurable timeouts, tracks results to `kani_status.json`, and integrates with the looper 60s progress requirement.
+
+Usage:
+```bash
+# Run all proofs with 5-minute default timeout
+python3 -m ai_template_scripts.kani_runner --timeout 300
+
+# Run specific harness with custom timeout
+python3 -m ai_template_scripts.kani_runner --harness proof_foo --timeout 600
+
+# Run only not_run proofs
+python3 -m ai_template_scripts.kani_runner --filter not_run
+
+# Audit: compare tracking file to actual harnesses
+python3 -m ai_template_scripts.kani_runner --audit
+
+# Dry run: discover harnesses without executing
+python3 -m ai_template_scripts.kani_runner --dry-run
+```
+
+**Status tracking:** Results are stored in `kani_status.json` at repo root. The Prover role audits this file against actual harnesses each rotation.
+
 ### code_stats.py
 Analyzes cyclomatic/cognitive complexity across multiple languages (Python, Rust, Go, C++, etc). Uses best-in-class tools per language (radon for Python, gocyclo for Go, etc).
 
@@ -191,9 +223,9 @@ Bumps git dependency revision in Cargo.toml files to the latest commit (or a spe
 
 Usage:
 ```bash
-./ai_template_scripts/bump_git_dep_rev.sh https://github.com/ayates_dbx/z4           # Bump to HEAD
-./ai_template_scripts/bump_git_dep_rev.sh https://github.com/ayates_dbx/z4 cdfa08fb  # Bump to specific rev
-./ai_template_scripts/bump_git_dep_rev.sh --dry-run https://github.com/ayates_dbx/z4 # Preview changes
+./ai_template_scripts/bump_git_dep_rev.sh https://github.com/dropbox-ai-prototypes/z4           # Bump to HEAD
+./ai_template_scripts/bump_git_dep_rev.sh https://github.com/dropbox-ai-prototypes/z4 cdfa08fb  # Bump to specific rev
+./ai_template_scripts/bump_git_dep_rev.sh --dry-run https://github.com/dropbox-ai-prototypes/z4 # Preview changes
 ```
 
 After running, follow up with:
@@ -405,7 +437,7 @@ gh issue cleanup-closed --dry-run # Preview without modifying
 - `AI_SESSION` - Session UUID
 
 ### gh_discussion.py
-List, get, create, and comment on GitHub discussions with AI identity markers. Used for posting to Dash News (ayates_dbx/dashnews).
+List, get, create, and comment on GitHub discussions with AI identity markers. Used for posting to Dash News (dropbox-ai-prototypes/dashnews).
 
 Usage:
 ```bash
@@ -417,7 +449,7 @@ Usage:
 # Get a specific discussion by number
 ./ai_template_scripts/gh_discussion.py get 211
 ./ai_template_scripts/gh_discussion.py get 211 --json
-./ai_template_scripts/gh_discussion.py get 211 --repo ayates_dbx/other
+./ai_template_scripts/gh_discussion.py get 211 --repo dropbox-ai-prototypes/other
 
 # Create a discussion
 ./ai_template_scripts/gh_discussion.py create --title "Title" --body "Body"
@@ -535,6 +567,7 @@ Package for GitHub API rate limiting. Used by `gh_wrapper.py`. Provides transpar
 - `serialize.py` - SerializedFetcher, lock file management
 - `changelog.py` - Change, ChangeLog for offline queueing
 - `batch.py` - Batch issue fetch helpers
+- `secondary_backoff.py` - Secondary rate limit backoff strategy
 
 ### gh_wrapper.py
 Transparent gh wrapper that routes commands through rate limiting and caching. Called by `bin/gh` for non-issue-write commands (`issue list`, `issue view`, `repo view`, `api`, etc.).
@@ -566,8 +599,8 @@ if result.ok:
 
 # Batch multiple queries in one API call
 result = graphql_batch([
-    ('repo1', 'repository(owner:"ayates_dbx", name:"ai_template") { id }'),
-    ('repo2', 'repository(owner:"ayates_dbx", name:"leadership") { id }'),
+    ('repo1', 'repository(owner:"dropbox-ai-prototypes", name:"ai_template") { id }'),
+    ('repo2', 'repository(owner:"dropbox-ai-prototypes", name:"leadership") { id }'),
 ])
 ```
 
@@ -728,7 +761,7 @@ from ai_template_scripts.subprocess_utils import get_repo_name, get_github_repo
 result = get_repo_name()
 name = result.stdout  # Always succeeds with fallback chain
 
-# Get owner/repo (e.g., "ayates_dbx/ai_template")
+# Get owner/repo (e.g., "dropbox-ai-prototypes/ai_template")
 result = get_github_repo()
 if result.ok:
     repo = result.stdout
@@ -815,6 +848,22 @@ See `docs/hooks.md` for detailed configuration options.
 
 ### post-commit-hook.sh
 Git post-commit hook for post-commit actions. Installed to `.git/hooks/post-commit`.
+
+### post-merge-hook.sh
+Git post-merge hook for automatic dependency bumping after `git pull` or `git merge`. Reads configured repos from `cargo_wrapper.toml` and bumps their git dependency revisions.
+
+**Configuration (cargo_wrapper.toml):**
+```toml
+[auto_bump]
+repos = ["https://github.com/dropbox-ai-prototypes/z4", "https://github.com/dropbox-ai-prototypes/tMIR"]
+```
+
+**Skip behavior:**
+- Skips if "Blocked by" found in any Cargo.toml
+- Skips if no `[auto_bump]` section configured
+- Skips if `bump_git_dep_rev.sh` not found
+
+Installed to `.git/hooks/post-merge` by `install_hooks.sh`.
 
 ### install_hooks.sh
 Installs the pre-commit framework and sets up git hooks (pre-commit, commit-msg, and pre-push). Auto-detects and installs pre-commit via pip or Homebrew if not present.

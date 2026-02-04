@@ -3,7 +3,7 @@
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
 #
-# CANONICAL SOURCE: ayates_dbx/ai_template
+# CANONICAL SOURCE: dropbox-ai-prototypes/ai_template
 # DO NOT EDIT in other repos - file issues to ai_template for changes.
 #
 # check_claude_version.sh - Verify installed Claude Code CLI matches pinned version
@@ -48,16 +48,16 @@ STRICT=false
 
 for arg in "$@"; do
     case "$arg" in
-        --strict) STRICT=true ;;
-        -h|--help)
-            echo "Usage: $0 [--strict]"
-            echo ""
-            echo "Verify installed Claude Code CLI matches pinned version in .claude-version"
-            echo ""
-            echo "Options:"
-            echo "  --strict    Exit with error if version mismatch"
-            exit 0
-            ;;
+    --strict) STRICT=true ;;
+    -h | --help)
+        echo "Usage: $0 [--strict]"
+        echo ""
+        echo "Verify installed Claude Code CLI matches pinned version in .claude-version"
+        echo ""
+        echo "Options:"
+        echo "  --strict    Exit with error if version mismatch"
+        exit 0
+        ;;
     esac
 done
 

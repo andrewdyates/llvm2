@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # python3 wrapper - Block inline Python for issue filtering (#1987, #2159)
 #
-# CANONICAL SOURCE: ayates_dbx/ai_template
+# CANONICAL SOURCE: dropbox-ai-prototypes/ai_template
 # DO NOT EDIT in other repos - file issues to ai_template for changes.
 #
 # This wrapper prevents the pattern:

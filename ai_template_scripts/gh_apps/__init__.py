@@ -18,7 +18,7 @@ Usage:
 
 Architecture:
     - Apps are hosted in dropbox-ai-prototypes org
-    - Apps are installed on ayates_dbx user repos
+    - Apps are installed on dropbox-ai-prototypes user repos
     - Each app gets independent rate limit quota
 
 Configuration:
@@ -27,12 +27,14 @@ Configuration:
 """
 
 from ai_template_scripts.gh_apps.config import AppConfig, load_config
+from ai_template_scripts.gh_apps.logging import debug_log
 from ai_template_scripts.gh_apps.selector import get_app_for_repo
 from ai_template_scripts.gh_apps.token import TokenManager, get_token
 
 __all__ = [
     "AppConfig",
     "TokenManager",
+    "debug_log",
     "get_app_for_repo",
     "get_token",
     "load_config",

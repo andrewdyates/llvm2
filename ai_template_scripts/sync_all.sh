@@ -5,7 +5,7 @@
 
 # sync_all.sh - Batch sync ai_template to all sibling repos
 #
-# CANONICAL SOURCE: ayates_dbx/ai_template
+# CANONICAL SOURCE: dropbox-ai-prototypes/ai_template
 # DO NOT EDIT in other repos - file issues to ai_template for changes.
 #
 # Usage:
@@ -45,7 +45,7 @@ version() {
 # Cache for archived repos (avoid repeated API calls)
 ARCHIVED_CACHE_DIR="${HOME}/.cache/ai_template"
 ARCHIVED_CACHE_FILE="${ARCHIVED_CACHE_DIR}/archived_repos.txt"
-ARCHIVED_CACHE_AGE=3600  # 1 hour
+ARCHIVED_CACHE_AGE=3600 # 1 hour
 
 # Get file mtime portably (Linux uses -c %Y, macOS uses -f %m)
 get_file_mtime() {
@@ -66,23 +66,23 @@ is_repo_archived() {
     local result stderr_file
     stderr_file=$(mktemp)
     # NOTE: Do NOT use gh -q or --jq - has caching bugs in v2.83.2+ (#1047)
-    if result=$(gh repo view "ayates_dbx/$repo_name" --json isArchived 2>"$stderr_file" | jq -r '.isArchived'); then
+    if result=$(gh repo view "dropbox-ai-prototypes/$repo_name" --json isArchived 2>"$stderr_file" | jq -r '.isArchived'); then
         rm -f "$stderr_file"
         if [[ "$result" == "true" ]]; then
             mkdir -p "$ARCHIVED_CACHE_DIR"
             # Avoid duplicates in cache file
-            grep -qx "$repo_name" "$ARCHIVED_CACHE_FILE" 2>/dev/null || echo "$repo_name" >> "$ARCHIVED_CACHE_FILE"
+            grep -qx "$repo_name" "$ARCHIVED_CACHE_FILE" 2>/dev/null || echo "$repo_name" >>"$ARCHIVED_CACHE_FILE"
             return 0
         fi
         return 1
     fi
     if grep -qiE 'rate.?limit' "$stderr_file" 2>/dev/null; then
         rm -f "$stderr_file"
-        if result=$(gh api "repos/ayates_dbx/$repo_name" 2>/dev/null | jq -r '.archived'); then
+        if result=$(gh api "repos/dropbox-ai-prototypes/$repo_name" 2>/dev/null | jq -r '.archived'); then
             if [[ "$result" == "true" ]]; then
                 mkdir -p "$ARCHIVED_CACHE_DIR"
                 # Avoid duplicates in cache file
-                grep -qx "$repo_name" "$ARCHIVED_CACHE_FILE" 2>/dev/null || echo "$repo_name" >> "$ARCHIVED_CACHE_FILE"
+                grep -qx "$repo_name" "$ARCHIVED_CACHE_FILE" 2>/dev/null || echo "$repo_name" >>"$ARCHIVED_CACHE_FILE"
                 return 0
             fi
             return 1
@@ -98,7 +98,10 @@ AI_TEMPLATE_ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$AI_TEMPLATE_ROOT"
 
-[[ -f "CLAUDE.md" ]] || { log_error "Run from ai_template root"; exit 1; }
+[[ -f "CLAUDE.md" ]] || {
+    log_error "Run from ai_template root"
+    exit 1
+}
 
 # Parse args
 DRY_RUN=false
@@ -107,100 +110,100 @@ PARALLEL=1
 BEHIND_ONLY=false
 SPECIFIC_REPOS=()
 NO_PUSH=false
-TIMEOUT=0  # Per-repo timeout in seconds (0 = no timeout)
-MAX_REPOS=0  # Maximum repos to process (0 = no limit)
+TIMEOUT=0   # Per-repo timeout in seconds (0 = no timeout)
+MAX_REPOS=0 # Maximum repos to process (0 = no limit)
 TIMEOUT_CMD=""
 TIMEOUT_ACTIVE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --dry-run)
-            DRY_RUN=true
-            shift
-            ;;
-        --summary)
-            SUMMARY_ONLY=true
-            DRY_RUN=true  # Summary implies dry-run
-            shift
-            ;;
-        --parallel)
-            if [[ -z "${2:-}" || "$2" == -* ]]; then
-                log_error "--parallel requires a number argument"
-                exit 1
-            fi
-            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                log_error "--parallel must be a positive integer, got: $2"
-                exit 1
-            fi
-            PARALLEL="$2"
-            shift 2
-            ;;
-        --behind)
-            BEHIND_ONLY=true
-            shift
-            ;;
-        --no-push)
-            NO_PUSH=true
-            shift
-            ;;
-        --timeout)
-            if [[ -z "${2:-}" || "$2" == -* ]]; then
-                log_error "--timeout requires a number argument (seconds)"
-                exit 1
-            fi
-            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                log_error "--timeout must be a positive integer, got: $2"
-                exit 1
-            fi
-            TIMEOUT="$2"
-            shift 2
-            ;;
-        --max-repos)
-            if [[ -z "${2:-}" || "$2" == -* ]]; then
-                log_error "--max-repos requires a number argument"
-                exit 1
-            fi
-            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                log_error "--max-repos must be a positive integer, got: $2"
-                exit 1
-            fi
-            MAX_REPOS="$2"
-            shift 2
-            ;;
-        --version)
-            version
-            ;;
-        -h|--help)
-            echo "Usage: $0 [OPTIONS] [repo1 repo2 ...]"
-            echo ""
-            echo "Batch sync ai_template to multiple repos."
-            echo ""
-            echo "Options:"
-            echo "  --dry-run      Show what would be synced (with per-repo details)"
-            echo "  --summary      Quick status summary only (faster than --dry-run)"
-            echo "  --parallel N   Sync N repos in parallel (default: serial)"
-            echo "  --behind       Only sync repos that are behind (skip untracked)"
-            echo "  --no-push      Sync and commit but don't push to remote"
-            echo "  --timeout N    Per-repo timeout in seconds (default: no limit)"
-            echo "  --max-repos N  Limit number of repos to process (default: all)"
-            echo "  --version      Show version information"
-            echo "  -h, --help     Show this help message"
-            echo ""
-            echo "Examples:"
-            echo "  $0 --dry-run                    # Preview all sibling repos"
-            echo "  $0 --behind --parallel 4        # Sync behind repos in parallel"
-            echo "  $0 --timeout 60 --max-repos 10  # Process max 10 repos, 60s each"
-            echo "  $0 ~/proj1 ~/proj2              # Sync specific repos"
-            exit 0
-            ;;
-        -*)
-            log_error "Unknown option: $1"
+    --dry-run)
+        DRY_RUN=true
+        shift
+        ;;
+    --summary)
+        SUMMARY_ONLY=true
+        DRY_RUN=true # Summary implies dry-run
+        shift
+        ;;
+    --parallel)
+        if [[ -z "${2:-}" || "$2" == -* ]]; then
+            log_error "--parallel requires a number argument"
             exit 1
-            ;;
-        *)
-            SPECIFIC_REPOS+=("$1")
-            shift
-            ;;
+        fi
+        if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+            log_error "--parallel must be a positive integer, got: $2"
+            exit 1
+        fi
+        PARALLEL="$2"
+        shift 2
+        ;;
+    --behind)
+        BEHIND_ONLY=true
+        shift
+        ;;
+    --no-push)
+        NO_PUSH=true
+        shift
+        ;;
+    --timeout)
+        if [[ -z "${2:-}" || "$2" == -* ]]; then
+            log_error "--timeout requires a number argument (seconds)"
+            exit 1
+        fi
+        if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+            log_error "--timeout must be a positive integer, got: $2"
+            exit 1
+        fi
+        TIMEOUT="$2"
+        shift 2
+        ;;
+    --max-repos)
+        if [[ -z "${2:-}" || "$2" == -* ]]; then
+            log_error "--max-repos requires a number argument"
+            exit 1
+        fi
+        if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+            log_error "--max-repos must be a positive integer, got: $2"
+            exit 1
+        fi
+        MAX_REPOS="$2"
+        shift 2
+        ;;
+    --version)
+        version
+        ;;
+    -h | --help)
+        echo "Usage: $0 [OPTIONS] [repo1 repo2 ...]"
+        echo ""
+        echo "Batch sync ai_template to multiple repos."
+        echo ""
+        echo "Options:"
+        echo "  --dry-run      Show what would be synced (with per-repo details)"
+        echo "  --summary      Quick status summary only (faster than --dry-run)"
+        echo "  --parallel N   Sync N repos in parallel (default: serial)"
+        echo "  --behind       Only sync repos that are behind (skip untracked)"
+        echo "  --no-push      Sync and commit but don't push to remote"
+        echo "  --timeout N    Per-repo timeout in seconds (default: no limit)"
+        echo "  --max-repos N  Limit number of repos to process (default: all)"
+        echo "  --version      Show version information"
+        echo "  -h, --help     Show this help message"
+        echo ""
+        echo "Examples:"
+        echo "  $0 --dry-run                    # Preview all sibling repos"
+        echo "  $0 --behind --parallel 4        # Sync behind repos in parallel"
+        echo "  $0 --timeout 60 --max-repos 10  # Process max 10 repos, 60s each"
+        echo "  $0 ~/proj1 ~/proj2              # Sync specific repos"
+        exit 0
+        ;;
+    -*)
+        log_error "Unknown option: $1"
+        exit 1
+        ;;
+    *)
+        SPECIFIC_REPOS+=("$1")
+        shift
+        ;;
     esac
 done
 
@@ -234,17 +237,17 @@ if [[ ${#SPECIFIC_REPOS[@]} -gt 0 ]]; then
         fi
     done
 else
-    # Default: sibling directories that are ayates_dbx repos
+    # Default: sibling directories that are dropbox-ai-prototypes repos
     PARENT_DIR="$(dirname "$AI_TEMPLATE_ROOT")"
     for dir in "$PARENT_DIR"/*/; do
         [[ -d "$dir/.git" ]] || continue
         [[ "$(basename "$dir")" == "ai_template" ]] && continue
 
-        # Only sync ayates_dbx repos (check git remote)
+        # Only sync dropbox-ai-prototypes repos (check git remote)
         repo_name=$(basename "$dir")
         remote_url=$(git -C "$dir" remote get-url origin 2>/dev/null || echo "")
-        if [[ ! "$remote_url" =~ ayates_dbx ]]; then
-            continue  # Skip non-ayates_dbx repos
+        if [[ ! "$remote_url" =~ dropbox-ai-prototypes ]]; then
+            continue # Skip non-dropbox-ai-prototypes repos
         fi
 
         # Skip archived repos
@@ -255,11 +258,11 @@ else
         if [[ "$BEHIND_ONLY" == "true" ]]; then
             version_file="$dir/.ai_template_version"
             if [[ ! -f "$version_file" ]]; then
-                continue  # Skip untracked repos when --behind is used
+                continue # Skip untracked repos when --behind is used
             fi
             repo_version=$(head -1 "$version_file" | tr -d '[:space:]')
             if [[ "$repo_version" == "$CURRENT_VERSION" ]]; then
-                continue  # Skip up-to-date repos
+                continue # Skip up-to-date repos
             fi
         fi
 
@@ -396,7 +399,7 @@ sync_single_repo() {
 
     if [[ -n "${STATUS_DIR:-}" ]]; then
         local status_file="$STATUS_DIR/${repo_name}.status"
-        printf '%s %s\n' "$exit_code" "$timed_out" > "$status_file"
+        printf '%s %s\n' "$exit_code" "$timed_out" >"$status_file"
     fi
 
     return $exit_code
@@ -438,7 +441,7 @@ for repo in "${REPOS[@]}"; do
         FAILED+=("$repo_name")
         continue
     fi
-    read -r exit_code timed_out < "$status_file"
+    read -r exit_code timed_out <"$status_file"
     if [[ "$timed_out" == "true" ]]; then
         TIMED_OUT+=("$repo_name")
     elif [[ "$exit_code" -eq 0 ]]; then

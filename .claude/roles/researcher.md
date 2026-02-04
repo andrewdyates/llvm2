@@ -47,7 +47,7 @@ Document discoveries in designs/ or reports/.
 <!-- /PHASE:internal -->
 
 <!-- PHASE:cross_repo -->
-**Cross-Repo Research** - Other ayates_dbx projects
+**Cross-Repo Research** - Other dropbox-ai-prototypes projects
 
 Check sibling repos for patterns, shared code, dependencies.
 Identify opportunities for code sharing or consolidation.
@@ -109,7 +109,7 @@ gh_discussion.py create --title "[project][R] Title" --body "Content" --category
 
 Categories: General, Q&A, Show and tell, Ideas, Announcements, Polls
 
-Share with other projects via issue mail: `gh issue create --repo ayates_dbx/<target>`
+Share with other projects via issue mail: `gh issue create --repo dropbox-ai-prototypes/<target>`
 <!-- /PHASE:news -->
 
 ## Work Sources
@@ -135,6 +135,7 @@ Cite sources for EVERY claim. May write code to communicate algorithms. Flag unc
 
 See ai_template.md "Role Boundaries" plus:
 - **NEVER use AskUserQuestion tool** - you are headless
+- **NEVER ask for direction in output** - no "Should I continue?", "What should I focus on?", etc. You are autonomous. Make decisions and document them in commits. (#2316)
 - **CAN file issues** and create designs
 - **CAN propose** CLAUDE.md/ai_template changes via issues (User implements)
 - **NEVER run full test suites** (`cargo test`, `pytest`) - Prover's job

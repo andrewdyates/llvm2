@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cargo wrapper - Serializes cargo builds org-wide to prevent deadlocks and OOM
 #
-# CANONICAL SOURCE: ayates_dbx/ai_template
+# CANONICAL SOURCE: dropbox-ai-prototypes/ai_template
 # DO NOT EDIT in other repos - file issues to ai_template for changes.
 #
 # This wrapper sits in PATH before the real cargo and:
@@ -53,20 +53,20 @@ BYPASS_WRAPPER=""
 FILTERED_ARGS=()
 for arg in "$@"; do
     case "$arg" in
-        --wrapper-help)
-            print_wrapper_help
-            exit 0
-            ;;
-        --wrapper-version)
-            print_wrapper_version
-            exit 0
-            ;;
-        --no-wrapper)
-            BYPASS_WRAPPER="1"
-            ;;
-        *)
-            FILTERED_ARGS+=("$arg")
-            ;;
+    --wrapper-help)
+        print_wrapper_help
+        exit 0
+        ;;
+    --wrapper-version)
+        print_wrapper_version
+        exit 0
+        ;;
+    --no-wrapper)
+        BYPASS_WRAPPER="1"
+        ;;
+    *)
+        FILTERED_ARGS+=("$arg")
+        ;;
     esac
 done
 
@@ -85,7 +85,7 @@ done
 
 # Fall back to PATH search if not found
 if [[ -z "$REAL_CARGO" ]]; then
-    IFS=':' read -ra PATH_DIRS <<< "$PATH"
+    IFS=':' read -ra PATH_DIRS <<<"$PATH"
     for p in "${PATH_DIRS[@]}"; do
         [[ -d "$p" ]] || continue
         cargo_candidate="$p/cargo"

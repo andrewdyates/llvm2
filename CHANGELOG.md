@@ -60,5 +60,5 @@ Initial CHANGELOG creation for V1 deprecation policy tracking.
 - V1 readiness requires: API stability, deprecation policy, test coverage, documentation accuracy
 - See `designs/2026-02-03-v1-success-criteria.md` for V1 criteria
 
-[Unreleased]: https://github.com/ayates_dbx/ai_template/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/ayates_dbx/ai_template/releases/tag/v0.1.0
+[Unreleased]: https://github.com/dropbox-ai-prototypes/ai_template/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/dropbox-ai-prototypes/ai_template/releases/tag/v0.1.0

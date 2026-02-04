@@ -53,6 +53,25 @@ def get_audit_data() -> Result[str]:
             except Exception as e:
                 debug_swallow("crash_analysis.py", e)
 
+        # timeout_classifier.py - timeout event classification (#2310)
+        timeout_script = Path("ai_template_scripts/timeout_classifier.py")
+        if timeout_script.exists():
+            try:
+                result = subprocess.run(
+                    ["python3", str(timeout_script), "--report"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if result.stdout.strip():
+                    # Only include if there are timeout events
+                    if "Total events: 0" not in result.stdout:
+                        sections.append(
+                            f"### timeout_classifier.py\n```\n{result.stdout.strip()}\n```"
+                        )
+            except Exception as e:
+                debug_swallow("timeout_classifier.py", e)
+
         # system_health_check.py (project integration sanity)
         health_timeout = load_timeout_config().get("health_check", 120)
         system_health = run_system_health_check(timeout_sec=health_timeout)

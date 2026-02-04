@@ -6,7 +6,7 @@
 """
 gh_discussion.py - List, get, create, and comment on GitHub discussions
 
-CANONICAL SOURCE: ayates_dbx/ai_template
+CANONICAL SOURCE: dropbox-ai-prototypes/ai_template
 DO NOT EDIT in other repos - file issues to ai_template for changes.
 
 Provides consistent interface with gh issue create, adds identity automatically.
@@ -18,7 +18,7 @@ Usage:
   gh_discussion.py get 211 --json
   gh_discussion.py create --title "Title" --body "Body" --category "General"
   gh_discussion.py comment --number 42 --body "Comment"
-  --repo ayates_dbx/dashnews
+  --repo dropbox-ai-prototypes/dashnews
 
 Categories for dashnews: General, Q&A, Show and tell, Ideas, Announcements, Polls
 
@@ -148,14 +148,14 @@ Commands:
   comment   Add a comment to an existing discussion
 
 List Options:
-  --repo OWNER/REPO   Target repo (default: ayates_dbx/dashnews)
+  --repo OWNER/REPO   Target repo (default: dropbox-ai-prototypes/dashnews)
   --limit N           Number of discussions to list (default: 10, max: 100)
   --category CAT      Filter by category (optional)
   --json              Output in JSON format
 
 Get Options:
   NUMBER              Discussion number (required, positional)
-  --repo OWNER/REPO   Target repo (default: ayates_dbx/dashnews)
+  --repo OWNER/REPO   Target repo (default: dropbox-ai-prototypes/dashnews)
   --json              Output in JSON format
 
 Create Options:
@@ -163,12 +163,12 @@ Create Options:
   --body BODY         Discussion body (required)
   --category CAT      Category: General, Q&A, "Show and tell", Ideas, Announcements,
                       Polls (default: General)
-  --repo OWNER/REPO   Target repo (default: ayates_dbx/dashnews)
+  --repo OWNER/REPO   Target repo (default: dropbox-ai-prototypes/dashnews)
 
 Comment Options:
   --number N          Discussion number (required)
   --body BODY         Comment body (required)
-  --repo OWNER/REPO   Target repo (default: ayates_dbx/dashnews)
+  --repo OWNER/REPO   Target repo (default: dropbox-ai-prototypes/dashnews)
 
 Examples:
   gh_discussion.py list
@@ -176,7 +176,7 @@ Examples:
   gh_discussion.py list --json
   gh_discussion.py get 211
   gh_discussion.py get 211 --json
-  gh_discussion.py get 211 --repo ayates_dbx/other
+  gh_discussion.py get 211 --repo dropbox-ai-prototypes/other
   gh_discussion.py create --title "New discovery" --body "Found something interesting"
   gh_discussion.py create --title "Question" --body "How do I...?" --category "Q&A"
   gh_discussion.py comment --number 42 --body "Great post!"
@@ -255,7 +255,7 @@ def create_discussion(args: list[str]) -> str:
     title = ""
     body = ""
     category = "General"
-    repo = "ayates_dbx/dashnews"
+    repo = "dropbox-ai-prototypes/dashnews"
 
     # Parse arguments
     i = 0
@@ -297,7 +297,7 @@ def create_discussion(args: list[str]) -> str:
     body = process_body(body, identity)
 
     # Get category and repo IDs
-    if repo == "ayates_dbx/dashnews":
+    if repo == "dropbox-ai-prototypes/dashnews":
         repo_id = DASHNEWS_REPO_ID
         category_id = CATEGORY_IDS.get(category)
         if not category_id:
@@ -378,7 +378,7 @@ def get_discussion(args: list[str]) -> dict:
     Returns dict with: number, title, body, url, createdAt, category, author.
     """
     number = 0
-    repo = "ayates_dbx/dashnews"
+    repo = "dropbox-ai-prototypes/dashnews"
     json_output = False
 
     # Parse arguments - first positional arg is number
@@ -489,7 +489,7 @@ def comment_discussion(args: list[str]) -> str:
     """
     number = 0
     body = ""
-    repo = "ayates_dbx/dashnews"
+    repo = "dropbox-ai-prototypes/dashnews"
 
     # Parse arguments
     i = 0
@@ -572,7 +572,7 @@ def list_discussions(args: list[str]) -> list[dict]:
 
     Returns list of dicts with: number, title, url, createdAt, category, author.
     """
-    repo = "ayates_dbx/dashnews"
+    repo = "dropbox-ai-prototypes/dashnews"
     limit = 10
     category = None
     json_output = False

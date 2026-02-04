@@ -272,7 +272,7 @@ def find_forbidden_ci(repo_root: Path | None = None) -> list[str]:
     """Check for forbidden GitHub Actions CI workflows.
 
     Per ai_template rules: "No GitHub CI/CD: Don't create .github/workflows/.
-    Not supported in ayates_dbx GitHub."
+    Not supported in dropbox-ai-prototypes GitHub."
 
     Returns list of forbidden workflow files found.
 

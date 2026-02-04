@@ -6,7 +6,7 @@
 """
 log_test.py - Log test invocations for manager audit
 
-CANONICAL SOURCE: ayates_dbx/ai_template
+CANONICAL SOURCE: dropbox-ai-prototypes/ai_template
 DO NOT EDIT in other repos - file issues to ai_template for changes.
 
 Records test runs to logs/tests.jsonl for pattern detection:

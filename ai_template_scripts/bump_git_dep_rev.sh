@@ -13,9 +13,9 @@
 #   bump_git_dep_rev.sh --version          # Show script version
 #
 # Examples:
-#   bump_git_dep_rev.sh https://github.com/ayates_dbx/z4
-#   bump_git_dep_rev.sh https://github.com/ayates_dbx/z4 cdfa08fb
-#   bump_git_dep_rev.sh --dry-run https://github.com/ayates_dbx/z4
+#   bump_git_dep_rev.sh https://github.com/dropbox-ai-prototypes/z4
+#   bump_git_dep_rev.sh https://github.com/dropbox-ai-prototypes/z4 cdfa08fb
+#   bump_git_dep_rev.sh --dry-run https://github.com/dropbox-ai-prototypes/z4
 
 set -euo pipefail
 
@@ -38,7 +38,7 @@ usage() {
     echo "Bump git dependency revision in Cargo.toml files."
     echo ""
     echo "Arguments:"
-    echo "  REPO_URL   Git repository URL to bump (e.g., https://github.com/ayates_dbx/z4)"
+    echo "  REPO_URL   Git repository URL to bump (e.g., https://github.com/dropbox-ai-prototypes/z4)"
     echo "  REV        Target revision (default: HEAD of default branch)"
     echo ""
     echo "Options:"
@@ -47,34 +47,34 @@ usage() {
     echo "  --help     Show this help message"
     echo ""
     echo "Examples:"
-    echo "  bump_git_dep_rev.sh https://github.com/ayates_dbx/z4"
-    echo "  bump_git_dep_rev.sh https://github.com/ayates_dbx/z4 cdfa08fb"
-    echo "  bump_git_dep_rev.sh --dry-run https://github.com/ayates_dbx/z4"
+    echo "  bump_git_dep_rev.sh https://github.com/dropbox-ai-prototypes/z4"
+    echo "  bump_git_dep_rev.sh https://github.com/dropbox-ai-prototypes/z4 cdfa08fb"
+    echo "  bump_git_dep_rev.sh --dry-run https://github.com/dropbox-ai-prototypes/z4"
     echo "  bump_git_dep_rev.sh --version"
 }
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --dry-run)
-            DRY_RUN=true
-            shift
-            ;;
-        --version)
-            version
-            ;;
-        --help|-h)
-            usage
-            exit 0
-            ;;
-        -*)
-            echo -e "${RED}Error: Unknown option $1${NC}" >&2
-            usage >&2
-            exit 1
-            ;;
-        *)
-            break
-            ;;
+    --dry-run)
+        DRY_RUN=true
+        shift
+        ;;
+    --version)
+        version
+        ;;
+    --help | -h)
+        usage
+        exit 0
+        ;;
+    -*)
+        echo -e "${RED}Error: Unknown option $1${NC}" >&2
+        usage >&2
+        exit 1
+        ;;
+    *)
+        break
+        ;;
     esac
 done
 
@@ -100,7 +100,7 @@ if [[ -z "$TARGET_REV" ]]; then
     if [[ "$REPO_URL" =~ github\.com[:/]([^/]+)/([^/]+) ]]; then
         OWNER="${BASH_REMATCH[1]}"
         REPO="${BASH_REMATCH[2]}"
-        REPO="${REPO%.git}"  # Remove .git suffix if present
+        REPO="${REPO%.git}" # Remove .git suffix if present
 
         # Use gh api to get default branch HEAD
         TARGET_REV=$(gh api "repos/$OWNER/$REPO/commits/HEAD" --jq '.sha' 2>/dev/null || true)

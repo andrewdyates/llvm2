@@ -35,7 +35,7 @@ EXIT_STATUS=0
 # Cache for archived repos (avoid repeated API calls)
 ARCHIVED_CACHE_DIR="${HOME}/.cache/ai_template"
 ARCHIVED_CACHE_FILE="${ARCHIVED_CACHE_DIR}/archived_repos.txt"
-ARCHIVED_CACHE_AGE=3600  # 1 hour
+ARCHIVED_CACHE_AGE=3600 # 1 hour
 
 # Temp file for batch archive check results (bash 3.x compatible - no assoc arrays)
 ARCHIVED_BATCH_RESULTS=""
@@ -104,7 +104,7 @@ batch_check_archived() {
     [[ ${#repos_to_check[@]} -eq 0 ]] && return 0
 
     # Build GraphQL query with aliases for each repo
-    # Example: query { r0: repository(owner:"ayates_dbx", name:"repo1") { isArchived } ... }
+    # Example: query { r0: repository(owner:"dropbox-ai-prototypes", name:"repo1") { isArchived } ... }
     # Validate repo names to prevent GraphQL injection (special chars like " or })
     local query="query {"
     local i=0
@@ -115,7 +115,7 @@ batch_check_archived() {
             echo "Warning: skipping invalid repo name: $repo" >&2
             continue
         fi
-        query+=" r${i}: repository(owner: \"ayates_dbx\", name: \"$repo\") { isArchived }"
+        query+=" r${i}: repository(owner: \"dropbox-ai-prototypes\", name: \"$repo\") { isArchived }"
         valid_repos+=("$repo")
         i=$((i + 1))
     done
@@ -143,7 +143,7 @@ batch_check_archived() {
                 fi
                 # Add to file cache
                 mkdir -p "$ARCHIVED_CACHE_DIR"
-                echo "$repo" >> "$ARCHIVED_CACHE_FILE"
+                echo "$repo" >>"$ARCHIVED_CACHE_FILE"
             fi
             i=$((i + 1))
         done
@@ -157,8 +157,8 @@ batch_check_archived() {
         echo "Warning: GraphQL rate-limited, using REST fallback for archive check" >&2
         for repo in "${repos_to_check[@]}"; do
             local api_output is_archived api_message
-            # Use || true to prevent pipefail exit on 404 (repo not in ayates_dbx)
-            api_output=$(gh api "repos/ayates_dbx/$repo" 2>/dev/null || true)
+            # Use || true to prevent pipefail exit on 404 (repo not in dropbox-ai-prototypes)
+            api_output=$(gh api "repos/dropbox-ai-prototypes/$repo" 2>/dev/null || true)
             if [[ -z "$api_output" ]]; then
                 # Empty response - skip silently
                 continue
@@ -166,7 +166,7 @@ batch_check_archived() {
             # Check for API error response (404 returns JSON with message field)
             api_message=$(echo "$api_output" | jq -r '.message // empty' 2>/dev/null)
             if [[ "$api_message" == "Not Found" ]]; then
-                # Repo doesn't exist in ayates_dbx - skip silently
+                # Repo doesn't exist in dropbox-ai-prototypes - skip silently
                 continue
             fi
             is_archived=$(echo "$api_output" | jq -r '.archived // false')
@@ -177,7 +177,7 @@ batch_check_archived() {
                     ARCHIVED_BATCH_RESULTS="$repo"
                 fi
                 mkdir -p "$ARCHIVED_CACHE_DIR"
-                echo "$repo" >> "$ARCHIVED_CACHE_FILE"
+                echo "$repo" >>"$ARCHIVED_CACHE_FILE"
             fi
         done
     fi
@@ -220,7 +220,7 @@ if ! AI_TEMPLATE_ROOT=$(find_ai_template "$AI_TEMPLATE_ROOT"); then
         echo "    - ~/ai_template (home)" >&2
         echo "" >&2
         echo "To fix, either:" >&2
-        echo "  1. Clone ai_template as a sibling: cd .. && git clone https://github.com/ayates_dbx/ai_template" >&2
+        echo "  1. Clone ai_template as a sibling: cd .. && git clone https://github.com/dropbox-ai-prototypes/ai_template" >&2
         echo "  2. Or run directly from ai_template: ~/ai_template/ai_template_scripts/sync_check.sh" >&2
         exit 1
     fi
@@ -236,7 +236,7 @@ if [[ -f "$EXCLUDE_FILE" ]]; then
         # Skip empty lines and comments
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
         EXCLUDED_REPOS+=("$line")
-    done < "$EXCLUDE_FILE"
+    done <"$EXCLUDE_FILE"
 fi
 
 # Check if repo should be excluded
@@ -259,18 +259,21 @@ EXIT_CODE=false
 # Parse args first (before any output or network calls)
 for arg in "$@"; do
     case "$arg" in
-        -h|--help) usage ;;
-        --version) version ;;
-        --files) CHECK_FILES_ARG=true ;;
-        --exit-code) EXIT_CODE=true ;;
-        -*) echo "ERROR: Unknown option: $arg"; exit 1 ;;
-        *) ARGS+=("$arg") ;;
+    -h | --help) usage ;;
+    --version) version ;;
+    --files) CHECK_FILES_ARG=true ;;
+    --exit-code) EXIT_CODE=true ;;
+    -*)
+        echo "ERROR: Unknown option: $arg"
+        exit 1
+        ;;
+    *) ARGS+=("$arg") ;;
     esac
 done
 
 set_exit_status() {
     local status="$1"
-    if [[ "$EXIT_CODE" == "true" ]] && (( EXIT_STATUS < status )); then
+    if [[ "$EXIT_CODE" == "true" ]] && ((EXIT_STATUS < status)); then
         EXIT_STATUS=$status
     fi
 }
@@ -286,26 +289,26 @@ CURRENT_SHORT=$(git rev-parse --short origin/main)
 echo "ai_template current version: $CURRENT_SHORT"
 echo ""
 
-# Check if repo is an ayates_dbx repo (by git remote)
-is_ayates_dbx_repo() {
+# Check if repo is an dropbox-ai-prototypes repo (by git remote)
+is_dropbox-ai-prototypes_repo() {
     local dir="$1"
     local remote_url
     remote_url=$(git -C "$dir" remote get-url origin 2>/dev/null || echo "")
-    [[ "$remote_url" =~ ayates_dbx ]]
+    [[ "$remote_url" =~ dropbox-ai-prototypes ]]
 }
 
 if [[ ${#ARGS[@]} -eq 0 ]]; then
-    # Default: check sibling directories that are ayates_dbx repos
+    # Default: check sibling directories that are dropbox-ai-prototypes repos
     PARENT_DIR="$(dirname "$AI_TEMPLATE_ROOT")"
     for dir in "$PARENT_DIR"/*/; do
         repo_name="$(basename "$dir")"
-        [[ -d "$dir/.git" ]] && [[ "$repo_name" != "ai_template" ]] && is_ayates_dbx_repo "$dir" && ! is_excluded "$repo_name" && REPOS+=("$dir")
+        [[ -d "$dir/.git" ]] && [[ "$repo_name" != "ai_template" ]] && is_dropbox-ai-prototypes_repo "$dir" && ! is_excluded "$repo_name" && REPOS+=("$dir")
     done
 elif [[ ${#ARGS[@]} -eq 1 && -d "${ARGS[0]}" && ! -d "${ARGS[0]}/.git" ]]; then
-    # Single directory argument that's not a repo - scan it (only ayates_dbx repos)
+    # Single directory argument that's not a repo - scan it (only dropbox-ai-prototypes repos)
     for dir in "${ARGS[0]}"/*/; do
         repo_name="$(basename "$dir")"
-        [[ -d "$dir/.git" ]] && is_ayates_dbx_repo "$dir" && ! is_excluded "$repo_name" && REPOS+=("$dir")
+        [[ -d "$dir/.git" ]] && is_dropbox-ai-prototypes_repo "$dir" && ! is_excluded "$repo_name" && REPOS+=("$dir")
     done
 else
     # Explicit repo list
@@ -476,10 +479,10 @@ if [[ "${CHECK_FILES:-}" == "1" || "${CHECK_FILES:-}" == "true" ]] || [[ "$CHECK
             line="${line#"${line%%[![:space:]]*}"}"
             [[ -z "$line" ]] && continue
             [[ "$line" == !* ]] && continue
-            [[ "$line" == */ ]] && continue  # Skip directories
-            [[ "$line" == *\** ]] && continue  # Skip globs (too complex)
+            [[ "$line" == */ ]] && continue   # Skip directories
+            [[ "$line" == *\** ]] && continue # Skip globs (too complex)
             SYNC_FILES+=("$line")
-        done < "$MANIFEST"
+        done <"$MANIFEST"
 
         DRIFT_REPOS=()
         for repo in "${REPOS[@]}"; do
@@ -491,9 +494,12 @@ if [[ "${CHECK_FILES:-}" == "1" || "${CHECK_FILES:-}" == "true" ]] || [[ "$CHECK
                 dst="$repo/$file"
 
                 [[ ! -f "$src" ]] && continue
-                [[ ! -f "$dst" ]] && { drifted+=("$file (missing)"); continue; }
+                [[ ! -f "$dst" ]] && {
+                    drifted+=("$file (missing)")
+                    continue
+                }
 
-                if ! diff -q "$src" "$dst" > /dev/null 2>&1; then
+                if ! diff -q "$src" "$dst" >/dev/null 2>&1; then
                     drifted+=("$file")
                 fi
             done
@@ -539,7 +545,7 @@ if [[ "${CHECK_FILES:-}" == "1" || "${CHECK_FILES:-}" == "true" ]] || [[ "$CHECK
                 [[ -z "$line" ]] && continue
                 [[ "$line" == */* || "$line" == *\\* || "$line" == *..* ]] && continue
                 enabled_features+=("$line")
-            done < "$features_file"
+            done <"$features_file"
 
             # Check each enabled feature for drift
             for feature in "${enabled_features[@]}"; do
@@ -557,7 +563,7 @@ if [[ "${CHECK_FILES:-}" == "1" || "${CHECK_FILES:-}" == "true" ]] || [[ "$CHECK
                 fi
 
                 # Check if directories differ
-                if ! diff -rq "$src" "$dst" > /dev/null 2>&1; then
+                if ! diff -rq "$src" "$dst" >/dev/null 2>&1; then
                     drifted+=("optional/$feature")
                 fi
             done
@@ -590,7 +596,7 @@ if [[ "${CHECK_FILES:-}" == "1" || "${CHECK_FILES:-}" == "true" ]] || [[ "$CHECK
         # NOTE: Use heredoc (not -c) to avoid shell hook escaping != to \!= (#1987)
         parse_precommit_config() {
             local config_path="$1"
-            PRECOMMIT_CONFIG="$config_path" python3 << 'PYEOF'
+            PRECOMMIT_CONFIG="$config_path" python3 <<'PYEOF'
 import yaml
 import os
 import sys
@@ -618,7 +624,7 @@ PYEOF
             local versions_data="$2"
             while IFS='|' read -r url rev; do
                 [[ "$url" == "$search_url" ]] && echo "$rev" && return 0
-            done <<< "$versions_data"
+            done <<<"$versions_data"
             return 1
         }
 
@@ -657,7 +663,7 @@ PYEOF
                             hook_name=$(basename "$url")
                             drifted_hooks+=("$hook_name: $rev -> $template_rev")
                         fi
-                    done <<< "$REPO_VERSIONS"
+                    done <<<"$REPO_VERSIONS"
 
                     # Check for template hooks missing from target repo
                     missing_hooks=()
@@ -668,7 +674,7 @@ PYEOF
                             hook_name=$(basename "$url")
                             missing_hooks+=("$hook_name (missing)")
                         fi
-                    done <<< "$TEMPLATE_VERSIONS"
+                    done <<<"$TEMPLATE_VERSIONS"
 
                     if [[ ${#drifted_hooks[@]} -gt 0 || ${#missing_hooks[@]} -gt 0 ]]; then
                         total_issues=$((${#drifted_hooks[@]} + ${#missing_hooks[@]}))

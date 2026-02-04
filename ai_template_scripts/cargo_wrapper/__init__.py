@@ -45,7 +45,7 @@ Public API (library usage):
 CLI usage:
     This script replaces 'cargo' in PATH. All cargo commands pass through it.
 
-CANONICAL SOURCE: ayates_dbx/ai_template
+CANONICAL SOURCE: dropbox-ai-prototypes/ai_template
 DO NOT EDIT in other repos - file issues to ai_template for changes.
 
 Andrew Yates <ayates@dropbox.com>

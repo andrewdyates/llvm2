@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -29,6 +30,19 @@ from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".ait_gh_apps"
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
+
+
+def _check_openssl() -> bool:
+    """Check if openssl is available."""
+    try:
+        result = subprocess.run(
+            ["openssl", "version"],
+            capture_output=True,
+            check=False,
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
 
 
 def export_credentials(output_path: Path, encrypt: bool = True) -> bool:
@@ -41,6 +55,10 @@ def export_credentials(output_path: Path, encrypt: bool = True) -> bool:
     Returns:
         True if successful
     """
+    if encrypt and not _check_openssl():
+        print("Error: openssl not found. Install it or use --no-encrypt", file=sys.stderr)
+        return False
+
     if not CONFIG_DIR.exists():
         print(f"Error: No credentials found at {CONFIG_DIR}", file=sys.stderr)
         return False
@@ -95,7 +113,6 @@ def export_credentials(output_path: Path, encrypt: bool = True) -> bool:
             print(f"\nEncrypted credentials saved to: {output_path}")
         else:
             # Just copy the tar
-            import shutil
             shutil.copy(tmp_tar, tar_path)
             print(f"\nCredentials saved to: {tar_path}")
             print("WARNING: Archive is NOT encrypted - contains private keys!")
@@ -119,6 +136,10 @@ def import_credentials(input_path: Path, encrypt: bool = True) -> bool:
     Returns:
         True if successful
     """
+    if encrypt and not _check_openssl():
+        print("Error: openssl not found. Install it or use --no-encrypt", file=sys.stderr)
+        return False
+
     if not input_path.exists():
         print(f"Error: File not found: {input_path}", file=sys.stderr)
         return False
@@ -127,10 +148,12 @@ def import_credentials(input_path: Path, encrypt: bool = True) -> bool:
     CONFIG_DIR.mkdir(mode=0o700, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+
         if encrypt:
             # Decrypt with openssl
             print("Decrypting archive (enter passphrase)...")
-            tmp_tar = Path(tmpdir) / "creds.tar.gz"
+            tmp_tar = tmpdir_path / "creds.tar.gz"
             result = subprocess.run(
                 [
                     "openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2",
@@ -145,7 +168,10 @@ def import_credentials(input_path: Path, encrypt: bool = True) -> bool:
         else:
             tmp_tar = input_path
 
-        # Extract tar
+        # Extract to staging dir first (atomic extraction)
+        staging_dir = tmpdir_path / "staging"
+        staging_dir.mkdir()
+
         with tarfile.open(tmp_tar, "r:gz") as tar:
             # Security: check for path traversal
             for member in tar.getmembers():
@@ -153,25 +179,30 @@ def import_credentials(input_path: Path, encrypt: bool = True) -> bool:
                     print(f"Error: Unsafe path in archive: {member.name}", file=sys.stderr)
                     return False
 
-            print(f"\nImporting to {CONFIG_DIR}:")
-            for member in tar.getmembers():
-                dest = CONFIG_DIR / member.name
-                print(f"  - {member.name}")
+            # Extract all to staging first
+            tar.extractall(staging_dir)
 
-                # Check if file exists
-                if dest.exists():
-                    response = input(f"    Overwrite {dest}? [y/N] ")
-                    if response.lower() != "y":
-                        print(f"    Skipped")
-                        continue
+        # Now move files to config dir (user can choose to overwrite)
+        print(f"\nImporting to {CONFIG_DIR}:")
+        for src_file in staging_dir.iterdir():
+            dest = CONFIG_DIR / src_file.name
+            print(f"  - {src_file.name}")
 
-                tar.extract(member, CONFIG_DIR)
+            # Check if file exists
+            if dest.exists():
+                response = input(f"    Overwrite {dest}? [y/N] ")
+                if response.lower() != "y":
+                    print(f"    Skipped")
+                    continue
+                dest.unlink()  # Remove existing before move
 
-                # Set permissions
-                if member.name.endswith(".pem"):
-                    dest.chmod(0o600)
-                elif member.name == "config.yaml":
-                    dest.chmod(0o600)
+            shutil.move(str(src_file), str(dest))
+
+            # Set permissions
+            if dest.name.endswith(".pem"):
+                dest.chmod(0o600)
+            elif dest.name == "config.yaml":
+                dest.chmod(0o600)
 
     print(f"\nCredentials imported to {CONFIG_DIR}")
     print("\nTest with:")

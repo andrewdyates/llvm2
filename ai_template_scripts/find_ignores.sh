@@ -5,7 +5,7 @@
 
 # find_ignores.sh - Find forbidden test ignores in a codebase
 #
-# CANONICAL SOURCE: ayates_dbx/ai_template
+# CANONICAL SOURCE: dropbox-ai-prototypes/ai_template
 # DO NOT EDIT in other repos - file issues to ai_template for changes.
 #
 # Usage: ./find_ignores.sh [directory]
@@ -32,17 +32,17 @@ version() {
 }
 
 case "${1:-}" in
-    --version) version ;;
-    -h|--help)
-        echo "Usage: find_ignores.sh [directory]"
-        echo ""
-        echo "Find forbidden test ignores in a codebase."
-        echo ""
-        echo "Options:"
-        echo "  --version     Show version information"
-        echo "  -h, --help    Show this help message"
-        exit 0
-        ;;
+--version) version ;;
+-h | --help)
+    echo "Usage: find_ignores.sh [directory]"
+    echo ""
+    echo "Find forbidden test ignores in a codebase."
+    echo ""
+    echo "Options:"
+    echo "  --version     Show version information"
+    echo "  -h, --help    Show this help message"
+    exit 0
+    ;;
 esac
 
 DIR="${1:-.}"
@@ -55,20 +55,20 @@ EXCLUDE_ARGS=()
 # These are commonly used for vendored code, reference implementations,
 # build artifacts, and generated content that we don't test.
 DEFAULT_EXCLUDES=(
-    "reference"      # Reference implementations, not our code
-    "vendor"         # Vendored third-party code
-    "third_party"    # Another common name for vendored code
-    "node_modules"   # JS dependencies
-    "target"         # Rust build output
-    ".git"           # Git internals
-    ".venv*"         # Python virtualenv (#1488, #1822 - glob covers .venv, .venv_310, etc.)
-    "venv"           # Alternative virtualenv name
-    "env"            # Another common virtualenv name (#1822)
-    "site-packages"  # Python packages (inside virtualenvs)
-    ".tox"           # Tox testing environments (#1822)
-    "__pycache__"    # Python bytecode cache
-    ".mypy_cache"    # Mypy type checking cache
-    ".pytest_cache"  # Pytest cache
+    "reference"     # Reference implementations, not our code
+    "vendor"        # Vendored third-party code
+    "third_party"   # Another common name for vendored code
+    "node_modules"  # JS dependencies
+    "target"        # Rust build output
+    ".git"          # Git internals
+    ".venv*"        # Python virtualenv (#1488, #1822 - glob covers .venv, .venv_310, etc.)
+    "venv"          # Alternative virtualenv name
+    "env"           # Another common virtualenv name (#1822)
+    "site-packages" # Python packages (inside virtualenvs)
+    ".tox"          # Tox testing environments (#1822)
+    "__pycache__"   # Python bytecode cache
+    ".mypy_cache"   # Mypy type checking cache
+    ".pytest_cache" # Pytest cache
 )
 
 for excl in "${DEFAULT_EXCLUDES[@]}"; do
@@ -80,12 +80,12 @@ if [[ -f "$DIR/.ignore-check-exclude" ]]; then
     while IFS= read -r line; do
         [[ -z "$line" || "$line" == \#* ]] && continue
         EXCLUDE_ARGS+=("--exclude-dir=${line%/}")
-    done < "$DIR/.ignore-check-exclude"
+    done <"$DIR/.ignore-check-exclude"
 fi
 
 # Load from environment variable
 if [[ -n "${IGNORE_CHECK_EXCLUDE:-}" ]]; then
-    IFS=':' read -ra env_excludes <<< "$IGNORE_CHECK_EXCLUDE"
+    IFS=':' read -ra env_excludes <<<"$IGNORE_CHECK_EXCLUDE"
     for excl in "${env_excludes[@]}"; do
         [[ -n "$excl" ]] && EXCLUDE_ARGS+=("--exclude-dir=${excl%/}")
     done
