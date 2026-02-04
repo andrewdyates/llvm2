@@ -40,12 +40,12 @@ def debug_log(msg: str) -> None:
 
 
 # Per-resource thresholds (remaining count)
-# Search is 30/min, others are 5000/hr - need different thresholds
+# Search is 30/min, others are 5000/hr (or 15k/hr with GitHub Apps)
 THRESHOLDS = {
-    "core": {"warning": 500, "critical": 100, "block": 10},
-    "graphql": {"warning": 500, "critical": 100, "block": 10},
-    "search": {"warning": 10, "critical": 5, "block": 2},
-    "default": {"warning": 500, "critical": 100, "block": 10},
+    "core": {"warning": 500, "critical": 100, "block": 50},
+    "graphql": {"warning": 500, "critical": 100, "block": 50},
+    "search": {"warning": 10, "critical": 5, "block": 2},  # Keep - 30/min limit
+    "default": {"warning": 500, "critical": 100, "block": 50},
 }
 
 

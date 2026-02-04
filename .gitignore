@@ -92,3 +92,10 @@ FEATURE_FREEZE
 mutants/
 .mutmut-cache/
 .hypothesis
+states/
+.looper_tool_calls_*.jsonl
+FEATURE_FREEZE
+
+# Mutation testing artifacts
+mutants/
+.mutmut-cache/

@@ -16,6 +16,7 @@ Tiered lookup:
 from __future__ import annotations
 
 from ai_template_scripts.gh_apps.config import load_config
+from ai_template_scripts.gh_apps.logging import debug_log
 
 # Director → repos mapping (source: org_chart.md)
 # Per-repo apps override this - only repos WITHOUT dedicated apps use director fallback
@@ -93,10 +94,13 @@ def get_app_for_repo(repo: str) -> str | None:
     Returns:
         App name (e.g., "ai-template-ai", "dbx-dMATH-ai") or None if not configured.
     """
+    debug_log(f"get_app_for_repo({repo})")
     config = load_config()
     if not config:
+        debug_log(f"no config available for repo '{repo}'")
         return None
 
+    debug_log(f"searching {len(config.apps)} configured apps")
     wildcard_app: str | None = None
 
     # Tier 1: Per-repo apps (exact match - single repo)
@@ -104,15 +108,19 @@ def get_app_for_repo(repo: str) -> str | None:
         # Skip wildcard apps for now - they're fallback
         if "*" in app_config.repos:
             wildcard_app = app_name
+            debug_log(f"  found wildcard app: {app_name}")
             continue
         # Check for exact match
         if repo in app_config.repos:
+            debug_log(f"  exact match: repo '{repo}' -> app '{app_name}'")
             return app_name
 
     # Tier 2: Wildcard fallback
     if wildcard_app:
+        debug_log(f"  wildcard fallback: repo '{repo}' -> app '{wildcard_app}'")
         return wildcard_app
 
+    debug_log(f"  no app found for repo '{repo}'")
     return None
 
 

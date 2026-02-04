@@ -24,6 +24,7 @@ import jwt
 import requests
 
 from ai_template_scripts.gh_apps.config import AppConfig, load_config
+from ai_template_scripts.gh_apps.logging import debug_log
 
 if TYPE_CHECKING:
     pass
@@ -57,6 +58,7 @@ class TokenManager:
     def _load_cache(self) -> None:
         """Load token cache from disk."""
         if not TOKEN_CACHE_FILE.exists():
+            debug_log("no token cache file found")
             return
         try:
             data = json.loads(TOKEN_CACHE_FILE.read_text())
@@ -65,8 +67,9 @@ class TokenManager:
                     token=token_data["token"],
                     expires_at=token_data["expires_at"],
                 )
-        except Exception:
-            # Ignore corrupted cache
+            debug_log(f"loaded {len(self._token_cache)} cached tokens from disk")
+        except Exception as e:
+            debug_log(f"failed to load token cache: {e}")
             pass
 
     def _save_cache(self) -> None:
@@ -146,13 +149,19 @@ class TokenManager:
         Returns:
             Installation token string, or None if app not configured.
         """
+        debug_log(f"get_token called: app_name={app_name}, repo={repo}")
+
         config = load_config()
         if not config:
+            debug_log("no config loaded - falling back to OAuth")
             return None
 
         app_config = config.get_app(app_name)
         if not app_config:
+            debug_log(f"app '{app_name}' not found in config - available: {list(config.apps.keys())}")
             return None
+
+        debug_log(f"found app config: app_id={app_config.app_id}, installation_id={app_config.installation_id}")
 
         # Cache key includes repo for repo-scoped tokens (no cross-repo reuse)
         cache_key = f"{app_name}|{repo}" if repo else app_name
@@ -160,24 +169,38 @@ class TokenManager:
         # Check cache first
         cached = self._token_cache.get(cache_key)
         if cached and not self._needs_refresh(cached):
+            ttl = int(cached.expires_at - time.time())
+            debug_log(f"cache HIT for {cache_key} (expires in {ttl}s)")
             return cached.token
+
+        if cached:
+            debug_log(f"cache STALE for {cache_key} - refreshing")
+        else:
+            debug_log(f"cache MISS for {cache_key} - generating new token")
 
         # Generate new token
         try:
+            debug_log(f"generating JWT for app_id={app_config.app_id}")
             jwt_token = self._generate_jwt(app_config)
+            debug_log(f"exchanging JWT for installation token (installation_id={app_config.installation_id})")
             cached_token = self._exchange_for_installation_token(
                 app_config, jwt_token, repo
             )
             self._token_cache[cache_key] = cached_token
             self._save_cache()
+            ttl = int(cached_token.expires_at - time.time())
+            debug_log(f"token obtained successfully, expires in {ttl}s")
             return cached_token.token
         except FileNotFoundError as e:
+            debug_log(f"FileNotFoundError: {e}")
             print(f"gh_apps: {e}", file=sys.stderr)
             return None
         except requests.RequestException as e:
+            debug_log(f"RequestException: {e}")
             print(f"gh_apps: token exchange failed for {app_name}: {e}", file=sys.stderr)
             return None
         except jwt.PyJWTError as e:
+            debug_log(f"PyJWTError: {e}")
             print(f"gh_apps: JWT generation failed for {app_name}: {e}", file=sys.stderr)
             return None
 
@@ -199,15 +222,20 @@ def get_token(repo: str) -> str | None:
     Returns:
         Installation token string, or None if no app configured.
     """
+    debug_log(f"get_token(repo={repo}) - looking up app")
+
     global _token_manager
     if _token_manager is None:
+        debug_log("initializing TokenManager singleton")
         _token_manager = TokenManager()
 
     from ai_template_scripts.gh_apps.selector import get_app_for_repo
 
     app_name = get_app_for_repo(repo)
     if not app_name:
+        debug_log(f"no app found for repo '{repo}' - falling back to OAuth")
         return None
 
+    debug_log(f"repo '{repo}' -> app '{app_name}'")
     # Pass repo for repo-scoped tokens (least privilege)
     return _token_manager.get_token(app_name, repo=repo)

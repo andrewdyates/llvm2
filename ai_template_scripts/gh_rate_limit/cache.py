@@ -26,14 +26,14 @@ from pathlib import Path
 
 from ai_template_scripts.gh_rate_limit.limiter import debug_log
 
-# Cache TTLs (seconds) - 3 min default to reduce API load while staying fresh
+# Cache TTLs (seconds) - short TTLs for freshness, we have credits
 # Workers polling simultaneously was causing rate limits; shared cache fixes this
 CACHE_TTLS = {
-    ("issue", "list"): 180,  # 3 min
-    ("issue", "view"): 180,  # 3 min
-    ("repo", "view"): 180,  # 3 min (was 1hr but stale data causes issues)
-    ("label", "list"): 180,  # 3 min
-    ("pr", "list"): 180,  # 3 min
+    ("issue", "list"): 20,   # 20s - fresh issue data critical for coordination
+    ("issue", "view"): 20,   # 20s - fresh issue data critical for coordination
+    ("repo", "view"): 180,   # 3 min - repo metadata changes rarely
+    ("label", "list"): 180,  # 3 min - labels change rarely
+    ("pr", "list"): 20,      # 20s - fresh PR data important
 }
 
 # Search API cache TTL - longer to reduce quota pressure (#1782, #1869)

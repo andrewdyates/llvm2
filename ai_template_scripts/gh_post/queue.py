@@ -214,7 +214,7 @@ def _invalidate_issue_cache(
         print(f"[gh_post] Warning: cache invalidation failed: {e}", file=sys.stderr)
 
 
-def _sync_pending_changes(real_gh: str) -> int:
+def _sync_pending_changes(real_gh: str, max_count: int = 10) -> int:
     """Try to sync any pending changes from ChangeLog. Returns count synced."""
     gh_post_module = _gh_post()
 
@@ -229,7 +229,7 @@ def _sync_pending_changes(real_gh: str) -> int:
     limiter = gh_post_module.get_limiter()
     synced = 0
 
-    for change in pending[:3]:  # Sync up to 3 per call to avoid blocking
+    for change in pending[:max_count]:  # Sync up to max_count per call
         # Check rate limit before each sync
         if not limiter.check_rate_limit(["issue", change.operation]):
             break
@@ -417,7 +417,7 @@ def _execute_gh_with_queue(real_gh: str, args: list[str], parsed: dict) -> int:
             # Write-through to local store (#1834)
             _write_through_queued(parsed["subcommand"], data)
 
-            return 0  # Return success - operation is queued
+            return 75  # EX_TEMPFAIL - operation queued, not delivered
 
     # Proactive REST for label-only edits when GraphQL quota is low (#1502)
     # This prevents GraphQL exhaustion by using REST before hitting rate limit
@@ -565,10 +565,10 @@ def _queue_for_later(args: list[str], parsed: dict) -> int:
     # Write-through to local store (#1834)
     _write_through_queued(subcommand, data)
 
-    return 0
+    return 75  # EX_TEMPFAIL - operation queued, not delivered
 
 
-def replay_pending_changes(max_per_call: int = 3) -> int:
+def replay_pending_changes(max_per_call: int = 10) -> int:
     """Replay pending changes from ChangeLog at iteration start (#1846).
 
     Called by looper at iteration start to ensure pending issues are synced
@@ -580,15 +580,12 @@ def replay_pending_changes(max_per_call: int = 3) -> int:
 
     Contracts:
         REQUIRES: max_per_call >= 0
-        ENSURES: Returns count of successfully synced changes (0 <= result <= 3)
+        ENSURES: Returns count of successfully synced changes (0 <= result <= max_per_call)
         ENSURES: If gh_rate_limit unavailable, returns 0 silently
         ENSURES: Rate limit checked before each sync attempt
-        NOTE: max_per_call parameter is currently ignored (see Args).
 
     Args:
-        max_per_call: Maximum pending changes to sync per call (default 3).
-            Note: Currently ignored - _sync_pending_changes uses hardcoded 3.
-            Future: Refactor _sync_pending_changes to accept parameter.
+        max_per_call: Maximum pending changes to sync per call (default 10).
 
     Returns:
         Count of successfully synced operations.
@@ -600,7 +597,4 @@ def replay_pending_changes(max_per_call: int = 3) -> int:
     except Exception:
         return 0
 
-    # Delegate to shared implementation
-    # Note: max_per_call parameter is currently unused since _sync_pending_changes
-    # has hardcoded limit of 3. Filed as future enhancement.
-    return _sync_pending_changes(real_gh)
+    return _sync_pending_changes(real_gh, max_per_call)

@@ -371,6 +371,8 @@ gh_issues.py dep list 55      # Show what blocks #55 and what #55 blocks
 
 `gh` commands flow through `ai_template_scripts/bin/gh` wrapper with rate limiting and caching.
 
+**Authentication:** USER uses `gh auth` (5k/hr shared). Automated roles use GitHub App tokens (15k/hr each) via `AIT_USE_GITHUB_APPS=1`.
+
 Key behaviors:
 - Cache: `~/.ait_gh_cache/` with 3-minute TTLs. Request serialization prevents thundering herd.
 - Write queue: `change_log.json` stores operations when rate-limited (offline-first).

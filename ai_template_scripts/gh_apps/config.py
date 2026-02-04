@@ -31,6 +31,16 @@ CONFIG_DIR = Path.home() / ".ait_gh_apps"
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
 
+def _debug_log(msg: str) -> None:
+    """Debug log - imported lazily to avoid circular imports."""
+    try:
+        from ai_template_scripts.gh_apps.logging import debug_log
+
+        debug_log(msg)
+    except ImportError:
+        pass  # Module not yet available during early imports
+
+
 @dataclass
 class AppConfig:
     """Configuration for a single GitHub App."""
@@ -87,19 +97,25 @@ def load_config(force_reload: bool = False) -> Config | None:
     global _cached_config, _config_mtime
 
     if not YAML_AVAILABLE:
+        _debug_log("yaml not available - cannot load config")
         return None
 
     if not CONFIG_FILE.exists():
+        _debug_log(f"config file not found: {CONFIG_FILE}")
         return None
 
     # Check if config changed since last load
     current_mtime = CONFIG_FILE.stat().st_mtime
     if not force_reload and _cached_config and current_mtime == _config_mtime:
+        _debug_log(f"using cached config ({len(_cached_config.apps)} apps)")
         return _cached_config
+
+    _debug_log(f"loading config from {CONFIG_FILE}")
 
     try:
         data: dict[str, Any] = yaml.safe_load(CONFIG_FILE.read_text())
         if not data:
+            _debug_log("config file is empty")
             return None
 
         apps: dict[str, AppConfig] = {}
@@ -121,6 +137,7 @@ def load_config(force_reload: bool = False) -> Config | None:
                 private_key_path=key_path,
                 repos=repos,
             )
+            _debug_log(f"  loaded app '{app_name}': repos={repos}, key={key_path}")
 
         config = Config(
             org=data.get("org", "dropbox-ai-prototypes"),
@@ -128,6 +145,7 @@ def load_config(force_reload: bool = False) -> Config | None:
             apps=apps,
         )
 
+        _debug_log(f"config loaded: {len(apps)} apps configured")
         _cached_config = config
         _config_mtime = current_mtime
         return config
