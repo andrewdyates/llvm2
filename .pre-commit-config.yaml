@@ -6,7 +6,7 @@
 # Author: Andrew Yates
 # Licensed under the Apache License, Version 2.0
 
-default_install_hook_types: [pre-commit, commit-msg]
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
 default_stages: [pre-commit]
 
 repos:
@@ -29,8 +29,33 @@ repos:
     rev: v0.14.14
     hooks:
       - id: ruff
-        args: [--fix]
+        args: [--fix, --config=pyproject.toml]
       - id: ruff-format
+
+  # Python type checking (prevents bugs like #932 label type assumptions)
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.17.1
+    hooks:
+      - id: mypy
+        args: [--config-file=pyproject.toml]
+        additional_dependencies: [PyJWT, requests]
+        pass_filenames: false
+
+  # Markdown linting (#438)
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.20.0
+    hooks:
+      - id: markdownlint-cli2
+        args: [--config, .markdownlint.jsonc]
+
+  # Shell script formatting (shfmt) - #439
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.12.0-2
+    hooks:
+      - id: shfmt
+        # -i 4: 4-space indent (matches .editorconfig)
+        # -w: write changes in place
+        args: [-i, '4', -w]
 
   # Shell script linting (using system shellcheck)
   - repo: local
@@ -40,6 +65,14 @@ repos:
         entry: shellcheck
         language: system
         types: [shell]
+
+  # Spell checking
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.42.3
+    hooks:
+      - id: typos
+        # Report-only mode (no auto-fix)
+        args: [--force-exclude]
 
   # Secret scanning
   - repo: https://github.com/gitleaks/gitleaks
@@ -61,4 +94,12 @@ repos:
         entry: ai_template_scripts/commit-msg-hook.sh
         language: script
         stages: [commit-msg]
+        pass_filenames: true
+
+      - id: ai-template-pre-push
+        name: ai_template claim validation
+        entry: ai_template_scripts/pre-push-hook.sh
+        language: script
+        stages: [pre-push]
         pass_filenames: false
+        always_run: true

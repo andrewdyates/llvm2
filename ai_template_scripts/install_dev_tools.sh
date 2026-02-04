@@ -19,6 +19,46 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Version function
+version() {
+    echo "install_dev_tools.sh $(git rev-parse --short HEAD 2>/dev/null || echo unknown) ($(date +%Y-%m-%d))"
+    exit 0
+}
+
+# Usage function
+usage() {
+    echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Install development tools for ai_template projects."
+    echo ""
+    echo "Installs tools needed by code_stats.py and other scripts:"
+    echo "  - Python tools (mypy, ruff, pre-commit)"
+    echo "  - TLA+ tools (TLA+ toolbox, Apalache)"
+    echo "  - Go tools (staticcheck)"
+    echo "  - C tools (pmccabe for cyclomatic complexity)"
+    echo "  - Shell tools (shellcheck)"
+    echo ""
+    echo "Options:"
+    echo "  --check      Check what's installed (no changes)"
+    echo "  -h, --help   Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  $0           # Install everything"
+    echo "  $0 --check   # Check what's installed"
+    exit 0
+}
+
+# Parse args before anything else
+case "${1:-}" in
+    --version) version ;;
+    -h|--help) usage ;;
+    --check|"") ;; # Valid options or no option
+    -*) echo "ERROR: Unknown option: $1"; exit 1 ;;
+    *) echo "ERROR: Unexpected argument: $1"; exit 1 ;;
+esac
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -36,6 +76,10 @@ log_ok() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Shared TLA+ tool discovery helpers.
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/find_tla_tools.sh"
+
 # Detect platform
 detect_platform() {
     case "$(uname -s)" in
@@ -48,6 +92,23 @@ detect_platform() {
 # Check if a command exists
 has_cmd() {
     command -v "$1" &> /dev/null
+}
+
+# Check whether TLA+ tools are available (java + jar or tlc wrapper)
+tla_tools_ready() {
+    if ! find_java >/dev/null 2>&1; then
+        return 1
+    fi
+
+    if find_tla_tools >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if has_cmd tlc; then
+        return 0
+    fi
+
+    return 1
 }
 
 # Check prerequisites
@@ -118,18 +179,52 @@ install_python_tools() {
     fi
 
     # ruff - Python linter (used by pre-commit hook)
+    # IMPORTANT: .pre-commit-config.yaml is the SINGLE SOURCE OF TRUTH for ruff version.
+    # When updating: change .pre-commit-config.yaml FIRST, then update this variable.
+    local RUFF_VERSION="0.14.14"  # Must match: grep -A1 'ruff-pre-commit' .pre-commit-config.yaml
     if has_cmd ruff; then
-        log_ok "ruff already installed"
-        SKIPPED+=("ruff")
+        local installed_version
+        installed_version=$(ruff --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        if [[ "$installed_version" == "$RUFF_VERSION" ]]; then
+            log_ok "ruff $RUFF_VERSION already installed"
+            SKIPPED+=("ruff")
+        else
+            log_warn "ruff version mismatch: installed=$installed_version, required=$RUFF_VERSION"
+            log_info "Upgrading ruff to $RUFF_VERSION..."
+            if $pip_cmd install --quiet "ruff==$RUFF_VERSION"; then
+                log_ok "ruff $RUFF_VERSION installed"
+                INSTALLED+=("ruff")
+            else
+                log_error "Failed to upgrade ruff"
+                FAILED+=("ruff")
+            fi
+        fi
     else
-        log_info "Installing ruff (Python linter)..."
-        if $pip_cmd install --quiet ruff; then
-            log_ok "ruff installed"
+        log_info "Installing ruff $RUFF_VERSION (Python linter)..."
+        if $pip_cmd install --quiet "ruff==$RUFF_VERSION"; then
+            log_ok "ruff $RUFF_VERSION installed"
             INSTALLED+=("ruff")
         else
             log_error "Failed to install ruff"
             FAILED+=("ruff")
         fi
+    fi
+}
+
+# Install TLA+ tools (TLC model checker)
+install_tla_tools() {
+    log_info "Installing TLA+ tools (TLC)..."
+
+    if [[ -x "./ai_template_scripts/install_tla_tools.sh" ]]; then
+        if ./ai_template_scripts/install_tla_tools.sh; then
+            INSTALLED+=("tlc")
+        else
+            log_error "Failed to install TLA+ tools"
+            FAILED+=("tlc")
+        fi
+    else
+        log_warn "install_tla_tools.sh not found - skipping TLA+ tools"
+        SKIPPED+=("tlc")
     fi
 }
 
@@ -301,6 +396,11 @@ verify_installations() {
             echo -e "  ${RED}✗${NC} $tool - $description"
         fi
     done
+    if tla_tools_ready; then
+        echo -e "  ${GREEN}✓${NC} tlc - TLA+ model checker (TLA2TOOLS_JAR)"
+    else
+        echo -e "  ${RED}✗${NC} tlc - TLA+ model checker (missing java or TLA2TOOLS_JAR)"
+    fi
     echo ""
 }
 
@@ -359,6 +459,9 @@ main() {
     echo ""
 
     install_python_tools
+    echo ""
+
+    install_tla_tools
     echo ""
 
     install_go_tools

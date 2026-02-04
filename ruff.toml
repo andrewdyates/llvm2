@@ -1,5 +1,15 @@
 # Ruff configuration - Python linter
 # https://docs.astral.sh/ruff/
+#
+# IMPORTANT: Keep ruff version aligned across tools:
+# - .pre-commit-config.yaml (authoritative)
+# - ai_template_scripts/install_dev_tools.sh (must match pre-commit)
+#
+# Version pinned at: 0.14.14 (see .pre-commit-config.yaml rev: v0.14.14)
+
+# Line length for formatter and E501 (if enabled)
+# Default is 88; explicit setting prevents version drift
+line-length = 88
 
 [lint]
 select = ["ALL"]
@@ -17,7 +27,7 @@ ignore = [
     "INP",     # namespace
     "FA",      # future annotations
     "BLE",     # blind except
-    "E501",    # line length
+    "E501",    # line length (formatter handles wrapping; see pycodestyle.max-line-length below)
     "PTH",     # pathlib style
     "EM",      # exception messages
     "TRY",     # tryceratops
@@ -31,3 +41,9 @@ ignore = [
     "TC003",   # type checking imports - not critical
     "B905",    # zip strict parameter - false positive for window patterns
 ]
+
+# Align E501 threshold with formatter line-length
+# Even though E501 is ignored, setting this prevents format/lint flip-flop
+# if E501 is re-enabled later
+[lint.pycodestyle]
+max-line-length = 88

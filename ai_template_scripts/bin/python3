@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# python3 wrapper - Block inline Python for issue filtering (#1987, #2159)
+#
+# CANONICAL SOURCE: ayates_dbx/ai_template
+# DO NOT EDIT in other repos - file issues to ai_template for changes.
+#
+# This wrapper prevents the pattern:
+#   gh issue list ... | python3 -c "import json; ..."
+#
+# Shell escaping corrupts operators like != to \!=, causing SyntaxError.
+# Use jq instead: gh issue list --json ... | jq '...'
+#
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates <ayates@dropbox.com>
+# Licensed under the Apache License, Version 2.0
+
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+
+find_real_python3() {
+    local real_python=""
+    for loc in /opt/homebrew/bin/python3 /opt/homebrew/bin/python3.14 /opt/homebrew/bin/python3.13 /usr/local/bin/python3 /usr/bin/python3; do
+        if [[ -x "$loc" ]]; then
+            local candidate_real
+            candidate_real="$(realpath "$loc" 2>/dev/null || echo "$loc")"
+            [[ "$candidate_real" != "$SCRIPT_PATH" ]] && real_python="$loc" && break
+        fi
+    done
+
+    if [[ -z "$real_python" ]]; then
+        echo "ERROR: Real python3 not found" >&2
+        return 1
+    fi
+
+    echo "$real_python"
+}
+
+# Check if running with -c flag for inline code
+INLINE_CODE=""
+BYPASS_CHECK=""
+PREV_WAS_C=""
+for arg in "$@"; do
+    if [[ "$arg" == "--no-wrapper" ]]; then
+        BYPASS_CHECK="1"
+    elif [[ -n "$PREV_WAS_C" ]]; then
+        INLINE_CODE="$arg"
+        PREV_WAS_C=""
+    elif [[ "$arg" == "-c" ]]; then
+        PREV_WAS_C="1"
+    fi
+done
+
+if [[ -z "$BYPASS_CHECK" ]] && [[ -n "$INLINE_CODE" ]]; then
+    # Check for patterns that indicate JSON/stdin filtering
+    # These patterns combined suggest gh issue filtering via inline Python
+    HAS_JSON_PATTERN=""
+    HAS_STDIN_PATTERN=""
+
+    if echo "$INLINE_CODE" | grep -qE 'import\s+json|json\.(load|loads|dump|dumps)'; then
+        HAS_JSON_PATTERN="1"
+    fi
+
+    if echo "$INLINE_CODE" | grep -qE 'sys\.stdin|input\(\)|fileinput|stdin\.read'; then
+        HAS_STDIN_PATTERN="1"
+    fi
+
+    # Block if both JSON parsing AND stdin reading are present
+    if [[ -n "$HAS_JSON_PATTERN" ]] && [[ -n "$HAS_STDIN_PATTERN" ]]; then
+        cat >&2 <<'BLOCK_MESSAGE'
+[python3 wrapper] BLOCKED: Inline Python for JSON filtering (#1987)
+
+The pattern you're using:
+    ... | python3 -c "import json; sys.stdin..."
+
+is blocked because shell escaping corrupts operators:
+    != becomes \!= → SyntaxError
+
+Use jq instead:
+    gh issue list --json number,title,labels | jq '.[] | select(...)'
+
+Or use get_issues_structured() from looper.context:
+    from looper.context import get_issues_structured
+    issues = get_issues_structured()
+
+To bypass this check (not recommended):
+    python3 --no-wrapper -c "..."
+
+See: Rule #1987 in ai_template.md
+BLOCK_MESSAGE
+        exit 1
+    fi
+fi
+
+# Pass through to real python3
+REAL_PYTHON3="$(find_real_python3)" || exit 1
+
+# Remove --no-wrapper from arguments if present
+FILTERED_ARGS=()
+for arg in "$@"; do
+    [[ "$arg" != "--no-wrapper" ]] && FILTERED_ARGS+=("$arg")
+done
+
+exec "$REAL_PYTHON3" "${FILTERED_ARGS[@]}"

@@ -1,7 +1,9 @@
+<!-- Verified: <commit> | <timestamp> | [<role>]<iter> -->
+
 # Post-Mortem: [Title]
 
+**Author:** Andrew Yates <ayates@dropbox.com>
 **Date:** YYYY-MM-DD
-**Author:** [Worker/Manager ID or name]
 **Related Issues:** #N, #M
 **Related Commits:** abc1234, def5678
 
@@ -13,6 +15,10 @@ What we were trying to accomplish.
 
 What we tried. Include specific commits, code changes, and commands.
 
+## Timeline (P0 required)
+
+Discovery → mitigation → resolution. Include timestamps.
+
 ## Failure Evidence
 
 How we proved this cannot succeed. Be specific:
@@ -21,6 +27,10 @@ How we proved this cannot succeed. Be specific:
 - Documentation references
 - Screenshots if relevant
 
+## How It Went Undetected (P0 required)
+
+What signals we missed, and why they didn't surface sooner.
+
 ## Root Cause
 
 Why it failed. Distinguish between:
@@ -28,9 +38,17 @@ Why it failed. Distinguish between:
 - **Temporary blockers** (might change in future)
 - **Skill gaps** (we didn't know how, but it's possible)
 
+## Claims/Benchmarks Affected (P0 required)
+
+Which published claims, benchmarks, or docs were impacted.
+
 ## What We Learned
 
 Key insights that should inform future work.
+
+## Process Improvements (P0 required)
+
+Changes to prevent recurrence (tests, alerts, workflows).
 
 ## Resolution
 

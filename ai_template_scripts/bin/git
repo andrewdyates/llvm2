@@ -1,0 +1,566 @@
+#!/usr/bin/env bash
+# git wrapper - Blocks branch creation, guards destructive ops, serializes commits
+#
+# CANONICAL SOURCE: ayates_dbx/ai_template
+# DO NOT EDIT in other repos - file issues to ai_template for changes.
+#
+# This wrapper sits in PATH before the real git and:
+# - Blocks branch-creating commands (branch <name>, checkout -b, switch -c)
+# - Blocks git stash operations (stash push/pop/apply/drop) - use WIP commits instead
+# - Guards destructive operations when workers active (restore, checkout --, reset --hard, clean -f)
+# - Serializes git commit operations with a per-repo lock to prevent collisions
+# - Blocks --no-verify/-n on git commit for AI roles unless explicitly allowed
+# - Auto-installs the commit-msg hook on git commit if missing (when hook source exists)
+# - Passes all other commands to the real git unchanged
+#
+# Installed by looper.py via PATH modification.
+#
+# Destructive op guard:
+#   When .pid_worker or .pid_worker_* files exist with valid processes, blocks:
+#   - git restore <path>     (unless --staged)
+#   - git checkout -- <path>
+#   - git reset --hard
+#   - git clean -f/-fd
+#   Use --ait-force-destructive to override if needed.
+#
+# Config:
+#   AI_ROLE              - WORKER/PROVER/RESEARCHER/MANAGER/USER (set by looper.py)
+#   AIT_ALLOW_NO_VERIFY  - Set to 1 to allow --no-verify/-n for AI roles on git commit
+#   AIT_GIT_LOCK_WAIT_S  - Seconds to wait for lock (default: 300)
+#   AIT_GIT_LOCK_DISABLE - Set to 1 to disable commit locking
+#
+# Author: Andrew Yates <ayates@dropbox.com>
+# Copyright 2026 Dropbox, Inc.
+# Licensed under the Apache License, Version 2.0
+
+# Find the real git (skip this wrapper)
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+REAL_GIT=""
+
+# First try common locations (fastest, avoids PATH issues)
+for loc in /usr/bin/git /opt/homebrew/bin/git /usr/local/bin/git; do
+    if [[ -x "$loc" ]]; then
+        candidate_real="$(realpath "$loc" 2>/dev/null || echo "$loc")"
+        [[ "$candidate_real" != "$SCRIPT_PATH" ]] && REAL_GIT="$loc" && break
+    fi
+done
+
+# Fall back to PATH search if not found
+if [[ -z "$REAL_GIT" ]]; then
+    IFS=':' read -ra PATH_DIRS <<< "$PATH"
+    for p in "${PATH_DIRS[@]}"; do
+        [[ -d "$p" ]] || continue
+        git_candidate="$p/git"
+        [[ -x "$git_candidate" ]] || continue
+        candidate_real="$(realpath "$git_candidate" 2>/dev/null || echo "$git_candidate")"
+        [[ "$candidate_real" == "$SCRIPT_PATH" ]] && continue
+        REAL_GIT="$git_candidate"
+        break
+    done
+fi
+
+if [[ -z "$REAL_GIT" ]]; then
+    echo "ERROR: Real git not found in PATH" >&2
+    exit 1
+fi
+
+# Check if branch name is allowed (zone/* for multi-machine mode)
+is_zone_branch() {
+    local branch="$1"
+    [[ "$branch" == zone/* ]]
+}
+
+# Block branch-creating commands (unless zone/* for multi-machine mode)
+block_branch() {
+    local branch="${1:-}"
+    if [[ -n "$branch" ]] && is_zone_branch "$branch"; then
+        return 0  # Allow zone/* branches for multi-machine mode
+    fi
+    cat >&2 <<'EOF'
+ERROR: Branch creation is blocked.
+
+AI workers must commit directly to main. Branches create:
+- Merge conflicts that AIs cannot resolve
+- Orphan branches when sessions end
+- Coordination complexity across workers
+
+See ai_template rule: "No feature branches"
+
+Exception: zone/* branches are allowed for multi-machine mode.
+If you need to isolate work, commit small incremental changes to main.
+EOF
+    exit 1
+}
+
+# Check if workers are active (any .pid_worker or .pid_worker_* with valid process)
+workers_active() {
+    local repo_root
+    repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -z "$repo_root" ]] && return 1
+
+    # Check both single-worker (.pid_worker) and multi-worker (.pid_worker_*) formats
+    for pidfile in "$repo_root"/.pid_worker "$repo_root"/.pid_worker_*; do
+        [[ -f "$pidfile" ]] || continue
+        local pid
+        pid="$(cat "$pidfile" 2>/dev/null || true)"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            return 0  # At least one worker is active
+        fi
+    done
+    return 1
+}
+
+# Warn and block destructive operations when workers active
+block_destructive() {
+    local op="$1"
+    local repo_root
+    repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null || echo .)"
+    local worker_count
+    # Count both single-worker (.pid_worker) and multi-worker (.pid_worker_*) files
+    worker_count="$(find "$repo_root" -maxdepth 1 \( -name '.pid_worker' -o -name '.pid_worker_*' \) 2>/dev/null | wc -l)"
+    worker_count="${worker_count//[[:space:]]/}"
+    printf '%s\n' \
+        "ERROR: Destructive operation blocked while workers are active." \
+        "" \
+        "Command: git ${op}" \
+        "Workers: ${worker_count} worker process(es) active" \
+        "" \
+        "This command may revert uncommitted worker changes. Options:" \
+        "1. Wait for workers to commit their changes" \
+        "2. Use --ait-force-destructive to override (after verifying no uncommitted work)" \
+        "" \
+        "See ai_template rule: \"Commit AND push: Files invisible until pushed\"" >&2
+    exit 1
+}
+
+# Check for --ait-force-destructive override flag
+has_force_override() {
+    for arg in "$@"; do
+        [[ "$arg" == "--ait-force-destructive" ]] && return 0
+    done
+    return 1
+}
+
+# Remove --ait-force-destructive from args and exec real git
+# Uses exec directly to preserve argument quoting (avoids word splitting issues)
+exec_without_force_flag() {
+    local -a new_args=()
+    for arg in "$@"; do
+        [[ "$arg" != "--ait-force-destructive" ]] && new_args+=("$arg")
+    done
+    exec "$REAL_GIT" "${new_args[@]}"
+}
+
+# Block --no-verify for AI roles to prevent bypassing commit hooks
+has_no_verify() {
+    for arg in "$@"; do
+        [[ "$arg" == "--no-verify" || "$arg" == "-n" ]] && return 0
+    done
+    return 1
+}
+
+is_ai_role() {
+    case "${AI_ROLE:-}" in
+        WORKER|PROVER|RESEARCHER|MANAGER) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_worker_role() {
+    [[ "${AI_ROLE:-}" == "WORKER" ]]
+}
+
+ensure_commit_msg_hook() {
+    local repo_root hook_source hooks_dir hook_target
+    repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -z "$repo_root" ]] && return 0
+
+    hook_source="$repo_root/ai_template_scripts/commit-msg-hook.sh"
+    [[ -f "$hook_source" ]] || return 0
+
+    hooks_dir="$("$REAL_GIT" rev-parse --git-path hooks 2>/dev/null || echo "$repo_root/.git/hooks")"
+    hook_target="$hooks_dir/commit-msg"
+
+    if [[ ! -x "$hook_target" ]]; then
+        mkdir -p "$hooks_dir" 2>/dev/null || true
+        if cp "$hook_source" "$hook_target" && chmod +x "$hook_target"; then
+            echo "[git wrapper] Installed commit-msg hook at $hook_target" >&2
+        else
+            echo "ERROR: Failed to install commit-msg hook at $hook_target" >&2
+            echo "   Run ./ai_template_scripts/install_hooks.sh to install hooks." >&2
+            exit 1
+        fi
+    fi
+}
+
+# Check for branch-creating patterns
+case "$1" in
+    branch)
+        # Allow: git branch (list), git branch -d/-D (delete), git branch -a/--list/--show-current
+        # Block: git branch <name> (creates branch) unless zone/*
+        shift
+        saved_args=("$@")
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -d|-D|--delete|-m|-M|--move|-c|-C|--copy|-a|--all|--list|--show-current|-v|-vv|--verbose|-r|--remotes|--merged|--no-merged|--contains|--no-contains|--sort=*|--format=*)
+                    # Safe flags - pass through
+                    exec "$REAL_GIT" branch "${saved_args[@]}"
+                    ;;
+                -*)
+                    # Other flags - continue checking
+                    shift
+                    ;;
+                *)
+                    # Positional argument = branch name = creating a branch
+                    # Allow zone/* for multi-machine mode, block others
+                    if block_branch "$1"; then
+                        # zone/* allowed - pass through to real git
+                        exec "$REAL_GIT" branch "${saved_args[@]}"
+                    fi
+                    # block_branch exits on failure, so we never reach here for blocked branches
+                    ;;
+            esac
+        done
+        # No positional args - safe (listing branches)
+        exec "$REAL_GIT" branch "${saved_args[@]}"
+        ;;
+    checkout)
+        # Block: git checkout -b <name> unless zone/*
+        prev_arg=""
+        for arg in "$@"; do
+            if [[ "$prev_arg" == "-b" || "$prev_arg" == "-B" ]]; then
+                # $arg is the branch name after -b/-B
+                block_branch "$arg"
+            fi
+            prev_arg="$arg"
+        done
+        # Block: git checkout -- <file> when workers active (discards changes)
+        # Pattern: checkout followed by -- followed by paths
+        has_double_dash=false
+        for arg in "$@"; do
+            [[ "$arg" == "--" ]] && has_double_dash=true && break
+        done
+        if $has_double_dash && workers_active && ! has_force_override "$@"; then
+            block_destructive "checkout -- <paths>"
+        fi
+        if has_force_override "$@"; then
+            exec_without_force_flag "$@"
+        fi
+        ;;
+    switch)
+        # Block: git switch -c/-C <name> unless zone/*
+        prev_arg=""
+        for arg in "$@"; do
+            if [[ "$prev_arg" == "-c" || "$prev_arg" == "-C" || "$prev_arg" == "--create" || "$prev_arg" == "--force-create" ]]; then
+                # $arg is the branch name after the create flag
+                block_branch "$arg"
+            fi
+            prev_arg="$arg"
+        done
+        ;;
+    restore)
+        # Block: git restore <file> when workers active (unless --staged)
+        # Allow: git restore --staged (only touches index, not working tree)
+        has_staged=false
+        for arg in "$@"; do
+            [[ "$arg" == "--staged" || "$arg" == "-S" ]] && has_staged=true && break
+        done
+        if ! $has_staged && workers_active && ! has_force_override "$@"; then
+            block_destructive "restore <paths>"
+        fi
+        if has_force_override "$@"; then
+            exec_without_force_flag "$@"
+        fi
+        ;;
+    reset)
+        # Block: git reset --hard when workers active
+        has_hard=false
+        for arg in "$@"; do
+            [[ "$arg" == "--hard" ]] && has_hard=true && break
+        done
+        if $has_hard && workers_active && ! has_force_override "$@"; then
+            block_destructive "reset --hard"
+        fi
+        if has_force_override "$@"; then
+            exec_without_force_flag "$@"
+        fi
+        ;;
+    clean)
+        # Block: git clean -f/-fd/--force when workers active
+        has_force=false
+        for arg in "$@"; do
+            # Match -f, -fd, -ffd, etc or --force
+            if [[ "$arg" =~ ^-[a-zA-Z]*f ]] || [[ "$arg" == "--force" ]]; then
+                has_force=true
+                break
+            fi
+        done
+        if $has_force && workers_active && ! has_force_override "$@"; then
+            block_destructive "clean -f"
+        fi
+        if has_force_override "$@"; then
+            exec_without_force_flag "$@"
+        fi
+        ;;
+    add)
+        # Multi-worker mode: warn when staging files not tracked by this worker
+        # Advisory only - warns but doesn't block
+        if [[ -n "${AI_WORKER_ID:-}" ]]; then
+            repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null || pwd)"
+            tracker_file="$repo_root/.worker_${AI_WORKER_ID}_files.json"
+
+            # Check for dangerous patterns: git add . or git add -A
+            for arg in "$@"; do
+                if [[ "$arg" == "." || "$arg" == "-A" || "$arg" == "--all" ]]; then
+                    echo "[git add] WARNING: 'git add $arg' in multi-worker mode" >&2
+                    echo "   This may stage files modified by other workers." >&2
+                    echo "   Consider staging specific files instead." >&2
+                    break
+                fi
+            done
+
+            # Check specific files against tracker
+            if [[ -f "$tracker_file" ]] && command -v python3 &>/dev/null; then
+                # Get tracked files
+                tracked_files=$(python3 -c "
+import json
+import sys
+try:
+    with open('$tracker_file') as f:
+        data = json.load(f)
+    for f in data.get('files', []):
+        print(f)
+except Exception:
+    sys.exit(0)
+" 2>/dev/null || true)
+
+                # Check each file argument
+                skip_next=false
+                for arg in "$@"; do
+                    # Skip flags and their values
+                    if $skip_next; then
+                        skip_next=false
+                        continue
+                    fi
+                    case "$arg" in
+                        -p|--patch|-e|--edit|-i|--interactive|-N|--intent-to-add|--chmod=*)
+                            continue ;;
+                        .|--all|-A)
+                            continue ;;  # Already warned above
+                        -*)
+                            # Other flags - continue checking
+                            continue ;;
+                        *)
+                            # This is a file path - check if tracked
+                            if [[ -n "$tracked_files" ]]; then
+                                if ! echo "$tracked_files" | grep -qxF "$arg"; then
+                                    echo "[git add] Advisory: '$arg' is not in worker $AI_WORKER_ID's tracked files" >&2
+                                fi
+                            fi
+                            ;;
+                    esac
+                done
+            fi
+        fi
+        ;;
+    commit)
+        if has_no_verify "$@"; then
+            if is_ai_role && [[ "${AIT_ALLOW_NO_VERIFY:-}" != "1" ]]; then
+                echo "ERROR: --no-verify is blocked for AI roles." >&2
+                echo "   Commit hooks enforce issue workflow and role boundaries." >&2
+                echo "   Remove --no-verify or set AIT_ALLOW_NO_VERIFY=1 to override." >&2
+                exit 1
+            fi
+        fi
+
+        ensure_commit_msg_hook
+
+        # Enforce Worker cannot use Fixes #N (fallback when hook isn't installed)
+        # This prevents gamma-crown-style bypasses when hook source is missing (#1269)
+        # Note: Does not handle stdin commits (-F -) - hook catches those if installed
+        if is_worker_role; then
+            COMMIT_MSG=""
+            # Extract commit message from -m "msg" or -F file (not stdin)
+            PREV_ARG=""
+            for arg in "$@"; do
+                if [[ "$PREV_ARG" == "-m" ]]; then
+                    COMMIT_MSG="$arg"
+                    break
+                elif [[ "$PREV_ARG" == "-F" && -f "$arg" ]]; then
+                    COMMIT_MSG="$(cat "$arg" 2>/dev/null || true)"
+                    break
+                fi
+                PREV_ARG="$arg"
+            done
+
+            # Check for auto-close patterns (case insensitive)
+            if [[ -n "$COMMIT_MSG" ]] && echo "$COMMIT_MSG" | grep -qiE '(^|[^[:alnum:]_])(fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved):?[[:space:]]*(([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]+)'; then
+                echo "ERROR: Worker role cannot close issues with Fixes/Closes/Resolves." >&2
+                echo "   Use 'Part of #N' to link without closing." >&2
+                echo "   Only MANAGER or USER can close issues." >&2
+                exit 1
+            fi
+        fi
+
+        # Serialize commits with per-repo lock to prevent cross-session collisions
+        if [[ -z "${AIT_GIT_LOCK_DISABLE:-}" ]]; then
+            GIT_DIR="$("$REAL_GIT" rev-parse --absolute-git-dir 2>/dev/null || true)"
+            if [[ -n "$GIT_DIR" ]]; then
+                LOCK_DIR="${GIT_DIR}/ait_commit_lock"
+                LOCK_PID_FILE="${LOCK_DIR}/pid"
+                LOCK_WAIT_S="${AIT_GIT_LOCK_WAIT_S:-300}"
+                START_TS="$(date +%s)"
+
+                LAST_STATUS_TS="$START_TS"
+
+                while true; do
+                    if mkdir "$LOCK_DIR" 2>/dev/null; then
+                        echo "$$" > "$LOCK_PID_FILE" 2>/dev/null || true
+                        break
+                    fi
+
+                    # Check if lock holder is still alive
+                    if [[ -f "$LOCK_PID_FILE" ]]; then
+                        LOCK_PID="$(cat "$LOCK_PID_FILE" 2>/dev/null || true)"
+                        if [[ -n "$LOCK_PID" ]] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+                            # Lock holder died, clean up stale lock
+                            rm -rf "$LOCK_DIR"
+                            continue
+                        fi
+                    fi
+
+                    NOW_TS="$(date +%s)"
+                    if (( NOW_TS - START_TS >= LOCK_WAIT_S )); then
+                        echo "ERROR: Timed out waiting for git commit lock at $LOCK_DIR" >&2
+                        echo "   Set AIT_GIT_LOCK_DISABLE=1 to bypass if lock is stale." >&2
+                        exit 1
+                    fi
+
+                    # Emit progress every 60s to prevent looper silence timeout
+                    if (( NOW_TS - LAST_STATUS_TS >= 60 )); then
+                        WAITED=$(( NOW_TS - START_TS ))
+                        echo "[git commit lock] Waiting for lock... (${WAITED}s/${LOCK_WAIT_S}s)" >&2
+                        LAST_STATUS_TS="$NOW_TS"
+                    fi
+
+                    sleep 0.2
+                done
+
+                # shellcheck disable=SC2329  # Used via trap
+                cleanup_lock() {
+                    rm -rf "$LOCK_DIR"
+                }
+                trap cleanup_lock EXIT INT TERM
+
+                status=0
+                "$REAL_GIT" "$@" || status=$?
+                exit "$status"
+            fi
+        fi
+        ;;
+    status)
+        # Enhanced git status: show worker file ownership after standard output
+        "$REAL_GIT" "$@"
+        status_exit=$?
+
+        # Skip ownership info for machine-readable formats (--porcelain, -s, -z, etc.)
+        is_machine_format=false
+        for arg in "$@"; do
+            case "$arg" in
+                --porcelain|--porcelain=*|-s|--short|-z|--null)
+                    is_machine_format=true
+                    break
+                    ;;
+            esac
+        done
+
+        # Only show ownership info when status succeeded, in a repo, and human format
+        if [[ $status_exit -eq 0 ]] && ! $is_machine_format; then
+            repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null)" || repo_root=""
+
+            if [[ -n "$repo_root" ]]; then
+                # Check for tracker files
+                shopt -s nullglob
+                trackers=("$repo_root"/.worker_*_files.json)
+                shopt -u nullglob
+
+                if [[ ${#trackers[@]} -gt 0 ]] && command -v python3 &>/dev/null; then
+                    # Show worker file ownership
+                    python3 - "$repo_root" "${AI_WORKER_ID:-}" <<'PYEOF'
+import json
+import os
+import re
+import sys
+
+repo_root = sys.argv[1]
+my_worker_id = sys.argv[2] if len(sys.argv) > 2 else ""
+
+tracker_pattern = re.compile(r'^\.worker_(\d+)_files\.json$')
+worker_files = {}
+
+for filename in os.listdir(repo_root):
+    match = tracker_pattern.match(filename)
+    if not match:
+        continue
+
+    filepath = os.path.join(repo_root, filename)
+    try:
+        with open(filepath) as f:
+            data = json.load(f)
+        pid = data.get('pid', 0)
+        worker_id = data.get('worker_id', 0)
+        files = data.get('files', [])
+
+        # Check if PID is alive
+        if pid > 0:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue  # Dead PID, skip
+            except PermissionError:
+                pass  # Process exists
+
+        if worker_id > 0 and files:
+            worker_files[worker_id] = files
+    except (json.JSONDecodeError, OSError, KeyError):
+        continue
+
+if worker_files:
+    # Print to stderr to avoid corrupting machine-parseable stdout (#2065)
+    print(file=sys.stderr)
+    print("Active worker files:", file=sys.stderr)
+    for wid in sorted(worker_files.keys()):
+        marker = " (you)" if str(wid) == my_worker_id else ""
+        files = worker_files[wid]
+        print(f"  W{wid}{marker}: {len(files)} file(s)", file=sys.stderr)
+        for f in sorted(files)[:5]:
+            print(f"    {f}", file=sys.stderr)
+        if len(files) > 5:
+            print(f"    ... and {len(files) - 5} more", file=sys.stderr)
+PYEOF
+                fi
+            fi
+        fi
+
+        exit "$status_exit"
+        ;;
+    stash)
+        # Block all git stash operations - "Never stash - always commit (WIP if needed)"
+        cat >&2 <<'EOF'
+ERROR: git stash is blocked.
+
+AI workers must never stash - stashed changes become invisible context.
+Instead, commit your changes (even as WIP commits):
+
+  git add -A && git commit -m "[W]N: WIP - description"
+
+This keeps changes visible in git history and prevents lost work.
+
+See ai_template rule: "Commit AND push: Files invisible until pushed"
+EOF
+        exit 1
+        ;;
+esac
+
+# Pass through to real git
+exec "$REAL_GIT" "$@"

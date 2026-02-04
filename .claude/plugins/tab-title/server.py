@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates
+# Licensed under the Apache License, Version 2.0
+
 """
 MCP server for setting terminal tab titles.
 
@@ -31,7 +35,10 @@ def get_project_name() -> str:
 def get_role() -> str:
     """
     Get role from AI_ROLE env var (set by looper.py).
-    Returns: W (worker), P (prover), R (researcher), M (manager), or U (user/human sessions)
+    Includes worker/prover ID if set (AI_WORKER_ID env var).
+    Returns:
+        W (worker), W1/W2 (multi-worker), P (prover), P1/P2 (multi-prover),
+        R (researcher), M (manager), or U (user/human sessions)
     """
     role = os.environ.get("AI_ROLE", "").upper()
     role_map = {
@@ -40,14 +47,20 @@ def get_role() -> str:
         "RESEARCHER": "R",
         "MANAGER": "M",
     }
-    return role_map.get(role, "U")
+    short_role = role_map.get(role, "U")
+
+    # Include worker/prover ID if set (multi-instance mode)
+    worker_id = os.environ.get("AI_WORKER_ID", "")
+    if worker_id and short_role in ("W", "P", "R"):
+        return f"{short_role}{worker_id}"
+    return short_role
 
 
 def auto_set_title() -> None:
-    """Automatically set terminal title on startup.
+    """Automatically set terminal title during MCP initialize.
 
-    Called when MCP server initializes to set the tab title
-    based on current role and project.
+    Called during the MCP 'initialize' method to set the tab title
+    based on current role (with worker ID if set) and project name.
     """
     role = get_role()
     project = get_project_name()
@@ -134,7 +147,8 @@ def set_title_escape(title: str) -> bool:
         with open("/dev/tty", "w") as tty:
             # OSC 0: Set icon name and window title
             tty.write(f"\033]0;{title}\007")
-            # OSC 1: Set icon name (tab title in iTerm2) - this one tends to be more persistent
+            # OSC 1: Set icon name (tab title in iTerm2).
+            # This one tends to be more persistent.
             tty.write(f"\033]1;{title}\007")
             # OSC 2: Set window title
             tty.write(f"\033]2;{title}\007")
@@ -172,6 +186,14 @@ def handle_request(request: dict) -> dict | None:
     req_id = request.get("id")
 
     if method == "initialize":
+        # Auto-set terminal title immediately on initialize
+        # This is more reliable than waiting for notifications/initialized
+        # which may not be sent by all MCP clients
+        try:
+            auto_set_title()
+        except Exception as e:
+            # Log to stderr for debugging, don't fail initialization
+            print(f"[tab-title] auto_set_title failed: {e}", file=sys.stderr)
         return {
             "jsonrpc": "2.0",
             "id": req_id,
@@ -183,9 +205,8 @@ def handle_request(request: dict) -> dict | None:
         }
 
     if method == "notifications/initialized":
-        # Auto-set terminal title when session starts
-        auto_set_title()
-        # No response needed for notifications
+        # Keep for backwards compatibility with clients that send this
+        # No-op since we already set the title during initialize
         return None
 
     if method == "tools/list":
@@ -196,13 +217,20 @@ def handle_request(request: dict) -> dict | None:
                 "tools": [
                     {
                         "name": "set_tab_title",
-                        "description": "[BOTH] Set the terminal tab/window title. If no title provided, auto-generates from role and project.",
+                        "description": (
+                            "[BOTH] Set the terminal tab/window title. "
+                            "If no title provided, auto-generates from role and "
+                            "project."
+                        ),
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "title": {
                                     "type": "string",
-                                    "description": "Custom title. If omitted, uses [X]<project> format where X is W/M/U.",
+                                    "description": (
+                                        "Custom title. If omitted, uses [X]<project> "
+                                        "format where X is W/W1/P/P1/R/M/U."
+                                    ),
                                 },
                                 "role": {
                                     "type": "string",
@@ -218,11 +246,18 @@ def handle_request(request: dict) -> dict | None:
                                         "MANAGER",
                                         "USER",
                                     ],
-                                    "description": "Role to display: W (worker), P (prover), R (researcher), M (manager), U (user). Defaults to AI_ROLE env var.",
+                                    "description": (
+                                        "Role to display: W (worker), P (prover), "
+                                        "R (researcher), M (manager), U (user). "
+                                        "Defaults to AI_ROLE env var. "
+                                        "Multi-instance IDs (W1, P2) auto-detected."
+                                    ),
                                 },
                                 "project": {
                                     "type": "string",
-                                    "description": "Project name. Defaults to git remote name.",
+                                    "description": (
+                                        "Project name. Defaults to git remote name."
+                                    ),
                                 },
                             },
                             "required": [],
@@ -242,22 +277,31 @@ def handle_request(request: dict) -> dict | None:
             if "title" in args:
                 title = args["title"]
             else:
-                role = args.get("role") or get_role()
-                # Normalize roles to short form (case-insensitive)
-                role_upper = role.upper() if role else ""
-                role_map = {
-                    "WORKER": "W",
-                    "PROVER": "P",
-                    "RESEARCHER": "R",
-                    "MANAGER": "M",
-                    "USER": "U",
-                    "W": "W",
-                    "P": "P",
-                    "R": "R",
-                    "M": "M",
-                    "U": "U",
-                }
-                role = role_map.get(role_upper, role_upper or "U")
+                role_arg = args.get("role")
+                if not role_arg:
+                    # No role specified - use environment-aware role with worker ID
+                    role = get_role()
+                else:
+                    role_upper = role_arg.upper()
+                    # Full role names should use env-aware role (to get worker ID)
+                    full_names = {"WORKER", "PROVER", "RESEARCHER", "MANAGER", "USER"}
+                    # Short role names without ID should also use env-aware role
+                    short_names = {"W", "P", "R", "M", "U"}
+                    if role_upper in full_names or role_upper in short_names:
+                        # Use get_role() to preserve worker/prover ID from environment
+                        role = get_role()
+                    else:
+                        # Already includes ID (W1, P2, etc.) - validate and use as-is
+                        # Only allow valid patterns: single letter + optional digits
+                        if (
+                            len(role_upper) >= 1
+                            and role_upper[0] in "WPRMU"
+                            and role_upper[1:].isdigit()
+                        ):
+                            role = role_upper
+                        else:
+                            # Invalid format - fall back to env-aware role
+                            role = get_role()
                 project = args.get("project") or get_project_name()
                 title = f"[{role}]{project}"
 
@@ -272,7 +316,10 @@ def handle_request(request: dict) -> dict | None:
                 if methods_used:
                     msg = f"Tab title set to: {title} (via {', '.join(methods_used)})"
                 else:
-                    msg = f"Tab title '{title}' - no methods succeeded. Session ID: {results['session_id']}"
+                    msg = (
+                        f"Tab title '{title}' - no methods succeeded. "
+                        f"Session ID: {results['session_id']}"
+                    )
 
                 return {
                     "jsonrpc": "2.0",
@@ -307,7 +354,7 @@ def handle_request(request: dict) -> dict | None:
         }
 
 
-def main():
+def main() -> None:
     """Main loop - read JSON-RPC from stdin, write responses to stdout."""
     for line in sys.stdin:
         line = line.strip()

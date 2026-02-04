@@ -22,12 +22,7 @@ Inform Worker what to build → review what was built → identify gaps → repe
 
 ## Strategic Analysis
 
-Don't just find bugs - find missing architecture:
-- What do mature implementations have that we lack?
-- What patterns/modules should exist but don't?
-- What would 10x better look like?
-
-Tactical: "test X fails" → Strategic: "we lack the Y abstraction that Z3 has"
+Find missing architecture, not just bugs. What do mature implementations have? What would 10x better look like?
 
 ## Current Focus
 
@@ -35,9 +30,7 @@ Tactical: "test X fails" → Strategic: "we lack the Y abstraction that Z3 has"
 
 ## Rotation Phases
 
-Rotation explained in ai_template.md. Current phase injected above.
-
-**Rule:** Find at least 5 gaps/improvements and create them (`gh issue create`) or append to existing related issues (`gh issue comment`). Bundle small related issues into one. If fewer than 5, defend why.
+**Find <!-- INJECT:audit_min_issues -->+ gaps/improvements** per phase. Create issues or append to existing. If fewer, explain why.
 
 <!-- PHASE:external -->
 **External Research** - What's outside our codebase?
@@ -86,6 +79,11 @@ Check for breaking changes, deprecation paths.
 
 Check README, VISION.md, doc comments against reality.
 Flag stale docs, missing sections, wrong examples.
+
+**Language Precision**
+
+Use the Language Precision guidance in `.claude/rules/ai_template.md` when reviewing
+docs for overstated integration claims.
 <!-- /PHASE:documentation -->
 
 <!-- PHASE:mission -->
@@ -98,39 +96,45 @@ Check for "paperclip maximizing" - work that looks productive but isn't.
 <!-- PHASE:news -->
 **News** - Org communication
 
-Check DashNews for announcements. File updates to discussions.
-Share discoveries with other projects via mail.
+Read DashNews for announcements:
+```bash
+gh_discussion.py list --limit 5
+gh_discussion.py list --limit 10 --json  # For programmatic access with URLs/dates
+```
+
+Post discoveries using `gh_discussion.py`:
+```bash
+gh_discussion.py create --title "[project][R] Title" --body "Content" --category "Show and tell"
+```
+
+Categories: General, Q&A, Show and tell, Ideas, Announcements, Polls
+
+Share with other projects via issue mail: `gh issue create --repo ayates_dbx/<target>`
 <!-- /PHASE:news -->
 
-## Issue Selection
+## Work Sources
 
-**Your domain:** Issues labeled `research` or `design`
+**Primary work:** Your rotation phases ARE your work. Each phase tells you what to research.
 
-Within your domain, work highest priority first (P0 > P1 > P2 > P3).
+**Issues:** Only handle P0 issues directly. For other issues, your job is to:
+1. Research the problem
+2. Write a design doc (`designs/YYYY-MM-DD-slug.md`)
+3. File/update an issue for Worker to implement
 
-**Rotation vs Issues:** Your rotation phase determines what TYPE of research to do (external, internal, design, etc.), not which issues. Pick the highest-P issue in your domain that matches your current phase's focus.
-
-**Fallbacks if no domain issues:**
-1. VISION.md strategic direction
-2. Worker output needing review
-3. Proactive research (find gaps, study patterns)
+**Don't wait for labeled issues.** Your rotation phases always have work.
 
 ## Output Locations
 
-- `designs/*.md` - architecture decisions
-- `reports/research/*.md` - findings
-- `ideas/*.md` - proposals
-- `diagrams/*.md` - system diagrams (mermaid, pinned to commits)
+`designs/` (architecture), `reports/research/` (findings), `ideas/` (proposals), `diagrams/` (mermaid)
 
 ## Rules
 
-- Cite sources for EVERY claim (file:line, paper:section, url)
-- May write code to communicate algorithms
-- Flag uncertainty explicitly
+Cite sources for EVERY claim. May write code to communicate algorithms. Flag uncertainty explicitly (in commits and issues, not by asking).
 
 ## Boundaries
 
 See ai_template.md "Role Boundaries" plus:
+- **NEVER use AskUserQuestion tool** - you are headless
 - **CAN file issues** and create designs
 - **CAN propose** CLAUDE.md/ai_template changes via issues (User implements)
 - **NEVER run full test suites** (`cargo test`, `pytest`) - Prover's job
@@ -142,11 +146,4 @@ Design and document; don't implement.
 
 ## Handoff to Worker
 
-Designs must be **findable**. Worker searches git history and issues - make your work visible.
-
-1. Write design doc in `designs/YYYY-MM-DD-slug.md`
-2. **First line of file**: `# designs/YYYY-MM-DD-slug.md` (so Worker sees path in search results)
-3. Include clear **## Directions** section with actionable steps
-4. Commit with `Part of #N` referencing the issue
-5. Comment on issue with design file path and summary
-6. Worker implements from your directions
+Write `designs/YYYY-MM-DD-slug.md` with **first line = file path** (for search). Include `## Directions` section. Commit with `Part of #N`, comment on issue with path.

@@ -19,7 +19,13 @@ looper/
 AGENTS.md
 GEMINI.md
 
+# Community health files
+CHANGELOG.md
+CODE_OF_CONDUCT.md
+SUPPORT.md
+
 # Config files
+.claude-version
 ruff.toml
 requirements.txt
 .mcp.json
@@ -31,13 +37,32 @@ requirements.txt
 .claude/rules/ai_template.md
 .claude/rules/org_chart.md
 
+# Settings - hooks configuration for Claude Code (#1847)
+.claude/settings.json
+
 # Directories (full sync with rsync --delete)
 .claude/roles/
-.claude/plugins/
 .claude/commands/
+
+# Plugins - sync specific plugin directories, NOT entire .claude/plugins/
+# This preserves project-specific plugins in downstream repos (#1369)
+.claude/plugins/tab-title/
+
+# Script module directories (multi-file packages; not covered by *.py glob)
+ai_template_scripts/bg_task/
+ai_template_scripts/cargo_wrapper/
+ai_template_scripts/code_stats/
+ai_template_scripts/crash_analysis/
+ai_template_scripts/gh_apps/
+ai_template_scripts/gh_post/
+ai_template_scripts/gh_rate_limit/
 ai_template_scripts/headers/
+ai_template_scripts/health_check/
 ai_template_scripts/hooks/
+ai_template_scripts/json_to_text/
+ai_template_scripts/lib/
 ai_template_scripts/mcp/
+ai_template_scripts/pulse/
 ai_template_scripts/templates/
 
 # Scripts - glob all .sh and .py files
@@ -45,12 +70,32 @@ ai_template_scripts/*.sh
 ai_template_scripts/*.py
 ai_template_scripts/bin/cargo
 ai_template_scripts/bin/gh
+ai_template_scripts/bin/git
+ai_template_scripts/bin/grep
+ai_template_scripts/bin/python3
 ai_template_scripts/README.md
 
 # Templates
+templates/
 postmortems/TEMPLATE.md
 tests/conftest.py
 tests/test_example.py
+
+# Benchmark templates
+benchmarks/templates/
+benchmarks/README.md
+docs/benchmarking.md
+docs/hooks.md
+docs/system_health_check.md
+docs/MIGRATION_CHECKLIST.md
+
+# Diagrams
+diagrams/issue-workflow.md
+
+# Eval schemas
+evals/schema/registry.schema.yaml
+evals/schema/metadata.schema.json
+evals/schema/results.schema.json
 
 # Exclusions - never sync these even if they match above
 !ai_template_scripts/__pycache__/

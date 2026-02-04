@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2026 Dropbox, Inc.
-# Author: Andrew Yates
+# Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
 
 """
@@ -15,28 +15,53 @@ Records test runs to logs/tests.jsonl for pattern detection:
 - Frequent test failures
 - Resource-intensive test patterns
 
-Usage:
-    # Log a test run (call before/after test)
+Public API (library usage):
+    from ai_template_scripts.log_test import (
+        get_session_info,  # Get AI session info from env
+        log_entry,         # Append entry to test log
+        cmd_start,         # Log test start
+        cmd_end,           # Log test end
+        cmd_run,           # Run command with logging
+        cmd_report,        # Generate report from log
+    )
+
+CLI usage:
     ./ai_template_scripts/log_test.py start "cargo test"
     ./ai_template_scripts/log_test.py end 0  # exit code
-
-    # Or wrap a command (logs start/end automatically)
     ./ai_template_scripts/log_test.py run "cargo test -p solver"
-
-    # Analyze recent tests
     ./ai_template_scripts/log_test.py report
+    ./ai_template_scripts/log_test.py --version
 
 Copyright 2026 Dropbox, Inc.
 Licensed under the Apache License, Version 2.0
 """
 
+__all__ = [
+    "get_session_info",
+    "log_entry",
+    "cmd_start",
+    "cmd_end",
+    "cmd_run",
+    "cmd_report",
+    "main",
+]
+
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+# Support running as script (not just as module)
+_repo_root = Path(__file__).resolve().parents[1]
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
+from ai_template_scripts.subprocess_utils import run_cmd  # noqa: E402
+from ai_template_scripts.version import get_version  # noqa: E402
 
 LOGS_DIR = Path("logs")
 TEST_LOG = LOGS_DIR / "tests.jsonl"
@@ -52,14 +77,14 @@ def get_session_info() -> dict:
     }
 
 
-def log_entry(entry: dict):
+def log_entry(entry: dict) -> None:
     """Append entry to test log."""
     LOGS_DIR.mkdir(exist_ok=True)
     with open(TEST_LOG, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
 
-def cmd_start(command: str):
+def cmd_start(command: str) -> None:
     """Log test start."""
     info = get_session_info()
     entry = {
@@ -83,7 +108,7 @@ def cmd_start(command: str):
     print(f"[test-log] Started: {command}")
 
 
-def cmd_end(exit_code: int):
+def cmd_end(exit_code: int) -> None:
     """Log test end."""
     info = get_session_info()
 
@@ -115,62 +140,115 @@ def cmd_end(exit_code: int):
     print(f"[test-log] Ended: {command} - {status}{duration_str}")
 
 
-def cmd_run(command: str):
-    """Run a test command with automatic logging."""
+# Max bytes to capture from stderr for failed test analysis (#924)
+STDERR_TAIL_BYTES = 4096
+
+
+def cmd_run(command: str) -> int:
+    """Run a test command with automatic logging.
+
+    For failed commands, captures stderr tail to help distinguish command
+    errors (wrong args) from actual test failures (#924).
+
+    Uses subprocess_utils.run_cmd for consistent timeout handling when possible,
+    falls back to shell execution for complex commands with shell features.
+    """
     cmd_start(command)
     start = time.time()
 
-    # Run the command
-    result = subprocess.run(command, shell=True)
+    # Check if command needs shell features
+    shell_chars = {"|", ">", "<", "&", ";", "*", "?", "$", "`", "(", ")"}
+    needs_shell = any(c in command for c in shell_chars)
+
+    if needs_shell:
+        # Complex command - use shell
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=600,  # 10 min timeout for tests
+        )
+        stdout, stderr = result.stdout, result.stderr
+        returncode = result.returncode
+    else:
+        # Simple command - use run_cmd for consistent timeout handling
+        try:
+            cmd_list = shlex.split(command)
+            result = run_cmd(cmd_list, timeout=600)  # 10 min timeout for tests
+            stdout, stderr = result.stdout, result.stderr
+            returncode = result.returncode
+        except ValueError:
+            # Fallback if shlex fails
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=600,  # 10 min timeout for tests
+            )
+            stdout, stderr = result.stdout, result.stderr
+            returncode = result.returncode
 
     duration_s = round(time.time() - start, 1)
 
-    # Log end with duration
+    # Stream stdout/stderr to console (since we captured them)
+    if stdout:
+        sys.stdout.write(stdout)
+    if stderr:
+        sys.stderr.write(stderr)
+
+    # Log end with duration and optional stderr tail for failures
     info = get_session_info()
     entry = {
         "event": "end",
         "timestamp": datetime.now().isoformat(),
         "command": command,
-        "exit_code": result.returncode,
+        "exit_code": returncode,
         "duration_s": duration_s,
         **info,
     }
+
+    # Capture stderr tail for failed runs to help classify failures (#924)
+    if returncode != 0:
+        if stderr:
+            stderr_tail = stderr[-STDERR_TAIL_BYTES:]
+            entry["stderr_tail"] = stderr_tail
+
+            # Detect command/usage errors vs actual test failures
+            usage_error_patterns = [
+                "unexpected argument",
+                "Found argument",
+                "unrecognized option",
+                "invalid option",
+                "Usage:",
+                "error: unrecognized",
+                "missing '--'",
+                "unknown flag",
+            ]
+            for pattern in usage_error_patterns:
+                if pattern.lower() in stderr_tail.lower():
+                    entry["error_type"] = "command_error"
+                    break
+            else:
+                entry["error_type"] = "test_failure"
+        else:
+            # No stderr but still failed - classify as test_failure
+            entry["error_type"] = "test_failure"
+
     log_entry(entry)
     ACTIVE_FILE.unlink(missing_ok=True)
 
-    status = (
-        "passed" if result.returncode == 0 else f"failed (exit {result.returncode})"
-    )
+    status = "passed" if returncode == 0 else f"failed (exit {returncode})"
     print(f"[test-log] Completed: {command} - {status} ({duration_s}s)")
 
-    return result.returncode
+    return returncode
 
 
-def cmd_report():
-    """Generate report from test log."""
-    if not TEST_LOG.exists():
-        print("No test log found.")
-        return
-
-    entries = []
-    for line in TEST_LOG.read_text().strip().split("\n"):
-        if line:
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-
-    if not entries:
-        print("No test entries found.")
-        return
-
-    # Filter to end events (have duration)
-    end_events = [e for e in entries if e.get("event") == "end"]
-
-    print(f"Test Log Report ({len(end_events)} runs)")
-    print("=" * 60)
-
-    # Recent tests (last 10)
+def _print_recent_tests(end_events: list) -> None:
+    """Print recent tests section."""
     print("\nRecent tests:")
     for e in end_events[-10:]:
         ts = e.get("timestamp", "?")[:19]
@@ -181,17 +259,31 @@ def cmd_report():
         status = "✓" if code == 0 else "✗"
         print(f"  {ts} [{role}] {status} {cmd} ({dur}s)")
 
-    # Failures
+
+def _print_failure_summary(end_events: list) -> None:
+    """Print failure summary section with error type breakdown (#924)."""
     failures = [e for e in end_events if e.get("exit_code", 0) != 0]
     if failures:
-        print(
-            f"\nFailures: {len(failures)}/{len(end_events)} ({100 * len(failures) // len(end_events)}%)"
-        )
+        total = len(end_events)
+        print(f"\nFailures: {len(failures)}/{total} ({100 * len(failures) // total}%)")
 
-    # Concurrent tests (look for overlapping start/end)
+        # Break down by error type if classified (#924)
+        command_errors = [f for f in failures if f.get("error_type") == "command_error"]
+        test_failures = [f for f in failures if f.get("error_type") == "test_failure"]
+        unclassified = [f for f in failures if "error_type" not in f]
+
+        if command_errors or test_failures:
+            print(f"  - Command errors: {len(command_errors)}")
+            print(f"  - Test failures: {len(test_failures)}")
+            if unclassified:
+                print(f"  - Unclassified: {len(unclassified)}")
+
+
+def _detect_concurrent_tests(entries: list) -> None:
+    """Detect and print concurrent test runs."""
     print("\nConcurrent test detection:")
 
-    # Build list of (start_time, end_time, session, role, command) tuples
+    # Build test_runs from matched start/end pairs
     test_runs = []
     starts = {
         (e.get("session"), e.get("command")): e
@@ -230,31 +322,72 @@ def cmd_report():
         for run, other in overlaps[-5:]:
             print(f"    [{run['role']}:{run['session'][:8]}] {run['command'][:30]}")
             print(
-                f"      overlapped with [{other['role']}:{other['session'][:8]}] {other['command'][:30]}"
+                f"      overlapped with [{other['role']}:{other['session'][:8]}] "
+                f"{other['command'][:30]}"
             )
     else:
         print("  No concurrent test runs detected")
 
-    # Duration trends
-    if len(end_events) >= 5:
-        durations = [e.get("duration_s", 0) for e in end_events if e.get("duration_s")]
-        if durations:
-            avg = sum(durations) / len(durations)
-            recent_avg = sum(durations[-5:]) / min(5, len(durations))
-            print("\nDuration trends:")
-            print(f"  Overall avg: {avg:.1f}s")
-            print(f"  Recent avg (last 5): {recent_avg:.1f}s")
-            if recent_avg > avg * 1.5:
-                print("  ⚠️  Tests getting slower!")
+
+def _print_duration_trends(end_events: list) -> None:
+    """Print duration trends section."""
+    if len(end_events) < 5:
+        return
+
+    durations = [e.get("duration_s", 0) for e in end_events if e.get("duration_s")]
+    if durations:
+        avg = sum(durations) / len(durations)
+        recent_avg = sum(durations[-5:]) / min(5, len(durations))
+        print("\nDuration trends:")
+        print(f"  Overall avg: {avg:.1f}s")
+        print(f"  Recent avg (last 5): {recent_avg:.1f}s")
+        if recent_avg > avg * 1.5:
+            print("  ⚠️  Tests getting slower!")
 
 
-def main():
-    if len(sys.argv) < 2:
+def cmd_report() -> None:
+    """Generate report from test log."""
+    if not TEST_LOG.exists():
+        print("No test log found.")
+        return
+
+    entries = []
+    for line in TEST_LOG.read_text().strip().split("\n"):
+        if line:
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+
+    if not entries:
+        print("No test entries found.")
+        return
+
+    end_events = [e for e in entries if e.get("event") == "end"]
+    print(f"Test Log Report ({len(end_events)} runs)")
+    print("=" * 60)
+
+    _print_recent_tests(end_events)
+    _print_failure_summary(end_events)
+    _detect_concurrent_tests(entries)
+    _print_duration_trends(end_events)
+
+
+def main() -> None:
+    if "--version" in sys.argv:
+        print(get_version("log_test.py"))
+        return
+
+    if len(sys.argv) < 2 or "--help" in sys.argv or "-h" in sys.argv:
         print("Usage: log_test.py <start|end|run|report> [args]")
         print("  start <command>  - Log test start")
         print("  end <exit_code>  - Log test end")
         print("  run <command>    - Run command with logging")
         print("  report           - Show test log analysis")
+        print("  --version        - Show version information")
+        print("  -h, --help       - Show this help message")
+        if len(sys.argv) >= 2:
+            return
         sys.exit(1)
 
     cmd = sys.argv[1]

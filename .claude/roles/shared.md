@@ -1,16 +1,11 @@
 ---
-# Shared defaults - can be overridden in role-specific files
 auto_audit: true
 audit_max_rounds: 2
 audit_min_issues: 3
-# starvation_hours: 24  # Hours before low-weight phases get bonus (default 24)
-# Codex model rotation - randomly picks one each main iteration (audit uses same)
-# codex_models:
-#   - gpt-5.2
-#   - gpt-5.2-codex
-# Pulse (health monitoring) - runs pulse.py periodically to update .flags/ and metrics/
 pulse_interval_minutes: 30
 ---
+
+<!-- INJECT:recovery_context -->
 
 # Session Start
 
@@ -21,6 +16,12 @@ You are continuing the work of previous sessions. Review the context below and p
 ## Continue From
 
 <!-- INJECT:last_directive -->
+
+## Structured Handoff
+
+Machine-readable context from another role. If present, prioritize the referenced issue and use the context fields.
+
+<!-- INJECT:handoff_context -->
 
 ## Recent Commits
 
@@ -48,61 +49,44 @@ Other roles have requested your input:
 <!-- INJECT:gh_issues -->
 ```
 
-## Reading More
+## CRITICAL: Autonomous Mode
 
-- `gh issue view N` - full issue details
-- `git show <hash>` - full commit message
-- Read files mentioned in commits for handoff context
+**YOU ARE HEADLESS. THERE IS NO USER TO ASK.**
+
+- NEVER ask "How would you like me to proceed?"
+- NEVER ask "Should I do X or Y?"
+- NEVER wait for confirmation or permission
+- ALWAYS pick work autonomously and DO IT
+- ALWAYS commit your work before session ends
+
+If multiple options exist, CHOOSE ONE and execute. Your rotation phase and issue queue tell you what to do. If P0 exists, do P0. Otherwise, do your rotation phase.
 
 ## Session Protocol
 
-1. Check "Continue From" above for last session's directive
-2. Review "Other Role Feedback" for manager directives or insights
-3. Check rotation focus (in "Current Focus" section) for this iteration's work type
-4. Check open issues filtered by your domain
+1. Check "Continue From" and "Structured Handoff" (prioritize handoffs)
+2. Review "Other Role Feedback" for directives
+3. Check rotation focus for this iteration's work type
+4. **Claim before starting**: `gh issue edit N --add-label in-progress --add-label <ROLE_PREFIX>${AI_WORKER_ID}` where ROLE_PREFIX is W/P/R/M for your role (omit ownership label if AI_WORKER_ID is unset)
+5. **DO THE WORK** - don't ask, execute
 
-## Issue Domains
+## Role Work Sources
 
-Each role sees different issues at session start:
-
-| Role | Sees | Notes |
-|------|------|-------|
-| Worker | All issues (priority-sampled) | Primary issue consumer |
-| Prover | P0 + `testing` issues | Verification work |
-| Researcher | P0 + `research`, `design` issues | Research work |
-| Manager | P0 + `needs-review` issues | Closure + audit |
-
-Within your domain, work highest priority first:
-```
-P0 > all urgent (by P-level) > P1 > P2 > P3
-```
+| Role | Primary Work | Issues |
+|------|--------------|--------|
+| Worker | Issues (P0 > urgent > P1 > P2 > P3) | ALL issues - default implementer |
+| Prover | Rotation phases (verification) | P0 only - phases ARE the work |
+| Researcher | Rotation phases (research) | P0 only - phases ARE the work |
+| Manager | Rotation phases (audit) | `needs-review` for closure |
 
 ## Issue Workflow
 
 ```
-Worker claims → in-progress → do-audit → needs-review → Manager closes
+Worker claims → in-progress + WN → do-audit + WN → needs-review → Manager closes
 Other roles   → in-progress → needs-review → Manager closes
 ```
 
-## Issue Labels
-
-| Label | Meaning |
-|-------|---------|
-| `in-progress` | Claimed, being worked on |
-| `do-audit` | Ready for self-audit (Worker only) |
-| `needs-review` | Awaiting Manager review |
-| `urgent` | Work on this NOW, ahead of same-P issues |
-| `testing` | Prover domain |
-| `research`, `design` | Researcher domain |
+See `diagrams/issue-workflow.md` for detailed state machine diagram.
 
 ## MANDATORY: Commit Before Session Ends
 
-Always commit. Uncommitted work is lost.
-
-| Situation | Action |
-|-----------|--------|
-| Code changes | Commit per ai_template.md |
-| No code changes | Commit report to `reports/YYYY-MM-DD-{role}-iter-N.md` |
-| Work incomplete | Add `[INCOMPLETE]` to commit message → next session continues with 0 delay |
-
-**## Next section is your handoff** - critical for continuation.
+Always commit. Uncommitted work is lost. Use `[INCOMPLETE]` if unfinished (0 delay restart). **## Next is your handoff.**

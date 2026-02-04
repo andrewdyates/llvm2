@@ -4,7 +4,17 @@
 # Testing
 pytest>=7.0.0
 pytest-cov>=4.0.0
+pytest-timeout>=2.0.0
+hypothesis>=6.0.0
+
+# Pre-commit hooks (required for integration tests)
+pre-commit>=3.0.0
 
 # GitHub automation
 PyJWT[crypto]>=2.0.0
 requests>=2.0.0
+pyyaml>=6.0.0
+
+# Browser automation (for GitHub App setup)
+# Install chromium after pip install: playwright install chromium
+playwright>=1.40.0

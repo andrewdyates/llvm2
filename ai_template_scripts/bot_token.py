@@ -1,18 +1,29 @@
 #!/usr/bin/env python3
 # Copyright 2026 Dropbox, Inc.
-# Author: Andrew Yates
+# Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
 
 """
 bot_token.py - GitHub App installation token management for AI fleet
 
 Fetches GitHub App installation tokens for bot identity.
-Part of the two-layer bot identity system - see docs/plans/PLAN_bot_identity.md.
+Part of the two-layer bot identity system.
 
-Usage:
+Public API (library usage):
+    from ai_template_scripts.bot_token import (
+        get_config_dir,          # Get ai-fleet config directory
+        get_project_name,        # Get project name from git remote
+        load_credentials,        # Load app_id and private key
+        get_jwt,                 # Generate JWT for GitHub App auth
+        get_installation_id,     # Get installation ID for repo
+        get_installation_token,  # Get installation access token
+    )
+
+CLI usage:
     ./bot_token.py                    # Print token for current repo
     ./bot_token.py --json             # Print JSON with token + expiry
     ./bot_token.py --project z4       # Explicit project
+    ./bot_token.py --check            # Check if credentials exist
 
 Environment:
     AI_FLEET_CONFIG_DIR  - Override ~/.config/ai-fleet
@@ -21,61 +32,101 @@ Credential structure (in config dir):
     apps.json         - Maps project name to app_id: {"z4": 123456}
     keys/{project}.pem - Private key for each app
 
-Copyright 2026 Dropbox, Inc.
-Author: Andrew Yates <ayates@dropbox.com>
-Licensed under the Apache License, Version 2.0
+Module contracts:
+    ENSURES: All file paths returned are absolute
+    ENSURES: JWT tokens follow GitHub App authentication format (RS256)
+    ENSURES: API errors propagate as RuntimeError or requests.HTTPError
 """
 
 from __future__ import annotations
 
+__all__ = [
+    "get_config_dir",
+    "get_project_name",
+    "load_credentials",
+    "get_jwt",
+    "get_installation_id",
+    "get_installation_token",
+    "main",
+]
+
 import argparse
 import json
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
 
-import jwt  # PyJWT - requires cryptography for RS256
-import requests
+# Support running as script (not just as module)
+_repo_root = Path(__file__).resolve().parents[1]
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
+import jwt  # PyJWT - requires cryptography for RS256  # noqa: E402
+import requests  # noqa: E402
+
+from ai_template_scripts.subprocess_utils import (  # noqa: E402
+    get_repo_name,
+    run_cmd,
+)
+from ai_template_scripts.version import get_version  # noqa: E402
 
 
 def get_config_dir() -> Path:
-    """Get ai-fleet config directory."""
+    """Get ai-fleet config directory.
+
+    Contracts:
+        ENSURES: Returns absolute Path
+        ENSURES: Respects AI_FLEET_CONFIG_DIR env var if set
+        ENSURES: Default is ~/.config/ai-fleet
+    """
     return Path(
         os.environ.get("AI_FLEET_CONFIG_DIR", Path.home() / ".config" / "ai-fleet"),
     )
 
 
 def get_project_name() -> str:
-    """Get project name from git remote."""
-    result = subprocess.run(
-        ["git", "remote", "get-url", "origin"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    if result.returncode != 0:
+    """Get project name from git remote.
+
+    Contracts:
+        REQUIRES: Current directory is in a git repo with origin remote
+        ENSURES: Returns repo name without .git suffix
+        ENSURES: Handles both SSH (git@...) and HTTPS (https://...) URLs
+        ENSURES: Raises RuntimeError if not in git repo
+
+    Raises:
+        RuntimeError: If not in a git repo or no origin remote.
+    """
+    # First verify we're in a git repo with an origin remote (strict mode)
+    check = run_cmd(["git", "remote", "get-url", "origin"], timeout=10)
+    if not check.ok:
         raise RuntimeError("Not in a git repo or no origin remote")
 
-    url = result.stdout.strip()
-    # git@github.com:owner/repo.git or https://github.com/owner/repo.git
-    if ":" in url and "@" in url:
-        # SSH format: git@github.com:owner/repo.git
-        repo = url.split(":")[-1]
-    else:
-        # HTTPS format: https://github.com/owner/repo.git
-        repo = "/".join(url.split("/")[-2:])
-    return repo.removesuffix(".git").split("/")[-1]
+    # Use canonical implementation for consistent URL parsing
+    result = get_repo_name()
+    return result.stdout
 
 
 def normalize_project_name(project: str) -> str:
-    """Normalize project name for app lookup (underscore to hyphen)."""
+    """Normalize project name for app lookup (underscore to hyphen).
+
+    Contracts:
+        REQUIRES: project is a non-empty string
+        ENSURES: Returns project with underscores replaced by hyphens
+    """
     return project.replace("_", "-")
 
 
 def load_credentials(project: str) -> tuple[int, str]:
     """Load app_id and private key for project.
+
+    Contracts:
+        REQUIRES: project is a non-empty string
+        REQUIRES: config_dir contains apps.json with project entry
+        REQUIRES: config_dir/keys/{project}.pem exists
+        ENSURES: Returns (app_id: int, private_key: str)
+        ENSURES: app_id is a positive integer
+        ENSURES: private_key is a PEM-encoded RSA key string
 
     Args:
         project: Project name (e.g., "z4", "ai_template")
@@ -116,6 +167,13 @@ def load_credentials(project: str) -> tuple[int, str]:
 def get_jwt(app_id: int, private_key: str) -> str:
     """Generate JWT for GitHub App authentication.
 
+    Contracts:
+        REQUIRES: app_id > 0
+        REQUIRES: private_key is a valid PEM-encoded RSA key
+        ENSURES: Returns RS256-signed JWT string
+        ENSURES: iat <= now <= exp (with 60s clock skew buffer)
+        ENSURES: exp - iat == 660s (11 minutes total: -60s skew + 10min validity)
+
     Args:
         app_id: GitHub App ID
         private_key: PEM-encoded private key
@@ -127,13 +185,19 @@ def get_jwt(app_id: int, private_key: str) -> str:
     payload = {
         "iat": now - 60,  # Issued 60s ago (clock skew buffer)
         "exp": now + (10 * 60),  # Expires in 10 minutes
-        "iss": app_id,
+        "iss": str(app_id),  # PyJWT requires iss to be a string
     }
     return jwt.encode(payload, private_key, algorithm="RS256")
 
 
 def get_installation_id(jwt_token: str, owner: str, repo: str) -> int:
     """Get installation ID for a repository.
+
+    Contracts:
+        REQUIRES: jwt_token is a valid GitHub App JWT
+        REQUIRES: owner and repo are non-empty strings
+        ENSURES: Returns positive integer installation ID
+        ENSURES: Raises RuntimeError if app not installed
 
     Args:
         jwt_token: JWT for app authentication
@@ -169,6 +233,13 @@ def get_installation_id(jwt_token: str, owner: str, repo: str) -> int:
 def get_installation_token(jwt_token: str, installation_id: int) -> dict:
     """Get installation access token.
 
+    Contracts:
+        REQUIRES: jwt_token is a valid GitHub App JWT
+        REQUIRES: installation_id > 0
+        ENSURES: Returns dict with "token" and "expires_at" keys
+        ENSURES: "token" is a non-empty string
+        ENSURES: "expires_at" is an ISO 8601 timestamp
+
     Args:
         jwt_token: JWT for app authentication
         installation_id: Installation ID from get_installation_id
@@ -195,6 +266,10 @@ def get_installation_token(jwt_token: str, installation_id: int) -> dict:
 def main(args: list[str] | None = None) -> int:
     """Main entry point.
 
+    Contracts:
+        ENSURES: Returns 0 on success, 1 on error
+        ENSURES: Never raises - catches all exceptions
+
     Args:
         args: Command line arguments (defaults to sys.argv[1:])
 
@@ -203,6 +278,11 @@ def main(args: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(
         description="Fetch GitHub App installation token for bot identity",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=get_version("bot_token.py"),
     )
     parser.add_argument(
         "--project",
@@ -263,6 +343,7 @@ def main(args: list[str] | None = None) -> int:
         print(f"GitHub App error: {e}", file=sys.stderr)
         return 1
     except Exception as e:
+        # Catch-all: unexpected error in CLI entry point
         print(f"Error: {e}", file=sys.stderr)
         return 1
 

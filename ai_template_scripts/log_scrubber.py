@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""
-log_scrubber.py - Sanitize secrets and PII from JSONL log files
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates <ayates@dropbox.com>
+# Licensed under the Apache License, Version 2.0
 
-Copyright 2026 Dropbox, Inc.
-Author: Andrew Yates <ayates@dropbox.com>
-Licensed under the Apache License, Version 2.0
+"""log_scrubber.py - Sanitize secrets and PII from JSONL log files.
 
-Usage:
+Public API (library usage):
+    from ai_template_scripts.log_scrubber import (
+        PATTERNS,             # Compiled regex patterns for secrets
+        scrub_value,          # Recursively scrub secrets from a value
+        scrub_jsonl_file,     # Scrub a JSONL file (file_path param)
+        scrub_directory,      # Scrub all JSONL files in directory (dir_path param)
+    )
+
+CLI usage:
     # Scrub a single file (in-place)
     ./ai_template_scripts/log_scrubber.py worker_logs/worker_iter_1.jsonl
 
@@ -31,6 +38,14 @@ Does NOT scrub:
     - Tool names and commands (needed for audit)
 """
 
+__all__ = [
+    "PATTERNS",
+    "scrub_value",
+    "scrub_jsonl_file",
+    "scrub_directory",
+    "main",
+]
+
 import argparse
 import json
 import os
@@ -38,6 +53,14 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+
+# Support running as script (not just as module)
+_repo_root = Path(__file__).resolve().parents[1]
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
+from ai_template_scripts.path_utils import resolve_path_alias  # noqa: E402
+from ai_template_scripts.version import get_version  # noqa: E402
 
 # Patterns for secrets - compiled for performance
 PATTERNS = [
@@ -82,7 +105,8 @@ PATTERNS = [
     # Private keys (RSA, EC, DSA, or generic PKCS#8 format)
     (
         re.compile(
-            r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z]+ )?PRIVATE KEY-----",
+            r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----"
+            r".*?-----END (?:[A-Z]+ )?PRIVATE KEY-----",
             re.DOTALL,
         ),
         "[REDACTED:PRIVATE_KEY]",
@@ -97,8 +121,31 @@ HOME_DIR = os.path.expanduser("~")
 HOME_PATTERN = re.compile(re.escape(HOME_DIR))
 
 
-def scrub_value(value: Any, scrub_emails: bool = False, scrub_home: bool = True) -> Any:
-    """Recursively scrub secrets from a value."""
+def scrub_value(
+    value: Any,
+    scrub_emails: bool = False,
+    scrub_home: bool = True,
+    max_depth: int = 100,
+) -> Any:
+    """Recursively scrub secrets from a value.
+
+    Args:
+        value: The value to scrub (str, dict, list, or other).
+        scrub_emails: If True, also scrub email addresses.
+        scrub_home: If True, replace home directory paths with ~.
+        max_depth: Maximum recursion depth to prevent stack overflow.
+            Default 100 is sufficient for typical JSONL structures.
+
+    Returns:
+        The scrubbed value with secrets replaced.
+
+    REQUIRES: max_depth >= 0 (values <=0 return input unchanged)
+    ENSURES: Returns same type as input (str->str, dict->dict, list->list)
+    ENSURES: All patterns in PATTERNS are applied to string values
+    ENSURES: Never raises (returns original value on recursion limit)
+    """
+    if max_depth <= 0:
+        return value
     if isinstance(value, str):
         result = value
         for pattern, replacement in PATTERNS:
@@ -109,23 +156,49 @@ def scrub_value(value: Any, scrub_emails: bool = False, scrub_home: bool = True)
             result = EMAIL_PATTERN.sub("[REDACTED:EMAIL]", result)
         return result
     if isinstance(value, dict):
-        return {k: scrub_value(v, scrub_emails, scrub_home) for k, v in value.items()}
+        return {
+            k: scrub_value(v, scrub_emails, scrub_home, max_depth - 1)
+            for k, v in value.items()
+        }
     if isinstance(value, list):
-        return [scrub_value(item, scrub_emails, scrub_home) for item in value]
+        return [
+            scrub_value(item, scrub_emails, scrub_home, max_depth - 1) for item in value
+        ]
     return value
 
 
 def scrub_jsonl_file(
-    filepath: Path,
+    file_path: Path | None = None,
     output_to_stdout: bool = False,
     scrub_emails: bool = False,
     scrub_home: bool = True,
+    **kwargs: Any,
 ) -> int:
-    """Scrub a JSONL file. Returns number of lines processed."""
-    lines_processed = 0
-    scrubbed_lines = [] if not output_to_stdout else None
+    """Scrub a JSONL file.
 
-    with open(filepath, encoding="utf-8", errors="replace") as f:
+    Args:
+        file_path: Path to the JSONL file to scrub.
+        output_to_stdout: If True, write to stdout instead of in-place.
+        scrub_emails: If True, also scrub email addresses.
+        scrub_home: If True, replace home directory paths with ~.
+        **kwargs: Accepts deprecated 'filepath' alias for file_path.
+
+    Returns:
+        Number of lines processed.
+
+    REQUIRES: file_path or filepath kwarg must resolve to existing file
+    REQUIRES: File must be readable (raises OSError if not)
+    ENSURES: Returns int >= 0 representing lines processed
+    ENSURES: If not output_to_stdout, file is overwritten with scrubbed content
+    ENSURES: JSON decode errors handled gracefully (scrubs as plain text)
+    """
+    resolved_path = resolve_path_alias(
+        "file_path", "filepath", file_path, kwargs, "scrub_jsonl_file"
+    )
+    lines_processed = 0
+    scrubbed_lines: list[str] = []
+
+    with open(resolved_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.rstrip("\n")
             if not line:
@@ -150,38 +223,70 @@ def scrub_jsonl_file(
             lines_processed += 1
 
     if not output_to_stdout:
-        with open(filepath, "w", encoding="utf-8") as f:
-            for line in scrubbed_lines:
-                f.write(line + "\n")
+        with open(resolved_path, "w", encoding="utf-8") as f:
+            f.writelines(scrubbed_line + "\n" for scrubbed_line in scrubbed_lines)
 
     return lines_processed
 
 
 def scrub_directory(
-    dirpath: Path,
+    dir_path: Path | None = None,
     output_to_stdout: bool = False,
     scrub_emails: bool = False,
     scrub_home: bool = True,
+    **kwargs: Any,
 ) -> tuple[int, int]:
-    """Scrub all JSONL files in directory. Returns (files, lines) processed."""
+    """Scrub all JSONL files in directory.
+
+    Args:
+        dir_path: Directory containing JSONL files to scrub.
+        output_to_stdout: If True, write to stdout instead of in-place.
+        scrub_emails: If True, also scrub email addresses.
+        scrub_home: If True, replace home directory paths with ~.
+        **kwargs: Accepts deprecated 'dirpath' alias for dir_path.
+
+    Returns:
+        Tuple of (files_processed, lines_processed).
+
+    REQUIRES: dir_path or dirpath kwarg must resolve to existing directory
+    ENSURES: Returns tuple of (files_processed >= 0, lines_processed >= 0)
+    ENSURES: Only processes *.jsonl files (ignores other extensions)
+    ENSURES: Progress logged to stderr if not output_to_stdout
+    """
+    resolved_path = resolve_path_alias(
+        "dir_path", "dirpath", dir_path, kwargs, "scrub_directory"
+    )
     files_processed = 0
     total_lines = 0
 
-    for filepath in dirpath.glob("*.jsonl"):
-        lines = scrub_jsonl_file(filepath, output_to_stdout, scrub_emails, scrub_home)
+    for file_path in resolved_path.glob("*.jsonl"):
+        lines = scrub_jsonl_file(file_path, output_to_stdout, scrub_emails, scrub_home)
         files_processed += 1
         total_lines += lines
         if not output_to_stdout:
-            print(f"Scrubbed {filepath.name}: {lines} lines", file=sys.stderr)
+            print(f"Scrubbed {file_path.name}: {lines} lines", file=sys.stderr)
 
     return files_processed, total_lines
 
 
-def main():
+def main() -> None:
+    """Entry point: sanitize secrets and PII from log files.
+
+    REQUIRES: sys.argv contains valid CLI arguments
+    ENSURES: Exits with 0 on success
+    ENSURES: Exits with 1 if path doesn't exist or is invalid
+    ENSURES: Scrubs all *.jsonl files if path is directory
+    ENSURES: Scrubs single file if path is file
+    """
     parser = argparse.ArgumentParser(
         description="Sanitize secrets and PII from JSONL log files",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=get_version("log_scrubber.py"),
     )
     parser.add_argument("path", type=Path, help="File or directory to scrub")
     parser.add_argument(

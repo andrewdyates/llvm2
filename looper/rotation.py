@@ -1,3 +1,7 @@
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates <ayates@dropbox.com>
+# Licensed under the Apache License, Version 2.0
+
 """
 looper/rotation.py - Rotation state management
 
@@ -6,15 +10,21 @@ Manages phase rotation for roles that cycle through different focus areas:
 - Researcher: research phases (external, internal, design, gap_analysis, etc.)
 - Prover: verification phases (formal_proofs, tool_quality, claim_verification, etc.)
 - Worker: priority tiers (high_priority, normal_work, quality)
-
-Copyright 2026 Dropbox, Inc.
-Created by Andrew Yates
-Licensed under the Apache License, Version 2.0
 """
 
+__all__ = [
+    "get_rotation_focus",
+    "load_rotation_state",
+    "save_rotation_state",
+    "select_phase_by_priority",
+    "update_rotation_state",
+]
+
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+
+from looper.log import debug_swallow
 
 # fcntl is Unix-only for file locking
 try:
@@ -27,23 +37,63 @@ except ImportError:
 ROTATION_STATE_FILE = Path(".rotation_state.json")
 ROTATION_LOCK_FILE = Path(".rotation_state.lock")
 
+# Phase scoring constants
+# NEVER_RUN_HOURS: Synthetic "hours since last run" for phases that have never run
+# or have unparsable timestamps. Set high enough (1000 hours ~= 41 days) to ensure
+# never-run phases are selected before recently-run phases, but low enough to avoid
+# overflow concerns. Subtracted by index (0, 1, 2...) for deterministic ordering.
+NEVER_RUN_HOURS = 1000.0
 
-def load_rotation_state() -> dict:
-    """Load rotation state from .rotation_state.json."""
+# MAX_OVERTIME_BONUS: Cap on the starvation prevention bonus to prevent unbounded
+# score growth. 168 hours = 1 week of AI time, giving bonus of 168² = 28,224.
+# This is large enough to override any reasonable weight difference while keeping
+# scores in a predictable range.
+MAX_OVERTIME_BONUS = 168.0
+
+# MAX_PHASE_SCORE: Informational upper bound for typical scores.
+# Calculated as: typical_max_weight * max_hours + max_bonus² = 10 * 1000 + 168² ≈ 38,224
+# Not enforced in code - scores could exceed this with extreme weights.
+# Used for documentation and test assertions only.
+MAX_PHASE_SCORE = 50000.0
+
+
+def load_rotation_state() -> dict[str, dict[str, object]]:
+    """Load rotation state from .rotation_state.json.
+
+    Contracts:
+        REQUIRES: Current directory is project root (contains .rotation_state.json)
+        ENSURES: Returns dict mapping role -> {phase -> {last_run: iso_timestamp}}
+        ENSURES: If file missing or invalid JSON, returns empty dict {}
+        ENSURES: Never raises (silent fallback to empty state)
+    """
     if ROTATION_STATE_FILE.exists():
         try:
-            return json.loads(ROTATION_STATE_FILE.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
+            data = json.loads(ROTATION_STATE_FILE.read_text())
+            if isinstance(data, dict):
+                # Validate structure - should be dict of dicts
+                return {
+                    k: v
+                    for k, v in data.items()
+                    if isinstance(k, str) and isinstance(v, dict)
+                }
+        except (json.JSONDecodeError, OSError) as e:
+            debug_swallow("load_rotation_state", e)
     return {}
 
 
-def save_rotation_state(state: dict) -> None:
-    """Save rotation state to .rotation_state.json."""
+def save_rotation_state(state: dict[str, dict[str, object]]) -> None:
+    """Save rotation state to .rotation_state.json.
+
+    Contracts:
+        REQUIRES: state is a dict (type-hinted)
+        ENSURES: Writes JSON to .rotation_state.json with indent=2 and trailing newline
+        ENSURES: If write fails (OSError), silently returns (no exception)
+        ENSURES: Never raises (graceful degradation)
+    """
     try:
         ROTATION_STATE_FILE.write_text(json.dumps(state, indent=2) + "\n")
-    except OSError:
-        pass
+    except OSError as e:
+        debug_swallow("save_rotation_state", e)
 
 
 def update_rotation_state(role: str, phase: str) -> None:
@@ -51,6 +101,16 @@ def update_rotation_state(role: str, phase: str) -> None:
 
     Uses file locking to prevent race conditions when multiple roles
     update state simultaneously. If locking fails, proceeds without lock.
+
+    Contracts:
+        REQUIRES: role is a non-empty string (role name)
+        REQUIRES: phase is a non-empty string (phase name)
+        ENSURES: Updates state[role][phase] = {last_run: current_iso_timestamp}
+        ENSURES: Creates role entry in state if not present
+        ENSURES: Acquires exclusive file lock if fcntl available (Unix)
+        ENSURES: Releases lock in finally block (no lock leaks)
+        ENSURES: If lock acquisition fails, proceeds without lock
+        ENSURES: Never raises (graceful degradation)
     """
     lock_file = None
     try:
@@ -59,8 +119,9 @@ def update_rotation_state(role: str, phase: str) -> None:
             try:
                 lock_file = open(ROTATION_LOCK_FILE, "w")
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            except OSError:
+            except OSError as e:
                 # Lock failed - proceed without lock (better than skipping update)
+                debug_swallow("rotation_state_lock", e)
                 if lock_file:
                     lock_file.close()
                     lock_file = None
@@ -70,7 +131,7 @@ def update_rotation_state(role: str, phase: str) -> None:
         if role not in state:
             state[role] = {}
         state[role][phase] = {
-            "last_run": datetime.now(timezone.utc).isoformat(),
+            "last_run": datetime.now(UTC).isoformat(),
         }
         save_rotation_state(state)
 
@@ -84,11 +145,23 @@ def update_rotation_state(role: str, phase: str) -> None:
 
 def select_phase_by_priority(
     phases: list[str],
-    phase_data: dict[str, dict],
-    role_state: dict[str, dict],
+    phase_data: dict[str, dict[str, object]],
+    role_state: dict[str, object],
     starvation_hours: int = 24,
 ) -> str:
     """Select next phase using priority queue with starvation prevention.
+
+    Contracts:
+        REQUIRES: phases is a list (may be empty)
+        REQUIRES: phase_data values have optional 'weight' key (default 1)
+        REQUIRES: role_state values have optional 'last_run' ISO timestamp
+        REQUIRES: starvation_hours > 0
+        ENSURES: If phases is empty, returns ""
+        ENSURES: Otherwise, returns a value that is in phases
+        ENSURES: Highest-scored phase wins; ties broken by list order
+        ENSURES: Deterministic for same inputs and system time
+        ENSURES: Score typically bounded by MAX_PHASE_SCORE under normal weights
+                 (extreme weight values may exceed; see constant docstring)
 
     Score = weight × hours_since_last_run + starvation_bonus
 
@@ -105,36 +178,50 @@ def select_phase_by_priority(
     if not phases:
         return ""
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     scores: list[tuple[float, int, str]] = []
 
     for i, phase in enumerate(phases):
-        weight = phase_data.get(phase, {}).get("weight", 1)
-        last_run_str = role_state.get(phase, {}).get("last_run")
+        weight_val = phase_data.get(phase, {}).get("weight", 1)
+        weight: float = (
+            float(weight_val) if isinstance(weight_val, (int, float)) else 1.0
+        )
 
+        # Extract last_run from role_state[phase], with type narrowing
+        phase_state = role_state.get(phase)
+        last_run_str: str | None = None
+        if isinstance(phase_state, dict):
+            lr = phase_state.get("last_run")
+            if isinstance(lr, str):
+                last_run_str = lr
+
+        hours: float
         if last_run_str:
             try:
                 last_run = datetime.fromisoformat(last_run_str)
                 hours = (now - last_run).total_seconds() / 3600
             except ValueError:
-                hours = 1000 - i  # Parse error = treat as never run
+                # Parse error = treat as never run with deterministic ordering
+                hours = NEVER_RUN_HOURS - i
         else:
             # Never run = high priority, but use index for deterministic ordering
-            hours = 1000 - i  # Ensures sequential order for fresh start
+            hours = NEVER_RUN_HOURS - i
 
         # Base score: weight × hours
-        score = weight * max(hours, 1)
+        score: float = weight * max(hours, 1.0)
 
         # Starvation prevention: after threshold, add large bonus
         # This ensures low-weight tasks don't starve indefinitely
         if hours > starvation_hours:
-            # Bonus grows quadratically after threshold
-            overtime = hours - starvation_hours
+            # Bonus grows quadratically after threshold, capped to prevent unbounded growth
+            overtime = min(hours - starvation_hours, MAX_OVERTIME_BONUS)
             score += overtime * overtime
 
         scores.append((score, i, phase))  # i for stable sort
 
     # Highest score wins; tie-break by original order
+    if not scores:
+        return ""  # Defensive: empty scores shouldn't happen but prevents IndexError
     scores.sort(key=lambda x: (-x[0], x[1]))
     return scores[0][2]
 
@@ -143,7 +230,7 @@ def get_rotation_focus(
     iteration: int,
     rotation_type: str,
     phases: list[str],
-    phase_data: dict[str, dict] | None = None,
+    phase_data: dict[str, dict[str, object]] | None = None,
     role: str = "",
     freeform_frequency: int = 3,
     force_phase: str | None = None,
@@ -151,9 +238,16 @@ def get_rotation_focus(
 ) -> tuple[str, str | None]:
     """Determine current rotation focus using priority queue.
 
+    Contracts:
+        REQUIRES: iteration >= 1 (1-based iteration counter)
+        REQUIRES: freeform_frequency >= 0 (0 disables freeform)
+        ENSURES: If rotation_type empty or phases empty, returns ("", None)
+        ENSURES: If freeform iteration, returns freeform message with None phase
+        ENSURES: Otherwise, returns (focus_string, phase) where phase in phases
+
     Args:
         iteration: Current iteration number (1-based)
-        rotation_type: Type of rotation ('audit', 'research', 'verification', or empty)
+        rotation_type: Type of rotation ('audit', 'research', 'verification', 'work', or empty)
         phases: List of phase names to cycle through
         phase_data: Optional dict of phase configs from parse_phase_blocks()
         role: Role name for state tracking
@@ -184,6 +278,7 @@ def get_rotation_focus(
     else:
         # Select by priority queue
         state = load_rotation_state()
+        # state[role] is dict[phase -> {last_run: ...}], same type as state values
         role_state = state.get(role, {})
         phase = select_phase_by_priority(
             phases, phase_data or {}, role_state, starvation_hours
@@ -195,7 +290,7 @@ def get_rotation_focus(
     # If we have phase data with content, use it directly
     if phase_data and phase in phase_data:
         content = phase_data[phase].get("content", "")
-        if content:
+        if content and isinstance(content, str):
             return content, phase
 
     # Fallback without phase data or content

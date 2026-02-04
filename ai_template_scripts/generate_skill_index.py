@@ -1,21 +1,61 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dropbox, Inc.
+# Author: Andrew Yates <ayates@dropbox.com>
+# Licensed under the Apache License, Version 2.0
+
 """Generate SKILLS.md index from skill files in .claude/commands/.
+
+Public API (library usage):
+    from ai_template_scripts.generate_skill_index import (
+        parse_skill_file,     # Parse a skill markdown file (file_path param)
+        categorize_skills,    # Group skills into categories
+        generate_skills_md,   # Generate SKILLS.md content
+    )
+
+CLI usage:
+    ./generate_skill_index.py            # Generate .claude/SKILLS.md
+    ./generate_skill_index.py --version  # Show version information
 
 Copyright 2026 Dropbox, Inc.
 Author: Andrew Yates <ayates@dropbox.com>
 License: Apache-2.0
 """
 
+__all__ = [
+    "parse_skill_file",
+    "categorize_skills",
+    "generate_skills_md",
+    "main",
+]
+
+import sys
 from pathlib import Path
+from typing import Any
+
+# Support running as script (not just as module)
+_repo_root = Path(__file__).resolve().parents[1]
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
+from ai_template_scripts.path_utils import resolve_path_alias  # noqa: E402
+from ai_template_scripts.version import get_version  # noqa: E402
 
 
-def parse_skill_file(filepath: Path) -> dict | None:
+def parse_skill_file(file_path: Path | None = None, **kwargs: Any) -> dict | None:
     """Parse a skill markdown file and extract metadata.
 
-    Returns dict with keys: name, description, triggers, filename
-    Returns None if file doesn't look like a skill.
+    Args:
+        file_path: Path to the skill markdown file.
+        **kwargs: Accepts deprecated 'filepath' alias for file_path.
+
+    Returns:
+        dict with keys: name, description, triggers, filename
+        Returns None if file doesn't look like a skill.
     """
-    content = filepath.read_text()
+    resolved_path = resolve_path_alias(
+        "file_path", "filepath", file_path, kwargs, "parse_skill_file"
+    )
+    content = resolved_path.read_text()
     lines = content.split("\n")
 
     # Get skill name from first header
@@ -59,7 +99,7 @@ def parse_skill_file(filepath: Path) -> dict | None:
 
     return {
         "name": name,
-        "filename": filepath.stem,
+        "filename": resolved_path.stem,
         "description": description,
         "triggers": triggers,
     }
@@ -152,8 +192,19 @@ def generate_skills_md(categories: dict[str, list[dict]]) -> str:
     return "\n".join(lines)
 
 
-def main():
+def main() -> int:
     """Generate SKILLS.md from skill files."""
+    if "--version" in sys.argv:
+        print(get_version("generate_skill_index.py"))
+        return 0
+
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print(__doc__)
+        print("\nOptions:")
+        print("  --version     Show version information")
+        print("  -h, --help    Show this help message")
+        return 0
+
     commands_dir = Path(".claude/commands")
 
     if not commands_dir.exists():
@@ -180,6 +231,7 @@ def main():
 
     # Write output
     output_path = Path(".claude/SKILLS.md")
+    output_path.parent.mkdir(exist_ok=True)
     output_path.write_text(content)
     print(f"\nGenerated: {output_path}")
 

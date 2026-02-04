@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
 # Copyright 2026 Dropbox, Inc.
-# Author: Andrew Yates
+# Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
 
 """
 markdown_to_issues.py - Sync Markdown ↔ GitHub Issues
 =====================================================
 
+Public API (library usage):
+    from ai_template_scripts.markdown_to_issues import (
+        Issue,              # Dataclass for parsed issues
+        Parser,             # Markdown parser class
+        setup_labels,       # Create standard labels
+        export_issues,      # Export issues to markdown
+        create_issue,       # Create a GitHub issue
+        update_issue,       # Update an existing issue
+        close_issue,        # Close an issue
+    )
+
 COMMANDS
 ────────
   --export, --current Issues → markdown (stdout)
-  --setup-labels      Create P0-P3, task, bug labels
+  --setup-labels      Create P0-P3, bug, enhancement labels
   ROADMAP.md          Parse and validate (default)
   --publish           Create new issues
   --sync              Create + update + close all
@@ -28,7 +39,7 @@ MARKDOWN FORMAT
   ## #42: Task title                → Update #42
   ## [DONE] Task title              → Close (--sync)
 
-  Labels: task, bug
+  Labels: bug, enhancement
   Priority: P0
   Assignee: @user
   <!-- comments stripped -->
@@ -44,6 +55,24 @@ Author: Andrew Yates <ayates@dropbox.com>
 License: Apache-2.0
 """
 
+__all__ = [
+    "GH_TIMEOUT",
+    "Issue",
+    "ListResult",
+    "Parser",
+    "STANDARD_LABELS",
+    "PRIORITIES",
+    "ValidationError",
+    "ValidationResult",
+    "setup_labels",
+    "export_issues",
+    "create_issue",
+    "update_issue",
+    "close_issue",
+    "validate_issues",
+    "main",
+]
+
 import argparse
 import json
 import re
@@ -51,10 +80,20 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
+try:
+    from ai_template_scripts.version import get_version
+except ModuleNotFoundError:
+    _repo_root = Path(__file__).resolve().parents[1]
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+    from ai_template_scripts.version import get_version
+from ai_template_scripts.gh_issue_numbers import parse_issue_number
+
 # Rate limit delay between API calls (seconds)
+# Note: bin/gh wrapper handles rate limiting transparently
 RATE_LIMIT_DELAY = 0.3
 
 # Valid priority labels
@@ -66,10 +105,34 @@ STANDARD_LABELS = [
     {"name": "P1", "description": "High priority", "color": "D93F0B"},
     {"name": "P2", "description": "Medium priority", "color": "FBCA04"},
     {"name": "P3", "description": "Low priority", "color": "0E8A16"},
-    {"name": "task", "description": "Work item", "color": "1D76DB"},
     {"name": "bug", "description": "Something broken", "color": "B60205"},
     {"name": "enhancement", "description": "Improvement", "color": "A2EEEF"},
     {"name": "in-progress", "description": "Being worked on", "color": "FBCA04"},
+    {
+        "name": "in-progress-W1",
+        "description": "Being worked on by Worker 1",
+        "color": "FBCA04",
+    },
+    {
+        "name": "in-progress-W2",
+        "description": "Being worked on by Worker 2",
+        "color": "FBCA04",
+    },
+    {
+        "name": "in-progress-W3",
+        "description": "Being worked on by Worker 3",
+        "color": "FBCA04",
+    },
+    {
+        "name": "in-progress-W4",
+        "description": "Being worked on by Worker 4",
+        "color": "FBCA04",
+    },
+    {
+        "name": "in-progress-W5",
+        "description": "Being worked on by Worker 5",
+        "color": "FBCA04",
+    },
     {"name": "blocked", "description": "Waiting", "color": "D93F0B"},
 ]
 
@@ -79,9 +142,34 @@ def log(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
-def gh(args: list[str]) -> subprocess.CompletedProcess:
-    """Run gh command."""
-    return subprocess.run(["gh"] + args, check=False, capture_output=True, text=True)
+# Default timeout for gh commands (seconds)
+GH_TIMEOUT = 30
+
+
+def gh(args: list[str], timeout: float = GH_TIMEOUT) -> subprocess.CompletedProcess:
+    """Run gh command with timeout.
+
+    Rate limiting and caching are handled transparently by bin/gh wrapper.
+
+    Args:
+        args: Arguments to pass to gh command
+        timeout: Timeout in seconds (default: 30)
+
+    Returns:
+        CompletedProcess result. On timeout, returncode is -1 and stderr contains
+        the timeout message.
+    """
+    try:
+        return subprocess.run(
+            ["gh"] + args, check=False, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=["gh"] + args,
+            returncode=-1,
+            stdout="",
+            stderr=f"Command timed out after {timeout}s",
+        )
 
 
 def gh_json(args: list[str], default: str = "[]") -> str:
@@ -89,15 +177,30 @@ def gh_json(args: list[str], default: str = "[]") -> str:
     result = gh(args)
     if result.returncode != 0:
         log(
-            f"gh {' '.join(args[:2])} failed: {result.stderr.strip() or 'unknown error'}"
+            f"gh {' '.join(args[:2])} failed: "
+            f"{result.stderr.strip() or 'unknown error'}"
         )
         return default
     return result.stdout or default
 
 
+@dataclass
+class ListResult:
+    """Result from gh_list_all operation."""
+
+    items: list[dict]
+    truncated: bool = False
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        """True if the operation succeeded (no error)."""
+        return self.error is None
+
+
 def gh_list_all(
     base_args: list[str], json_fields: str, limit: int = 1000
-) -> list[dict]:
+) -> ListResult:
     """Fetch all items with high limit. gh CLI doesn't support true pagination.
 
     Args:
@@ -106,22 +209,28 @@ def gh_list_all(
         limit: Maximum items to fetch (default 1000, increase if needed)
 
     Returns:
-        List of items as dicts
+        ListResult with items, truncated flag, and optional error message.
     """
     cmd = base_args + ["--limit", str(limit), "--json", json_fields]
     result = gh(cmd)
     if result.returncode != 0:
+        error_msg = result.stderr.strip() or "unknown error"
+        log(f"gh {' '.join(base_args[:2])} failed: {error_msg}")
+        return ListResult(items=[], error=error_msg)
+    items = json.loads(result.stdout or "[]")
+    truncated = len(items) >= limit
+    if truncated:
         log(
-            f"gh {' '.join(base_args[:2])} failed: {result.stderr.strip() or 'unknown error'}"
+            f"WARNING: gh {' '.join(base_args[:2])} returned {len(items)} items "
+            f"(limit={limit}), results may be truncated"
         )
-        return []
-    return json.loads(result.stdout or "[]")
+    return ListResult(items=items, truncated=truncated)
 
 
 @dataclass
 class Issue:
     title: str
-    labels: list[str] = field(default_factory=lambda: ["task"])
+    labels: list[str] = field(default_factory=list)
     priority: str | None = None
     milestone: str | None = None
     assignee: str | None = None
@@ -166,7 +275,7 @@ class Parser:
         "status": re.compile(r"^[-*]?\s*(?:\*\*)?Status:\*?\*?\s*(.+)$", re.IGNORECASE),
     }
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path) -> None:
         self.path = path
         self.issues: list[Issue] = []
         self.warnings: list[str] = []
@@ -306,29 +415,53 @@ def setup_labels(dry_run: bool = False) -> dict:
 
 def priority_sort_key(issue: dict) -> int:
     """Sort key: P0=0, P1=1, P2=2, P3=3, no priority=99."""
-    labels = {lbl["name"] for lbl in issue.get("labels", [])}
+    # Handle both GraphQL (dict) and REST (string) label formats
+    raw_labels = issue.get("labels", [])
+    labels = {lbl["name"] if isinstance(lbl, dict) else lbl for lbl in raw_labels}
     for idx, priority in enumerate(PRIORITIES):
         if priority in labels:
             return idx
     return 99
 
 
-def export_issues(state: str = "open", label: str | None = None) -> str:
-    """Export issues to markdown."""
+def export_issues(state: str = "open", label: str | None = None) -> str | None:
+    """Export issues to markdown.
+
+    REQUIRES: state in ("open", "closed", "all")
+    REQUIRES: label is None or a valid label name
+    ENSURES: Returns markdown string on success, None on gh failure
+    ENSURES: Issues are sorted by priority (P0 first)
+
+    Returns:
+        Markdown string on success, None on gh command failure.
+    """
     base_args = ["issue", "list", "--state", state]
     if label:
         base_args.extend(["--label", label])
 
-    issues = gh_list_all(
+    result = gh_list_all(
         base_args, "number,title,body,labels,milestone,assignees,state"
     )
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines = [f"# Issues ({state})", f"> Exported: {now}", ""]
+    if not result.ok:
+        return None
 
-    for issue in sorted(issues, key=priority_sort_key):
-        num, title = issue["number"], issue["title"]
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [f"# Issues ({state})", f"> Exported: {now}"]
+    if result.truncated:
+        lines.append(f"> **WARNING: Results truncated at {len(result.items)} issues**")
+    lines.append("")
+
+    for issue in sorted(result.items, key=priority_sort_key):
+        raw_number = issue.get("number")
+        num = parse_issue_number(raw_number)
+        if num is None:
+            log(f"Skipping pending issue in export: {raw_number!r}")
+            continue
+        title = issue.get("title") or ""
         state_mark = "[CLOSED] " if issue.get("state", "").upper() == "CLOSED" else ""
-        labels = [lbl["name"] for lbl in issue.get("labels", [])]
+        # Handle both GraphQL (dict) and REST (string) label formats
+        raw_labels = issue.get("labels", [])
+        labels = [lbl["name"] if isinstance(lbl, dict) else lbl for lbl in raw_labels]
         priority = next((lbl for lbl in labels if lbl in PRIORITIES), None)
         other = [lbl for lbl in labels if lbl not in PRIORITIES]
 
@@ -345,7 +478,12 @@ def export_issues(state: str = "open", label: str | None = None) -> str:
 
 
 def create_issue(issue: Issue) -> int | None:
-    """Create issue, return number."""
+    """Create issue, return number.
+
+    REQUIRES: issue.title is non-empty string
+    ENSURES: Returns issue number (int > 0) on success, None on failure
+    ENSURES: Logs error to stderr on failure
+    """
     cmd = [
         "issue",
         "create",
@@ -371,7 +509,12 @@ def create_issue(issue: Issue) -> int | None:
 
 
 def update_issue(num: int, issue: Issue) -> bool:
-    """Update existing issue."""
+    """Update existing issue.
+
+    REQUIRES: num > 0 (valid issue number)
+    REQUIRES: issue is valid Issue dataclass
+    ENSURES: Returns True on success, False on failure
+    """
     cmd = [
         "issue",
         "edit",
@@ -392,7 +535,11 @@ def update_issue(num: int, issue: Issue) -> bool:
 
 
 def close_issue(num: int) -> bool:
-    """Close issue."""
+    """Close issue.
+
+    REQUIRES: num > 0 (valid issue number)
+    ENSURES: Returns True on success, False on failure
+    """
     return gh(["issue", "close", str(num)]).returncode == 0
 
 
@@ -405,15 +552,44 @@ class ValidationResult:
     existing_titles: dict[str, int]  # lowercase title -> issue number
 
 
+class ValidationError(Exception):
+    """Raised when validation cannot be performed due to gh failures."""
+
+
 def validate_issues(issues: list[Issue]) -> ValidationResult:
-    """Check issues against existing repo state."""
-    existing = {
-        i["title"].lower(): i["number"]
-        for i in gh_list_all(["issue", "list", "--state", "all"], "number,title")
-    }
-    repo_labels = {
-        lbl["name"] for lbl in json.loads(gh_json(["label", "list", "--json", "name"]))
-    }
+    """Check issues against existing repo state.
+
+    REQUIRES: issues is list of Issue objects (may be empty)
+    ENSURES: Returns ValidationResult with duplicates, bad_labels, existing_titles
+    ENSURES: Raises ValidationError if gh commands fail or results truncated
+
+    Raises:
+        ValidationError: If gh commands fail (auth/network/timeout issues).
+    """
+    result = gh_list_all(["issue", "list", "--state", "all"], "number,title")
+    if not result.ok:
+        raise ValidationError(f"Failed to list issues: {result.error}")
+    if result.truncated:
+        raise ValidationError(
+            f"Issue list truncated at {len(result.items)} items - "
+            "validation cannot be complete. This repo has too many issues."
+        )
+
+    existing: dict[str, int] = {}
+    for item in result.items:
+        number = parse_issue_number(item.get("number"))
+        title = item.get("title")
+        if number is None or not isinstance(title, str) or not title:
+            continue
+        existing[title.lower()] = number
+
+    # Get repo labels - gh_json returns "[]" on failure, check explicitly
+    labels_result = gh(["label", "list", "--json", "name"])
+    if labels_result.returncode != 0:
+        raise ValidationError(
+            f"Failed to list labels: {labels_result.stderr.strip() or 'unknown error'}"
+        )
+    repo_labels = {lbl["name"] for lbl in json.loads(labels_result.stdout or "[]")}
 
     new_issues = [i for i in issues if not i.existing_number]
     duplicates = {
@@ -437,7 +613,14 @@ def validate_issues(issues: list[Issue]) -> ValidationResult:
 def categorize_issues(
     issues: list[Issue],
 ) -> tuple[list[Issue], list[Issue], list[Issue]]:
-    """Split issues into new, update, and close lists."""
+    """Split issues into new, update, and close lists.
+
+    REQUIRES: issues is list of Issue objects (may be empty)
+    ENSURES: Returns (new, update, close) tuple of Issue lists
+    ENSURES: new = issues without existing_number
+    ENSURES: close = issues with existing_number and status=="done"
+    ENSURES: update = issues with existing_number and status!="done"
+    """
     new, update, close = [], [], []
     for issue in issues:
         if not issue.existing_number:
@@ -450,7 +633,13 @@ def categorize_issues(
 
 
 def report_warnings(parser_warnings: list[str], validation: ValidationResult) -> int:
-    """Log all warnings and return total count."""
+    """Log all warnings and return total count.
+
+    REQUIRES: parser_warnings is list of strings
+    REQUIRES: validation is ValidationResult with duplicates and bad_labels
+    ENSURES: Returns int >= 0 (total warning count)
+    ENSURES: All warnings logged to stderr
+    """
     for w in parser_warnings:
         log(f"WARNING: {w}")
     for title, num in validation.duplicates.items():
@@ -465,7 +654,13 @@ def report_warnings(parser_warnings: list[str], validation: ValidationResult) ->
 def print_dry_run(
     new: list[Issue], update: list[Issue], close: list[Issue], sync: bool
 ) -> None:
-    """Print dry run commands."""
+    """Print dry run commands.
+
+    REQUIRES: new, update, close are lists of Issue objects
+    REQUIRES: sync is boolean
+    ENSURES: Prints gh commands to stdout (no return value)
+    ENSURES: If not sync, only new issues printed
+    """
     for issue in new:
         print(f'gh issue create --title "{issue.title}"')
     if sync:
@@ -478,7 +673,13 @@ def print_dry_run(
 def execute_changes(
     new: list[Issue], update: list[Issue], close: list[Issue], publish: bool, sync: bool
 ) -> dict[str, list]:
-    """Execute issue changes and return results."""
+    """Execute issue changes and return results.
+
+    REQUIRES: new, update, close are lists of Issue objects
+    REQUIRES: publish and sync are booleans
+    ENSURES: Returns dict with keys "created", "updated", "closed", "failed"
+    ENSURES: Each key maps to a list of issue numbers or titles
+    """
     results: dict[str, list] = {
         "created": [],
         "updated": [],
@@ -528,23 +729,40 @@ def print_results(
     close: list[Issue],
     warning_count: int,
 ) -> None:
-    """Print execution summary."""
+    """Print execution summary.
+
+    REQUIRES: results dict with "created", "updated", "closed", "failed" keys
+    REQUIRES: issues, new, update, close are lists of Issue objects
+    ENSURES: Prints summary to stdout (no return value)
+    """
     if publish or sync:
         print(
-            f"RESULT: created={len(results['created'])} updated={len(results['updated'])} "
+            f"RESULT: created={len(results['created'])} "
+            f"updated={len(results['updated'])} "
             f"closed={len(results['closed'])} failed={len(results['failed'])}"
         )
         if results["created"]:
             print(f"Created: {' '.join(f'#{n}' for n in results['created'])}")
     else:
         print(
-            f"SUMMARY: total={len(issues)} new={len(new)} update={len(update)} close={len(close)} "
-            f"warnings={warning_count}"
+            f"SUMMARY: total={len(issues)} new={len(new)} update={len(update)} "
+            f"close={len(close)} warnings={warning_count}"
         )
 
 
-def main():
+def main() -> int:
+    """Entry point: sync markdown roadmap files with GitHub Issues.
+
+    REQUIRES: None (reads sys.argv)
+    ENSURES: Returns 0 on success, 1 on failure
+    ENSURES: Performs requested action (export, setup-labels, publish, sync)
+    """
     p = argparse.ArgumentParser(description="Sync Markdown ↔ GitHub Issues")
+    p.add_argument(
+        "--version",
+        action="version",
+        version=get_version("markdown_to_issues.py"),
+    )
     p.add_argument("roadmap", nargs="?", default="ROADMAP.md")
     p.add_argument(
         "--export", "--current", action="store_true", help="Export issues to markdown"
@@ -562,7 +780,8 @@ def main():
     if args.setup_labels:
         results = setup_labels(args.dry_run)
         print(
-            f"RESULT: created={results['created']} updated={results['updated']} failed={results['failed']}"
+            f"RESULT: created={results['created']} updated={results['updated']} "
+            f"failed={results['failed']}"
         )
         return 0
 
@@ -582,7 +801,12 @@ def main():
     new, update, close = categorize_issues(issues)
 
     # Validate against repo state
-    validation = validate_issues(issues)
+    try:
+        validation = validate_issues(issues)
+    except ValidationError as e:
+        log(f"ERROR: {e}")
+        log("Cannot proceed - validation failed due to gh command errors")
+        return 1
     warning_count = report_warnings(parser.warnings, validation)
 
     if warning_count and not args.force and (args.publish or args.sync):

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # lint_applescript.sh - Validate AppleScript syntax in shell scripts
 #
 # Copyright 2026 Dropbox, Inc.
@@ -10,9 +10,18 @@
 #   ./ai_template_scripts/lint_applescript.sh script.sh          # Check specific file
 #   ./ai_template_scripts/lint_applescript.sh --fix script.sh    # Show what to fix
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+version() {
+    local git_hash
+    git_hash=$(git -C "$SCRIPT_DIR/.." rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    local date
+    date=$(date +%Y-%m-%d)
+    echo "lint_applescript.sh ${git_hash} (${date})"
+    exit 0
+}
 
 usage() {
     cat <<'EOF'
@@ -25,6 +34,7 @@ Arguments:
 
 Options:
   -h, --help    Show this help message
+  --version     Show version information
   --verbose     Show each script being checked
   --fix         Show detailed error context
 
@@ -39,6 +49,7 @@ FILES=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
+        --version) version ;;
         --verbose) VERBOSE=true; shift ;;
         --fix) FIX=true; shift ;;
         -*) echo "Error: Unknown option: $1" >&2; exit 1 ;;

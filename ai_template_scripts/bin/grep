@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# grep wrapper - Blocks dangerous recursive grep under memory pressure
+#
+# CANONICAL SOURCE: ayates_dbx/ai_template
+# DO NOT EDIT in other repos - file issues to ai_template for changes.
+#
+# This wrapper sits in PATH before the real grep and:
+# - Detects recursive grep operations (-r, -R, --recursive)
+# - Checks system memory pressure before allowing recursive ops
+# - Blocks ALL recursive grep when memory is critical to prevent OOM
+# - Warns when memory pressure is elevated
+# - Suggests alternatives (rg, Grep tool)
+#
+# Installed by looper.py via PATH modification.
+#
+# Andrew Yates <ayates@dropbox.com>
+# Copyright 2026 Dropbox, Inc.
+# Licensed under the Apache License, Version 2.0
+
+# Find the real grep (skip this wrapper)
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+REAL_GREP=""
+
+# Check common locations first
+GREP_LOCATIONS=(/usr/bin/grep /bin/grep /opt/homebrew/bin/ggrep /usr/local/bin/ggrep)
+for loc in "${GREP_LOCATIONS[@]}"; do
+    if [[ -x "$loc" ]]; then
+        candidate_real="$(realpath "$loc" 2>/dev/null || echo "$loc")"
+        [[ "$candidate_real" != "$SCRIPT_PATH" ]] && REAL_GREP="$loc" && break
+    fi
+done
+
+# Fall back to PATH search if not found
+if [[ -z "$REAL_GREP" ]]; then
+    IFS=':' read -ra PATH_DIRS <<< "$PATH"
+    for p in "${PATH_DIRS[@]}"; do
+        [[ -d "$p" ]] || continue
+        grep_candidate="$p/grep"
+        [[ -x "$grep_candidate" ]] || continue
+        candidate_real="$(realpath "$grep_candidate" 2>/dev/null || echo "$grep_candidate")"
+        [[ "$candidate_real" == "$SCRIPT_PATH" ]] && continue
+        REAL_GREP="$grep_candidate"
+        break
+    done
+fi
+
+if [[ -z "$REAL_GREP" ]]; then
+    echo "[grep] ERROR: Real grep not found in PATH" >&2
+    exit 1
+fi
+
+# Detect if this is a recursive grep operation
+IS_RECURSIVE=false
+for arg in "$@"; do
+    case "$arg" in
+        -r|-R|--recursive|-rn|-nr|-Rn|-nR|--include=*|--exclude-dir=*)
+            IS_RECURSIVE=true
+            break
+            ;;
+    esac
+    # Also check combined short flags like -rn, -nri, etc.
+    if [[ "$arg" =~ ^-[^-]*[rR] ]]; then
+        IS_RECURSIVE=true
+        break
+    fi
+done
+
+# Check memory pressure for recursive operations (macOS only)
+if [[ "$IS_RECURSIVE" == true ]] && [[ "$OSTYPE" == darwin* ]]; then
+    # Get memory statistics from vm_stat
+    if command -v vm_stat &>/dev/null; then
+        # Parse vm_stat output to calculate memory pressure
+        # Page size is typically 16384 bytes on Apple Silicon, 4096 on Intel
+        PAGE_SIZE=$(vm_stat | grep -o 'page size of [0-9]* bytes' | grep -o '[0-9]*')
+        [[ -z "$PAGE_SIZE" ]] && PAGE_SIZE=16384
+
+        # Get memory stats (remove periods from numbers)
+        PAGES_FREE=$(vm_stat | awk '/Pages free:/ {gsub(/\./,"",$3); print $3}')
+        PAGES_INACTIVE=$(vm_stat | awk '/Pages inactive:/ {gsub(/\./,"",$3); print $3}')
+        PAGES_ACTIVE=$(vm_stat | awk '/Pages active:/ {gsub(/\./,"",$3); print $3}')
+        PAGES_SPECULATIVE=$(vm_stat | awk '/Pages speculative:/ {gsub(/\./,"",$3); print $3}')
+        PAGES_WIRED=$(vm_stat | awk '/Pages wired/ {gsub(/\./,"",$4); print $4}')
+        PAGES_COMPRESSED=$(vm_stat | awk '/Pages occupied by compressor:/ {gsub(/\./,"",$5); print $5}')
+
+        # Total physical memory (approximate from adding up pages)
+        PAGES_TOTAL=$((PAGES_FREE + PAGES_INACTIVE + PAGES_ACTIVE + PAGES_SPECULATIVE + PAGES_WIRED + PAGES_COMPRESSED))
+
+        # Available memory = free + inactive (can be reclaimed)
+        PAGES_AVAILABLE=$((PAGES_FREE + PAGES_INACTIVE))
+
+        # Calculate percentage used
+        if [[ $PAGES_TOTAL -gt 0 ]]; then
+            PERCENT_USED=$(( (PAGES_TOTAL - PAGES_AVAILABLE) * 100 / PAGES_TOTAL ))
+
+            # Memory pressure levels:
+            # - Normal: <70% used
+            # - Warn: 70-85% used
+            # - Critical: >85% used
+            if [[ $PERCENT_USED -gt 85 ]]; then
+                echo "[grep] BLOCKED: System memory pressure is CRITICAL (${PERCENT_USED}% used)" >&2
+                echo "[grep] Recursive grep can cause OOM. Use alternatives:" >&2
+                echo "[grep]   - rg (ripgrep): rg 'pattern' path" >&2
+                echo "[grep]   - Grep tool in Claude Code" >&2
+                exit 1
+            elif [[ $PERCENT_USED -gt 70 ]]; then
+                echo "[grep] WARNING: Memory pressure elevated (${PERCENT_USED}% used)" >&2
+                echo "[grep] Consider using rg (ripgrep) instead for large searches" >&2
+            fi
+        fi
+    fi
+fi
+
+# Pass through to real grep
+exec "$REAL_GREP" "$@"
