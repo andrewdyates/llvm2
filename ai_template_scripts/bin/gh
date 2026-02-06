@@ -228,8 +228,9 @@ if [[ "${AIT_USE_GITHUB_APPS:-}" == "1" ]]; then
 
     if [[ -n "$REPO" ]]; then
         export AIT_CURRENT_REPO="$REPO" # For rate_state.py (#2279)
-        # gh_apps.get_token outputs token to stdout; --quiet suppresses errors
-        APP_TOKEN=$("$PYTHON" -m ai_template_scripts.gh_apps.get_token --repo "$REPO" --quiet 2>/dev/null) || true
+        # gh_apps.get_token with --overflow picks best available app based on rate limits
+        # This enables overflow: per-repo → director → global when quota exhausted
+        APP_TOKEN=$("$PYTHON" -m ai_template_scripts.gh_apps.get_token --repo "$REPO" --overflow --quiet 2>/dev/null) || true
         if [[ -n "$APP_TOKEN" ]]; then
             export GH_TOKEN="$APP_TOKEN"
             export AIT_GH_APP_ACTIVE="1"

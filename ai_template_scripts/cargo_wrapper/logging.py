@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -16,6 +20,7 @@ import os
 import shlex
 
 from ai_template_scripts.shared_logging import (
+    debug_swallow,
     log_stderr,
     now_iso,
     rotate_log_file,
@@ -25,6 +30,7 @@ from . import _state
 from .constants import MAX_LOG_LINES
 
 __all__ = [
+    "debug_swallow",
     "now_iso",
     "log_stderr",
     "rotate_log_file",
@@ -127,4 +133,4 @@ def check_retry_loop(command: str, cwd: str, current_commit: str) -> None:
                 log_stderr(f"[cargo] ℹ️  {len(failures)}x failures (commits changed)")
 
     except Exception:
-        pass  # Best-effort: retry detection is observability, not critical
+        debug_swallow("check_retry_loop")

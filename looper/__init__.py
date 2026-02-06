@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -17,7 +21,7 @@ Public API (stable):
              CheckpointManager, CheckpointState, RecoveryContext
     Functions: load_role_config, load_project_config, main
     Constants: ROLES_DIR, LOG_DIR, LOG_RETENTION_HOURS,
-               EXIT_NO_ISSUES, EXIT_SILENCE, EXIT_TIMEOUT
+               EXIT_NOT_INITIALIZED, EXIT_SILENCE, EXIT_TIMEOUT
 
 Internal Helpers (may change):
     build_codex_context, inject_content, select_phase_by_priority, show_prompt,
@@ -67,7 +71,7 @@ from looper.config import (
     validate_config,
 )
 from looper.constants import (
-    EXIT_NO_ISSUES,
+    EXIT_NOT_INITIALIZED,
     EXIT_SILENCE,
     EXIT_TIMEOUT,
 )
@@ -158,7 +162,7 @@ __all__ = [
     "LOG_DIR",
     "LOG_RETENTION_HOURS",
     # Exit codes - iteration termination reasons (#1972, stable)
-    "EXIT_NO_ISSUES",
+    "EXIT_NOT_INITIALIZED",
     "EXIT_SILENCE",
     "EXIT_TIMEOUT",
     # Logging - structured logging support (stable)
@@ -189,13 +193,15 @@ __all__ = [
     "save_rotation_state",
     "update_rotation_state",
     "select_phase_by_priority",
+    # ===== DEPRECATED (scheduled for removal in v2.0) =====
+    # Use replacements documented in docs/deprecations.md
+    "check_stale_staged_files",  # → get_staged_files() + warn_stale_staged_files()
+    "check_uncommitted_work_size",  # → warn_uncommitted_work()
     # ===== EXPERIMENTAL =====
     # Multi-machine sync - subject to change as coordination evolves
     "SyncConfig",
     "SyncResult",
     "SyncStatus",
-    "check_stale_staged_files",
-    "check_uncommitted_work_size",
     "get_commits_behind",
     "get_conflict_files",
     "get_current_branch",

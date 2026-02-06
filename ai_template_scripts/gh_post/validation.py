@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -6,6 +10,8 @@
 
 import re
 import subprocess
+
+from looper.log import debug_swallow
 import sys
 
 from ai_template_scripts.gh_post.labels import (
@@ -20,7 +26,7 @@ def _is_malformed_in_progress_label(label: str) -> str | None:
 
     Returns error message if malformed, None if valid.
 
-    Valid: in-progress, in-progress-W1, in-progress-P2, in-progress-R1, in-progress-M1, etc.
+    Valid: in-progress, legacy in-progress-W1/in-progress-P2/in-progress-R1/in-progress-M1, etc.
     Invalid: in-progress-W (missing ID), in-progress- (trailing dash)
 
     See #866 for context.
@@ -33,11 +39,12 @@ def _is_malformed_in_progress_label(label: str) -> str | None:
         if not re.match(r"^[WPRM]\d+$", suffix):
             return (
                 f"Malformed in-progress label: '{label}'\n"
-                f"  Expected: 'in-progress' or 'in-progress-XN' (X=W/P/R/M, N=number)\n"
+                f"  Expected: 'in-progress' or legacy 'in-progress-XN' (X=W/P/R/M, N=number)\n"
                 f"  Got suffix: '{suffix}'\n"
                 f"\n"
-                f"  Fix: Set AI_WORKER_ID before claiming, or use 'in-progress' directly.\n"
-                f"  Example: gh issue edit N --add-label in-progress"
+                f"  Fix: Use 'in-progress' with a separate ownership label (W1/prov1/R1/M1),\n"
+                f"       or use a full legacy label like 'in-progress-W1'.\n"
+                f"  Example: gh issue edit N --add-label in-progress --add-label W1"
             )
     return None
 
@@ -179,6 +186,7 @@ def _has_fix_commit(issue_number: str) -> tuple[bool, str]:
             commit_hash = first_line.split()[0] if first_line else ""
             return True, commit_hash
         return False, ""
-    except Exception:
+    except Exception as e:
+        debug_swallow("gh_post_has_fix_commit", e)
         # If git fails, don't block (might be in test environment)
         return True, "unknown"

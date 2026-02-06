@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -10,6 +14,8 @@ Worker sees full priority-ordered list, other roles see domain-specific subsets.
 """
 
 __all__ = [
+    "filter_issues_by_theme",
+    "get_active_issue",
     "get_sampled_issues",
     "get_issue_by_number",
     "get_issues_by_numbers",
@@ -20,17 +26,19 @@ import json
 import os
 import random
 import re
-import sys
 
-from looper.config import load_project_config, load_timeout_config
+from looper.config import ThemeConfig, get_theme_config, load_injection_caps, load_project_config, load_timeout_config
 from looper.context.helpers import (
     Issue,
+    clean_issue_body,
     format_issue,
+    get_labels,
     get_p_level,
     has_in_progress_label,
     has_label,
     is_pending_issue,
     issue_number,
+    truncate_injection,
 )
 from looper.context.issue_cache import IterationIssueCache, is_feature_freeze
 from looper.log import debug_swallow
@@ -42,11 +50,10 @@ from looper.subprocess_utils import (
     run_gh_command,
 )
 
-# Import batch_issue_view at module level for testability
-# The function falls back to individual fetches if import fails
+# Import batch_issue_view for GraphQL batching
+# Falls back to individual fetches if import fails (non-ai_template repos)
 try:
-    sys.path.insert(0, "ai_template_scripts")
-    from gh_rate_limit import batch_issue_view  # type: ignore[import-not-found]
+    from ai_template_scripts.gh_rate_limit import batch_issue_view
 except ImportError:
     batch_issue_view = None  # type: ignore[misc, assignment]
 
@@ -124,8 +131,125 @@ def _format_pending_issue(issue: Issue) -> str:
     return f"[PENDING] {number_str}: {title_str} [{label_str}]"
 
 
-def get_sampled_issues(role: str = "worker") -> Result[str]:
+def _matches_search(text: str, search_query: str) -> bool:
+    """Check if text matches a simple search query with OR logic.
+
+    Supports "term1 OR term2 OR term3" syntax.
+    Each term is matched case-insensitively against the text.
+
+    Contracts:
+        REQUIRES: text is a string, search_query is a string
+        ENSURES: Returns True if any search term is found in text (case-insensitive)
+        ENSURES: Returns True if search_query is empty
+        ENSURES: Never raises
+
+    Args:
+        text: Text to search in (issue title + body typically)
+        search_query: Search query with optional OR operators
+
+    Returns:
+        True if text matches query, False otherwise.
+    """
+    if not search_query or not search_query.strip():
+        return True
+
+    text_lower = text.lower()
+    # Split on " OR " (case-insensitive)
+    terms = re.split(r"\s+OR\s+", search_query, flags=re.IGNORECASE)
+    for term in terms:
+        term = term.strip().lower()
+        if term and term in text_lower:
+            return True
+    return False
+
+
+def filter_issues_by_theme(
+    issues: list[Issue], theme_config: ThemeConfig | None
+) -> list[Issue]:
+    """Filter issues based on theme configuration.
+
+    Implements label-based filtering per designs/2026-02-05-ai-themes.md.
+    P0 issues are always preserved (emergencies override theme).
+
+    Contracts:
+        REQUIRES: issues is a list of issue dicts
+        REQUIRES: theme_config is None or ThemeConfig dict
+        ENSURES: P0 issues are ALWAYS preserved (not filtered out)
+        ENSURES: If theme_config is None, returns issues unchanged
+        ENSURES: If no issue_filter in theme_config, returns issues unchanged
+        ENSURES: If labels specified, only issues with at least one label pass
+        ENSURES: If exclude_labels specified, issues with any excluded label are removed
+        ENSURES: If search specified, issues not matching search are removed
+        ENSURES: Never raises
+
+    Args:
+        issues: List of issue dicts to filter.
+        theme_config: Theme configuration with issue_filter settings.
+
+    Returns:
+        Filtered list of issues.
+    """
+    if theme_config is None:
+        return issues
+
+    issue_filter = theme_config.get("issue_filter", {})
+    if not issue_filter:
+        return issues
+
+    # Validate and extract filter fields with type safety
+    raw_include = issue_filter.get("labels", [])
+    raw_exclude = issue_filter.get("exclude_labels", [])
+    include_labels = set(raw_include) if isinstance(raw_include, list) else set()
+    exclude_labels = set(raw_exclude) if isinstance(raw_exclude, list) else set()
+    search_query = issue_filter.get("search", "") if isinstance(issue_filter.get("search"), str) else ""
+
+    filtered: list[Issue] = []
+    for issue in issues:
+        # P0 always preserved (emergencies override theme)
+        if has_label(issue, "P0"):
+            filtered.append(issue)
+            continue
+
+        # Get issue labels as set
+        raw_labels = issue.get("labels", [])
+        issue_labels: set[str] = set()
+        for lbl in raw_labels:
+            if isinstance(lbl, dict):
+                name = lbl.get("name")
+                if isinstance(name, str):
+                    issue_labels.add(name)
+            elif isinstance(lbl, str):
+                issue_labels.add(lbl)
+
+        # Check exclusions first (exclude_labels = blocklist)
+        if exclude_labels and (issue_labels & exclude_labels):
+            continue
+
+        # Check inclusions (labels = allowlist)
+        if include_labels and not (issue_labels & include_labels):
+            continue
+
+        # Check search query (title + body)
+        if search_query:
+            title = issue.get("title", "")
+            body = issue.get("body", "")
+            text = f"{title} {body}"
+            if not _matches_search(text, search_query):
+                continue
+
+        filtered.append(issue)
+
+    return filtered
+
+
+def get_sampled_issues(
+    role: str = "worker", worker_id: int | None = None
+) -> Result[str]:
     """Get role-filtered sampled issues.
+
+    Args:
+        role: Current role (worker, manager, researcher, prover)
+        worker_id: Worker instance ID. If None, falls back to AI_WORKER_ID env var.
 
     Contracts:
         REQUIRES: role is a string (unknown roles treated as 'worker')
@@ -165,7 +289,12 @@ def get_sampled_issues(role: str = "worker") -> Result[str]:
         return _get_p0_issues_only()
 
     # Worker: full priority sampling - use cache for single API call (#1676)
-    worker_id = os.environ.get("AI_WORKER_ID")
+    # Resolve worker_id: explicit param > env var (#2591)
+    wid_str: str | None = None
+    if worker_id is not None:
+        wid_str = str(worker_id)
+    else:
+        wid_str = os.environ.get("AI_WORKER_ID")
     cache_result = IterationIssueCache.get_all()
     if not cache_result.ok:
         error = cache_result.error or "unknown error"
@@ -183,8 +312,9 @@ def get_sampled_issues(role: str = "worker") -> Result[str]:
         issues = [i for i in all_issues if not is_pending_issue(i)]
 
         # Worker: full priority sampling
-        # Exclude tracking/deferred issues - not actionable work
+        # Exclude tracking/deferred/epic issues - not actionable work
         # (except P0 tracking/deferred issues, which must still be visible)
+        # Epic issues are always excluded - they are tracking-only (#2627)
         issues = [
             i
             for i in issues
@@ -192,6 +322,7 @@ def get_sampled_issues(role: str = "worker") -> Result[str]:
                 (has_label(i, "tracking") or has_label(i, "deferred"))
                 and not has_label(i, "P0")
             )
+            and not has_label(i, "epic")
         ]
 
         # Feature freeze: exclude feature-labeled issues (bugs/docs/refactor only)
@@ -203,13 +334,20 @@ def get_sampled_issues(role: str = "worker") -> Result[str]:
                 if not (has_label(i, "feature") and not has_label(i, "P0"))
             ]
 
+        # Theme filtering (#2478): apply theme-based issue filter if configured
+        # P0 issues are preserved even if they don't match theme filter
+        wid_int = int(wid_str) if wid_str and wid_str.isdigit() else None
+        theme_config = get_theme_config(role, wid_int)
+        if theme_config:
+            issues = filter_issues_by_theme(issues, theme_config)
+
         # Worker 3 specialization: P3-only by default
         # Override with WORKER3_NORMAL_MODE=1 to use normal priority sampling
-        if worker_id == "3" and os.environ.get("WORKER3_NORMAL_MODE") != "1":
+        if wid_str == "3" and os.environ.get("WORKER3_NORMAL_MODE") != "1":
             if not issues and pending_issues:
                 pending_lines = [_format_pending_issue(p) for p in pending_issues]
                 return Result.success("\n".join(pending_lines))
-            result = _sample_worker3_issues(issues, worker_id)
+            result = _sample_worker3_issues(issues, wid_str)
             # Prepend pending issues if any (#1854)
             if pending_issues and result.ok:
                 pending_lines = [_format_pending_issue(p) for p in pending_issues]
@@ -227,12 +365,17 @@ def get_sampled_issues(role: str = "worker") -> Result[str]:
             lines.append(_format_pending_issue(pending))
 
         # Sample by priority tiers (P0 > do-audit > in-progress > urgent > P1-3)
-        _sample_priority_issues(issues, lines, shown, worker_id, sampling)
+        _sample_priority_issues(issues, lines, shown, wid_str, sampling)
 
         # Sample for discovery (newest, random, oldest)
         _sample_discovery_issues(issues, lines, shown, sampling)
 
         if not lines:
+            # Distinguish between truly empty repo and all-filtered scenario
+            if all_issues:
+                return Result.success(
+                    "(all issues filtered: tracking/deferred only)"
+                )
             return Result.success("(no open issues)")
 
         return Result.success("\n".join(lines))
@@ -247,21 +390,37 @@ def _sample_tier(
     limit: int,
     shown: set[int],
     prefix: str,
+    *,
+    unlimited_if_zero: bool = False,
 ) -> list[str]:
     """Sample up to `limit` issues matching `label`.
 
     Args:
         issues: List of issue dicts to sample from.
         label: Label to filter by.
-        limit: Maximum number to sample (0 = unlimited for P0).
+        limit: Maximum number to sample. 0 = disabled (returns []) unless
+               unlimited_if_zero=True (used for P0 which must always show).
         shown: Set of issue numbers already shown (mutated in place).
         prefix: Prefix string for formatted output (e.g., "[P1]").
+        unlimited_if_zero: If True, limit=0 means unlimited (for P0 only).
+                          If False (default), limit=0 disables the tier.
 
     Returns:
         List of formatted issue strings.
+
+    Contracts:
+        REQUIRES: issues is list, label is str, limit >= 0, shown is set, prefix is str
+        ENSURES: if limit=0 and not unlimited_if_zero, returns []
+        ENSURES: if limit=0 and unlimited_if_zero, no limit applied
+        ENSURES: if limit>0, at most `limit` issues returned
     """
+    # limit=0 disables the tier (except P0 which uses unlimited_if_zero=True)
+    if limit == 0 and not unlimited_if_zero:
+        return []
+
     lines: list[str] = []
     for issue in issues:
+        # Check limit (0 = unlimited when unlimited_if_zero=True)
         if limit > 0 and len(lines) >= limit:
             break
         if has_label(issue, label) and issue_number(issue) not in shown:
@@ -291,29 +450,76 @@ def _sample_priority_issues(
     sampling = sampling or _ISSUE_SAMPLING_DEFAULTS
 
     # P0 first (always - system compromised, no limit)
-    lines.extend(_sample_tier(issues, "P0", 0, shown, "[P0]"))
+    lines.extend(_sample_tier(issues, "P0", 0, shown, "[P0]", unlimited_if_zero=True))
 
-    # do-audit second (workflow gate)
-    lines.extend(
-        _sample_tier(
-            issues, "do-audit", sampling.get("do_audit", 5), shown, "[DO-AUDIT]"
-        )
-    )
+    # do-audit: show summary count instead of listing all (#2572)
+    # These are in the audit pipeline - not actionable for workers.
+    # Show 1 line summary to maintain awareness without consuming slots.
+    do_audit_limit = sampling.get("do_audit", 5)
+    do_audit_issues = [
+        i for i in issues
+        if has_label(i, "do-audit") and issue_number(i) not in shown
+    ]
+    if do_audit_issues:
+        # Add all do-audit to shown so they don't appear in later tiers
+        for i in do_audit_issues:
+            shown.add(issue_number(i))
+        if do_audit_limit > 0:
+            count = len(do_audit_issues)
+            numbers = ", ".join(
+                f"#{issue_number(i)}" for i in do_audit_issues[:5]
+            )
+            suffix = f", +{count - 5} more" if count > 5 else ""
+            lines.append(
+                f"[DO-AUDIT] {count} issues awaiting audit ({numbers}{suffix})"
+            )
 
-    # In-progress third (current work) - needs custom handling for claim suffix
+    # In-progress third (current work) - prioritize own issues (#2567)
+    # Show +YOU issues first, then up to 2 other workers' issues for awareness
+    # When worker_id is None (single-worker), show all up to limit (#2594)
     in_progress_limit = sampling.get("in_progress", 5)
     if in_progress_limit > 0:
         count = 0
-        for issue in issues:
-            if count >= in_progress_limit:
-                break
-            if has_in_progress_label(issue) and issue_number(issue) not in shown:
+        if worker_id is not None:
+            # Multi-worker: split own vs other, cap other at 2
+            own_issues: list[tuple[Issue, str]] = []
+            other_issues: list[tuple[Issue, str]] = []
+            for issue in issues:
+                if has_in_progress_label(issue) and issue_number(issue) not in shown:
+                    suffix = _claimed_by_suffix(issue, worker_id)
+                    if suffix == "+YOU":
+                        own_issues.append((issue, suffix))
+                    else:
+                        other_issues.append((issue, suffix or ""))
+
+            # Own issues first (no cap)
+            for issue, suffix in own_issues:
+                if count >= in_progress_limit:
+                    break
+                line = f"[IN-PROGRESS] {format_issue(issue)} {suffix}"
+                lines.append(line)
+                shown.add(issue_number(issue))
+                count += 1
+            # Other workers' issues capped at 2 to conserve context
+            other_cap = min(2, in_progress_limit - count)
+            for issue, suffix in other_issues[:other_cap]:
+                if count >= in_progress_limit:
+                    break
                 line = f"[IN-PROGRESS] {format_issue(issue)}"
-                if suffix := _claimed_by_suffix(issue, worker_id):
+                if suffix:
                     line = f"{line} {suffix}"
                 lines.append(line)
                 shown.add(issue_number(issue))
                 count += 1
+        else:
+            # Single-worker (worker_id=None): show all up to limit
+            for issue in issues:
+                if count >= in_progress_limit:
+                    break
+                if has_in_progress_label(issue) and issue_number(issue) not in shown:
+                    lines.append(f"[IN-PROGRESS] {format_issue(issue)}")
+                    shown.add(issue_number(issue))
+                    count += 1
 
     # Urgent issues (sorted by P-level within)
     urgent_limit = sampling.get("urgent", 5)
@@ -351,7 +557,7 @@ def _claimed_by_suffix(issue: Issue, worker_id: str | None) -> str | None:
     """
     # Handle both GraphQL (dict) and REST (string) label formats
     raw_labels = issue.get("labels", [])
-    labels = [lbl["name"] if isinstance(lbl, dict) else lbl for lbl in raw_labels]
+    labels = [lbl.get("name", "") if isinstance(lbl, dict) else lbl for lbl in raw_labels]
 
     # Look for worker ownership labels: W1, W2, W3, etc.
     # Note: P0-P3 are priority labels, not Prover ownership
@@ -363,6 +569,124 @@ def _claimed_by_suffix(issue: Issue, worker_id: str | None) -> str | None:
                 return "+YOU"  # Current worker
             return f"+W{instance}"  # Other worker
     return None
+
+
+# Max chars for secondary active issue (acceptance criteria extract)
+_SECONDARY_ISSUE_CAP = 600
+
+# Per-injection caps loaded from config (#2745)
+_injection_caps: dict[str, int] | None = None
+
+
+def _get_active_issue_cap() -> int:
+    """Return the configured cap for active_issue injection."""
+    global _injection_caps  # noqa: PLW0603
+    if _injection_caps is None:
+        _injection_caps = load_injection_caps()
+    return _injection_caps["active_issue"]
+
+
+def _extract_acceptance_criteria(body: str) -> str:
+    """Extract ## Acceptance Criteria section from issue body.
+
+    Returns the criteria text (without the header), or empty string if not found.
+    """
+    if "## Acceptance Criteria" not in body:
+        return ""
+    in_section = False
+    lines: list[str] = []
+    for line in body.splitlines():
+        if line.startswith("## Acceptance Criteria"):
+            in_section = True
+            continue
+        if not in_section:
+            continue
+        if line.startswith("## "):
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def get_active_issue(worker_id: int | None = None) -> Result[str]:
+    """Get the current worker's in-progress issue for prominent display.
+
+    Returns the worker's own in-progress issue (labeled with their W{N} ownership
+    label) formatted for a dedicated "Your Active Issue" prompt section. This
+    ensures the worker encounters its current work before the general issue list.
+
+    Primary issue gets full body (capped at 2000 chars). Secondary issues get
+    title + acceptance criteria only to keep total size bounded. See #2689.
+
+    Args:
+        worker_id: Worker instance ID. If None, falls back to AI_WORKER_ID env var.
+
+    Contracts:
+        ENSURES: Returns Result.success with formatted issue or empty string
+        ENSURES: Only returns issues labeled both 'in-progress' and 'W{worker_id}'
+        ENSURES: Primary issue body capped at configured active_issue cap
+        ENSURES: Secondary issues show title + acceptance criteria only
+        ENSURES: Never raises - all exceptions caught
+    """
+    wid_str = str(worker_id) if worker_id is not None else os.environ.get("AI_WORKER_ID")
+    if not wid_str:
+        return Result.success("")
+
+    try:
+        cache_result = IterationIssueCache.get_all()
+        if not cache_result.ok:
+            return Result.success("")
+
+        all_issues = list(cache_result.value or [])
+        active: list[str] = []
+
+        for issue in all_issues:
+            if not has_in_progress_label(issue):
+                continue
+            suffix = _claimed_by_suffix(issue, wid_str)
+            if suffix == "+YOU":
+                issue_number_str = str(issue.get("number", "?"))
+                title = issue.get("title", "(no title)")
+                if not isinstance(title, str):
+                    title = "(no title)"
+                labels = ", ".join(get_labels(issue)) or "-"
+                issue_header = f"**#{issue_number_str}: {title} [{labels}]**"
+                issue_body = issue.get("body", "")
+                body_text = clean_issue_body(issue_body.strip()) if isinstance(issue_body, str) else ""
+
+                if not active:
+                    # Primary issue: full body, capped (#2733 Phase 2)
+                    if body_text:
+                        body_text = truncate_injection(
+                            body_text, _get_active_issue_cap(), "active_issue"
+                        )
+                    if body_text:
+                        active.append(f"{issue_header}\n\n{body_text}")
+                    else:
+                        active.append(issue_header)
+                else:
+                    # Secondary issues: title + acceptance criteria only
+                    criteria = _extract_acceptance_criteria(body_text) if body_text else ""
+                    if criteria:
+                        if len(criteria) > _SECONDARY_ISSUE_CAP:
+                            criteria = criteria[:_SECONDARY_ISSUE_CAP].rsplit("\n", 1)[0]
+                            criteria += "\n... [truncated]"
+                        active.append(f"{issue_header}\n\n## Acceptance Criteria\n{criteria}")
+                    else:
+                        active.append(issue_header)
+
+        if not active:
+            return Result.success("")
+
+        lines = []
+        for block in active:
+            lines.append(block)
+        lines.append("")
+        lines.append("Continue this work. Only pivot for P0 or explicit User directive.")
+        return Result.success("\n".join(lines))
+
+    except Exception as exc:
+        debug_swallow("get_active_issue", exc)
+        return Result.success("")
 
 
 def _sample_discovery_issues(
@@ -468,18 +792,46 @@ def _sample_worker3_issues(issues: list[Issue], worker_id: str | None) -> Result
             shown.add(issue_number(issue))
             count += 1
 
-    # in-progress P3
+    # in-progress P3 - prioritize own issues (#2567)
+    # When worker_id is None (single-worker), show all up to limit (#2594)
     count = 0
-    for issue in p3_issues:
-        if count >= 3:
-            break
-        if has_in_progress_label(issue) and issue_number(issue) not in shown:
+    p3_ip_limit = 3
+    if worker_id is not None:
+        # Multi-worker: split own vs other, cap other at 1
+        p3_own: list[tuple[Issue, str]] = []
+        p3_other: list[tuple[Issue, str]] = []
+        for issue in p3_issues:
+            if has_in_progress_label(issue) and issue_number(issue) not in shown:
+                suffix = _claimed_by_suffix(issue, worker_id)
+                if suffix == "+YOU":
+                    p3_own.append((issue, suffix))
+                else:
+                    p3_other.append((issue, suffix or ""))
+        for issue, suffix in p3_own:
+            if count >= p3_ip_limit:
+                break
+            lines.append(f"[IN-PROGRESS P3] {format_issue(issue)} {suffix}")
+            shown.add(issue_number(issue))
+            count += 1
+        other_cap = min(1, p3_ip_limit - count)
+        for issue, suffix in p3_other[:other_cap]:
+            if count >= p3_ip_limit:
+                break
             line = f"[IN-PROGRESS P3] {format_issue(issue)}"
-            if suffix := _claimed_by_suffix(issue, worker_id):
+            if suffix:
                 line = f"{line} {suffix}"
             lines.append(line)
             shown.add(issue_number(issue))
             count += 1
+    else:
+        # Single-worker (worker_id=None): show all up to limit
+        for issue in p3_issues:
+            if count >= p3_ip_limit:
+                break
+            if has_in_progress_label(issue) and issue_number(issue) not in shown:
+                lines.append(f"[IN-PROGRESS P3] {format_issue(issue)}")
+                shown.add(issue_number(issue))
+                count += 1
 
     # Remaining P3 (up to 10)
     count = 0
@@ -673,7 +1025,7 @@ def get_issues_by_numbers(issue_nums: list[int]) -> dict[int, str]:
                 raw_labels = issue.get("labels", [])
                 labels = (
                     [
-                        lbl["name"] if isinstance(lbl, dict) else lbl
+                        lbl.get("name", "") if isinstance(lbl, dict) else lbl
                         for lbl in raw_labels
                     ]
                     if isinstance(raw_labels, list)
@@ -712,7 +1064,8 @@ def get_issues_by_numbers(issue_nums: list[int]) -> dict[int, str]:
             issue = json.loads(result.value)
             raw_labels = issue.get("labels", [])
             labels = [
-                lbl["name"] if isinstance(lbl, dict) else lbl for lbl in raw_labels
+                lbl.get("name", "") if isinstance(lbl, dict) else lbl
+                for lbl in raw_labels
             ]
             label_str = ", ".join(labels) or "-"
             state = issue.get("state", "UNKNOWN")
@@ -726,7 +1079,10 @@ def get_issues_by_numbers(issue_nums: list[int]) -> dict[int, str]:
     return results
 
 
-def get_issues_structured(role: str = "worker") -> Result[list[dict[str, object]]]:
+def get_issues_structured(
+    role: str = "worker",
+    worker_id: int | None = None,
+) -> Result[list[dict[str, object]]]:
     """Get role-filtered issues as structured data (list of dicts).
 
     This is the structured alternative to get_sampled_issues() which returns
@@ -754,9 +1110,13 @@ def get_issues_structured(role: str = "worker") -> Result[list[dict[str, object]
         ENSURES: P0 issues always included (even for non-worker roles)
         ENSURES: Never raises - catches all exceptions
         ENSURES: Same role-based filtering as get_sampled_issues() (but no priority ordering)
+        ENSURES: Theme filtering applied when theme config exists (#2660)
+        ENSURES: Worker 3 P3-only specialization when worker_id=3 (#2660)
 
     Args:
         role: Role name (worker, manager, prover, researcher).
+        worker_id: Worker instance ID (1-5). Used for theme filtering and
+            Worker 3 specialization.
 
     Returns:
         Result with list of issue dicts on success.
@@ -768,6 +1128,12 @@ def get_issues_structured(role: str = "worker") -> Result[list[dict[str, object]
     # Normalize role to lowercase for consistent matching
     role = role.lower()
 
+    # Resolve worker_id: explicit param > env var (same as get_sampled_issues)
+    if worker_id is None:
+        wid_str = os.environ.get("AI_WORKER_ID")
+        if wid_str and wid_str.isdigit():
+            worker_id = int(wid_str)
+
     cache_result = IterationIssueCache.get_all()
     if not cache_result.ok:
         error = cache_result.error or "unknown error"
@@ -777,6 +1143,10 @@ def get_issues_structured(role: str = "worker") -> Result[list[dict[str, object]
         all_issues = list(cache_result.value or [])
         if not all_issues:
             return Result.success([])
+
+        # Separate pending issues - they bypass all filters (#1854)
+        pending = [i for i in all_issues if is_pending_issue(i)]
+        all_issues = [i for i in all_issues if not is_pending_issue(i)]
 
         # Normalize issues to consistent structure
         def normalize_issue(issue: Issue) -> dict[str, object]:
@@ -803,11 +1173,22 @@ def get_issues_structured(role: str = "worker") -> Result[list[dict[str, object]
                 "is_pending": is_pending_issue(issue),
             }
 
+        # Normalize helper for combining filtered + pending
+        def _result(issues: list[Issue]) -> list[dict[str, object]]:
+            return [normalize_issue(i) for i in issues] + [
+                normalize_issue(i) for i in pending
+            ]
+
         # Apply role-based filtering (same logic as get_sampled_issues)
         if role in ("prover", "researcher"):
             # Only P0 issues for rotation-based roles
+            # Pending issues also filtered to P0-only (match get_sampled_issues)
             p0_issues = [i for i in all_issues if has_label(i, "P0")]
-            return Result.success([normalize_issue(i) for i in p0_issues])
+            p0_pending = [i for i in pending if has_label(i, "P0")]
+            return Result.success(
+                [normalize_issue(i) for i in p0_issues]
+                + [normalize_issue(i) for i in p0_pending]
+            )
 
         if role == "manager":
             # P0 + needs-review
@@ -816,9 +1197,10 @@ def get_issues_structured(role: str = "worker") -> Result[list[dict[str, object]
                 for i in all_issues
                 if has_label(i, "P0") or has_label(i, "needs-review")
             ]
-            return Result.success([normalize_issue(i) for i in filtered])
+            return Result.success(_result(filtered))
 
-        # Worker: exclude tracking/deferred (except P0)
+        # Worker: exclude tracking/deferred/epic (except P0 tracking/deferred)
+        # Epic issues always excluded - tracking-only (#2627)
         filtered = [
             i
             for i in all_issues
@@ -826,6 +1208,7 @@ def get_issues_structured(role: str = "worker") -> Result[list[dict[str, object]
                 (has_label(i, "tracking") or has_label(i, "deferred"))
                 and not has_label(i, "P0")
             )
+            and not has_label(i, "epic")
         ]
 
         # Feature freeze: exclude feature-labeled issues (except P0)
@@ -836,7 +1219,23 @@ def get_issues_structured(role: str = "worker") -> Result[list[dict[str, object]
                 if not (has_label(i, "feature") and not has_label(i, "P0"))
             ]
 
-        return Result.success([normalize_issue(i) for i in filtered])
+        # Theme filtering (#2660): same logic as get_sampled_issues lines 331-336
+        theme_config = get_theme_config(role, worker_id)
+        if theme_config:
+            filtered = filter_issues_by_theme(filtered, theme_config)
+
+        # Worker 3 specialization (#2660): P3-only by default
+        # P0 always preserved (emergencies override specialization)
+        # Falls back to unfiltered list when no P3 issues exist (#2671)
+        if worker_id == 3 and os.environ.get("WORKER3_NORMAL_MODE") != "1":
+            w3_filtered = [
+                i for i in filtered
+                if get_p_level(i) == 3 or has_label(i, "P0")
+            ]
+            if w3_filtered:
+                filtered = w3_filtered
+
+        return Result.success(_result(filtered))
 
     except Exception as e:
         return Result.failure(f"get_issues_structured error: {e}", value=[])

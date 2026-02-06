@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -61,6 +65,7 @@ _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
+from ai_template_scripts.identity import get_identity as _get_ident  # noqa: E402
 from ai_template_scripts.path_utils import resolve_path_alias  # noqa: E402
 from ai_template_scripts.subprocess_utils import run_cmd  # noqa: E402
 from ai_template_scripts.url_sanitizer import sanitize_git_url  # noqa: E402
@@ -114,7 +119,7 @@ def get_builder_info() -> dict[str, Any]:
              'python_version', 'user' keys
     """
     return {
-        "id": f"https://github.com/dropbox-ai-prototypes/ai_template/builder/{platform.node()}",
+        "id": f"https://github.com/{_get_ident().github_org}/ai_template/builder/{platform.node()}",
         "hostname": platform.node(),
         "platform": platform.system(),
         "platform_version": platform.release(),
@@ -205,7 +210,7 @@ def create_provenance(
     # SLSA BuildDefinition
     resolved_dependencies: list[dict[str, Any]] = []
     build_definition: dict[str, Any] = {
-        "buildType": f"https://github.com/dropbox-ai-prototypes/ai_template/build/{build_type}",
+        "buildType": f"https://github.com/{_get_ident().github_org}/ai_template/build/{build_type}",
         "externalParameters": {
             "command": command,
             "cwd": str(Path.cwd()),

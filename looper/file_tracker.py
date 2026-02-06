@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -27,6 +31,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ai_template_scripts.subprocess_utils import is_process_alive
 from looper.log import debug_swallow, log_info, log_warning
 from looper.subprocess_utils import run_git_command
 
@@ -132,22 +137,6 @@ def get_uncommitted_files() -> list[str]:
     return files
 
 
-def _is_pid_alive(pid: int) -> bool:
-    """Check if a process with given PID is still running.
-
-    REQUIRES: pid > 0
-    ENSURES: Returns True if process is running
-    ENSURES: Returns False if process is dead or inaccessible
-    """
-    try:
-        os.kill(pid, 0)  # Doesn't kill, just checks existence
-        return True  # Process exists
-    except ProcessLookupError:
-        return False  # Process doesn't exist
-    except PermissionError:
-        return True  # Process exists but we can't signal it
-
-
 class FileTracker:
     """Tracks files modified by a worker during a session.
 
@@ -214,7 +203,7 @@ class FileTracker:
             return False
         if state.session_id == self.session_id:
             return False
-        return _is_pid_alive(state.pid)
+        return is_process_alive(state.pid)
 
     def save(self, files: list[str] | None = None) -> bool:
         """Save tracker state atomically.
@@ -363,7 +352,7 @@ def cleanup_stale_trackers(repo_root: Path) -> list[str]:
                 data = json.loads(path.read_text())
                 pid = data.get("pid", 0)
 
-                if pid > 0 and not _is_pid_alive(pid):
+                if pid > 0 and not is_process_alive(pid):
                     path.unlink()
                     cleaned.append(path.name)
                     log_info(f"Cleaned up stale tracker: {path.name} (PID {pid} dead)")
@@ -403,7 +392,7 @@ def get_all_tracked_files(repo_root: Path) -> dict[int, list[str]]:
                 worker_id = data.get("worker_id", 0)
                 files = data.get("files", [])
 
-                if pid > 0 and _is_pid_alive(pid) and worker_id > 0:
+                if pid > 0 and is_process_alive(pid) and worker_id > 0:
                     result[worker_id] = files
             except (json.JSONDecodeError, KeyError, OSError) as e:
                 debug_swallow("get_all_tracked_files_parse", e)

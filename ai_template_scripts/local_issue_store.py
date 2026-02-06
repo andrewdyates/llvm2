@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -24,7 +28,7 @@ Design decisions:
     - IDs use L<int> prefix to avoid collision with GitHub numbers
     - YAML frontmatter for metadata (parseable, human-readable)
     - Comments stored inline in Markdown (## Comments section)
-    - File locking on writes for concurrent access safety
+    - Atomic file replacement on writes for reader safety
 """
 
 from __future__ import annotations
@@ -34,17 +38,19 @@ __all__ = [
     "LocalIssueStore",
     "LOCAL_ISSUE_PREFIX",
     "is_local_issue_id",
-    "parse_local_issue_id",
 ]
 
 import fcntl
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from ai_template_scripts.atomic_write import atomic_write_text
 
 # Local issue ID prefix - distinguishes from GitHub issue numbers
 LOCAL_ISSUE_PREFIX = "L"
@@ -65,21 +71,6 @@ def is_local_issue_id(issue_id: str | int) -> bool:
     if isinstance(issue_id, int):
         return False
     return bool(_LOCAL_ID_PATTERN.match(str(issue_id)))
-
-
-def parse_local_issue_id(issue_id: str) -> int | None:
-    """Parse local issue ID and return the numeric portion.
-
-    Args:
-        issue_id: Local issue ID string (e.g., "L1", "L42").
-
-    Returns:
-        Integer portion of the ID, or None if not a valid local ID.
-    """
-    match = _LOCAL_ID_PATTERN.match(str(issue_id))
-    if match:
-        return int(match.group(1))
-    return None
 
 
 @dataclass
@@ -248,7 +239,7 @@ class LocalIssueStore:
     - .issues/L1.md, .issues/L2.md, etc.
     - .issues/_meta.json for next ID counter
 
-    Thread-safe via file locking on writes.
+    Thread-safe ID allocation via file locking and atomic file replacement.
     """
 
     def __init__(self, repo_root: Path | None = None):
@@ -265,35 +256,23 @@ class LocalIssueStore:
         """Ensure .issues/ directory exists."""
         self.issues_dir.mkdir(parents=True, exist_ok=True)
 
-    def _load_meta(self) -> dict[str, Any]:
-        """Load metadata from _meta.json.
+    def _scan_max_issue_id(self) -> int:
+        """Scan .issues/ for existing L*.md files and return max ID number.
+
+        Used as a recovery mechanism when _meta.json is corrupt or stale,
+        to prevent ID reuse that would overwrite existing issues (#2906).
 
         Returns:
-            Metadata dict with at least 'next_id' key.
+            Max numeric ID found, or 0 if no issue files exist.
         """
-        if self.meta_file.exists():
-            try:
-                return json.loads(self.meta_file.read_text())
-            except json.JSONDecodeError:
-                pass
-        return {"next_id": 1}
-
-    def _save_meta(self, meta: dict[str, Any]) -> None:
-        """Save metadata to _meta.json with file locking.
-
-        Args:
-            meta: Metadata dict to save.
-        """
-        self._ensure_dir()
-
-        # Use exclusive lock for atomic write
-        with open(self.meta_file, "w") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                json.dump(meta, f, indent=2)
-                f.write("\n")
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        max_id = 0
+        for path in self.issues_dir.glob("L*.md"):
+            match = _LOCAL_ID_PATTERN.match(path.stem)
+            if match:
+                num = int(match.group(1))
+                if num > max_id:
+                    max_id = num
+        return max_id
 
     def _get_next_id(self) -> str:
         """Get next available local issue ID.
@@ -301,29 +280,33 @@ class LocalIssueStore:
         Uses atomic read-modify-write with file locking to prevent TOCTOU
         race conditions when multiple processes call this concurrently.
 
+        Locking uses a separate .lock file so the flock inode is stable
+        across the temp+replace cycle on _meta.json.
+
+        When _meta.json is missing or corrupt, scans existing issue files
+        to prevent ID reuse (#2906).
+
         Returns:
             Next ID string (e.g., "L1", "L2").
         """
         self._ensure_dir()
+        lock_path = self.meta_file.parent / f"{self.meta_file.name}.lock"
 
-        # Use "a+" mode: creates file if missing, allows read+write
-        # Lock before reading to ensure atomic read-modify-write
-        with open(self.meta_file, "a+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        # Lock a dedicated file; its inode survives the data-file replace.
+        with open(lock_path, "a+") as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
             try:
-                f.seek(0)  # "a+" opens at end, seek to start for reading
-                content = f.read()
-                meta: dict[str, Any]
-                try:
-                    if content.strip():
-                        meta = json.loads(content)
-                    else:
-                        meta = {"next_id": 1}
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    meta = {"next_id": 1}
-
-                if not isinstance(meta, dict):
-                    meta = {"next_id": 1}
+                # Read current meta from data file
+                meta: dict[str, Any] = {"next_id": 1}
+                if self.meta_file.exists():
+                    try:
+                        content = self.meta_file.read_text()
+                        if content.strip():
+                            parsed = json.loads(content)
+                            if isinstance(parsed, dict):
+                                meta = parsed
+                    except (json.JSONDecodeError, TypeError, ValueError, OSError):
+                        pass
 
                 next_num = meta.get("next_id", 1)
                 if not isinstance(next_num, int):
@@ -333,16 +316,36 @@ class LocalIssueStore:
                         next_num = 1
                 if next_num < 1:
                     next_num = 1
+
+                # Guard against stale/partial metadata by ensuring next_id is
+                # always above the highest existing issue file (#2906).
+                max_existing = self._scan_max_issue_id()
+                if next_num <= max_existing:
+                    next_num = max_existing + 1
+
                 meta["next_id"] = next_num + 1
 
-                f.seek(0)
-                f.truncate()
-                json.dump(meta, f, indent=2)
-                f.write("\n")
-                f.flush()
-                os.fsync(f.fileno())
+                # Write to temp file then replace, so a crash never
+                # leaves _meta.json empty (unlike truncate+write).
+                fd, tmp_name = tempfile.mkstemp(
+                    prefix=f".{self.meta_file.name}.tmp.",
+                    dir=self.meta_file.parent,
+                )
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as tmp_f:
+                        json.dump(meta, tmp_f, indent=2)
+                        tmp_f.write("\n")
+                        tmp_f.flush()
+                        os.fsync(tmp_f.fileno())
+                    os.replace(tmp_name, self.meta_file)
+                except OSError:
+                    try:
+                        os.unlink(tmp_name)
+                    except OSError:
+                        pass
+                    raise
             finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 
         return f"{LOCAL_ISSUE_PREFIX}{next_num}"
 
@@ -358,7 +361,7 @@ class LocalIssueStore:
         return self.issues_dir / f"{issue_id}.md"
 
     def _write_issue(self, issue: LocalIssue) -> None:
-        """Write issue to file with locking.
+        """Write issue file atomically.
 
         Args:
             issue: Issue to write.
@@ -366,14 +369,8 @@ class LocalIssueStore:
         self._ensure_dir()
         path = self._issue_path(issue.id)
 
-        # Use exclusive lock for atomic write
         content = issue.to_markdown()
-        with open(path, "w") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                f.write(content)
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        atomic_write_text(path, content)
 
     def _read_issue(self, issue_id: str) -> LocalIssue | None:
         """Read issue from file.

@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -23,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_template_scripts.gh_rate_limit.limiter import debug_log
+from ai_template_scripts.shared_logging import debug_swallow
 
 # Cross-platform file locking
 try:
@@ -127,12 +132,18 @@ class SerializedFetcher:
         if lock_path is None:
             return None, False
 
+        lock_fd = None
         try:
             lock_fd = open(lock_path, "w")
             got_lock = try_lock_file(lock_fd, SERIALIZE_TIMEOUT_SEC)
             return lock_fd, got_lock
         except Exception as e:
             debug_log(f"acquire_lock failed for {lock_path}: {e}")
+            if lock_fd is not None:
+                try:
+                    lock_fd.close()
+                except OSError:
+                    debug_swallow("acquire_lock_fd_close")
             return None, False
 
     def release_lock(self, lock_fd: Any) -> None:
@@ -182,6 +193,6 @@ def cleanup_stale_locks(cache_dir: Path, max_age_hours: int = 24) -> tuple[int, 
                 lf_path.unlink()
                 old_removed += 1
         except OSError:
-            pass
+            debug_swallow("cleanup_stale_locks")
 
     return (tmp_removed, old_removed)

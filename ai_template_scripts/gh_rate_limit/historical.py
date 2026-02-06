@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -23,6 +27,7 @@ import time
 from pathlib import Path
 
 from ai_template_scripts.gh_rate_limit.limiter import debug_log
+from ai_template_scripts.shared_logging import debug_swallow
 
 
 class HistoricalCache:
@@ -185,7 +190,7 @@ class HistoricalCache:
         try:
             hist_path.unlink(missing_ok=True)
         except OSError:
-            pass
+            debug_swallow("invalidate_historical_issue")
 
     def cleanup(self, max_age_days: int = 30) -> tuple[int, int]:
         """Clean up old historical cache entries.
@@ -222,21 +227,21 @@ class HistoricalCache:
                             files_removed += 1
                             bytes_freed += st.st_size
                     except OSError:
-                        pass
+                        debug_swallow("cleanup_historical_issue")
 
                 # Clean up empty repo directory
                 try:
                     if repo_dir.exists() and not any(repo_dir.iterdir()):
                         repo_dir.rmdir()
                 except OSError:
-                    pass
+                    debug_swallow("cleanup_empty_repo_dir")
 
             # Clean up empty owner directory
             try:
                 if owner_dir.exists() and not any(owner_dir.iterdir()):
                     owner_dir.rmdir()
             except OSError:
-                pass
+                debug_swallow("cleanup_empty_owner_dir")
 
         return (files_removed, bytes_freed)
 

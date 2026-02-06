@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -31,6 +35,8 @@ __all__ = [
     "check_command",
     "check_java",
     "check_tla_tools",
+    "clear_extension_cache",
+    "has_extension",
     "rglob_filtered",
     "resolve_tla2tools_jar",
     "main",
@@ -120,6 +126,59 @@ def rglob_filtered(pattern: str) -> list[Path]:
     ]
 
 
+# Cached file extension index to avoid multiple repo walks (#2401)
+_extension_cache: dict[str, bool] | None = None
+
+
+def clear_extension_cache() -> None:
+    """Clear the file extension cache.
+
+    Call this when the working directory changes to ensure has_extension()
+    scans the new directory instead of using stale cached results.
+    """
+    global _extension_cache
+    _extension_cache = None
+
+
+def _get_extension_cache() -> dict[str, bool]:
+    """Build a one-time cache of file extensions present in the repo.
+
+    Returns:
+        Dict mapping extension (e.g., ".rs", ".tla", ".py") to True if any
+        files with that extension exist (excluding EXCLUDE_DIRS).
+    """
+    global _extension_cache
+    if _extension_cache is not None:
+        return _extension_cache
+
+    extensions: set[str] = set()
+    for root, dirs, files in os.walk("."):
+        # Prune excluded directories in-place to skip subtrees
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+        for f in files:
+            ext = Path(f).suffix.lower()
+            if ext:
+                extensions.add(ext)
+
+    _extension_cache = {ext: True for ext in extensions}
+    return _extension_cache
+
+
+def has_extension(ext: str) -> bool:
+    """Check if any files with the given extension exist in the repo.
+
+    Uses a cached single-pass scan of the repo to avoid repeated rglob calls.
+
+    Args:
+        ext: File extension including dot (e.g., ".rs", ".tla", ".py").
+
+    Returns:
+        True if at least one file with that extension exists.
+    """
+    cache = _get_extension_cache()
+    return ext.lower() in cache
+
+
 def check_command(cmd: str) -> bool:
     """Check if a command exists."""
     code, _ = run(f"which {cmd}")
@@ -200,7 +259,8 @@ CHECKS: dict[str, CheckSpec] = {
         "desc": "Rust project (needs .cargo/config.toml for build parallelism limits)",
     },
     "kani": {
-        "detect": lambda: len(rglob_filtered("*.rs")) > 0
+        # Use has_extension() for fast check before expensive grep (#2401)
+        "detect": lambda: has_extension(".rs")
         and run(
             "grep -rE '(kani::|cfg_attr\\(kani,[[:space:]]*kani::)"
             "(proof|requires|ensures|modifies)' "
@@ -212,7 +272,7 @@ CHECKS: dict[str, CheckSpec] = {
         "desc": "Kani proofs or contracts found in Rust files",
     },
     "tla": {
-        "detect": lambda: len(rglob_filtered("*.tla")) > 0,
+        "detect": lambda: has_extension(".tla"),
         "check": check_tla_tools,
         "install": "./ai_template_scripts/install_tla_tools.sh",
         "desc": "TLA+ specs found (TLC required)",
@@ -225,7 +285,7 @@ CHECKS: dict[str, CheckSpec] = {
         "desc": "Fuzz targets found",
     },
     "python": {
-        "detect": lambda: len(rglob_filtered("*.py")) > 0,
+        "detect": lambda: has_extension(".py"),
         "check": lambda: check_command("python3"),
         "install": "brew install python3",
         "desc": "Python files found",

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # spawn_session.sh - Spawn worker, prover, researcher, or manager in new iTerm2 tab
 #
 # Copyright 2026 Dropbox, Inc.
@@ -86,33 +90,48 @@ sanitize_url() {
 DRY_RUN=false
 ALLOW_DIRTY=false
 WORKER_ID=""
-ISOLATED=false  # Default to shared checkout; use --isolated for separate clones
+ISOLATED=false # Default to shared checkout; use --isolated for separate clones
 COORD_DIR=""
 while [[ "${1-}" == -* ]]; do
     case "$1" in
-        -h|--help) usage; exit 0 ;;
-        --version) version ;;
-        --dry-run) DRY_RUN=true; shift ;;
-        --allow-dirty) ALLOW_DIRTY=true; shift ;;
-        --id=*)
-            WORKER_ID="${1#--id=}"
-            # Must be integer 1-5 to match pulse.py GraphQL label counting
-            # See #1080: prevents in-progress-W43 label sprawl
-            if ! [[ "$WORKER_ID" =~ ^[1-5]$ ]]; then
-                err "Invalid --id value: $WORKER_ID" "Must be 1-5 (e.g., --id=1)"
-            fi
-            shift
-            ;;
-        --isolated) ISOLATED=true; shift ;;
-        --shared) ISOLATED=false; shift ;;
-        --coord-dir=*)
-            COORD_DIR="${1#--coord-dir=}"
-            if [[ -z "$COORD_DIR" ]]; then
-                err "--coord-dir requires a non-empty path" "Example: --coord-dir=/tmp/coord"
-            fi
-            shift
-            ;;
-        *) err "Unknown option: $1" "Use --help for usage" ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    --version) version ;;
+    --dry-run)
+        DRY_RUN=true
+        shift
+        ;;
+    --allow-dirty)
+        ALLOW_DIRTY=true
+        shift
+        ;;
+    --id=*)
+        WORKER_ID="${1#--id=}"
+        # Must be integer 1-5 to match pulse.py GraphQL label counting
+        # See #1080: prevents in-progress-W43 label sprawl
+        if ! [[ "$WORKER_ID" =~ ^[1-5]$ ]]; then
+            err "Invalid --id value: $WORKER_ID" "Must be 1-5 (e.g., --id=1)"
+        fi
+        shift
+        ;;
+    --isolated)
+        ISOLATED=true
+        shift
+        ;;
+    --shared)
+        ISOLATED=false
+        shift
+        ;;
+    --coord-dir=*)
+        COORD_DIR="${1#--coord-dir=}"
+        if [[ -z "$COORD_DIR" ]]; then
+            err "--coord-dir requires a non-empty path" "Example: --coord-dir=/tmp/coord"
+        fi
+        shift
+        ;;
+    *) err "Unknown option: $1" "Use --help for usage" ;;
     esac
 done
 
@@ -194,7 +213,7 @@ if $ISOLATED; then
     #        #1794 (bare repo detection)
     resolve_remote_url() {
         local url="$1"
-        local base_dir="$2"  # Base directory for resolving relative paths
+        local base_dir="$2" # Base directory for resolving relative paths
         local max_depth=5
         local depth=0
 
@@ -370,10 +389,10 @@ fi
 # Sanitize project name for osascript (remove quotes and backslashes)
 PROJECT_NAME_SAFE="${PROJECT_NAME//[\"\'\\\$]/}"
 case "$MODE" in
-    worker)     ROLE="W" ;;
-    prover)     ROLE="P" ;;
-    researcher) ROLE="R" ;;
-    manager)    ROLE="M" ;;
+worker) ROLE="W" ;;
+prover) ROLE="P" ;;
+researcher) ROLE="R" ;;
+manager) ROLE="M" ;;
 esac
 
 # Build role display: W or W1 for multi-worker
@@ -417,9 +436,58 @@ if $DRY_RUN; then
     exit 0
 fi
 
+# Clear stale STOP files from previous sessions (#2368, #2369)
+# Spawning = intent to start, so clear any stops that would block this session
+# STOP files older than STOP_EXPIRY_SEC are marked as expired in output
+MODE_UPPER=$(echo "$MODE" | tr '[:lower:]' '[:upper:]')
+CLEARED_STOPS=()
+STOP_EXPIRY_SEC="${AIT_STOP_EXPIRY_SEC:-3600}" # Default 1 hour
+
+# Helper to clear a stop file and show its reason/age
+clear_stop_file() {
+    local stop_file="$1"
+    local display_name="$2"
+    if [[ -f "$stop_file" ]]; then
+        local reason="" age_note=""
+        # Get reason from file content
+        if [[ -s "$stop_file" ]]; then
+            reason=$(head -1 "$stop_file" 2>/dev/null | tr -d '\n')
+        fi
+        # Check age using stat (macOS format)
+        local mtime now age_sec
+        mtime=$(stat -f %m "$stop_file" 2>/dev/null) || mtime=0
+        now=$(date +%s)
+        age_sec=$((now - mtime))
+        if [[ $age_sec -gt $STOP_EXPIRY_SEC ]]; then
+            local age_min=$((age_sec / 60))
+            age_note=" [expired: ${age_min}m old]"
+        fi
+        rm -f "$stop_file"
+        local msg="$display_name"
+        [[ -n "$reason" ]] && msg="$msg (reason: $reason)"
+        [[ -n "$age_note" ]] && msg="$msg$age_note"
+        CLEARED_STOPS+=("$msg")
+    fi
+}
+
+# Check from most specific to least specific
+# Instance-specific: STOP_W1, STOP_W2, etc.
+if [[ -n "$WORKER_ID" ]]; then
+    clear_stop_file "$PROJECT/STOP_${MODE_UPPER}${WORKER_ID}" "STOP_${MODE_UPPER}${WORKER_ID}"
+fi
+# Role-specific: STOP_WORKER, STOP_MANAGER, etc.
+clear_stop_file "$PROJECT/STOP_${MODE_UPPER}" "STOP_${MODE_UPPER}"
+# Global: STOP
+clear_stop_file "$PROJECT/STOP" "STOP"
+
+# Report what was cleared
+if [[ ${#CLEARED_STOPS[@]} -gt 0 ]]; then
+    echo "Cleared stale STOP files: ${CLEARED_STOPS[*]}"
+fi
+
 # Check iTerm2 is running (only when actually creating a tab)
 # Note: pgrep -x doesn't work for GUI apps on macOS, use -f with app bundle path
-if ! pgrep -f "iTerm.app" > /dev/null 2>&1; then
+if ! pgrep -f "iTerm.app" >/dev/null 2>&1; then
     err "iTerm2 is not running" "Start iTerm2 first, then run this script"
 fi
 

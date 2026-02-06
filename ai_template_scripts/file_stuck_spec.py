@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -17,9 +21,15 @@ import argparse
 import subprocess
 import sys
 
+from ai_template_scripts.identity import get_identity as _get_ident
+
 
 def file_kani_issue(harness: str, timeout: str, prop: str, repo: str) -> int:
-    """File stuck Kani proof issue to zani."""
+    """File stuck Kani proof issue to zani.
+
+    REQUIRES: harness, timeout, prop, repo are non-empty strings; gh CLI available
+    ENSURES: returns 0 on success, 1 on failure; prints issue URL or error
+    """
     title = f"[stuck] Kani harness: {harness} (timeout: {timeout})"
     body = f"""## Stuck Kani Proof
 
@@ -50,14 +60,19 @@ Filed by: file_stuck_spec.py from {repo}
 
     cmd = [
         "gh", "issue", "create",
-        "--repo", "dropbox-ai-prototypes/zani",
+        "--repo", f"{_get_ident().github_org}/zani",
         "--title", title,
         "--body", body,
         "--label", "stuck-proof",
         "--label", "P2",
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        print("Error: gh command timed out", file=sys.stderr)
+        return 1
+
     if result.returncode == 0:
         print(f"Filed: {result.stdout.strip()}")
         return 0
@@ -67,7 +82,11 @@ Filed by: file_stuck_spec.py from {repo}
 
 
 def file_tla_issue(spec: str, timeout: str, prop: str, repo: str) -> int:
-    """File stuck TLA+ spec issue to tla2."""
+    """File stuck TLA+ spec issue to tla2.
+
+    REQUIRES: spec, timeout, prop, repo are non-empty strings; gh CLI available
+    ENSURES: returns 0 on success, 1 on failure; prints issue URL or error
+    """
     title = f"[stuck] TLA+ spec: {spec} (timeout: {timeout})"
     body = f"""## Stuck TLA+ Spec
 
@@ -98,14 +117,19 @@ Filed by: file_stuck_spec.py from {repo}
 
     cmd = [
         "gh", "issue", "create",
-        "--repo", "dropbox-ai-prototypes/tla2",
+        "--repo", f"{_get_ident().github_org}/tla2",
         "--title", title,
         "--body", body,
         "--label", "stuck-spec",
         "--label", "P2",
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        print("Error: gh command timed out", file=sys.stderr)
+        return 1
+
     if result.returncode == 0:
         print(f"Filed: {result.stdout.strip()}")
         return 0
@@ -115,7 +139,11 @@ Filed by: file_stuck_spec.py from {repo}
 
 
 def get_current_repo() -> str:
-    """Get current repo name from git remote."""
+    """Get current repo name from git remote.
+
+    REQUIRES: git command available in PATH
+    ENSURES: returns "owner/repo" string from origin URL, or "unknown" on failure
+    """
     try:
         result = subprocess.run(
             ["git", "remote", "get-url", "origin"],
@@ -125,14 +153,30 @@ def get_current_repo() -> str:
             url = result.stdout.strip()
             # Extract repo name from URL
             if "github.com" in url:
-                parts = url.rstrip(".git").split("/")
-                return "/".join(parts[-2:])
+                # Remove .git suffix if present (use slice, not rstrip which strips chars)
+                if url.endswith(".git"):
+                    url = url[:-4]
+                # Handle SSH URLs: git@github.com:owner/repo
+                if url.startswith("git@"):
+                    # Split on colon to get owner/repo part
+                    parts = url.split(":")
+                    if len(parts) == 2:
+                        return parts[1]
+                # Handle HTTPS URLs: https://github.com/owner/repo
+                else:
+                    parts = url.split("/")
+                    return "/".join(parts[-2:])
         return "unknown"
     except Exception:
         return "unknown"
 
 
 def main() -> int:
+    """CLI entry point for filing stuck spec issues.
+
+    REQUIRES: sys.argv contains valid subcommand (kani or tla) with required args
+    ENSURES: returns 0 on success, 1 on failure
+    """
     parser = argparse.ArgumentParser(
         description="File stuck verification specs to zani/tla2"
     )

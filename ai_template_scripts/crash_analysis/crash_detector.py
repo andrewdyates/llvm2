@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -11,6 +15,8 @@ This module contains functions for:
 - Grouping crashes by fingerprint
 - Analyzing crash patterns
 - Applying inhibition rules
+
+Categories imported from ai_template_scripts.crash_categories per #2318.
 """
 
 from __future__ import annotations
@@ -22,6 +28,11 @@ from ai_template_scripts.crash_analysis.types import (
     CrashEntry,
     CrashFingerprint,
     SuppressedPattern,
+)
+from ai_template_scripts.crash_categories import (
+    CrashCategoryStr,
+    CRASH_CATEGORIES,
+    is_expected_termination,
 )
 
 # Idle abort detection
@@ -54,20 +65,18 @@ def _filter_idle_aborts(crashes: list[CrashEntry]) -> tuple[list[CrashEntry], in
     return filtered, idle_count
 
 
-def _get_crash_category(message: str) -> str:
+def _get_crash_category(message: str) -> CrashCategoryStr:
     """Determine crash category from message.
 
     Args:
         message: Crash message text
 
     Returns:
-        Category string: idle_abort, signal_kill, timeout, stale_connection,
-        exit_error, or unknown
+        Category string from CRASH_CATEGORIES per #2318
 
     Contracts:
         REQUIRES: message is a string
-        ENSURES: result in {"idle_abort", "signal_kill", "timeout",
-            "stale_connection", "exit_error", "unknown"}
+        ENSURES: result in CRASH_CATEGORIES
     """
     msg = message.lower()
     if _is_idle_abort(message):

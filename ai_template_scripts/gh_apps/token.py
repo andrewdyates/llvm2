@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -95,7 +99,7 @@ class TokenManager:
         payload = {
             "iat": now - 60,  # Issued 60s ago (clock skew buffer)
             "exp": now + 600,  # Expires in 10 minutes
-            "iss": app_config.app_id,
+            "iss": str(app_config.app_id),
         }
         return jwt.encode(payload, app_config.private_key, algorithm="RS256")
 

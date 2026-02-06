@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -9,6 +13,7 @@ import subprocess
 import sys
 
 from ai_template_scripts.gh_post.args import _extract_title_body
+from looper.log import debug_swallow
 
 
 def _gh_post():
@@ -150,7 +155,8 @@ def _rest_create_issue(
                         file=sys.stderr,
                     )
             return 0
-        except Exception:
+        except Exception as e:
+            debug_swallow("gh_post_rest_create_issue_parse", e)
             print(result.stdout, end="")
             return 0
 
@@ -198,7 +204,8 @@ def _rest_add_comment(
             data = json.loads(result.stdout)
             print(data.get("html_url", result.stdout))
             return 0
-        except Exception:
+        except Exception as e:
+            debug_swallow("gh_post_rest_add_comment_parse", e)
             print(result.stdout, end="")
             return 0
 
@@ -311,8 +318,8 @@ def _rest_edit_issue(
             html_url = data.get("html_url", "")
             if html_url:
                 print(html_url)
-        except Exception:
-            pass
+        except Exception as e:
+            debug_swallow("gh_post_rest_edit_issue_parse", e)
         return 0
 
     # Check if REST also rate limited (#1779 - check both stderr and stdout)

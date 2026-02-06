@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -67,7 +71,7 @@ def _get_repo_owner_and_name() -> tuple[str, str] | None:
 def _has_in_progress_label(labels: list[str]) -> bool:
     """Return True if labels include in-progress or any role-specific claims.
 
-    Handles: in-progress, in-progress-W*, in-progress-P*, in-progress-R*, in-progress-M*
+    Handles: in-progress, legacy in-progress-W*, in-progress-P*, in-progress-R*, in-progress-M*
 
     REQUIRES: labels is a list of strings
     ENSURES: Returns True iff any label matches in-progress or in-progress-*
@@ -94,7 +98,7 @@ def _get_issue_counts_graphql(owner: str, repo: str) -> Result[dict[str, int]]:
 
     # GraphQL query for issue counts by state and label
     # Note: labels filter in GraphQL requires exact match, so we query
-    # in-progress and all role-specific labels separately (W, P, R, M variants 1-5)
+    # in-progress and legacy in-progress-* labels separately (W1-5, P/R/M1-3)
     query = """
     query($owner: String!, $repo: String!) {
       repository(owner: $owner, name: $repo) {
@@ -152,7 +156,7 @@ def _get_issue_counts_graphql(owner: str, repo: str) -> Result[dict[str, int]]:
         counts["closed"] = repo_data.get("closed", {}).get("totalCount", 0)
         counts["blocked"] = repo_data.get("blocked", {}).get("totalCount", 0)
 
-        # Sum all in-progress variants: in-progress + {W,P,R,M}{1-5}
+        # Sum all in-progress variants: in-progress + W1-5 + P/R/M1-3
         in_progress_total = repo_data.get("inProgress", {}).get("totalCount", 0)
         for role in ["W", "P", "R", "M"]:
             # W has 5 workers, others have 3

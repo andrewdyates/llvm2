@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -23,6 +27,7 @@ See: designs/2026-02-01-iteration-split.md
 import json
 import os
 import random
+import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -36,11 +41,13 @@ from looper.config import (
     LOG_DIR,
     build_codex_context,
     get_project_name,
+    get_theme_config,
     inject_content,
     set_tab_title,
 )
-from looper.constants import EXIT_NO_ISSUES
+from looper.constants import EXIT_NOT_INITIALIZED
 from looper.context import IterationIssueCache
+from looper.context.helpers import DEFAULT_PROMPT_BUDGET, enforce_prompt_budget
 from looper.issue_manager import IssueManager
 from looper.iteration_process import ProcessManager
 from looper.iteration_prompt import (
@@ -91,7 +98,7 @@ __all__ = [
     "IterationResult",
     "build_audit_prompt",
     "extract_issue_numbers",
-    "EXIT_NO_ISSUES",  # Re-exported from looper.constants
+    "EXIT_NOT_INITIALIZED",  # Re-exported from looper.constants
 ]
 
 
@@ -317,18 +324,11 @@ class IterationRunner:
                 cmd.extend(["--resume", resume_session_id])
             return final_prompt, cmd, claude_model
 
-        # Codex/Dasher: prepend rules files (Claude reads them automatically, they don't)
-        # Both use the same CLI interface since dasher is a codex fork
+        # Codex/Dasher: rules are prepended to the prompt by the looper.
+        # AGENTS.md is a minimal stub; build_codex_context() provides the rules.
+        # Role prompt comes from `prompt` (shared.md + role.md via load_role_config).
         codex_context = build_codex_context()
-        final_prompt = (
-            codex_context
-            + prompt
-            + """
-
-IMPORTANT: After completing the work, YOU MUST create the git commit immediately
-using the commit template. Do NOT ask for permission - just commit. This is
-headless autonomous mode."""
-        )
+        final_prompt = codex_context + prompt if codex_context else prompt
 
         # Select binary name based on tool
         binary = "dasher" if ai_tool == "dasher" else "codex"
@@ -411,6 +411,7 @@ headless autonomous mode."""
         replacements: dict[str, str],
         final_prompt: str,
         audit_round: int,
+        audit_max_rounds_override: int | None = None,
     ) -> None:
         """Print iteration header and prompt diagnostics."""
         log_info("")
@@ -431,7 +432,11 @@ headless autonomous mode."""
         log_info("")
         # Display prompt assembly info (shows the actual prompt being sent)
         self._prompt_builder.display_prompt_info(
-            replacements, final_prompt, ai_tool, audit_round
+            replacements,
+            final_prompt,
+            ai_tool,
+            audit_round,
+            audit_max_rounds_override=audit_max_rounds_override,
         )
 
         # Report stuck issues (manager only)
@@ -443,6 +448,7 @@ headless autonomous mode."""
         iteration: int,
         audit_round: int,
         ai_tool: str,
+        model: str | None = None,
     ) -> Path:
         """Prepare log file path, create tombstone, and update status.
 
@@ -474,6 +480,8 @@ headless autonomous mode."""
             )
 
         status_extra: dict[str, Any] = {"ai_tool": ai_tool, "audit_round": audit_round}
+        if model:
+            status_extra["model"] = model
         self.status_manager.write_status(
             iteration, "working", log_file=log_file, extra=status_extra
         )
@@ -635,6 +643,8 @@ headless autonomous mode."""
         force_ai_tool: str | None = None,
         force_codex_model: str | None = None,
         working_issues: list[int] | None = None,
+        audit_min_issues_override: int | None = None,
+        audit_max_rounds_override: int | None = None,
     ) -> IterationResult:
         """Run a single AI iteration.
 
@@ -660,61 +670,78 @@ headless autonomous mode."""
             IterationIssueCache.clear()
 
         replacements, selected_phase = self._prompt_builder.build_replacements(
-            iteration, audit_round, working_issues, self.current_phase
+            iteration,
+            audit_round,
+            working_issues,
+            self.current_phase,
+            audit_min_issues_override=audit_min_issues_override,
         )
         self.current_phase = selected_phase
 
-        # Fail-fast if no issues to work on (#1641)
-        # Only check main iterations (audits always have working_issues from main)
-        # Skip for rotation-based roles where phases ARE the work (#1909):
-        # - audit (Manager): audit phases are the work
-        # - research (Researcher): research phases are the work
-        # - verification (Prover): verification phases are the work
-        # Worker uses "work" rotation_type (priority tiers) and still needs issues
-        gh_issues = replacements.get("gh_issues", "")
-        rotation_type = self.config.get("rotation_type", "")
-        rotation_is_work = rotation_type in ("audit", "research", "verification")
-        role_skips_issue_gate = self.mode in ("manager", "prover", "researcher")
-        skip_no_issue_abort = rotation_is_work or role_skips_issue_gate
-        if not is_audit and _has_no_issues(gh_issues) and not skip_no_issue_abort:
-            start_time = time.time()
-            log_warning(
-                f"\n⚠️  No issues assigned - aborting iteration early (exit {EXIT_NO_ISSUES})"
-            )
-            log_info("Reason: gh_issues returned no actionable work")
-            log_info(
-                "This saves compute vs running a long session with no direction.\n"
-            )
+        # Export input provenance to env vars for commit trailers (#2473)
+        # Phase: what rotation phase the AI is in (or "freeform"/"none")
+        if selected_phase:
+            os.environ["AI_PHASE"] = selected_phase
+        else:
+            os.environ["AI_PHASE"] = "freeform" if self.mode != "user" else "none"
 
-            # Record metrics for early abort tracking
+        # Input-Issues: issues shown in the prompt (only capture on main iteration)
+        if not is_audit:
+            gh_issues = replacements.get("gh_issues", "")
+            issue_numbers: list[str] = []
+            seen: set[str] = set()
+            for match in re.finditer(r"#(\d+):", gh_issues):
+                number = match.group(1)
+                if number not in seen:
+                    issue_numbers.append(number)
+                    seen.add(number)
+            os.environ["AI_INPUT_ISSUES"] = ",".join(issue_numbers)
+
+        # Theme: what theme the AI is configured with (#2478)
+        # Exported for commit trailers and prompt context
+        theme_config = get_theme_config(self.mode, self.worker_id)
+        if theme_config and theme_config.get("name"):
+            os.environ["AI_THEME"] = theme_config["name"]
+        elif "AI_THEME" in os.environ:
+            del os.environ["AI_THEME"]  # Clear stale theme if no longer configured
+
+        # Check for uninitialized repo (no VISION.md + no issues) (#2410)
+        # This is a project init failure, not a work scenario.
+        # Workers with no issues enter Maintenance Mode (see worker.md).
+        # But no VISION.md means the project was never initialized.
+        gh_issues = replacements.get("gh_issues", "")
+        if (
+            not is_audit
+            and _has_no_issues(gh_issues)
+            and not Path("VISION.md").exists()
+        ):
+            start_time = time.time()
+            log_warning("\n⚠️  Repo not initialized - cannot start autonomous work")
+            log_info("")
+            log_info("This repo is missing VISION.md and has no issues.")
+            log_info("Autonomous roles need direction to work on.")
+            log_info("")
+            log_info("To initialize (see CLAUDE.md 'Project init workflow'):")
+            log_info("  1. Write VISION.md with project direction")
+            log_info("  2. Create initial issues: gh issue create --title '...' --label P1")
+            log_info("  3. Then start autonomous roles")
+            log_info("")
             ai_tool = force_ai_tool if force_ai_tool else self.select_ai_tool()
-            codex_model = force_codex_model
-            # Create minimal log file for traceability
-            log_file = self._prepare_log_file(iteration, audit_round, ai_tool)
-            log_file.write_text(
-                f"Early abort: no issues assigned\n"
-                f"Time: {start_time}\n"
-                f"gh_issues: {gh_issues}\n"
-            )
-            self._record_pending_metrics(
-                start_time,
-                ai_tool,
-                EXIT_NO_ISSUES,
-                codex_model,
-                log_file,
-                is_audit,
-                iteration,
-            )
             return IterationResult(
-                exit_code=EXIT_NO_ISSUES,
+                exit_code=EXIT_NOT_INITIALIZED,
                 start_time=start_time,
                 ai_tool=ai_tool,
                 session_id=None,
-                codex_model=codex_model,
+                codex_model=force_codex_model,
             )
 
+        budget = self.config.get("prompt_budget_chars", DEFAULT_PROMPT_BUDGET)
+        replacements = enforce_prompt_budget(replacements, budget=budget)
         prompt = inject_content(self.prompt_template, replacements)
         ai_tool = force_ai_tool if force_ai_tool else self.select_ai_tool()
+
+        # Codex rules are prepended in _build_command() via build_codex_context().
+        # AGENTS.md is a minimal stub.
 
         # Model switching logic for resumed sessions (#1888)
         # Determine selected model before building command to check switching policy
@@ -748,7 +775,11 @@ headless autonomous mode."""
 
         if is_audit:
             prompt = self._prompt_builder.append_audit_prompt(
-                prompt, ai_tool, audit_round
+                prompt,
+                ai_tool,
+                audit_round,
+                audit_min_issues_override=audit_min_issues_override,
+                audit_max_rounds_override=audit_max_rounds_override,
             )
 
         final_prompt, cmd, codex_model = self._build_command(
@@ -773,10 +804,16 @@ headless autonomous mode."""
         set_tab_title(role_letter, worker_id=self.worker_id)
 
         self._print_iteration_header(
-            iter_display, ai_tool, codex_model, replacements, final_prompt, audit_round
+            iter_display,
+            ai_tool,
+            codex_model,
+            replacements,
+            final_prompt,
+            audit_round,
+            audit_max_rounds_override=audit_max_rounds_override,
         )
 
-        log_file = self._prepare_log_file(iteration, audit_round, ai_tool)
+        log_file = self._prepare_log_file(iteration, audit_round, ai_tool, model=codex_model)
         self._set_coder_info(ai_tool)
 
         # Initialize tool call tracker for fine-grained recovery (#1625, #1804)

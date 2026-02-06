@@ -63,6 +63,7 @@ evals/**/logs/
 
 # Test/lint output
 .coverage
+.vision_health_cache/
 htmlcov/
 .pytest_cache/
 .mypy_cache/
@@ -91,6 +92,7 @@ FEATURE_FREEZE
 # Mutation testing artifacts
 mutants/
 .mutmut-cache/
+kani_status.json
 .hypothesis
 states/
 .looper_tool_calls_*.jsonl

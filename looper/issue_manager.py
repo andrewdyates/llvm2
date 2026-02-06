@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -138,9 +142,16 @@ class IssueManager(IssueManagerBase):
             issue_num, unchecked, checked, original_body
         )
 
+    def _has_label(self, issue_num: int, label_name: str) -> bool:
+        """Check if issue has a label (delegates to _get_issue_labels)."""
+        return label_name in self._checkbox._get_issue_labels(issue_num)
+
     def _get_issue_p_label(self, issue_num: int) -> str | None:
-        """Delegate to CheckboxConverter."""
-        return self._checkbox._get_issue_p_label(issue_num)
+        """Get P-label from issue (delegates to _get_issue_labels)."""
+        for label in self._checkbox._get_issue_labels(issue_num):
+            if label in ("P0", "P1", "P2", "P3"):
+                return label
+        return None
 
     def _get_commit_issue_numbers(self) -> set[int]:
         """Delegate to CheckboxConverter."""

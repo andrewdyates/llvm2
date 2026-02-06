@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -12,8 +16,10 @@ import subprocess
 import time
 from datetime import datetime
 
+from ai_template_scripts.subprocess_utils import is_process_alive
+
 from .constants import STALE_PROCESS_AGE
-from .logging import log_orphan
+from .logging import debug_swallow, log_orphan
 
 __all__ = [
     "get_process_start_time",
@@ -77,7 +83,8 @@ def get_process_start_time(pid: int) -> float | None:
                 return dt.timestamp()
         return None
     except Exception:
-        return None  # Best-effort: ps output parsing for timestamp
+        debug_swallow("get_process_start_time")
+        return None
 
 
 def get_process_parent(pid: int) -> int | None:
@@ -92,7 +99,7 @@ def get_process_parent(pid: int) -> int | None:
         if result.returncode == 0:
             return int(result.stdout.strip())
     except Exception:
-        pass  # Best-effort: parent PID lookup for ancestry check
+        debug_swallow("get_process_parent")
     return None
 
 
@@ -194,7 +201,7 @@ def find_cargo_processes() -> list[dict]:
                 }
             )
     except Exception:
-        pass  # Best-effort: process list enumeration for orphan detection
+        debug_swallow("find_cargo_processes")
     return processes
 
 
@@ -220,7 +227,7 @@ def parse_etime(etime: str) -> int:
                 days * 86400 + int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
             )
     except Exception:
-        pass  # Best-effort: etime parsing returns 0 (safe default)
+        debug_swallow("parse_etime")
     return 0
 
 
@@ -256,11 +263,8 @@ def cleanup_orphans() -> int:
         try:
             os.kill(pid, signal.SIGTERM)
             time.sleep(0.5)
-            try:
-                os.kill(pid, 0)
+            if is_process_alive(pid):
                 os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
             log_orphan(proc)
             killed += 1
         except (ProcessLookupError, PermissionError):

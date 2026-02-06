@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -19,6 +23,11 @@
 
 set -euo pipefail
 
+# Load identity configuration from ait_identity.toml
+_BUMP_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=identity.sh
+source "$_BUMP_SCRIPT_DIR/identity.sh" 2>/dev/null || true
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -38,7 +47,7 @@ usage() {
     echo "Bump git dependency revision in Cargo.toml files."
     echo ""
     echo "Arguments:"
-    echo "  REPO_URL   Git repository URL to bump (e.g., https://github.com/dropbox-ai-prototypes/z4)"
+    echo "  REPO_URL   Git repository URL to bump (e.g., https://github.com/$AIT_GITHUB_ORG/z4)"
     echo "  REV        Target revision (default: HEAD of default branch)"
     echo ""
     echo "Options:"
@@ -47,9 +56,9 @@ usage() {
     echo "  --help     Show this help message"
     echo ""
     echo "Examples:"
-    echo "  bump_git_dep_rev.sh https://github.com/dropbox-ai-prototypes/z4"
-    echo "  bump_git_dep_rev.sh https://github.com/dropbox-ai-prototypes/z4 cdfa08fb"
-    echo "  bump_git_dep_rev.sh --dry-run https://github.com/dropbox-ai-prototypes/z4"
+    echo "  bump_git_dep_rev.sh https://github.com/$AIT_GITHUB_ORG/z4"
+    echo "  bump_git_dep_rev.sh https://github.com/$AIT_GITHUB_ORG/z4 cdfa08fb"
+    echo "  bump_git_dep_rev.sh --dry-run https://github.com/$AIT_GITHUB_ORG/z4"
     echo "  bump_git_dep_rev.sh --version"
 }
 

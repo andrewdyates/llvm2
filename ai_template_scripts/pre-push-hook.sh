@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -136,7 +140,7 @@ echo ""
 if [[ $INVALID_FOUND -gt 0 ]]; then
     if [[ "${CLAIM_VALIDATION_STRICT:-}" == "1" ]]; then
         error "$INVALID_FOUND commit(s) have INVALID benchmark claims"
-        error "Push blocked. Fix claims or set CLAIM_VALIDATION_SKIP=1 to bypass."
+        error "Push blocked. Fix claims before pushing."
         exit 1
     else
         warn "$INVALID_FOUND commit(s) have INVALID benchmark claims"
@@ -146,7 +150,7 @@ fi
 if [[ $ERROR_FOUND -gt 0 ]]; then
     if [[ "${CLAIM_VALIDATION_STRICT:-}" == "1" ]]; then
         error "$ERROR_FOUND commit(s) could not be validated"
-        error "Push blocked. Fix validation errors or set CLAIM_VALIDATION_SKIP=1 to bypass."
+        error "Push blocked. Fix validation errors before pushing."
         exit 1
     else
         warn "$ERROR_FOUND commit(s) could not be validated"
@@ -156,7 +160,7 @@ fi
 if [[ $INVALID_FOUND -eq 0 && $ERROR_FOUND -eq 0 ]]; then
     if [[ $UNKNOWN_FOUND -gt 0 && "${CLAIM_VALIDATION_STRICT:-}" == "1" ]]; then
         warn "$UNKNOWN_FOUND commit(s) have UNKNOWN (unverified) benchmark claims"
-        warn "Add results files or set CLAIM_VALIDATION_SKIP=1 to bypass."
+        warn "Add results files to verify claims."
         # UNKNOWN in strict mode is a warning, not a block (per design)
     fi
 fi

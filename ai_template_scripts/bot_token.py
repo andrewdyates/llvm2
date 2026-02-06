@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -65,6 +69,7 @@ if str(_repo_root) not in sys.path:
 import jwt  # PyJWT - requires cryptography for RS256  # noqa: E402
 import requests  # noqa: E402
 
+from ai_template_scripts.identity import get_identity as _get_ident  # noqa: E402
 from ai_template_scripts.subprocess_utils import (  # noqa: E402
     get_repo_name,
     run_cmd,
@@ -293,10 +298,11 @@ def main(args: list[str] | None = None) -> int:
         action="store_true",
         help="Output JSON with token + expiry",
     )
+    _default_org = _get_ident().github_org
     parser.add_argument(
         "--owner",
-        default="dropbox-ai-prototypes",
-        help="GitHub owner (default: dropbox-ai-prototypes)",
+        default=_default_org,
+        help=f"GitHub owner (default: {_default_org})",
     )
     parser.add_argument(
         "--check",

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -35,19 +39,22 @@ from __future__ import annotations
 
 import argparse
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 try:
+    from ai_template_scripts.atomic_write import atomic_write_text
     from ai_template_scripts.markdown_to_issues import export_issues
+    from ai_template_scripts.subprocess_utils import get_git_root as _get_git_root_or_none
     from ai_template_scripts.version import get_version
 except ModuleNotFoundError:
     repo_root = Path(__file__).resolve().parents[1]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
+    from ai_template_scripts.atomic_write import atomic_write_text
     from ai_template_scripts.markdown_to_issues import export_issues
+    from ai_template_scripts.subprocess_utils import get_git_root as _get_git_root_or_none
     from ai_template_scripts.version import get_version
 
 __all__ = [
@@ -72,19 +79,12 @@ class MirrorExportError(Exception):
 def get_git_root() -> Path:
     """Return repo root or raise RuntimeError.
 
-    REQUIRES: Current directory is within a git repository
-    ENSURES: Returns Path to repo root OR raises RuntimeError
+    Thin wrapper around subprocess_utils.get_git_root() (#2535).
     """
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=10,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "git rev-parse failed")
-    return Path(result.stdout.strip())
+    root = _get_git_root_or_none()
+    if root is None:
+        raise RuntimeError("git rev-parse failed")
+    return root
 
 
 def slugify(value: str) -> str:
@@ -155,7 +155,7 @@ def write_issue_mirror(
     content = export_issues(state, normalized_label)
     if content is None:
         raise MirrorExportError("gh issue list failed; existing cache preserved")
-    output_path.write_text(content.rstrip() + "\n")
+    atomic_write_text(output_path, content.rstrip() + "\n")
     return output_path
 
 

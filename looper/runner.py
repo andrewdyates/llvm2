@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -48,6 +52,7 @@ from looper.runner_iteration import RunnerIterationMixin
 from looper.runner_loop import RunnerLoopMixin
 from looper.runner_prompt import show_prompt
 from looper.runner_sync import RunnerSyncMixin
+from ai_template_scripts.subprocess_utils import is_process_alive
 from looper.subprocess_utils import run_git_command
 
 __all__ = [
@@ -92,6 +97,8 @@ def detect_other_sessions(
 
     # Check all PID files in coord_dir
     for pid_file in coord_dir.glob(".pid_*"):
+        if pid_file.suffix == ".tmp":
+            continue
         if pid_file.name == current_pid_name:
             continue  # Skip our own PID file
 
@@ -100,10 +107,7 @@ def detect_other_sessions(
         except (ValueError, OSError):
             continue  # Malformed or unreadable
 
-        # Check if process is running
-        try:
-            os.kill(pid, 0)  # Signal 0 checks existence without killing
-        except (OSError, ProcessLookupError):
+        if not is_process_alive(pid):
             continue  # Process not running
 
         # Extract mode display from filename: .pid_worker_1 -> worker_1

@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -11,6 +15,8 @@ import json
 import os
 from pathlib import Path
 
+from ai_template_scripts.subprocess_utils import is_process_alive
+
 from . import _state
 from .constants import (
     LOCK_BASENAMES,
@@ -20,7 +26,7 @@ from .constants import (
     STALE_PROCESS_AGE,
 )
 from .env import get_repo_identifier
-from .logging import log_stderr, now_iso
+from .logging import debug_swallow, log_stderr, now_iso
 from .processes import get_process_start_time
 from .timeouts import get_limits_config
 
@@ -154,28 +160,48 @@ def is_lock_stale(verbose: bool = False) -> bool:
     try:
         pid = int(lock_file.read_text().strip())
 
-        # Check if process exists
+        # Check if process exists and is accessible.
+        # Unlike is_process_alive() which treats PermissionError as "alive",
+        # lock staleness requires we can verify ownership. If os.kill raises
+        # PermissionError (different user) or OSError, treat lock as stale
+        # since we can't confirm the holder is our process. (#2703)
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
             if verbose:
                 log_stderr(f"[cargo] Stale lock: PID {pid} not found (process dead)")
-            return True  # Process dead
+            return True
         except PermissionError:
-            # Process exists but belongs to another user - treat as stale since
-            # this user's cargo_wrapper couldn't have created it legitimately
             if verbose:
                 log_stderr(f"[cargo] Stale lock: PID {pid} owned by another user")
             return True
         except OSError as e:
-            # Catch any other OS-level errors (e.g., zombie processes, kernel issues)
             if verbose:
-                log_stderr(f"[cargo] Stale lock: os.kill error ({e})")
+                log_stderr(f"[cargo] Stale lock: os.kill error for PID {pid}: {e}")
             return True
 
         # Check for PID reuse: compare process start time with lock acquisition time
         if lock_meta.exists():
             meta = json.loads(lock_meta.read_text())
+            meta_pid_raw = meta.get("pid")
+            meta_pid = None
+            if meta_pid_raw is not None:
+                try:
+                    meta_pid = int(meta_pid_raw)
+                except (TypeError, ValueError):
+                    meta_pid = None
+
+            # Lock release/acquire can transiently expose a new lock.pid with an
+            # old lock.json. Treat PID mismatch as in-flight transition, not stale,
+            # to avoid force-releasing a freshly acquired lock.
+            if meta_pid is not None and meta_pid != pid:
+                if verbose:
+                    log_stderr(
+                        f"[cargo] Lock metadata PID mismatch during transition "
+                        f"(lock.pid={pid}, lock.json={meta_pid}); treating as active"
+                    )
+                return False
+
             acquired_at = meta.get("acquired_at", "")
             lock_start = meta.get("process_start_time")
 
@@ -205,12 +231,25 @@ def is_lock_stale(verbose: bool = False) -> bool:
                     )
                 return True
         return False
+    except (FileNotFoundError, OSError) as e:
+        if verbose:
+            log_stderr(
+                f"[cargo] Stale lock: lock files changed during check ({type(e).__name__})"
+            )
+        return True
     except (
         ValueError,
         TypeError,
         json.JSONDecodeError,
         KeyError,
     ) as e:
+        if isinstance(e, ValueError) and not lock_meta.exists():
+            if verbose:
+                log_stderr(
+                    "[cargo] Lock metadata missing during PID parse; "
+                    "treating lock acquisition as in-flight"
+                )
+            return False
         if verbose:
             log_stderr(f"[cargo] Stale lock: metadata error ({type(e).__name__})")
         return True
@@ -225,27 +264,30 @@ def cleanup_stale_temp_files() -> None:
             for tmp_file in lock_dir.glob(f"{basename}.json.*.tmp"):
                 try:
                     pid = int(tmp_file.stem.split(".")[-1])
-                    os.kill(pid, 0)  # Process alive, leave it
-                except (ValueError, ProcessLookupError):
-                    tmp_file.unlink(missing_ok=True)  # Process dead, clean up
+                    if not is_process_alive(pid):
+                        tmp_file.unlink(missing_ok=True)
+                except ValueError:
+                    tmp_file.unlink(missing_ok=True)
 
             # Clean up lock.pid.stale.* files from interrupted force_release_stale_lock
             for stale_file in lock_dir.glob(f"{basename}.pid.stale.*"):
                 try:
                     pid = int(stale_file.name.split(".")[-1])
-                    os.kill(pid, 0)  # Process alive, leave it
-                except (ValueError, ProcessLookupError):
-                    stale_file.unlink(missing_ok=True)  # Process dead, clean up
+                    if not is_process_alive(pid):
+                        stale_file.unlink(missing_ok=True)
+                except ValueError:
+                    stale_file.unlink(missing_ok=True)
 
         # Clean up *.log.*.tmp files from interrupted rotate_log
         for log_tmp in lock_dir.glob("*.log.*.tmp"):
             try:
                 pid = int(log_tmp.stem.split(".")[-1])
-                os.kill(pid, 0)  # Process alive, leave it
-            except (ValueError, ProcessLookupError):
-                log_tmp.unlink(missing_ok=True)  # Process dead, clean up
+                if not is_process_alive(pid):
+                    log_tmp.unlink(missing_ok=True)
+            except ValueError:
+                log_tmp.unlink(missing_ok=True)
     except Exception:
-        pass  # Best-effort: stale file cleanup is housekeeping
+        debug_swallow("cleanup_stale_temp_files")
 
 
 def acquire_lock(context: dict[str, object]) -> bool:
@@ -321,11 +363,11 @@ def release_lock() -> None:
             pid = int(lock_file.read_text().strip())
             if pid != os.getpid():
                 return  # Not our lock
-        lock_file.unlink(missing_ok=True)
         lock_meta.unlink(missing_ok=True)
+        lock_file.unlink(missing_ok=True)
         _state._lock_held = False
     except Exception:
-        pass  # Best-effort: lock release cleanup (idempotent)
+        debug_swallow("release_lock")
 
 
 def force_release_stale_lock() -> bool:
@@ -364,8 +406,12 @@ def force_release_stale_lock() -> bool:
     basename = _lock_basename(_state.LOCK_KIND)
     old_lock = lock_dir / f"{basename}.pid.stale.{os.getpid()}"
     try:
-        # Atomic rename - if this succeeds, we "own" the stale lock
-        os.rename(lock_file, old_lock)
+        # Delete metadata BEFORE renaming lock file (#3069).
+        # If we delete meta after rename, a new acquirer can write fresh metadata
+        # between our rename and our meta deletion — corrupting the new holder's
+        # diagnostics. Deleting meta first is safe: the lock file still exists
+        # (protecting the critical section), and the new acquirer writes its own
+        # metadata after acquiring.
         if lock_meta.exists():
             try:
                 meta = json.loads(lock_meta.read_text())
@@ -376,6 +422,8 @@ def force_release_stale_lock() -> bool:
                 # Best-effort: metadata parse failed, log generic message instead
                 log_stderr("[cargo] Force-releasing stale lock")
             lock_meta.unlink(missing_ok=True)
+        # Atomic rename - if this succeeds, we "own" the stale lock
+        os.rename(lock_file, old_lock)
         old_lock.unlink(missing_ok=True)
         return True
     except (FileNotFoundError, OSError):

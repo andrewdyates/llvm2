@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -13,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_template_scripts.gh_post.args import _extract_title_body
+from looper.log import debug_swallow
 
 
 # Pattern to extract issue number from gh issue create output
@@ -153,8 +158,8 @@ def _get_current_repo_name() -> str:
                 parts = url.split("/")
             if len(parts) >= 2:
                 return f"{parts[-2]}/{parts[-1]}"
-    except Exception:
-        pass
+    except Exception as e:
+        debug_swallow("gh_post_get_current_repo_name_remote", e)
     # Fallback: just directory name (may cause issues with gh API)
     try:
         result = subprocess.run(
@@ -166,8 +171,8 @@ def _get_current_repo_name() -> str:
         )
         if result.returncode == 0:
             return Path(result.stdout.strip()).name
-    except Exception:
-        pass
+    except Exception as e:
+        debug_swallow("gh_post_get_current_repo_name_toplevel", e)
     return "unknown"
 
 
@@ -314,6 +319,131 @@ def _sync_pending_changes(real_gh: str, max_count: int = 10) -> int:
     return synced
 
 
+def _extract_arg_value(args: list[str], prefix: str) -> str:
+    """Extract value from args for --flag=value format."""
+    for arg in args:
+        if arg.startswith(prefix):
+            return arg[len(prefix):]
+    return ""
+
+
+def _build_queue_data_create(args: list[str], parsed: dict, repo: str) -> dict:
+    """Build queue data for create operations."""
+    title = ""
+    if parsed.get("title_index") is not None:
+        title = args[parsed["title_index"]]
+    else:
+        title = _extract_arg_value(args, "--title=")
+
+    body = ""
+    if parsed.get("body_index") is not None:
+        body = args[parsed["body_index"]]
+    else:
+        body = _extract_arg_value(args, "--body=")
+
+    return {
+        "repo": repo,
+        "title": title,
+        "body": body,
+        "labels": parsed.get("create_labels", []),
+    }
+
+
+def _build_queue_data_comment(args: list[str], parsed: dict, repo: str) -> dict:
+    """Build queue data for comment operations."""
+    body = ""
+    if parsed.get("body_index") is not None:
+        body = args[parsed["body_index"]]
+    else:
+        body = _extract_arg_value(args, "--body=")
+
+    return {
+        "repo": repo,
+        "issue": parsed.get("issue_number"),
+        "body": body,
+    }
+
+
+def _build_queue_data_edit(args: list[str], parsed: dict, repo: str) -> dict:
+    """Build queue data for edit operations."""
+    data: dict = {
+        "repo": repo,
+        "issue": parsed.get("issue_number"),
+        "add_labels": parsed.get("add_labels", []),
+        "remove_labels": parsed.get("remove_labels", []),
+    }
+
+    body = ""
+    if parsed.get("body_index") is not None:
+        body = args[parsed["body_index"]]
+    elif parsed.get("body_value") is not None:
+        body = parsed["body_value"]
+    if body:
+        data["body"] = body
+
+    title = ""
+    if parsed.get("title_index") is not None:
+        title = args[parsed["title_index"]]
+    elif parsed.get("title_value") is not None:
+        title = parsed["title_value"]
+    if title:
+        data["title"] = title
+
+    return data
+
+
+def _build_queue_data_close(args: list[str], parsed: dict, repo: str) -> dict:
+    """Build queue data for close operations."""
+    data: dict = {
+        "repo": repo,
+        "issue": parsed.get("issue_number"),
+    }
+
+    comment = ""
+    if parsed.get("comment_index") is not None:
+        comment = args[parsed["comment_index"]]
+    elif parsed.get("comment_value") is not None:
+        comment = parsed["comment_value"]
+    if comment:
+        data["comment"] = comment
+
+    if parsed.get("reason_value"):
+        data["reason"] = parsed["reason_value"]
+
+    return data
+
+
+def _build_queue_data(
+    subcommand: str, args: list[str], parsed: dict, repo: str
+) -> dict:
+    """Build data dict for queueing an operation."""
+    if subcommand == "create":
+        return _build_queue_data_create(args, parsed, repo)
+    elif subcommand == "comment":
+        return _build_queue_data_comment(args, parsed, repo)
+    elif subcommand == "edit":
+        return _build_queue_data_edit(args, parsed, repo)
+    elif subcommand == "close":
+        return _build_queue_data_close(args, parsed, repo)
+    else:
+        return {"repo": repo}
+
+
+def _handle_rest_fallback_result(
+    gh_post_module: Any, rest_result: int | None, parsed: dict
+) -> int | None:
+    """Handle REST fallback result and invalidate cache if successful."""
+    if rest_result is not None:
+        if rest_result == 0:
+            gh_post_module._invalidate_issue_cache(
+                parsed.get("subcommand"),
+                parsed.get("issue_number"),
+                parsed.get("repo"),
+            )
+        return rest_result
+    return None
+
+
 def _execute_gh_with_queue(real_gh: str, args: list[str], parsed: dict) -> int:
     """Execute gh command with rate limit checking and offline queuing.
 
@@ -332,78 +462,9 @@ def _execute_gh_with_queue(real_gh: str, args: list[str], parsed: dict) -> int:
             # Rate limited - queue for later
             change_log = gh_post_module.get_change_log()
             repo = gh_post_module._get_current_repo_name()
+            target_repo = parsed.get("repo") or repo
 
-            data: dict = {"repo": parsed.get("repo") or repo}
-
-            if parsed["subcommand"] == "create":
-                # Extract title/body from args (already processed with identity)
-                # Handle both --title=X and --title X formats
-                title = ""
-                body = ""
-                if parsed.get("title_index") is not None:
-                    title = args[parsed["title_index"]]
-                else:
-                    # Find --title=X in args
-                    for arg in args:
-                        if arg.startswith("--title="):
-                            title = arg[8:]  # len("--title=") = 8
-                            break
-                if parsed.get("body_index") is not None:
-                    body = args[parsed["body_index"]]
-                else:
-                    # Find --body=X in args
-                    for arg in args:
-                        if arg.startswith("--body="):
-                            body = arg[7:]  # len("--body=") = 7
-                            break
-                data["title"] = title
-                data["body"] = body
-                data["labels"] = parsed.get("create_labels", [])
-            elif parsed["subcommand"] == "comment":
-                data["issue"] = parsed.get("issue_number")
-                # Extract body from args (already processed with identity)
-                body = ""
-                if parsed.get("body_index") is not None:
-                    body = args[parsed["body_index"]]
-                else:
-                    # Find --body=X in args
-                    for arg in args:
-                        if arg.startswith("--body="):
-                            body = arg[7:]
-                            break
-                data["body"] = body
-            elif parsed["subcommand"] == "edit":
-                data["issue"] = parsed.get("issue_number")
-                data["add_labels"] = parsed.get("add_labels", [])
-                data["remove_labels"] = parsed.get("remove_labels", [])
-                # Capture body and title for edit operations (#1041)
-                body = ""
-                if parsed.get("body_index") is not None:
-                    body = args[parsed["body_index"]]
-                elif parsed.get("body_value") is not None:
-                    body = parsed["body_value"]
-                if body:
-                    data["body"] = body
-                title = ""
-                if parsed.get("title_index") is not None:
-                    title = args[parsed["title_index"]]
-                elif parsed.get("title_value") is not None:
-                    title = parsed["title_value"]
-                if title:
-                    data["title"] = title
-            elif parsed["subcommand"] == "close":
-                data["issue"] = parsed.get("issue_number")
-                # Capture comment and reason for close operations (#1041)
-                comment = ""
-                if parsed.get("comment_index") is not None:
-                    comment = args[parsed["comment_index"]]
-                elif parsed.get("comment_value") is not None:
-                    comment = parsed["comment_value"]
-                if comment:
-                    data["comment"] = comment
-                if parsed.get("reason_value"):
-                    data["reason"] = parsed["reason_value"]
-
+            data = _build_queue_data(parsed["subcommand"], args, parsed, target_repo)
             change_id = change_log.add_change(repo, parsed["subcommand"], data)
             print(
                 f"[gh_post] Rate limited - queued {parsed['subcommand']} as {change_id}",
@@ -420,7 +481,6 @@ def _execute_gh_with_queue(real_gh: str, args: list[str], parsed: dict) -> int:
             return 75  # EX_TEMPFAIL - operation queued, not delivered
 
     # Proactive REST for label-only edits when GraphQL quota is low (#1502)
-    # This prevents GraphQL exhaustion by using REST before hitting rate limit
     if parsed.get("subcommand") == "edit" and gh_post_module._HAS_RATE_LIMIT:
         add_labels = parsed.get("add_labels", [])
         remove_labels = parsed.get("remove_labels", [])
@@ -434,14 +494,9 @@ def _execute_gh_with_queue(real_gh: str, args: list[str], parsed: dict) -> int:
                     file=sys.stderr,
                 )
                 rest_result = gh_post_module._try_rest_fallback(real_gh, args, parsed)
-                if rest_result is not None:
-                    if rest_result == 0:
-                        gh_post_module._invalidate_issue_cache(
-                            parsed.get("subcommand"),
-                            parsed.get("issue_number"),
-                            parsed.get("repo"),
-                        )
-                    return rest_result
+                handled = _handle_rest_fallback_result(gh_post_module, rest_result, parsed)
+                if handled is not None:
+                    return handled
                 # REST failed, fall through to try GraphQL anyway
 
     # Execute the command, capture output to detect rate limit errors
@@ -454,7 +509,6 @@ def _execute_gh_with_queue(real_gh: str, args: list[str], parsed: dict) -> int:
     )
 
     # Check for GraphQL rate limit error (explicit failure)
-    # Check both stderr and stdout since error may appear in either (#1779)
     error_output = (result.stderr or "") + (result.stdout or "")
     if result.returncode != 0 and gh_post_module._is_graphql_rate_limited(error_output):
         print(
@@ -462,14 +516,9 @@ def _execute_gh_with_queue(real_gh: str, args: list[str], parsed: dict) -> int:
             file=sys.stderr,
         )
         rest_result = gh_post_module._try_rest_fallback(real_gh, args, parsed)
-        if rest_result is not None:
-            if rest_result == 0:
-                gh_post_module._invalidate_issue_cache(
-                    parsed.get("subcommand"),
-                    parsed.get("issue_number"),
-                    parsed.get("repo"),
-                )
-            return rest_result
+        handled = _handle_rest_fallback_result(gh_post_module, rest_result, parsed)
+        if handled is not None:
+            return handled
 
         # REST fallback failed or not applicable - queue for later
         print("[gh_post] REST fallback failed, queueing for later", file=sys.stderr)
@@ -477,22 +526,15 @@ def _execute_gh_with_queue(real_gh: str, args: list[str], parsed: dict) -> int:
 
     # Check for silent failure bug: gh CLI returns exit 0 with empty stdout
     # when GraphQL createIssue returns null (secondary rate limit, #1673, #1811)
-    # See: gh v2.83.2+ behavior where GraphQL response is { createIssue: { issue: null }}
     if gh_post_module._is_silent_create_failure(result, parsed):
         print(
             "[gh_post] Silent failure detected (exit 0, no URL) - GraphQL createIssue.issue=null",
             file=sys.stderr,
         )
-        # Try REST fallback first
         rest_result = gh_post_module._try_rest_fallback(real_gh, args, parsed)
-        if rest_result is not None:
-            if rest_result == 0:
-                gh_post_module._invalidate_issue_cache(
-                    parsed.get("subcommand"),
-                    parsed.get("issue_number"),
-                    parsed.get("repo"),
-                )
-            return rest_result
+        handled = _handle_rest_fallback_result(gh_post_module, rest_result, parsed)
+        if handled is not None:
+            return handled
 
         # REST also failed - queue for later
         print("[gh_post] REST fallback failed, queueing for later", file=sys.stderr)
@@ -594,7 +636,8 @@ def replay_pending_changes(max_per_call: int = 10) -> int:
         from ai_template_scripts.gh_post.identity import get_real_gh
 
         real_gh = get_real_gh()
-    except Exception:
+    except Exception as e:
+        debug_swallow("gh_post_replay_pending_changes", e)
         return 0
 
     return _sync_pending_changes(real_gh, max_per_call)

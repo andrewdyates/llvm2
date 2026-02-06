@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -58,6 +62,9 @@ def is_full_local_mode() -> bool:
 
     Full local mode routes ALL gh issue commands to local storage.
     Regular local mode (AIT_LOCAL_MODE=1) just returns stale cache.
+
+    REQUIRES: None (reads environment variable)
+    ENSURES: returns bool; True iff AIT_LOCAL_MODE environment variable equals "full"
 
     Returns:
         True if AIT_LOCAL_MODE=full, False otherwise.
@@ -272,6 +279,9 @@ def _format_issue_detail(issue: LocalIssue) -> str:
 def handle_issue_create(store: LocalIssueStore, parsed: dict) -> int:
     """Handle 'gh issue create' command.
 
+    REQUIRES: store is valid LocalIssueStore; parsed contains "title" key
+    ENSURES: returns 0 and creates issue if title provided; returns 1 if title missing
+
     Args:
         store: LocalIssueStore instance.
         parsed: Parsed arguments.
@@ -299,6 +309,9 @@ def handle_issue_create(store: LocalIssueStore, parsed: dict) -> int:
 
 def handle_issue_list(store: LocalIssueStore, parsed: dict) -> int:
     """Handle 'gh issue list' command.
+
+    REQUIRES: store is valid LocalIssueStore; parsed is dict with optional state/labels
+    ENSURES: returns 0; prints issues as text or JSON depending on json_fields
 
     Args:
         store: LocalIssueStore instance.
@@ -346,6 +359,9 @@ def handle_issue_list(store: LocalIssueStore, parsed: dict) -> int:
 def handle_issue_view(store: LocalIssueStore, parsed: dict) -> int:
     """Handle 'gh issue view' command.
 
+    REQUIRES: store is valid LocalIssueStore; parsed contains "issue_id"
+    ENSURES: returns 0 if issue found and printed; returns 1 if issue_id missing or not found
+
     Args:
         store: LocalIssueStore instance.
         parsed: Parsed arguments.
@@ -374,6 +390,9 @@ def handle_issue_view(store: LocalIssueStore, parsed: dict) -> int:
 
 def handle_issue_edit(store: LocalIssueStore, parsed: dict) -> int:
     """Handle 'gh issue edit' command.
+
+    REQUIRES: store is valid LocalIssueStore; parsed contains "issue_id"
+    ENSURES: returns 0 if issue found and edited; returns 1 if issue_id missing or not found
 
     Args:
         store: LocalIssueStore instance.
@@ -411,6 +430,9 @@ def handle_issue_edit(store: LocalIssueStore, parsed: dict) -> int:
 def handle_issue_close(store: LocalIssueStore, parsed: dict) -> int:
     """Handle 'gh issue close' command.
 
+    REQUIRES: store is valid LocalIssueStore; parsed contains "issue_id"
+    ENSURES: returns 0 if issue found and closed; returns 1 if issue_id missing or not found
+
     Args:
         store: LocalIssueStore instance.
         parsed: Parsed arguments.
@@ -435,6 +457,9 @@ def handle_issue_close(store: LocalIssueStore, parsed: dict) -> int:
 def handle_issue_reopen(store: LocalIssueStore, parsed: dict) -> int:
     """Handle 'gh issue reopen' command.
 
+    REQUIRES: store is valid LocalIssueStore; parsed contains "issue_id"
+    ENSURES: returns 0 if issue found and reopened; returns 1 if issue_id missing or not found
+
     Args:
         store: LocalIssueStore instance.
         parsed: Parsed arguments.
@@ -458,6 +483,9 @@ def handle_issue_reopen(store: LocalIssueStore, parsed: dict) -> int:
 
 def handle_issue_comment(store: LocalIssueStore, parsed: dict) -> int:
     """Handle 'gh issue comment' command.
+
+    REQUIRES: store is valid LocalIssueStore; parsed contains "issue_id" and "body"
+    ENSURES: returns 0 if comment added; returns 1 if issue_id/body missing or issue not found
 
     Args:
         store: LocalIssueStore instance.
@@ -487,6 +515,9 @@ def handle_issue_comment(store: LocalIssueStore, parsed: dict) -> int:
 
 def handle_issue_command(args: list[str]) -> int:
     """Handle gh issue subcommand locally.
+
+    REQUIRES: args is list of strings (may be empty)
+    ENSURES: returns exit code; routes to appropriate handler or returns 1 for unknown subcommand
 
     Args:
         args: Arguments after 'gh issue'.
@@ -525,6 +556,9 @@ def main() -> int:
 
     Routes gh issue commands to local storage.
     Non-issue commands fall through to real gh with warning.
+
+    REQUIRES: sys.argv contains command line arguments
+    ENSURES: returns exit code; handles 'issue' commands locally, others fall through to real gh
 
     Returns:
         Exit code.

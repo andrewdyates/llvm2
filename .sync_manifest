@@ -2,7 +2,11 @@
 # Format: One pattern per line. Supports:
 #   - Exact paths: looper.py
 #   - Glob patterns: ai_template_scripts/*.py
-#   - Directory sync (trailing /): .claude/roles/
+#   - Directory sync (trailing /): looper/ (CAUTION: uses rsync --delete)
+#
+# WARNING: Directory sync (trailing /) destroys project-specific files.
+# Use file globs or explicit paths for directories with project content.
+# See P0 #2550 and designs/2026-02-05-sync-safety-mechanisms.md.
 #
 # Lines starting with # are comments
 # Lines starting with ! are exclusions (processed after includes)
@@ -16,6 +20,8 @@ looper.py
 looper/
 
 # AI instruction files
+# AGENTS.md is synced as a minimal stub. Codex rules are injected by the looper
+# at runtime via build_codex_context(). sync_repo.sh replaces old full AGENTS.md.
 AGENTS.md
 GEMINI.md
 
@@ -35,14 +41,21 @@ requirements.txt
 
 # Rules (individual files, not directory - rules may be project-specific)
 .claude/rules/ai_template.md
-.claude/rules/org_chart.md
+# org_chart.md is project-specific (each org has its own structure).
+# New repos get the template version via gh repo create --template.
+# Existing repos maintain their own org_chart.md independently.
+
+# Codex-specific instructions (included in build_codex_context() at runtime)
+.claude/codex.md
 
 # Settings - hooks configuration for Claude Code (#1847)
 .claude/settings.json
 
-# Directories (full sync with rsync --delete)
-.claude/roles/
-.claude/commands/
+# Roles and commands - file-level sync to preserve project-specific content (#2551)
+# Uses glob patterns instead of directory sync (rsync --delete) which destroys
+# project-specific commands and role customizations. See P0 #2550.
+.claude/roles/*.md
+.claude/commands/*.md
 
 # Plugins - sync specific plugin directories, NOT entire .claude/plugins/
 # This preserves project-specific plugins in downstream repos (#1369)
@@ -75,19 +88,23 @@ ai_template_scripts/bin/grep
 ai_template_scripts/bin/python3
 ai_template_scripts/README.md
 
-# Templates
-templates/
+# Templates - explicit files to preserve project-specific templates (#2551)
+templates/cargo_config.toml
+templates/clippy.toml
+templates/success_metrics.md
 postmortems/TEMPLATE.md
 tests/conftest.py
 tests/test_example.py
 
-# Benchmark templates
-benchmarks/templates/
+# Benchmark templates - explicit files to preserve project-specific benchmarks (#2551)
+benchmarks/templates/docker-compose.yaml
+benchmarks/templates/Dockerfile
+benchmarks/templates/run_eval.sh
 benchmarks/README.md
-docs/benchmarking.md
-docs/hooks.md
-docs/system_health_check.md
-docs/MIGRATION_CHECKLIST.md
+
+# Documentation (merge mode - add/update template docs, preserve project docs)
+# Uses glob instead of directory sync to avoid --delete wiping project-specific files
+docs/*.md
 
 # Diagrams
 diagrams/issue-workflow.md
@@ -103,3 +120,4 @@ evals/schema/results.schema.json
 !.looper_config.json
 !.pre-commit-local.d/
 !.gh_apps_creds.enc
+!ait_identity.toml

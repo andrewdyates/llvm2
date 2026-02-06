@@ -1,4 +1,8 @@
 #!/bin/bash
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates
 # Licensed under the Apache License, Version 2.0
@@ -17,6 +21,26 @@
 # NOTE: Do NOT use gh --jq or -q flags anywhere in this script.
 # The gh CLI v2.83.2+ has caching bugs with --jq that return stale data.
 # Always pipe to external jq instead (see #1047 for details).
+
+# Re-exec latest source hook when installed copy is stale (#2826).
+# .git/hooks/commit-msg can lag behind ai_template_scripts during long sessions.
+# When content differs, prefer the repo source hook.
+if [[ -z "${AI_TEMPLATE_HOOK_REEXEC:-}" ]]; then
+    REPO_ROOT_SYNC="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    SOURCE_HOOK_SYNC="$REPO_ROOT_SYNC/ai_template_scripts/commit-msg-hook.sh"
+    CURRENT_HOOK_PATH="${BASH_SOURCE[0]}"
+    if [[ -n "$REPO_ROOT_SYNC" && -f "$SOURCE_HOOK_SYNC" && "$CURRENT_HOOK_PATH" != "$SOURCE_HOOK_SYNC" ]]; then
+        if grep -q "commit-msg-hook.sh - Git commit-msg hook" "$SOURCE_HOOK_SYNC" 2>/dev/null &&
+            ! cmp -s "$CURRENT_HOOK_PATH" "$SOURCE_HOOK_SYNC" 2>/dev/null; then
+            AI_TEMPLATE_HOOK_REEXEC=1 exec bash "$SOURCE_HOOK_SYNC" "$@"
+        fi
+    fi
+fi
+
+# Load identity configuration from ait_identity.toml
+_AIT_HOOK_REPO="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+# shellcheck source=identity.sh
+source "$_AIT_HOOK_REPO/ai_template_scripts/identity.sh" 2>/dev/null || true
 
 COMMIT_MSG_FILE="$1"
 if [[ -z "$COMMIT_MSG_FILE" ]]; then
@@ -187,7 +211,7 @@ for pattern in "${AI_ATTRIBUTION_PATTERNS[@]}"; do
         echo "" >&2
         echo "   Per ai_template.md: NEVER add Claude/AI attribution." >&2
         echo "   No \"Co-Authored-By: Claude\", no AI signatures." >&2
-        echo "   Andrew Yates is the author." >&2
+        echo "   $AIT_OWNER_NAME is the author." >&2
         echo "" >&2
         echo "   Remove the AI attribution line and retry." >&2
         echo "" >&2
@@ -232,32 +256,32 @@ local_issue_field() {
     frontmatter=$(sed -n '/^---$/,/^---$/p' "$issue_file" | sed '1d;$d')
 
     case "$field" in
-        state)
-            echo "$frontmatter" | grep -E '^state:' | sed 's/^state:[[:space:]]*//' | tr '[:lower:]' '[:upper:]'
-            ;;
-        title)
-            # Handle quoted or unquoted title
-            local title_line
-            title_line=$(echo "$frontmatter" | grep -E '^title:')
-            if echo "$title_line" | grep -q '"'; then
-                echo "$title_line" | sed 's/^title:[[:space:]]*//' | sed 's/^"//;s/"$//'
-            else
-                echo "$title_line" | sed 's/^title:[[:space:]]*//'
-            fi
-            ;;
-        body)
-            # Body is everything after the second --- until ## Comments (if present)
-            sed -n '/^---$/,/^---$/!p' "$issue_file" | sed '1,/^---$/d' | sed '/^## Comments$/,$d'
-            ;;
-        labels)
-            # Parse JSON array format: ["P2", "feature"]
-            local labels_line
-            labels_line=$(echo "$frontmatter" | grep -E '^labels:' | sed 's/^labels:[[:space:]]*//')
-            echo "$labels_line" | tr -d '[]"' | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
-            ;;
-        *)
-            echo "$frontmatter" | grep -E "^${field}:" | sed "s/^${field}:[[:space:]]*//"
-            ;;
+    state)
+        echo "$frontmatter" | grep -E '^state:' | sed 's/^state:[[:space:]]*//' | tr '[:lower:]' '[:upper:]'
+        ;;
+    title)
+        # Handle quoted or unquoted title
+        local title_line
+        title_line=$(echo "$frontmatter" | grep -E '^title:')
+        if echo "$title_line" | grep -q '"'; then
+            echo "$title_line" | sed 's/^title:[[:space:]]*//' | sed 's/^"//;s/"$//'
+        else
+            echo "$title_line" | sed 's/^title:[[:space:]]*//'
+        fi
+        ;;
+    body)
+        # Body is everything after the second --- until ## Comments (if present)
+        sed -n '/^---$/,/^---$/!p' "$issue_file" | sed '1,/^---$/d' | sed '/^## Comments$/,$d'
+        ;;
+    labels)
+        # Parse JSON array format: ["P2", "feature"]
+        local labels_line
+        labels_line=$(echo "$frontmatter" | grep -E '^labels:' | sed 's/^labels:[[:space:]]*//')
+        echo "$labels_line" | tr -d '[]"' | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+        ;;
+    *)
+        echo "$frontmatter" | grep -E "^${field}:" | sed "s/^${field}:[[:space:]]*//"
+        ;;
     esac
     return 0
 }
@@ -286,22 +310,22 @@ gh_issue_field() {
     if result=$(gh "${gh_args[@]}" 2>"$stderr_output"); then
         rm -f "$stderr_output"
         case "$field" in
-            labels)
-                # Handle both object format (real gh) and string format (wrapper cache)
-                echo "$result" | jq -r '.labels[] | if type == "object" then .name else . end' 2>/dev/null || echo "$result"
-                ;;
-            state)
-                echo "$result" | jq -r '.state' 2>/dev/null || echo "$result"
-                ;;
-            title)
-                echo "$result" | jq -r '.title' 2>/dev/null || echo "$result"
-                ;;
-            body)
-                echo "$result" | jq -r '.body // ""' 2>/dev/null || echo "$result"
-                ;;
-            *)
-                echo "$result" | jq -r ".${field} // \"\"" 2>/dev/null || echo "$result"
-                ;;
+        labels)
+            # Handle both object format (real gh) and string format (wrapper cache)
+            echo "$result" | jq -r '.labels[] | if type == "object" then .name else . end' 2>/dev/null || echo "$result"
+            ;;
+        state)
+            echo "$result" | jq -r '.state' 2>/dev/null || echo "$result"
+            ;;
+        title)
+            echo "$result" | jq -r '.title' 2>/dev/null || echo "$result"
+            ;;
+        body)
+            echo "$result" | jq -r '.body // ""' 2>/dev/null || echo "$result"
+            ;;
+        *)
+            echo "$result" | jq -r ".${field} // \"\"" 2>/dev/null || echo "$result"
+            ;;
         esac
         return 0
     fi
@@ -324,21 +348,21 @@ gh_issue_field() {
         if rest_result=$(gh api "$api_path" 2>"$stderr_output"); then
             rm -f "$stderr_output"
             case "$field" in
-                state)
-                    echo "$rest_result" | jq -r '.state' | tr '[:lower:]' '[:upper:]'
-                    ;;
-                title)
-                    echo "$rest_result" | jq -r '.title'
-                    ;;
-                body)
-                    echo "$rest_result" | jq -r '.body // ""'
-                    ;;
-                labels)
-                    echo "$rest_result" | jq -r '.labels[].name'
-                    ;;
-                *)
-                    echo "$rest_result" | jq -r ".$field // \"\""
-                    ;;
+            state)
+                echo "$rest_result" | jq -r '.state' | tr '[:lower:]' '[:upper:]'
+                ;;
+            title)
+                echo "$rest_result" | jq -r '.title'
+                ;;
+            body)
+                echo "$rest_result" | jq -r '.body // ""'
+                ;;
+            labels)
+                echo "$rest_result" | jq -r '.labels[].name'
+                ;;
+            *)
+                echo "$rest_result" | jq -r ".$field // \"\""
+                ;;
             esac
             return 0
         fi
@@ -376,12 +400,73 @@ gh_rate_limit_error() {
 }
 
 # Check if commit already has our prefix (amend scenario)
-# We still need to validate, but will skip rewriting
-# Pattern matches [W]N, [W1]N, and machine-prefixed [sat-W1]N formats
+# We still need to validate, but will skip rewriting.
+# Pattern matches [W]N:, [W1]N:, and machine-prefixed [sat-W1]N: formats.
+# IMPORTANT: only inspect the commit title line, not body text.
+FIRST_LINE=$(echo "$MSG" | head -1)
 ALREADY_PREFIXED=false
-if echo "$MSG" | grep -qE '^\[([^]]+-)?(U|W|P|R|M)[0-9]*\][0-9]+:'; then
+if echo "$FIRST_LINE" | grep -qE '^\[([^]]+-)?(U|W|P|R|M)[0-9]*\][0-9]+:'; then
     ALREADY_PREFIXED=true
 fi
+
+# AUTO-FIX: Worker ID tag to match AI_WORKER_ID (#2364, #2366)
+# Instead of rejecting wrong worker IDs, auto-correct them.
+# This removes AI-memory dependency - hook enforces correct ID automatically.
+if [[ -n "${AI_WORKER_ID:-}" ]] && [[ "${AI_ROLE:-}" == "WORKER" ]]; then
+    FIRST_LINE_ORIG="$FIRST_LINE"
+    MSG_REST=$(echo "$MSG" | tail -n +2)
+    AUTOFIX_APPLIED=false
+
+    # Auto-fix [W] prefix to [W<id>] when AI_WORKER_ID is set
+    # Pattern: [W]42: or [machine-W]42: → [W<id>]42: or [machine-W<id>]42:
+    if echo "$FIRST_LINE_ORIG" | grep -qE '^\[[^]]*-?W\][0-9]+:'; then
+        # Extract machine prefix if present
+        MACHINE_PREFIX=$(echo "$FIRST_LINE_ORIG" | sed -nE 's/^\[([^]]*-)W\].*/\1/p')
+        # Extract iteration and rest of title
+        ITER_AND_REST=$(echo "$FIRST_LINE_ORIG" | sed -E 's/^\[[^]]*-?W\]([0-9]+:.*)$/\1/')
+        # Rebuild with correct worker ID
+        if [[ -n "$MACHINE_PREFIX" ]]; then
+            FIRST_LINE_FIXED="[${MACHINE_PREFIX}W${AI_WORKER_ID}]${ITER_AND_REST}"
+        else
+            FIRST_LINE_FIXED="[W${AI_WORKER_ID}]${ITER_AND_REST}"
+        fi
+        MSG="${FIRST_LINE_FIXED}"$'\n'"${MSG_REST}"
+        AUTOFIX_APPLIED=true
+        echo "ℹ️  Auto-fixed: [W] → [W${AI_WORKER_ID}] (AI_WORKER_ID=$AI_WORKER_ID)" >&2
+    fi
+
+    # Auto-fix [W<wrong-id>] prefix to [W<correct-id>]
+    # Pattern: [W1]42: when AI_WORKER_ID=2 → [W2]42:
+    if [[ "$AUTOFIX_APPLIED" == "false" ]]; then
+        EXISTING_WORKER_ID=$(echo "$FIRST_LINE_ORIG" | sed -nE 's/^\[[^]]*-?W([0-9]+)\][0-9]+:.*/\1/p')
+        if [[ -n "$EXISTING_WORKER_ID" ]] && [[ "$EXISTING_WORKER_ID" != "$AI_WORKER_ID" ]]; then
+            # Extract machine prefix if present
+            MACHINE_PREFIX=$(echo "$FIRST_LINE_ORIG" | sed -nE 's/^\[([^]]*-)W[0-9]+\].*/\1/p')
+            # Extract iteration and rest of title
+            ITER_AND_REST=$(echo "$FIRST_LINE_ORIG" | sed -E 's/^\[[^]]*-?W[0-9]+\]([0-9]+:.*)$/\1/')
+            # Rebuild with correct worker ID
+            if [[ -n "$MACHINE_PREFIX" ]]; then
+                FIRST_LINE_FIXED="[${MACHINE_PREFIX}W${AI_WORKER_ID}]${ITER_AND_REST}"
+            else
+                FIRST_LINE_FIXED="[W${AI_WORKER_ID}]${ITER_AND_REST}"
+            fi
+            MSG="${FIRST_LINE_FIXED}"$'\n'"${MSG_REST}"
+            AUTOFIX_APPLIED=true
+            echo "ℹ️  Auto-fixed: [W${EXISTING_WORKER_ID}] → [W${AI_WORKER_ID}] (AI_WORKER_ID=$AI_WORKER_ID)" >&2
+        fi
+    fi
+
+    # If we auto-fixed, we need to:
+    # 1. Keep MSG updated (already done above)
+    # 2. Force ALREADY_PREFIXED=false so trailers get added
+    # The original message was prefixed but with wrong ID - treat as new commit
+    if [[ "$AUTOFIX_APPLIED" == "true" ]]; then
+        ALREADY_PREFIXED=false
+    fi
+fi
+
+# Keep FIRST_LINE in sync after any auto-fix mutation.
+FIRST_LINE=$(echo "$MSG" | head -1)
 
 # --- Extract info automatically ---
 
@@ -389,26 +474,61 @@ fi
 # For already-prefixed commits, extract role from prefix to validate correctly
 # Pattern handles [W], [W1], and [sat-W1] formats - extract base role letter
 if [[ "$ALREADY_PREFIXED" == "true" ]]; then
-    PREFIX_CHAR=$(echo "$MSG" | sed -nE 's/^\[[^]]*-?([UWPRM])[0-9]*\].*/\1/p')
+    PREFIX_CHAR=$(echo "$FIRST_LINE" | sed -nE 's/^\[[^]]*-?([UWPRM])[0-9]*\].*/\1/p')
     case "$PREFIX_CHAR" in
-        W) ROLE="WORKER" ;;
-        P) ROLE="PROVER" ;;
-        R) ROLE="RESEARCHER" ;;
-        M) ROLE="MANAGER" ;;
-        *) ROLE="USER" ;;
+    W) ROLE="WORKER" ;;
+    P) ROLE="PROVER" ;;
+    R) ROLE="RESEARCHER" ;;
+    M) ROLE="MANAGER" ;;
+    *) ROLE="USER" ;;
     esac
 else
     ROLE="${AI_ROLE:-USER}"
 fi
 
+# ENFORCE: Already-prefixed commits must match active autonomous role.
+# Prevent non-worker roles from spoofing another role's prefix to bypass
+# boundary checks (cross-role staging, ownership gating, close permissions).
+EXPECTED_PREFIX_CHAR=""
+case "${AI_ROLE:-}" in
+WORKER) EXPECTED_PREFIX_CHAR="W" ;;
+PROVER) EXPECTED_PREFIX_CHAR="P" ;;
+RESEARCHER) EXPECTED_PREFIX_CHAR="R" ;;
+MANAGER) EXPECTED_PREFIX_CHAR="M" ;;
+esac
+if [[ "$ALREADY_PREFIXED" == "true" ]] && [[ -n "$EXPECTED_PREFIX_CHAR" ]] && [[ "$PREFIX_CHAR" != "$EXPECTED_PREFIX_CHAR" ]]; then
+    echo "" >&2
+    echo "❌ ERROR: Commit prefix role does not match AI_ROLE" >&2
+    echo "   AI_ROLE: ${AI_ROLE}" >&2
+    echo "   Prefix role: ${PREFIX_CHAR}" >&2
+    echo "" >&2
+    echo "   Use a commit title prefix that matches your active role." >&2
+    echo "   If the prefix was copied from another commit, remove it and retry." >&2
+    echo "" >&2
+    exit 1
+fi
+# Warn when AI_ROLE is unset but commit uses an autonomous role prefix (#2790).
+# Warning-only: USER mode legitimately has no AI_ROLE, but autonomous prefixes are suspicious.
+if [[ "$ALREADY_PREFIXED" == "true" ]] && [[ -z "${AI_ROLE:-}" ]] && [[ "$PREFIX_CHAR" =~ ^[WPRM]$ ]]; then
+    echo "" >&2
+    echo "⚠️  WARNING: Autonomous role prefix [${PREFIX_CHAR}] without AI_ROLE set" >&2
+    echo "   AI_ROLE is empty — defaulting to USER permissions." >&2
+    echo "   Set AI_ROLE to match the prefix, or use [U] for USER commits." >&2
+    echo "" >&2
+fi
+
+# Resolve repo root and tracker utilities (used by ownership checks).
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+TRACKER_UTILS="$REPO_ROOT/ai_template_scripts/tracker_utils.py"
+
 # 2. Iteration: from git log (find max for this role's prefix)
 # Support multi-worker mode: [W1], [W2] etc when AI_WORKER_ID is set
 case "$ROLE" in
-    WORKER)     BASE_PREFIX="W" ;;
-    PROVER)     BASE_PREFIX="P" ;;
-    RESEARCHER) BASE_PREFIX="R" ;;
-    MANAGER)    BASE_PREFIX="M" ;;
-    *)          BASE_PREFIX="U" ;;  # USER or any other role
+WORKER) BASE_PREFIX="W" ;;
+PROVER) BASE_PREFIX="P" ;;
+RESEARCHER) BASE_PREFIX="R" ;;
+MANAGER) BASE_PREFIX="M" ;;
+*) BASE_PREFIX="U" ;; # USER or any other role
 esac
 
 # Build PREFIX: W or W1 (for multi-worker), add machine prefix if set
@@ -437,33 +557,121 @@ if echo "$MSG" | head -1 | grep -qi '\[maintain\]'; then
 fi
 
 # --- Check for cross-role file contamination ---
-# Warn if staged files include other roles' directories (issue #871)
-if [[ "$ROLE" != "USER" ]]; then
-    STAGED_FILES=$(git diff --cached --name-only 2>/dev/null || true)
+# Block if staged files include other roles' directories (issue #871)
+# This prevents role-boundary contamination in shared worktrees.
+STAGED_FILES_ARRAY=()
+while IFS= read -r -d '' staged_file; do
+    STAGED_FILES_ARRAY+=("$staged_file")
+done < <(git diff --cached --name-only -z 2>/dev/null || true)
+if [[ ${#STAGED_FILES_ARRAY[@]} -gt 0 ]]; then
+    STAGED_FILES=$(printf '%s\n' "${STAGED_FILES_ARRAY[@]}")
+else
+    STAGED_FILES=""
+fi
 
-    # Define forbidden directories per role
-    FORBIDDEN_DIRS=""
+# BLOCK non-workers from committing code files (#2812, #2794, #2729, #2405).
+# Non-Worker roles produce text, not code. Staged code files are likely contamination
+# from a Worker's staged-but-uncommitted work in the shared worktree.
+# Exception: documentation directories (reports/, designs/, etc.) per #2861.
+# Override: AIT_ALLOW_WORKER_FILES=1 (emergency only)
+check_non_worker_staged_files() {
     case "$ROLE" in
-        WORKER)     FORBIDDEN_DIRS="reports/manager reports/prover reports/researcher" ;;
-        PROVER)     FORBIDDEN_DIRS="reports/manager reports/worker reports/researcher worker_logs" ;;
-        RESEARCHER) FORBIDDEN_DIRS="reports/manager reports/worker reports/prover worker_logs" ;;
-        MANAGER)    FORBIDDEN_DIRS="reports/worker reports/prover reports/researcher" ;;
+    MANAGER | PROVER | RESEARCHER) ;;
+    *) return 0 ;; # USER/WORKER/unknown - skip
     esac
 
-    CROSS_ROLE_FILES=""
-    for dir in $FORBIDDEN_DIRS; do
-        MATCHES=$(echo "$STAGED_FILES" | grep "^$dir/" 2>/dev/null || true)
-        if [[ -n "$MATCHES" ]]; then
-            CROSS_ROLE_FILES="$CROSS_ROLE_FILES$MATCHES"$'\n'
+    [[ ${#STAGED_FILES_ARRAY[@]} -eq 0 ]] && return 0
+
+    # Non-Worker roles should not commit code files. Staged code files are likely
+    # contamination from a Worker's staged-but-uncommitted work in the shared worktree.
+    # Exception: documentation output directories that non-Workers legitimately produce (#2861).
+    local exempt_prefixes=("reports/" "designs/" "ideas/" "postmortems/" "diagrams/" "docs/")
+    local blocked_count=0
+    local blocked_list=()
+    local exempt_count=0
+    local fname
+    for fname in "${STAGED_FILES_ARRAY[@]}"; do
+        local is_exempt=false
+        local prefix
+        for prefix in "${exempt_prefixes[@]}"; do
+            if [[ "$fname" == "$prefix"* ]]; then
+                is_exempt=true
+                break
+            fi
+        done
+        if [[ "$is_exempt" == "true" ]]; then
+            exempt_count=$((exempt_count + 1))
+        else
+            blocked_count=$((blocked_count + 1))
+            blocked_list+=("$fname")
         fi
     done
 
-    if [[ -n "${CROSS_ROLE_FILES// }" ]]; then
+    if [[ $blocked_count -gt 0 ]]; then
+        echo "ERROR: CROSS-ROLE STAGING CONTAMINATION: $ROLE has $blocked_count blocked staged file(s)" >&2
         echo "" >&2
-        echo "⚠️  WARNING: Staged files from other roles' directories:" >&2
+        echo "  Non-Worker roles (Manager, Prover, Researcher) must not commit code files." >&2
+        echo "  These staged files were likely left by a Worker in the shared worktree:" >&2
+        echo "" >&2
+        for fname in "${blocked_list[@]}"; do
+            echo "    $fname" >&2
+        done
+        echo "" >&2
+        echo "  See: #2812, #2794, #2729, #2405" >&2
+        echo "" >&2
+        local _old_ifs="$IFS"
+        IFS=" "
+        echo "  Exempt paths (allowed for non-Workers): ${exempt_prefixes[*]}" >&2
+        IFS="$_old_ifs"
+        echo "" >&2
+        echo "  Resolution:" >&2
+        echo "    1. Unstage blocked files: git restore --staged <file>" >&2
+        echo "    2. Use: git commit --allow-empty --only -m \"your message\"" >&2
+        echo "" >&2
+        if [[ "${AIT_ALLOW_WORKER_FILES:-}" == "1" ]]; then
+            echo "⚠️  WARNING: Proceeding anyway (AIT_ALLOW_WORKER_FILES=1)" >&2
+        else
+            exit 1
+        fi
+    fi
+}
+
+check_non_worker_staged_files
+
+if [[ "$ROLE" != "USER" ]]; then
+    # Define forbidden directories per role
+    FORBIDDEN_DIRS=""
+    case "$ROLE" in
+    WORKER) FORBIDDEN_DIRS="reports/manager reports/prover reports/research reports/researcher" ;;
+    PROVER) FORBIDDEN_DIRS="reports/manager reports/worker reports/research reports/researcher worker_logs" ;;
+    RESEARCHER) FORBIDDEN_DIRS="reports/manager reports/worker reports/prover worker_logs" ;;
+    MANAGER) FORBIDDEN_DIRS="reports/worker reports/prover reports/research reports/researcher worker_logs" ;;
+    esac
+
+    CROSS_ROLE_FILES=""
+    for staged_file in "${STAGED_FILES_ARRAY[@]}"; do
+        for dir in $FORBIDDEN_DIRS; do
+            if [[ "$staged_file" == "$dir/"* ]]; then
+                CROSS_ROLE_FILES="${CROSS_ROLE_FILES}${staged_file}"$'\n'
+                break
+            fi
+        done
+    done
+
+    if [[ -n "${CROSS_ROLE_FILES// /}" ]]; then
+        echo "" >&2
+        echo "❌ ERROR: Staged files from other roles' directories:" >&2
         echo "$CROSS_ROLE_FILES" | head -5 | sed 's/^/   /' >&2
-        echo "   This may indicate cross-role contamination (see #871)" >&2
+        echo "   Cross-role contamination is blocked (see #871)." >&2
         echo "" >&2
+        echo "   Unstage these files before committing:" >&2
+        echo "     git restore --staged <file>" >&2
+        echo "" >&2
+        if [[ "${AIT_ALLOW_CROSS_ROLE_FILES:-}" == "1" ]]; then
+            echo "⚠️  WARNING: Proceeding anyway (AIT_ALLOW_CROSS_ROLE_FILES=1)" >&2
+        else
+            exit 1
+        fi
     fi
 fi
 
@@ -475,10 +683,14 @@ fi
 # Skip for merge commits (which legitimately have no diff sometimes).
 if ! git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
     STAGED_DIFF=$(git diff --cached --stat 2>/dev/null || true)
-    if [[ -z "${STAGED_DIFF// }" ]]; then
+    if [[ -z "${STAGED_DIFF// /}" ]]; then
         # Check if commit message implies file changes
         MSG_LOWER=$(echo "$MSG" | tr '[:upper:]' '[:lower:]')
-        CHANGE_KEYWORDS=$(echo "$MSG_LOWER" | grep -oE '(add|remove|fix|update|refactor|rename|delete|create|implement|change|modify|move|extend|enhance)' | head -3 | tr '\n' ',' | sed 's/,$//')
+        # Ignore markdown section headers (e.g., "## Changes") and only match whole
+        # action words/inflections to avoid substring false positives (prefix -> fix).
+        MSG_CONTENT_FOR_CLAIMS=$(echo "$MSG_LOWER" | grep -vE '^[[:space:]]*##[[:space:]]+' || true)
+        CHANGE_KEYWORD_PATTERN='(^|[^[:alnum:]_-])(add(ed|ing|s)?|remov(e|ed|es|ing)|fix(ed|es|ing)?|updat(e|ed|es|ing)|refactor(ed|s|ing)?|renam(e|ed|es|ing)|delet(e|ed|es|ing)|creat(e|ed|es|ing)|implement(ed|s|ing)?|chang(e|ed|es|ing)|modif(y|ied|ies|ying)|mov(e|ed|es|ing)|extend(ed|s|ing)?|enhanc(e|ed|es|ing))($|[^[:alnum:]_])'
+        CHANGE_KEYWORDS=$(echo "$MSG_CONTENT_FOR_CLAIMS" | grep -oE "$CHANGE_KEYWORD_PATTERN" | sed -E 's/^[^[:alnum:]_]+//; s/[^[:alnum:]_]+$//' | head -3 | tr '\n' ',' | sed 's/,$//')
         if [[ -n "$CHANGE_KEYWORDS" ]]; then
             # Error for non-Manager/non-USER roles, warning for Manager/USER
             if [[ "$ROLE" != "MANAGER" ]] && [[ "$ROLE" != "USER" ]]; then
@@ -492,7 +704,7 @@ if ! git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
                 echo "     - Files weren't staged (git add)" >&2
                 echo "     - A false claim about changes made" >&2
                 echo "" >&2
-                echo "   To bypass (if intentional): ALLOW_EMPTY_CLAIM=1 git commit ..." >&2
+                echo "   Stage files (git add) before committing." >&2
                 echo "" >&2
                 if [[ -z "${ALLOW_EMPTY_CLAIM:-}" ]]; then
                     exit 1
@@ -513,6 +725,56 @@ if ! git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
     fi
 fi
 
+# --- Check: ## Changes section mentions files not in staged diff (#2829) ---
+# Extracts file paths from the ## Changes section and compares against staged files.
+# Warns when a file path is mentioned in the message but is not in the actual diff.
+# This catches commit messages that describe intended changes that were not actually staged.
+if [[ ${#STAGED_FILES_ARRAY[@]} -gt 0 ]]; then
+    # Extract ## Changes section (between ## Changes and next ## heading)
+    CHANGES_SECTION=$(echo "$MSG" | sed -n '/^## Changes/,/^## [A-Z]/p' | grep -v '^## ' || true)
+    if [[ -n "$CHANGES_SECTION" ]]; then
+        # Extract file paths: alphanumeric sequences ending in common extensions
+        # Matches both paths (foo/bar.py) and bare filenames (README.md)
+        # grep -oE already excludes backticks/parens/colons (not in character class)
+        MENTIONED_FILES=$(echo "$CHANGES_SECTION" | \
+            grep -oE '[A-Za-z0-9_./-]+\.(py|rs|sh|toml|json|yaml|yml|md|ts|js|cfg)' | \
+            sort -u || true)
+        if [[ -n "$MENTIONED_FILES" ]]; then
+            PHANTOM_FILES=""
+            while IFS= read -r mentioned; do
+                [[ -z "$mentioned" ]] && continue
+                # Check if this file appears in staged files (exact or suffix match)
+                FOUND=0
+                for staged in "${STAGED_FILES_ARRAY[@]}"; do
+                    if [[ "$staged" == "$mentioned" ]] || [[ "$staged" == *"/$mentioned" ]] || [[ "$mentioned" == *"/$staged" ]]; then
+                        FOUND=1
+                        break
+                    fi
+                done
+                if [[ "$FOUND" -eq 0 ]]; then
+                    PHANTOM_FILES="${PHANTOM_FILES}  - ${mentioned}\n"
+                fi
+            done <<< "$MENTIONED_FILES"
+            if [[ -n "$PHANTOM_FILES" ]]; then
+                echo "" >&2
+                echo "⚠️  WARNING: ## Changes mentions files not in staged diff" >&2
+                echo "   Files mentioned in commit message but not staged:" >&2
+                echo -e "$PHANTOM_FILES" >&2
+                echo "   Staged files:" >&2
+                for sf in "${STAGED_FILES_ARRAY[@]}"; do
+                    echo "     $sf" >&2
+                done
+                echo "" >&2
+                echo "   This may indicate:" >&2
+                echo "     - Commit message describes work not actually committed" >&2
+                echo "     - Files were not staged (git add)" >&2
+                echo "     - Cross-role staging protection blocked some files" >&2
+                echo "" >&2
+            fi
+        fi
+    fi
+fi
+
 # --- Helper: Check if Rust file changes are only in test blocks (#1585) ---
 # Returns 0 if ALL changes are in #[cfg(test)] or mod tests blocks, 1 otherwise
 # This allows PROVER to add tests inside source files without triggering prod code error
@@ -526,7 +788,7 @@ rust_changes_only_in_tests() {
     changed_lines=$(echo "$diff_output" | grep -E '^@@' | sed -E 's/^@@ -[0-9,]+ \+([0-9]+).*/\1/')
 
     if [[ -z "$changed_lines" ]]; then
-        return 0  # No changes = not production code
+        return 0 # No changes = not production code
     fi
 
     # Get the full file content (staged version)
@@ -538,7 +800,7 @@ rust_changes_only_in_tests() {
     local in_test_block=0
     local brace_depth=0
     local test_start_depth=0
-    local test_block_opened=0  # Track if we've seen the opening brace
+    local test_block_opened=0 # Track if we've seen the opening brace
     local line_num=0
     local test_lines=""
 
@@ -575,7 +837,7 @@ rust_changes_only_in_tests() {
         if [[ $in_test_block -eq 1 ]] && [[ $test_block_opened -eq 1 ]] && [[ $brace_depth -le $test_start_depth ]]; then
             in_test_block=0
         fi
-    done <<< "$file_content"
+    done <<<"$file_content"
 
     # Check if all changed lines are in test blocks
     # Parse diff hunks to find actual changed line numbers
@@ -588,7 +850,7 @@ rust_changes_only_in_tests() {
         count=$(echo "$hunk_info" | sed -E 's/^@@ -[0-9,]+ \+[0-9]+,?([0-9]*) @@.*/\1/')
         [[ -z "$count" ]] && count=1
 
-        for ((i=0; i<count; i++)); do
+        for ((i = 0; i < count; i++)); do
             local check_line=$((start_line + i))
             if ! echo "$test_lines" | grep -qw "$check_line"; then
                 all_in_tests=0
@@ -614,11 +876,11 @@ if [[ "$ROLE" != "WORKER" ]] && [[ "$ROLE" != "USER" ]] && [[ -z "${ALLOW_NON_WO
     # Exclude Kani verification harnesses: *.kani.rs (#1466)
     INITIAL_PROD_FILES=$(git diff --cached --name-only -- \
         '*.rs' '*.py' '*.ts' '*.tsx' '*.js' '*.jsx' '*.go' '*.java' '*.swift' '*.kt' '*.c' '*.cpp' '*.h' \
-        2>/dev/null \
-        | grep -vE '^(tests/|docs/|reports/|\.claude/|postmortems/|ideas/|proofs/|spec/)' \
-        | grep -vE '/tests/' \
-        | grep -vE '/(proofs|spec)/' \
-        | grep -vE 'test_.*\.py$|_test\.py$|_test\.rs$|_test\.go$|\.test\.(ts|tsx|js|jsx)$|\.spec\.(ts|tsx|js|jsx)$|\.kani\.rs$' || true)
+        2>/dev/null |
+        grep -vE '^(tests/|docs/|reports/|\.claude/|postmortems/|ideas/|proofs/|spec/)' |
+        grep -vE '/tests/' |
+        grep -vE '/(proofs|spec)/' |
+        grep -vE 'test_.*\.py$|_test\.py$|_test\.rs$|_test\.go$|\.test\.(ts|tsx|js|jsx)$|\.spec\.(ts|tsx|js|jsx)$|\.kani\.rs$' || true)
 
     # For Rust files, filter out those where all changes are in test blocks (#1585)
     PROD_CODE_FILES=""
@@ -629,7 +891,7 @@ if [[ "$ROLE" != "WORKER" ]] && [[ "$ROLE" != "USER" ]] && [[ -z "${ALLOW_NON_WO
             continue
         fi
         PROD_CODE_FILES="$PROD_CODE_FILES$file"$'\n'
-    done <<< "$INITIAL_PROD_FILES"
+    done <<<"$INITIAL_PROD_FILES"
     PROD_CODE_FILES=$(echo "$PROD_CODE_FILES" | sed '/^$/d')
 
     if [[ -n "$PROD_CODE_FILES" ]]; then
@@ -757,9 +1019,9 @@ while IFS= read -r line; do
                 # In body (after ## Changes) - any auto-close keyword is bad
                 AUTO_CLOSE_BAD_LINES+="${LINE_NUM}: ${match}"$'\n'
             fi
-        done <<< "$MATCHES"
+        done <<<"$MATCHES"
     fi
-done <<< "$MSG"
+done <<<"$MSG"
 
 if [[ -n "$AUTO_CLOSE_BAD_LINES" ]]; then
     echo "" >&2
@@ -809,7 +1071,7 @@ HEADER_MSG=$(echo "$MSG" | awk 'BEGIN{in_header=1} /^##[[:space:]]+Changes/{in_h
 # Extract issue numbers from @ROLE directives and check their state
 # Include @ALL and handle cross-repo format (owner/repo#N extracts just the number)
 # Skip in full local mode - no gh API calls allowed
-if [[ "$FULL_LOCAL_MODE" != "true" ]] && command -v gh &> /dev/null; then
+if [[ "$FULL_LOCAL_MODE" != "true" ]] && command -v gh &>/dev/null; then
     DIRECTIVE_ISSUES=$(echo "$MSG" | grep -oE '@(WORKER|PROVER|RESEARCHER|MANAGER|ALL):[^#]*#[0-9]+' | grep -oE '#[0-9]+' | tr -d '#' | sort -u)
     for DIRECTIVE_ISSUE in $DIRECTIVE_ISSUES; do
         ISSUE_STATE=$(gh_issue_field "$DIRECTIVE_ISSUE" "state")
@@ -835,10 +1097,10 @@ if echo "$MSG" | grep -qiE "\\b${AUTO_CLOSE_KEYWORDS}[[:space:]]+${AUTO_CLOSE_RE
     # Extract the keyword used and normalize to present tense
     KEYWORD=$(echo "$MSG" | grep -oiE "\\b${AUTO_CLOSE_KEYWORDS}[[:space:]]+${AUTO_CLOSE_REF_PATTERN}," | head -1 | grep -oiE "${AUTO_CLOSE_KEYWORDS}" | head -1)
     case "$(echo "$KEYWORD" | tr '[:upper:]' '[:lower:]')" in
-        fix|fixes|fixed) REPEAT_KW="fixes" ;;
-        close|closes|closed) REPEAT_KW="closes" ;;
-        resolve|resolves|resolved) REPEAT_KW="resolves" ;;
-        *) REPEAT_KW="fixes" ;;
+    fix | fixes | fixed) REPEAT_KW="fixes" ;;
+    close | closes | closed) REPEAT_KW="closes" ;;
+    resolve | resolves | resolved) REPEAT_KW="resolves" ;;
+    *) REPEAT_KW="fixes" ;;
     esac
     # Replace ", [owner/repo]#N" with ", fixes [owner/repo]#N" only in lines 1-5
     # The Fixes/Closes line is typically line 3-4 (after title + blank line)
@@ -851,7 +1113,7 @@ if echo "$MSG" | grep -qiE "\\b${AUTO_CLOSE_KEYWORDS}[[:space:]]+${AUTO_CLOSE_RE
         PREV_MSG="$MSG"
         MSG=$(echo "$MSG" | sed -E "1,5 s/(^|[[:space:]])(Fixes|Fix|Fixed|Closes|Close|Closed|Resolves|Resolve|Resolved)[[:space:]]+([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#([0-9]+),[[:space:]]*([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#([0-9]+)/\1\2 \3#\4, $REPEAT_KW \5#\6/gI")
     done
-    echo "$MSG" > "$COMMIT_MSG_FILE"
+    echo "$MSG" >"$COMMIT_MSG_FILE"
     echo "ℹ️  Auto-fixed: Added '$REPEAT_KW' before each issue number (GitHub requires keyword per issue)" >&2
 fi
 
@@ -926,7 +1188,7 @@ if echo "$HEADER_MSG" | grep -qiE "$AUTO_CLOSE_INLINE_PATTERN"; then
             # Skip gh calls in full local mode for non-local issues
             elif [[ "$FULL_LOCAL_MODE" == "true" ]]; then
                 echo "   (skipping GitHub validation - full local mode)" >&2
-            elif command -v gh &> /dev/null; then
+            elif command -v gh &>/dev/null; then
                 if [[ -n "$ISSUE_REPO" ]]; then
                     TITLE=$(gh_issue_field "$ISSUE_NUM" "title" "$ISSUE_REPO")
                     [[ $? -eq 2 ]] && RATE_LIMITED_WARNING="yes"
@@ -998,14 +1260,40 @@ if echo "$HEADER_MSG" | grep -qiE "$AUTO_CLOSE_INLINE_PATTERN"; then
     fi
 fi
 
-# Check for ## Changes section (required)
+# ENFORCE: Required commit sections (#2621)
+# Pattern: "what you did / why / what you learned / what's next"
+# Hard block for autonomous roles (W/P/R/M), warning for USER
+MISSING_SECTIONS=""
 if ! echo "$MSG" | grep -q '^## Changes'; then
-    WARNINGS="${WARNINGS}⚠️  Missing '## Changes' section - explain WHY changes were made\n"
+    MISSING_SECTIONS="${MISSING_SECTIONS}  - ## Changes (what you did)\n"
+fi
+if ! echo "$MSG" | grep -q '^## Why'; then
+    MISSING_SECTIONS="${MISSING_SECTIONS}  - ## Why (why you did it)\n"
+fi
+if ! echo "$MSG" | grep -q '^## Learned'; then
+    MISSING_SECTIONS="${MISSING_SECTIONS}  - ## Learned (what you learned)\n"
+fi
+if ! echo "$MSG" | grep -q '^## Next'; then
+    MISSING_SECTIONS="${MISSING_SECTIONS}  - ## Next (what's next, @ROLE directives)\n"
 fi
 
-# Check for ## Next section (required)
-if ! echo "$MSG" | grep -q '^## Next'; then
-    WARNINGS="${WARNINGS}⚠️  Missing '## Next' section - directive for next session\n"
+# Reject ## Summary as alias for ## Changes
+if echo "$MSG" | grep -q '^## Summary'; then
+    MISSING_SECTIONS="${MISSING_SECTIONS}  - ## Summary is not valid — use ## Changes instead\n"
+fi
+
+if [[ -n "$MISSING_SECTIONS" ]]; then
+    if [[ "$ROLE" != "USER" ]]; then
+        echo "" >&2
+        echo "❌ ERROR: Missing required commit sections:" >&2
+        echo -e "$MISSING_SECTIONS" >&2
+        echo "   Required pattern: Changes / Why / Learned / Next" >&2
+        echo "   See ai_template.md 'Commit Message Template'" >&2
+        echo "" >&2
+        exit 1
+    else
+        WARNINGS="${WARNINGS}⚠️  Missing required sections:\n${MISSING_SECTIONS}"
+    fi
 fi
 
 # Check for issue link (recommended for workers, not required)
@@ -1032,7 +1320,7 @@ if [[ -n "$ISSUE_NUM" ]]; then
         # Full local mode - skip GitHub validation for non-local issues
         # Assume issue exists since we can't verify
         :
-    elif command -v gh &> /dev/null; then
+    elif command -v gh &>/dev/null; then
         # GitHub issue - use gh_issue_field
         ISSUE_STATE=$(gh_issue_field "$ISSUE_NUM" "state")
         GH_EXIT=$?
@@ -1057,7 +1345,7 @@ if [[ -f "FEATURE_FREEZE" ]] && [[ -n "$ISSUE_NUM" ]]; then
     elif [[ "$FULL_LOCAL_MODE" == "true" ]]; then
         # Full local mode - skip GitHub validation, allow commit
         :
-    elif command -v gh &> /dev/null; then
+    elif command -v gh &>/dev/null; then
         FREEZE_LABELS=$(gh_issue_field "$ISSUE_NUM" "labels")
     fi
     if echo "$FREEZE_LABELS" | grep -qx "feature"; then
@@ -1088,8 +1376,8 @@ if [[ "$ROLE" == "WORKER" ]] && [[ -n "$ISSUE_NUM" ]]; then
         ISSUE_LABELS=$(local_issue_field "$ISSUE_NUM" "labels")
     elif [[ "$FULL_LOCAL_MODE" == "true" ]]; then
         # Full local mode - skip GitHub validation, skip claim enforcement
-        ISSUE_LABELS="in-progress"  # Pretend claimed to skip enforcement
-    elif command -v gh &> /dev/null; then
+        ISSUE_LABELS="in-progress" # Pretend claimed to skip enforcement
+    elif command -v gh &>/dev/null; then
         ISSUE_LABELS=$(gh_issue_field "$ISSUE_NUM" "labels")
         GH_EXIT=$?
         if [[ $GH_EXIT -eq 2 ]]; then
@@ -1164,9 +1452,11 @@ fi
 
 # --- Rewrite commit message ---
 
-# SAFETY NET for already-prefixed commits: Final check before exit (#1269)
+# SAFETY NET for already-prefixed commits: Final check before rewrite (#1269)
 # For already-prefixed commits, the primary check should have blocked Fixes.
 # This is a redundant check to catch any bypass of the primary enforcement.
+# NOTE: Already-prefixed commits now fall through to trailer writing (#2958)
+# instead of exit 0, to ensure forensic trailers are always added.
 if [[ "$ALREADY_PREFIXED" == "true" ]]; then
     if [[ "$BASE_PREFIX" != "U" ]] && [[ "$BASE_PREFIX" != "M" ]]; then
         if echo "$HEADER_MSG" | grep -qiE "$AUTO_CLOSE_INLINE_PATTERN"; then
@@ -1181,15 +1471,40 @@ if [[ "$ALREADY_PREFIXED" == "true" ]]; then
             exit 1
         fi
     fi
-    exit 0
+    # Fall through to trailer writing (previously exit 0, fixed in #2958)
 fi
 
 FIRST_LINE=$(echo "$MSG" | head -1)
 BODY=$(echo "$MSG" | tail -n +2)
 
-# Add role prefix if not present (handles [W]N, [W1]N, and [sat-W1]N formats)
-# Pattern requires iteration number ([U]42, not [U]:) - prevents skipping when user types [U]: manually
-if ! echo "$FIRST_LINE" | grep -qE '^\[[^]]*-?(U|W|P|R|M)[0-9]*\][0-9]+'; then
+# Strip existing trailers to prevent duplication on amend/re-commit (#2958).
+# Trailers are appended after a blank line + "---" separator followed by "Role:".
+# When already-prefixed commits fall through to trailer writing, BODY may already
+# contain old trailers from a previous hook run.
+if echo "$BODY" | grep -qE '^---$' && echo "$BODY" | grep -q '^Role: '; then
+    # Find the line number of the last "---" separator that is followed by "Role: "
+    TRAILER_START=$(echo "$BODY" | grep -n '^---$' | while IFS=: read -r lnum _; do
+        next_line=$(echo "$BODY" | sed -n "$((lnum + 1))p")
+        if [[ "$next_line" == Role:* ]]; then
+            echo "$lnum"
+        fi
+    done | tail -1)
+    if [[ -n "$TRAILER_START" ]]; then
+        # Keep body up to (but not including) the blank line before ---
+        # Guard: if trailer is at start of body (line 1 or 2), body becomes empty
+        KEEP_LINES=$((TRAILER_START - 2))
+        if [[ "$KEEP_LINES" -gt 0 ]]; then
+            BODY=$(echo "$BODY" | head -n "$KEEP_LINES")
+        else
+            BODY=""
+        fi
+    fi
+fi
+
+# Add role prefix if not present (handles [W]N:, [W1]N:, and [sat-W1]N: formats)
+# Pattern requires iteration + colon ([U]42:, not [U]: or [U]42) to avoid
+# treating malformed prefixes as valid.
+if ! echo "$FIRST_LINE" | grep -qE '^\[[^]]*-?(U|W|P|R|M)[0-9]*\][0-9]+:'; then
     if [[ "$IS_MAINTAIN" == "true" ]]; then
         # Keep [maintain] but add iteration
         FIRST_LINE="[$PREFIX]$NEXT_ITER: $FIRST_LINE"
@@ -1275,12 +1590,17 @@ AWS_PROFILE_VAL="${AWS_PROFILE:-}"
     [[ -n "$AI_WORKER_ID" ]] && echo "Worker-Id: $AI_WORKER_ID"
     [[ -n "$ISSUE_NUM" ]] && echo "Issue: $ISSUE_NUM"
     [[ -n "$AI_SESSION" ]] && echo "Session: $AI_SESSION"
+    # Input provenance trailers (#2473) - trace commits to their inputs
+    [[ -n "$AI_PHASE" ]] && echo "Phase: $AI_PHASE"
+    [[ -n "$AI_INPUT_ISSUES" ]] && echo "Input-Issues: $AI_INPUT_ISSUES"
+    # AI Themes (#2478) - configurable focus via filtering
+    [[ -n "$AI_THEME" ]] && echo "Theme: $AI_THEME"
     [[ -n "$MODEL" ]] && echo "Model: $MODEL"
     [[ -n "$CODER" ]] && echo "Coder: $CODER"
     [[ -n "$AWS_REGION_VAL" ]] && echo "AWS-Region: $AWS_REGION_VAL"
     [[ -n "$AWS_PROFILE_VAL" ]] && echo "AWS-Profile: $AWS_PROFILE_VAL"
     [[ -n "$AIT_VERSION" ]] && echo "AIT-Version: $AIT_VERSION"
     echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-} > "$COMMIT_MSG_FILE"
+} >"$COMMIT_MSG_FILE"
 
 exit 0

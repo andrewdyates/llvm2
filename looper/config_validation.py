@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -16,7 +20,7 @@ Part of #2008: Extract shared config validation utility.
 from __future__ import annotations
 
 __all__ = [
-    "check_unknown_keys",
+    "get_unknown_keys",
     "validate_type",
     "validate_bounds",
     "merge_configs",
@@ -27,13 +31,13 @@ from typing import Any, TypeVar
 T = TypeVar("T")
 
 
-def check_unknown_keys(
+def get_unknown_keys(
     config: dict[str, Any],
     known_keys: set[str],
     context: str,
     logger: callable | None = None,
 ) -> list[str]:
-    """Check for unknown keys in a config dict.
+    """Get unknown keys in a config dict.
 
     Args:
         config: Config dict to validate.
@@ -45,7 +49,7 @@ def check_unknown_keys(
         List of unknown keys found (sorted for deterministic output).
 
     Example:
-        >>> unknown = check_unknown_keys({"foo": 1, "bar": 2}, {"foo"}, "config.toml")
+        >>> unknown = get_unknown_keys({"foo": 1, "bar": 2}, {"foo"}, "config.toml")
         >>> print(unknown)
         ['bar']
     """

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates
 # Licensed under the Apache License, Version 2.0
@@ -66,7 +70,7 @@ is_repo_archived() {
     local result stderr_file
     stderr_file=$(mktemp)
     # NOTE: Do NOT use gh -q or --jq - has caching bugs in v2.83.2+ (#1047)
-    if result=$(gh repo view "dropbox-ai-prototypes/$repo_name" --json isArchived 2>"$stderr_file" | jq -r '.isArchived'); then
+    if result=$(gh repo view "$AIT_GITHUB_ORG/$repo_name" --json isArchived 2>"$stderr_file" | jq -r '.isArchived'); then
         rm -f "$stderr_file"
         if [[ "$result" == "true" ]]; then
             mkdir -p "$ARCHIVED_CACHE_DIR"
@@ -78,7 +82,7 @@ is_repo_archived() {
     fi
     if grep -qiE 'rate.?limit' "$stderr_file" 2>/dev/null; then
         rm -f "$stderr_file"
-        if result=$(gh api "repos/dropbox-ai-prototypes/$repo_name" 2>/dev/null | jq -r '.archived'); then
+        if result=$(gh api "repos/$AIT_GITHUB_ORG/$repo_name" 2>/dev/null | jq -r '.archived'); then
             if [[ "$result" == "true" ]]; then
                 mkdir -p "$ARCHIVED_CACHE_DIR"
                 # Avoid duplicates in cache file
@@ -97,6 +101,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AI_TEMPLATE_ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$AI_TEMPLATE_ROOT"
+
+# Load identity configuration from ait_identity.toml
+# shellcheck source=identity.sh
+source "$SCRIPT_DIR/identity.sh"
 
 [[ -f "CLAUDE.md" ]] || {
     log_error "Run from ai_template root"
@@ -243,11 +251,11 @@ else
         [[ -d "$dir/.git" ]] || continue
         [[ "$(basename "$dir")" == "ai_template" ]] && continue
 
-        # Only sync dropbox-ai-prototypes repos (check git remote)
+        # Only sync repos belonging to our org (check git remote)
         repo_name=$(basename "$dir")
         remote_url=$(git -C "$dir" remote get-url origin 2>/dev/null || echo "")
-        if [[ ! "$remote_url" =~ dropbox-ai-prototypes ]]; then
-            continue # Skip non-dropbox-ai-prototypes repos
+        if [[ ! "$remote_url" =~ $AIT_GITHUB_ORG ]]; then
+            continue # Skip repos from other orgs
         fi
 
         # Skip archived repos

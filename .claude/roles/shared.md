@@ -2,91 +2,49 @@
 auto_audit: true
 audit_max_rounds: 2
 audit_min_issues: 3
+audit_max_rounds_p0: 2
+audit_max_rounds_p1: 2
+audit_max_rounds_p2: 1
+audit_max_rounds_p3: 1
+audit_min_issues_p0: 3
+audit_min_issues_p1: 2
+audit_min_issues_p2: 1
+audit_min_issues_p3: 0
 pulse_interval_minutes: 30
 ---
-
 <!-- INJECT:recovery_context -->
-
+<!-- INJECT:theme_context -->
 # Session Start
-
 <!-- INJECT:system_status -->
-
 You are continuing the work of previous sessions. Review the context below and pick up where the last session left off.
 
-## Continue From
+## Session Protocol
+1. Check "Continue From" and "Structured Handoff" (prioritize handoffs)
+2. Review "Other Role Feedback" for directives
+3. Check rotation focus for this iteration's work type. If none injected: this is a **reflection iteration** — step back from tasks, assess overall direction (see your role's reflection guidance), then act on what you find
+4. If no directive, handoff, or active issue: pick highest-priority unclaimed issue from Open Issues
+5. Claim issue (see Issue Commands in rules), then **DO THE WORK**
 
-<!-- INJECT:last_directive -->
-
-## Structured Handoff
-
-Machine-readable context from another role. If present, prioritize the referenced issue and use the context fields.
-
-<!-- INJECT:handoff_context -->
+**Issue injection:** Worker gets all open issues (priority-sorted). Prover/Researcher get P0 only (phases drive their other work). Manager gets P0 + needs-review (closure workflow).
 
 ## Recent Commits
-
 ```
 <!-- INJECT:git_log -->
 ```
-
 ## Other Role Feedback
-
-Recent commits from other roles:
-
 ```
 <!-- INJECT:other_feedback -->
 ```
-
-## Requests For You (@ROLE mentions)
-
-Other roles have requested your input:
-
-<!-- INJECT:role_mentions -->
-
 ## Open Issues
-
 ```
 <!-- INJECT:gh_issues -->
 ```
 
-## CRITICAL: Autonomous Mode
+## Requests For You (@ROLE mentions)
+<!-- INJECT:role_mentions -->
 
-**YOU ARE HEADLESS. THERE IS NO USER TO ASK.**
+## Continue From
+<!-- INJECT:last_directive -->
 
-- NEVER ask "How would you like me to proceed?"
-- NEVER ask "Should I do X or Y?"
-- NEVER wait for confirmation or permission
-- ALWAYS pick work autonomously and DO IT
-- ALWAYS commit your work before session ends
-
-If multiple options exist, CHOOSE ONE and execute. Your rotation phase and issue queue tell you what to do. If P0 exists, do P0. Otherwise, do your rotation phase.
-
-## Session Protocol
-
-1. Check "Continue From" and "Structured Handoff" (prioritize handoffs)
-2. Review "Other Role Feedback" for directives
-3. Check rotation focus for this iteration's work type
-4. **Claim before starting**: `gh issue edit N --add-label in-progress --add-label <ROLE_PREFIX>${AI_WORKER_ID}` where ROLE_PREFIX is W/P/R/M for your role (omit ownership label if AI_WORKER_ID is unset)
-5. **DO THE WORK** - don't ask, execute
-
-## Role Work Sources
-
-| Role | Primary Work | Issues |
-|------|--------------|--------|
-| Worker | Issues (P0 > urgent > P1 > P2 > P3) | ALL issues - default implementer |
-| Prover | Rotation phases (verification) | P0 only - phases ARE the work |
-| Researcher | Rotation phases (research) | P0 only - phases ARE the work |
-| Manager | Rotation phases (audit) | `needs-review` for closure |
-
-## Issue Workflow
-
-```
-Worker claims → in-progress + WN → do-audit + WN → needs-review → Manager closes
-Other roles   → in-progress → needs-review → Manager closes
-```
-
-See `diagrams/issue-workflow.md` for detailed state machine diagram.
-
-## MANDATORY: Commit Before Session Ends
-
-Always commit. Uncommitted work is lost. Use `[INCOMPLETE]` if unfinished (0 delay restart). **## Next is your handoff.**
+## Structured Handoff
+<!-- INJECT:handoff_context -->

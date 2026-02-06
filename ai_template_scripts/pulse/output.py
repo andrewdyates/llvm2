@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -95,7 +99,7 @@ def _print_issue_status(metrics: dict) -> None:
 
 
 def _print_system_status(metrics: dict) -> None:
-    """Print system status: memory, disk, artifacts, sessions, crashes, GH rate limits."""
+    """Print system status: memory, disk, artifacts, sessions, failures, GH rate limits."""
     system = metrics.get("system", {})
     memory = system.get("memory", {})
     disk = system.get("disk", {})
@@ -161,11 +165,38 @@ def _print_system_status(metrics: dict) -> None:
                 f"**GH API ({age_str}{commit_str}{stale_marker}{pending_str}):** {', '.join(parts)}"
             )
 
+    # CLI versions and model info
+    claude_cli = system.get("claude_cli", {})
+    codex_cli = system.get("codex_cli", {})
+    if claude_cli or codex_cli:
+        cli_parts = []
+        if claude_cli:
+            ver = claude_cli.get("installed", "?")
+            pinned = claude_cli.get("pinned")
+            if pinned:
+                cli_parts.append(f"Claude Code {ver} (pinned: {pinned})")
+            else:
+                cli_parts.append(f"Claude Code {ver}")
+        if codex_cli:
+            cli_parts.append(f"Codex {codex_cli.get('installed', '?')}")
+        print(f"**CLI:** {', '.join(cli_parts)}")
+
+    # Model configuration verification
+    model_config = system.get("model_config", {})
+    if model_config:
+        claude_model = model_config.get("claude_model", "?")
+        codex_model = model_config.get("codex_model", "?")
+        codex_effort = model_config.get("codex_reasoning_effort", "?")
+        print(f"**Models:** claude={claude_model}, codex={codex_model} ({codex_effort})")
+        mismatches = model_config.get("mismatches", [])
+        if mismatches:
+            print(f"**Model MISMATCH:** {'; '.join(mismatches)}")
+
     active = metrics.get("active_sessions", 0)
     if active > 0:
         print(f"**Active AI sessions:** {active}")
 
-    # Part of #2311: Split crashes vs idle aborts for clarity
+    # Part of #2311: Split failures vs idle aborts for clarity
     crashes_data = metrics.get("crashes_24h", {})
     if isinstance(crashes_data, dict):
         real = crashes_data.get("real", 0)
@@ -175,7 +206,7 @@ def _print_system_status(metrics: dict) -> None:
         if real > 0 or stale > 0 or idle > 0:
             parts = []
             if real > 0:
-                parts.append(f"{real} crash{'es' if real != 1 else ''}")
+                parts.append(f"{real} failure{'s' if real != 1 else ''}")
             if stale > 0:
                 parts.append(f"{stale} restart{'s' if stale != 1 else ''}")
             if idle > 0:

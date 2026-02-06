@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -13,6 +17,7 @@ Issues: #740 (auto-sync), #752 (this module)
 """
 
 import re
+import warnings
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
@@ -278,7 +283,8 @@ def get_uncommitted_line_count() -> int:
 
     # Parse "X files changed, Y insertions(+), Z deletions(-)" line
     # Example: "3 files changed, 150 insertions(+), 30 deletions(-)"
-    lines = result.value.strip().split("\n")
+    # Note: splitlines() returns [] for empty string, while split("\n") returns ['']
+    lines = result.value.strip().splitlines()
     if not lines:
         return 0
 
@@ -347,7 +353,17 @@ def check_uncommitted_work_size(threshold: int = 100) -> int | None:
         Line count if over threshold, None otherwise.
 
     Part of #1015: Worker needs mid-session commit enforcement
+
+    .. deprecated:: 1.0
+       Use :func:`warn_uncommitted_work` instead.
+       Scheduled for removal in v2.0.
     """
+    warnings.warn(
+        "check_uncommitted_work_size() is deprecated since v1.0, use warn_uncommitted_work(). "
+        "Scheduled for removal in v2.0.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return warn_uncommitted_work(threshold)
 
 
@@ -423,7 +439,19 @@ def check_stale_staged_files(abort: bool = False) -> list[str]:
         RuntimeError: If abort=True and staged files exist.
 
     Part of #995: Prevent cross-session staged-file contamination
+
+    .. deprecated:: 1.0
+       Use :func:`get_staged_files` + :func:`warn_stale_staged_files`
+       or :func:`enforce_no_stale_staged_files` instead.
+       Scheduled for removal in v2.0.
     """
+    warnings.warn(
+        "check_stale_staged_files() is deprecated since v1.0, use get_staged_files() + "
+        "warn_stale_staged_files() or enforce_no_stale_staged_files(). "
+        "Scheduled for removal in v2.0.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     staged = get_staged_files()
     if not staged:
         return []

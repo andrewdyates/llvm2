@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -24,7 +28,7 @@ version() {
 }
 
 case "${1:-}" in
-    --version) version ;;
+--version) version ;;
 esac
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -54,7 +58,10 @@ elif [[ -n "${1:-}" ]]; then
     exit 1
 fi
 
-[[ -f "CLAUDE.md" ]] || { echo "ERROR: Run from project root" >&2; exit 1; }
+[[ -f "CLAUDE.md" ]] || {
+    echo "ERROR: Run from project root" >&2
+    exit 1
+}
 
 # Get repo from origin remote (not gh repo view, which can pick wrong repo with multiple remotes)
 ORIGIN_URL=$(git remote get-url origin 2>/dev/null) || {
@@ -100,43 +107,25 @@ LABELS=(
     "M1|C5DEF5|Owned by Manager 1"
     "M2|C5DEF5|Owned by Manager 2"
     "M3|C5DEF5|Owned by Manager 3"
-    # Legacy combined labels (kept for backward compatibility)
-    "in-progress-W1|1D76DB|Claimed by Worker 1"
-    "in-progress-W2|1D76DB|Claimed by Worker 2"
-    "in-progress-W3|1D76DB|Claimed by Worker 3"
-    "in-progress-W4|1D76DB|Claimed by Worker 4"
-    "in-progress-W5|1D76DB|Claimed by Worker 5"
-    "in-progress-P1|1D76DB|Claimed by Prover 1"
-    "in-progress-P2|1D76DB|Claimed by Prover 2"
-    "in-progress-P3|1D76DB|Claimed by Prover 3"
-    "in-progress-R1|1D76DB|Claimed by Researcher 1"
-    "in-progress-R2|1D76DB|Claimed by Researcher 2"
-    "in-progress-R3|1D76DB|Claimed by Researcher 3"
-    "in-progress-M1|1D76DB|Claimed by Manager 1"
-    "in-progress-M2|1D76DB|Claimed by Manager 2"
-    "in-progress-M3|1D76DB|Claimed by Manager 3"
+    # NOTE: Legacy combined labels (in-progress-XN) removed in #2379
+    # Use: in-progress + W1/W2/etc. instead
+    "epic|1D76DB|Tracking-only epic - never claimed, never committed against"
     "tracking|D4C5F9|Monitor, don't schedule"
     "deferred|C5DEF5|Considered but not now - query when seeking new work"
     "needs-review|FBCA04|Ready for Manager review"
-    "urgent-handoff|D93F0B|Urgently needs target role (skip delay)"
     "blocked|D4C5F9|Waiting on dependency"
     "environmental|D4C5F9|Environment setup issue (no code fix)"
     "stale|D4C5F9|Auto-generated child issue obsoleted by parent closure"
     "duplicate|D4C5F9|Duplicate of another issue"
-    "blocker-cycle|B60205|Circular dependency requiring USER decision"
-    "local-maximum|B60205|Stuck at local maximum - needs USER architecture decision"
+    "stuck|B60205|Progress stalled - issue body MUST explain why"
     "mail|1D76DB|Cross-repo message (auto-added by gh wrapper)"
-    "notification|C5DEF5|Auto-generated closure notification"
-    # Issue type labels (informational, not for scheduling)
-    "bug|D93F0B|Bug fix"
-    "feature|0E8A16|New feature"
-    "documentation|0075CA|Documentation update"
+    "wontfix|D4C5F9|Will not be worked on"
 )
 
 if [[ "$DRY_RUN" == "true" ]]; then
     echo "Would create labels:"
     for entry in "${LABELS[@]}"; do
-        IFS='|' read -r name color description <<< "$entry"
+        IFS='|' read -r name color description <<<"$entry"
         echo "  $name ($color) - $description"
     done
     exit 0
@@ -162,7 +151,7 @@ create_label() {
 
 label_errors=0
 for entry in "${LABELS[@]}"; do
-    IFS='|' read -r name color description <<< "$entry"
+    IFS='|' read -r name color description <<<"$entry"
     create_label "$name" "$color" "$description" || ((label_errors++))
 done
 

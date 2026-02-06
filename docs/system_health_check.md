@@ -46,7 +46,7 @@ Repos with expensive checks should:
 ### Implementation Notes
 
 - Looper integration: `looper/runner.py` blocks audit transitions on non-zero exit
-- Looper call site: `looper/context/system_context.py:131-174`
+- Looper call site: `looper/context/system_context.py` (`get_system_status()`)
 - Shared base module: `ai_template_scripts/health_check/` (base.py, cli.py)
 
 ## JSON Output

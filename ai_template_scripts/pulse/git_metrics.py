@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -414,6 +418,46 @@ def get_doc_claim_status(repo_root: Path | None = None) -> dict:
         return {"error": "check_doc_claims module not available"}
     except Exception as e:
         # Don't let doc claim failures break pulse
+        return {"error": str(e)}
+
+
+def get_vision_compliance(repo_root: Path | None = None) -> dict:
+    """Check VISION.md structural compliance.
+
+    Uses vision_validate.py to verify required sections are present:
+    problem statement, success metrics, readiness label, phases.
+
+    Part of #2540.
+
+    REQUIRES: repo_root is None or a valid directory Path
+    ENSURES: Returns dict with check results or 'error' key on failure
+    ENSURES: Never raises (returns error dict on failure)
+    """
+    root = _resolve_root(repo_root)
+    vision_path = root / "VISION.md"
+
+    if not vision_path.exists():
+        return {"exists": False, "passed": 0, "failed": 0, "checks": []}
+
+    try:
+        from ai_template_scripts.vision_validate import validate_vision_file  # noqa: PLC0415
+
+        results = validate_vision_file(vision_path)
+        passed = sum(1 for r in results if r.passed)
+        failed = sum(1 for r in results if not r.passed)
+        return {
+            "exists": True,
+            "passed": passed,
+            "failed": failed,
+            "total": len(results),
+            "checks": [
+                {"name": r.name, "passed": r.passed, "message": r.message}
+                for r in results
+            ],
+        }
+    except ImportError:
+        return {"error": "vision_validate module not available"}
+    except Exception as e:
         return {"error": str(e)}
 
 

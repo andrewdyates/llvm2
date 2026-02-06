@@ -17,7 +17,7 @@ stateDiagram-v2
 
     state Open {
         [*] --> Unclaimed
-        Unclaimed --> Claimed: Role claims<br/>(+in-progress-XN)
+        Unclaimed --> Claimed: Role claims<br/>(+in-progress + ownership)
 
         state Claimed {
             [*] --> InProgress
@@ -39,8 +39,8 @@ stateDiagram-v2
 | State | Labels | Description |
 |-------|--------|-------------|
 | **Unclaimed** | (none) | Open issue, no owner |
-| **Claimed** | `in-progress-XN` | Owned by role X instance N |
-| **Blocked** | `in-progress-XN` + `blocked` | Work paused on blocker |
+| **Claimed** | `in-progress` + ownership label | Owned by role instance |
+| **Blocked** | `in-progress` + ownership label + `blocked` | Work paused on blocker |
 | **DoAudit** | `do-audit` | Worker done, awaiting Prover audit |
 | **NeedsReview** | `needs-review` | Ready for Manager review |
 | **Closed** | (closed state) | Manager verified and closed |
@@ -49,11 +49,11 @@ stateDiagram-v2
 
 | Transition | Who | Action |
 |------------|-----|--------|
-| Claim | Any role | `gh issue edit N --add-label in-progress --add-label WN` (where N is worker ID) |
+| Claim | Any role | `gh issue edit N --add-label in-progress --add-label <ownership>` (ownership: W1-W5/prov1-prov3/R1-R3/M1-M3) |
 | Block | Any role | `gh issue edit N --add-label blocked` |
 | Unblock | Any role | `gh issue edit N --remove-label blocked` |
-| Complete (Worker) | Worker | `gh issue edit N --add-label do-audit --remove-label in-progress` (keep ownership WN) |
-| Complete (Other) | P/R/M | `gh issue edit N --add-label needs-review --remove-label in-progress` |
+| Complete (Worker) | Worker | `gh issue edit N --add-label do-audit --remove-label in-progress` (keep ownership W<N>) |
+| Complete (Other) | P/R/M | `gh issue edit N --add-label needs-review --remove-label in-progress` (keep ownership label) |
 | Auto-promote | Looper | `do-audit` → `needs-review` (automatic) |
 | Close | Manager | Commit with `Fixes #N`, then close |
 | Reject | Manager | Remove `needs-review`, comment on issue |

@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -16,6 +20,8 @@ Parameters for run_iteration():
     resume_session_id: Optional session ID to resume (for --resume support)
     force_ai_tool: Override AI tool selection (claude, codex, dasher)
     force_codex_model: Override Codex model when using codex tool
+    audit_min_issues_override: Override audit min-issues prompt value
+    audit_max_rounds_override: Override audit max-rounds prompt value
 
 This mixin is the bridge between the loop orchestration (runner_loop.py)
 and the actual AI subprocess execution (iteration.py).
@@ -53,6 +59,8 @@ class RunnerIterationMixin:
         resume_session_id: str | None = None,
         force_ai_tool: str | None = None,
         force_codex_model: str | None = None,
+        audit_min_issues_override: int | None = None,
+        audit_max_rounds_override: int | None = None,
     ) -> IterationResult:
         """Run a single AI iteration via IterationRunner.
 
@@ -65,6 +73,10 @@ class RunnerIterationMixin:
                 or "dasher". If None, uses config default.
             force_codex_model: Override Codex model when using codex tool.
                 If None, uses config default.
+            audit_min_issues_override: Optional per-run override for audit
+                min-issues prompt requirement.
+            audit_max_rounds_override: Optional per-run override for audit
+                max-rounds prompt display value.
 
         Returns:
             IterationResult with exit_code, start_time, ai_tool, session_id,
@@ -77,6 +89,8 @@ class RunnerIterationMixin:
             force_ai_tool=force_ai_tool,
             force_codex_model=force_codex_model,
             working_issues=self._working_issues if audit_round > 0 else None,
+            audit_min_issues_override=audit_min_issues_override,
+            audit_max_rounds_override=audit_max_rounds_override,
         )
 
     def check_session_success(self, start_time: float) -> bool:
@@ -139,12 +153,14 @@ class RunnerIterationMixin:
             return marker in result.value
         return False
 
-    def _has_manager_iteration_reports(self, changes: str) -> bool:
-        """Check if uncommitted changes include manager iteration reports.
+    @staticmethod
+    def _parse_manager_report_files(changes: str) -> list[str]:
+        """Extract manager report filenames from git status --porcelain output.
 
-        Manager iteration reports (reports/*manager-iter*.md) should be
-        committed by the MANAGER loop, not as WIP or by another role (#1481).
+        Returns filenames matching the reports/*manager-iter* pattern.
+        Used by both _has_manager_iteration_reports and _commit_manager_reports.
         """
+        files = []
         for line in changes.strip().split("\n"):
             if not line:
                 continue
@@ -154,8 +170,16 @@ class RunnerIterationMixin:
             if len(parts) >= 2:
                 filename = parts[-1]  # Last part is the filename
                 if "reports/" in filename and "manager-iter" in filename:
-                    return True
-        return False
+                    files.append(filename)
+        return files
+
+    def _has_manager_iteration_reports(self, changes: str) -> bool:
+        """Check if uncommitted changes include manager iteration reports.
+
+        Manager iteration reports (reports/*manager-iter*.md) should be
+        committed by the MANAGER loop, not as WIP or by another role (#1481).
+        """
+        return len(self._parse_manager_report_files(changes)) > 0
 
     def commit_uncommitted_changes(self) -> bool:
         """Check for and commit any uncommitted changes after session ends.
@@ -175,17 +199,10 @@ class RunnerIterationMixin:
 
         # Manager-specific: commit iteration reports with proper attribution (#1481)
         if self.mode == "manager" and self._has_manager_iteration_reports(changes):
-            return self._commit_manager_reports()
+            return self._commit_manager_reports(changes)
 
         # There are uncommitted changes - commit them as WIP
         log_info("\n⚠️  Uncommitted changes detected - auto-committing as WIP")
-
-        # Stage all changes
-        add_result = run_git_command(["add", "-A"], timeout=10)
-        if not add_result.ok:
-            error = add_result.error or "unknown error"
-            log_warning(f"Warning: git add failed: {error}")
-            return False
 
         # Create WIP commit
         commit_msg = (
@@ -194,7 +211,30 @@ class RunnerIterationMixin:
             "Auto-committed by looper.py to prevent work loss.\n"
             "Review and amend or continue in next session."
         )
-        commit_result = run_git_command(["commit", "-m", commit_msg], timeout=30)
+
+        # Non-Worker roles must not stage files — they produce text, not code.
+        # Using git add -A would sweep in Worker's staged-but-uncommitted files,
+        # causing cross-role staging contamination (#2812, #2794, #2729, #2405).
+        # Use --allow-empty --only to create the WIP commit without any files.
+        if self.mode != "worker":
+            log_info(
+                "Non-Worker WIP: using --allow-empty --only to avoid "
+                "staging contamination (#2812)"
+            )
+            commit_result = run_git_command(
+                ["commit", "--allow-empty", "--only", "-m", commit_msg],
+                timeout=30,
+            )
+        else:
+            # Worker role: stage all changes as before
+            add_result = run_git_command(["add", "-A"], timeout=10)
+            if not add_result.ok:
+                error = add_result.error or "unknown error"
+                log_warning(f"Warning: git add failed: {error}")
+                return False
+            commit_result = run_git_command(
+                ["commit", "-m", commit_msg], timeout=30
+            )
 
         if commit_result.ok:
             log_info("✓ WIP commit created")
@@ -219,31 +259,46 @@ class RunnerIterationMixin:
         log_warning(f"⚠️  WIP commit failed: {error}")
         return False
 
-    def _commit_manager_reports(self) -> bool:
+    def _commit_manager_reports(self, changes: str) -> bool:
         """Commit manager iteration reports with proper [M] attribution (#1481).
 
         Manager iteration reports should be committed by the manager loop,
         not as WIP or by another role. This preserves process ownership.
 
+        Args:
+            changes: git status --porcelain output (reused from caller to
+                avoid redundant git status call, #2812 self-audit).
+
         Returns True if commit succeeded, False otherwise.
         """
         log_info("\n📋 Manager iteration report detected - committing with [M] tag")
 
-        # Stage all changes (same as WIP, but with proper commit message)
-        add_result = run_git_command(["add", "-A"], timeout=10)
+        # Stage ONLY manager report files, not all changes (#2812).
+        # Using git add -A would sweep in Worker's staged-but-uncommitted files.
+        report_files = self._parse_manager_report_files(changes)
+        if not report_files:
+            log_warning("Warning: no manager report files found to stage")
+            return False
+
+        add_result = run_git_command(["add"] + report_files, timeout=10)
         if not add_result.ok:
             error = add_result.error or "unknown error"
             log_warning(f"Warning: git add failed: {error}")
             return False
 
         # Create commit with proper [M] attribution (not WIP)
+        # Use --only to commit ONLY the files we explicitly staged above,
+        # excluding any other staged files in the worktree (#2812).
         commit_msg = (
             f"[M]{self.iteration}: Auto-commit manager iteration report\n\n"
             "## Note\n"
             "Manager session ended with uncommitted iteration report.\n"
             "Auto-committed by looper.py to preserve manager attribution (#1481)."
         )
-        commit_result = run_git_command(["commit", "-m", commit_msg], timeout=30)
+        commit_result = run_git_command(
+            ["commit", "--only"] + report_files + ["-m", commit_msg],
+            timeout=30,
+        )
 
         if commit_result.ok:
             log_info("✓ Manager report committed")

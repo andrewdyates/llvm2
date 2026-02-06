@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -56,6 +60,13 @@ except ImportError:
 import sys
 import time
 from pathlib import Path
+
+# Support running as script (not just as module)
+_repo_root = Path(__file__).resolve().parents[1]
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
+from ai_template_scripts.subprocess_utils import is_process_alive
 
 # Pressure levels
 PRESSURE_NORMAL = "normal"
@@ -320,12 +331,9 @@ def kill_process(pid: int, command: str) -> bool:
         time.sleep(GRACE_PERIOD)
 
         # Check if still running, send SIGKILL
-        try:
-            os.kill(pid, 0)  # Check if process exists
+        if is_process_alive(pid):
             os.kill(pid, signal.SIGKILL)
             log(f"Sent SIGKILL to PID {pid}: {command}", "WARN")
-        except ProcessLookupError:
-            pass  # Already dead
 
         return True
     except ProcessLookupError:

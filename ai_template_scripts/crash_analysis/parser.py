@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -5,7 +9,7 @@
 """
 Crash log parser for crash_analysis package.
 
-PURPOSE: Parses crashes.log file into structured CrashEntry objects.
+PURPOSE: Parses failures.log (fallback crashes.log) into CrashEntry objects.
 CALLED BY: crash_analysis.__init__ (get_health_report)
 """
 
@@ -13,22 +17,33 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from pathlib import Path
 
 from ai_template_scripts.crash_analysis.types import CrashEntry
 
-# Import CRASHES_LOG at runtime to support test patching via crash_analysis.CRASHES_LOG
+# Import log paths at runtime to support test patching via crash_analysis.FAILURES_LOG
+# and crash_analysis.CRASHES_LOG.
 # (tests patch crash_analysis namespace, not types namespace)
 
 
-def _get_crashes_log():
-    """Get CRASHES_LOG path, supporting runtime patching for tests."""
+def _get_failures_log() -> Path:
+    """Get failure log path, supporting runtime patching for tests."""
     import ai_template_scripts.crash_analysis as crash_analysis
+    from ai_template_scripts.crash_analysis import types as crash_types
 
-    return crash_analysis.CRASHES_LOG
+    failures_log = crash_analysis.FAILURES_LOG
+    crashes_log = crash_analysis.CRASHES_LOG
+    if crashes_log != crash_types.CRASHES_LOG and crashes_log.exists():
+        return crashes_log
+    if failures_log.exists():
+        return failures_log
+    if crashes_log.exists():
+        return crashes_log
+    return failures_log
 
 
 def parse_crashes_log(since: datetime | None = None) -> list[CrashEntry]:
-    """Parse crashes.log file.
+    """Parse failures.log file (fallback crashes.log).
 
     Args:
         since: Only include crashes after this timestamp
@@ -41,7 +56,7 @@ def parse_crashes_log(since: datetime | None = None) -> list[CrashEntry]:
         ENSURES: result is sorted by timestamp descending (newest first)
         ENSURES: all(e.timestamp >= since for e in result) if since is not None
     """
-    crashes_log = _get_crashes_log()
+    crashes_log = _get_failures_log()
     if not crashes_log.exists():
         return []
 

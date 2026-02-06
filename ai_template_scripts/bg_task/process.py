@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -42,20 +46,7 @@ from ai_template_scripts.bg_task.storage import (
     save_task_meta,
 )
 from ai_template_scripts.bg_task.types import DEFAULT_TIMEOUT, TaskMeta
-
-
-def is_process_alive(pid: int) -> bool:
-    """Check if a process is still running.
-
-    REQUIRES: pid > 0
-    ENSURES: return True iff process with pid exists and is accessible
-    ENSURES: Never raises - returns False on any error
-    """
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
-        return False
+from ai_template_scripts.subprocess_utils import is_process_alive  # canonical (#2535)
 
 
 def update_task_status(task_id: str) -> TaskMeta | None:

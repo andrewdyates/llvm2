@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -10,9 +14,10 @@ CALLED BY: Pre-commit hook or manual invocation.
 ADDRESSES: #1608 (automate line counts), #1588 (line counts outdated)
 
 Usage:
-    ./update_line_counts.py              # Update CLAUDE.md in place
-    ./update_line_counts.py --check      # Check if update needed (exit 1 if yes)
-    ./update_line_counts.py --dry-run    # Show changes without writing
+    ./update_line_counts.py                    # Update CLAUDE.md in place
+    ./update_line_counts.py --check            # Check if update needed (exit 1 if yes)
+    ./update_line_counts.py --dry-run          # Show changes without writing
+    ./update_line_counts.py --repo-root /path  # Specify repo root explicitly
 """
 
 __all__ = [
@@ -213,16 +218,34 @@ def main() -> int:
         help="Show changes without writing",
     )
     parser.add_argument(
-        "--repo",
+        "--repo-root",
         type=Path,
         default=Path.cwd(),
         help="Repository root (default: current directory)",
     )
+    # Deprecated --repo flag for backwards compatibility
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        dest="deprecated_repo",
+        help="DEPRECATED: Use --repo-root instead (Repository root)",
+    )
 
     args = parser.parse_args()
 
+    # Handle deprecated --repo flag with warning
+    if args.deprecated_repo:
+        print(
+            "Warning: --repo is deprecated and will be removed in V2. "
+            "Use --repo-root instead.",
+            file=sys.stderr,
+        )
+        repo_root = args.deprecated_repo
+    else:
+        repo_root = args.repo_root
+
     # Find repo root (look for CLAUDE.md)
-    repo_root = args.repo
+    # repo_root already set above
     if not (repo_root / "CLAUDE.md").exists():
         # Try parent directories
         for parent in repo_root.parents:

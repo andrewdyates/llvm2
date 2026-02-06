@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates
 # Licensed under the Apache License, Version 2.0
@@ -19,6 +23,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load identity configuration from ait_identity.toml
+# shellcheck source=identity.sh
+source "$SCRIPT_DIR/identity.sh" 2>/dev/null || true
 
 # Version function
 version() {
@@ -131,11 +139,11 @@ find tests -name '*.py' ! -name 'test_example.py' ! -name 'conftest.py' ! -name 
 # Create ideas directory with README (replaces obsolete IDEAS.md)
 rm -f IDEAS.md  # Remove obsolete file if present
 mkdir -p ideas
-cat > ideas/README.md << 'EOF'
+cat > ideas/README.md << EOF
 # Ideas
 
-Copyright 2026 Dropbox, Inc.
-Author: Andrew Yates <ayates@dropbox.com>
+Copyright $AIT_COPYRIGHT_YEAR ${AIT_COPYRIGHT_HOLDER:-$AIT_OWNER_NAME}
+Author: $AIT_OWNER_NAME <$AIT_OWNER_EMAIL>
 
 Future considerations and backlog items. These are NOT actionable tasks.
 
@@ -144,7 +152,7 @@ Future considerations and backlog items. These are NOT actionable tasks.
 
 ## How to use
 
-- Add files like `YYYY-MM-DD-idea-name.md`
+- Add files like \`YYYY-MM-DD-idea-name.md\`
 - Keep them simple - just enough to capture the idea
 - When ready to implement, file a GitHub issue and reference the idea
 
@@ -228,6 +236,125 @@ What success looks like. The end state we're building toward.
 # Usage examples
 ```
 EOF
+
+# Apply identity substitution to template files (CLAUDE.md, ai_template.md, researcher.md)
+# Replaces hardcoded ai_template identity (Dropbox/Andrew Yates) with values from
+# the local ait_identity.toml, which the user should have edited before running init.
+# See: #3028 (CLAUDE.md hardcoded identity references)
+
+# Template defaults — the identity values hardcoded in shipped template files.
+# These are the "find" values for sed substitution.
+_TMPL_OWNER_NAME="Andrew Yates"
+_TMPL_OWNER_EMAIL="ayates@dropbox.com"
+_TMPL_OWNER_USERNAMES="ayates|andrewdyates|ayates_dbx"
+_TMPL_GITHUB_ORG="dropbox-ai-prototypes"
+_TMPL_COMPANY_NAME="Dropbox, Inc."
+_TMPL_COMPANY_ABBREV="DBX"
+
+_init_sed_escape() {
+    printf '%s' "$1" | sed -e 's/[&\|]/\\&/g'
+}
+
+_apply_init_identity_substitution() {
+    # Apply identity substitution to a single file.
+    # Replaces template defaults with current AIT_* values.
+    local dst="$1"
+
+    [[ -f "$dst" ]] || return 0
+
+    local src_first_name target_first_name
+    src_first_name=$(echo "$_TMPL_OWNER_NAME" | awk '{print $1}')
+    target_first_name=$(echo "$AIT_OWNER_NAME" | awk '{print $1}')
+
+    local src_company_short target_company_short
+    src_company_short=$(echo "$_TMPL_COMPANY_NAME" | awk -F'[, ]' '{print $1}')
+    target_company_short=$(echo "$AIT_COMPANY_NAME" | awk -F'[, ]' '{print $1}')
+
+    # Escape target values for sed replacement
+    local t_name t_email t_org t_company t_abbrev t_first t_company_short
+    t_name=$(_init_sed_escape "$AIT_OWNER_NAME")
+    t_email=$(_init_sed_escape "$AIT_OWNER_EMAIL")
+    t_org=$(_init_sed_escape "$AIT_GITHUB_ORG")
+    t_company=$(_init_sed_escape "$AIT_COMPANY_NAME")
+    t_abbrev=$(_init_sed_escape "$AIT_COMPANY_ABBREV")
+    t_first=$(_init_sed_escape "$target_first_name")
+    t_company_short=$(_init_sed_escape "$target_company_short")
+
+    local -a sed_args=()
+    # 1. Full name + email (longest match first)
+    sed_args+=(-e "s|${_TMPL_OWNER_NAME} <${_TMPL_OWNER_EMAIL}>|${t_name} <${t_email}>|g")
+    # 2. Full name alone
+    sed_args+=(-e "s|${_TMPL_OWNER_NAME}|${t_name}|g")
+    # 3. Email alone
+    sed_args+=(-e "s|${_TMPL_OWNER_EMAIL}|${t_email}|g")
+    # 4. GitHub org
+    sed_args+=(-e "s|${_TMPL_GITHUB_ORG}|${t_org}|g")
+    # 5. Full company name
+    sed_args+=(-e "s|${_TMPL_COMPANY_NAME}|${t_company}|g")
+    # 6. Short company name in "ABBREV = Company" pattern
+    if [[ -n "$src_company_short" && "$src_company_short" != "$_TMPL_COMPANY_NAME" ]]; then
+        sed_args+=(-e "s|${_TMPL_COMPANY_ABBREV} = ${src_company_short}|${t_abbrev} = ${t_company_short}|g")
+    fi
+    # 7. Company abbreviation
+    sed_args+=(-e "s|${_TMPL_COMPANY_ABBREV}|${t_abbrev}|g")
+    # 8. First name in "except <Name>" pattern
+    sed_args+=(-e "s|except ${src_first_name}\.|except ${t_first}.|g")
+    # 9. Individual username replacements (positional: src[i] -> target[i])
+    local IFS='|'
+    local -a src_users=($_TMPL_OWNER_USERNAMES)
+    local -a target_users=($AIT_OWNER_USERNAMES)
+    IFS=' '
+    local i
+    for ((i = 0; i < ${#src_users[@]}; i++)); do
+        local src_user="${src_users[$i]}"
+        local target_user="${target_users[$i]:-${AIT_GITHUB_ORG}}"
+        if [[ "$src_user" != "$target_user" ]]; then
+            local t_user
+            t_user=$(_init_sed_escape "$target_user")
+            sed_args+=(-e "s|\`${src_user}\`|\`${t_user}\`|g")
+        fi
+    done
+
+    sed -i.bak "${sed_args[@]}" "$dst"
+    rm -f "${dst}.bak"
+}
+
+# Check if current identity differs from template defaults AND is not just placeholder defaults.
+# identity.sh returns placeholders ("Your Name", "your-org") when no ait_identity.toml exists.
+# We must not substitute placeholder values into CLAUDE.md.
+_INIT_IDENTITY_DIFFERS=false
+if [[ "$AIT_GITHUB_ORG" == "your-org" || "$AIT_OWNER_NAME" == "Your Name" ]]; then
+    # Still using identity.sh placeholder defaults — user hasn't customized yet
+    _INIT_IDENTITY_DIFFERS=false
+elif [[ "$AIT_GITHUB_ORG" != "$_TMPL_GITHUB_ORG" || \
+        "$AIT_OWNER_NAME" != "$_TMPL_OWNER_NAME" || \
+        "$AIT_OWNER_EMAIL" != "$_TMPL_OWNER_EMAIL" || \
+        "$AIT_COMPANY_NAME" != "$_TMPL_COMPANY_NAME" || \
+        "$AIT_COMPANY_ABBREV" != "$_TMPL_COMPANY_ABBREV" || \
+        "$AIT_OWNER_USERNAMES" != "$_TMPL_OWNER_USERNAMES" ]]; then
+    _INIT_IDENTITY_DIFFERS=true
+fi
+
+# Files to substitute. Includes CLAUDE.md (not synced, but needs init substitution)
+# plus the sync_repo.sh IDENTITY_SUB_FILES (ai_template.md, manager.md, researcher.md).
+_INIT_SUB_FILES=("CLAUDE.md" ".claude/rules/ai_template.md" ".claude/roles/manager.md" ".claude/roles/researcher.md")
+
+if [[ "$_INIT_IDENTITY_DIFFERS" == "true" ]]; then
+    echo ""
+    echo "Applying identity substitution (ait_identity.toml differs from template defaults)..."
+    _sub_count=0
+    for f in "${_INIT_SUB_FILES[@]}"; do
+        if [[ -f "$f" ]]; then
+            _apply_init_identity_substitution "$f"
+            (( _sub_count++ ))
+        fi
+    done
+    echo "  Substituted identity in $_sub_count file(s)"
+else
+    echo ""
+    echo "Identity matches template defaults — no substitution needed."
+    echo "  Edit ait_identity.toml with your identity, then re-run init to substitute."
+fi
 
 # Create required GitHub labels for AI workflow
 if [[ "$TEST_MODE" == "1" ]]; then
@@ -340,7 +467,12 @@ fi
 
 echo ""
 echo "Done. Next steps:"
-echo "  1. Edit CLAUDE.md (replace placeholders)"
-echo "  2. Run: ./ai_template_scripts/init_from_template.sh --verify"
-echo "  3. Edit VISION.md and README.md"
-echo "  4. Create issues: gh issue create --title \"Task\" --label \"P1\""
+if [[ "$_INIT_IDENTITY_DIFFERS" == "true" ]]; then
+    echo "  1. Review CLAUDE.md (identity auto-substituted from ait_identity.toml)"
+else
+    echo "  1. Edit ait_identity.toml with your identity, then re-run init"
+fi
+echo "  2. Edit CLAUDE.md: set <director> and customize project-specific sections"
+echo "  3. Run: ./ai_template_scripts/init_from_template.sh --verify"
+echo "  4. Edit VISION.md and README.md"
+echo "  5. Create issues: gh issue create --title \"Task\" --label \"P1\""

@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -43,8 +47,8 @@ def format_report(report: HealthReport, hours: int = RECENT_HOURS) -> str:
     lines.append("")
     lines.append(f"**Window:** Last {hours} hours")
     lines.append(f"**Iterations:** {report.total_iterations} successful")
-    lines.append(f"**Crashes (recent):** {report.recent_crashes}")
-    lines.append(f"**Crashes (all-time):** {report.total_crashes}")
+    lines.append(f"**Failures (recent):** {report.recent_crashes}")
+    lines.append(f"**Failures (all-time):** {report.total_crashes}")
     if report.idle_aborts_recent or report.idle_aborts_total:
         lines.append(f"**Idle aborts (recent):** {report.idle_aborts_recent}")
         lines.append(f"**Idle aborts (all-time):** {report.idle_aborts_total}")
@@ -65,13 +69,13 @@ def format_report(report: HealthReport, hours: int = RECENT_HOURS) -> str:
     lines.append("")
 
     if report.crash_patterns:
-        lines.append("**Crash breakdown:**")
+        lines.append("**Failure breakdown:**")
         for pattern, count in sorted(
             report.crash_patterns.items(),
             key=lambda x: -x[1],
         ):
             lines.append(f"  - {pattern}: {count}")
-        # Show suppressed patterns inline with crash breakdown
+        # Show suppressed patterns inline with failure breakdown
         if report.suppressed_patterns:
             for sp in report.suppressed_patterns:
                 lines.append(
@@ -79,9 +83,9 @@ def format_report(report: HealthReport, hours: int = RECENT_HOURS) -> str:
                 )
         lines.append("")
 
-    # Show deduplicated crash patterns if available
+    # Show deduplicated failure patterns if available
     if report.unique_fingerprints:
-        lines.append(f"**Unique crash patterns:** {len(report.unique_fingerprints)}")
+        lines.append(f"**Unique failure patterns:** {len(report.unique_fingerprints)}")
         for fp in report.unique_fingerprints:
             # Show fingerprint, count, and category
             lines.append(f"  - {fp.fingerprint} ({fp.count} occurrences)")

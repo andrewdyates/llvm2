@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -401,43 +405,45 @@ class CheckboxConverter(IssueManagerBase):
             debug_swallow("update_issue_body_checkboxes", e)
             return False
 
-    def _get_issue_p_label(self, issue_num: int) -> str | None:
-        """Get the P-label (P0/P1/P2/P3) from an issue, if any.
+    def _get_issue_labels(self, issue_num: int) -> list[str]:
+        """Fetch all label names for an issue (single API call).
 
         Contracts:
             REQUIRES: issue_num is a positive integer
-            ENSURES: Returns "P0", "P1", "P2", "P3", or None
-            ENSURES: Returns None if issue has no P-label or on error
+            ENSURES: Returns list of label name strings
+            ENSURES: Returns empty list on error (best-effort)
             ENSURES: Never raises - catches all exceptions
         """
         try:
-            # Do NOT use gh -q/--jq flags - they have caching bugs (#1047, #1102)
-            # Parse JSON with Python's json module instead
             result = self._gh_run_result(
                 ["gh", "issue", "view", str(issue_num), "--json", "labels"],
                 timeout=10,
             )
             if result.ok and result.value.stdout.strip():
                 data = json.loads(result.value.stdout)
-                for label_obj in data.get("labels", []):
-                    label_name = label_obj.get("name", "")
-                    if label_name in ("P0", "P1", "P2", "P3"):
-                        return label_name
+                return [
+                    label_obj.get("name", "")
+                    for label_obj in data.get("labels", [])
+                ]
         except Exception as e:
-            debug_swallow("get_parent_priority", e)  # Best-effort: priority inheritance
-        return None
+            debug_swallow("get_issue_labels", e)
+        return []
 
     def _get_commit_issue_numbers(self) -> set[int]:
         """Extract issue numbers from last commit message.
 
+        Excludes Claims #N because claiming an issue should not trigger
+        checkbox conversion before any work is done (#2490).
+
         Contracts:
             REQUIRES: git log is available in the repo
             ENSURES: Returns an empty set if git log fails
-            ENSURES: Returns a set of integers extracted from Fixes/Part of/Re:/Claims
+            ENSURES: Returns a set of integers extracted from Fixes/Part of/Re:
                 patterns in the last commit message
+            ENSURES: Claims #N does NOT trigger checkbox conversion
 
         Returns:
-            Set of issue numbers referenced in Fixes/Part of/Re:/Claims patterns.
+            Set of issue numbers referenced in Fixes/Part of/Re: patterns.
         """
         result = self._run_result(
             ["git", "log", "-1", "--format=%s %b"],
@@ -448,7 +454,7 @@ class CheckboxConverter(IssueManagerBase):
 
         issue_nums: set[int] = set()
         for match in re.finditer(
-            r"(?:Fixes|Part of|Re:|Claims) #(\d+)",
+            r"(?:Fixes|Part of|Re:) #(\d+)",
             result.value.stdout,
             re.IGNORECASE,
         ):
@@ -509,6 +515,7 @@ class CheckboxConverter(IssueManagerBase):
             REQUIRES: Last commit exists in git history
             ENSURES: Returns count of issues created (>= 0)
             ENSURES: Only processes issues referenced in last commit
+            ENSURES: Skips epic-labeled issues (their checklists are issue refs)
             ENSURES: Skips items that already have child issues
             ENSURES: Inherits P-label from parent issue
             ENSURES: Consolidates checkboxes in parent issue body
@@ -519,6 +526,19 @@ class CheckboxConverter(IssueManagerBase):
         lock_file = None
         try:
             issue_nums = self._get_commit_issue_numbers()
+            if not issue_nums:
+                return 0
+
+            # Fetch labels once per issue for epic check + P-level (#2669)
+            issue_labels: dict[int, list[str]] = {
+                n: self._get_issue_labels(n) for n in issue_nums
+            }
+
+            # Skip epic issues — their checklists reference existing issues (#N),
+            # not plain text tasks. Converting them would create duplicates. (#2627)
+            epic_issues = {n for n in issue_nums if "epic" in issue_labels.get(n, [])}
+            issue_nums -= epic_issues
+
             if not issue_nums:
                 return 0
 
@@ -546,8 +566,12 @@ class CheckboxConverter(IssueManagerBase):
                     issue_num
                 )
 
-                # Get parent's P-label to inherit
-                parent_p_label = self._get_issue_p_label(issue_num)
+                # Get parent's P-label from cached labels (#2669)
+                parent_p_label = next(
+                    (l for l in issue_labels.get(issue_num, [])
+                     if l in ("P0", "P1", "P2", "P3")),
+                    None,
+                )
 
                 # Filter items that don't already have child issues
                 # Check BOTH title AND hash to catch duplicates regardless of

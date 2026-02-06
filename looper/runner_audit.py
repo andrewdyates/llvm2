@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -23,11 +27,11 @@ __all__ = ["RunnerAuditMixin"]
 
 from looper.config import load_timeout_config
 from looper.context import (
-    check_urgent_handoff,
     get_do_audit_issues,
     run_system_health_check,
     transition_audit_to_review,
 )
+from looper.context.helpers import get_p_level
 from looper.context.issue_context import IterationIssueCache
 from looper.log import log_info, log_warning
 from looper.telemetry import check_consecutive_abort_alert, record_iteration
@@ -47,6 +51,47 @@ class RunnerAuditMixin:
         iteration_runner: IterationRunner
     """
 
+    @staticmethod
+    def _coerce_nonnegative_int(value: object, default: int) -> int:
+        """Return value when it's a non-negative int, otherwise default."""
+        if isinstance(value, bool):
+            return default
+        if isinstance(value, int) and value >= 0:
+            return value
+        return default
+
+    def _resolve_priority_tuned_audit_limits(
+        self,
+        do_audit_issues: list[dict],
+        default_max_rounds: int,
+        default_min_issues: int,
+    ) -> tuple[int, int]:
+        """Tune audit limits by the highest-priority do-audit issue.
+
+        If do-audit includes multiple priorities, the most severe priority wins
+        (P0 highest, P3 lowest). Per-priority keys are optional and fall back
+        to the global audit_max_rounds/audit_min_issues values.
+        """
+        levels = [
+            get_p_level(issue)
+            for issue in do_audit_issues
+            if isinstance(issue, dict)
+        ]
+        prioritized_levels = [level for level in levels if 0 <= level <= 3]
+        if not prioritized_levels:
+            return default_max_rounds, default_min_issues
+
+        highest_priority = min(prioritized_levels)
+        max_key = f"audit_max_rounds_p{highest_priority}"
+        min_key = f"audit_min_issues_p{highest_priority}"
+        tuned_max_rounds = self._coerce_nonnegative_int(
+            self.config.get(max_key), default_max_rounds
+        )
+        tuned_min_issues = self._coerce_nonnegative_int(
+            self.config.get(min_key), default_min_issues
+        )
+        return tuned_max_rounds, tuned_min_issues
+
     def _should_run_audit(
         self, exit_code: int, ai_tool: str
     ) -> tuple[bool, list[dict], int, int]:
@@ -56,8 +101,12 @@ class RunnerAuditMixin:
             (should_audit, do_audit_issues, audit_max_rounds, audit_min_issues)
         """
         auto_audit = self.config.get("auto_audit", True)
-        audit_max_rounds = self.config.get("audit_max_rounds", 5)
-        audit_min_issues = self.config.get("audit_min_issues", 3)
+        audit_max_rounds = self._coerce_nonnegative_int(
+            self.config.get("audit_max_rounds", 5), 5
+        )
+        audit_min_issues = self._coerce_nonnegative_int(
+            self.config.get("audit_min_issues", 3), 3
+        )
 
         if not auto_audit:
             return False, [], audit_max_rounds, audit_min_issues
@@ -73,6 +122,9 @@ class RunnerAuditMixin:
             return False, [], audit_max_rounds, audit_min_issues
 
         do_audit_issues = do_audit_result.value or []
+        audit_max_rounds, audit_min_issues = self._resolve_priority_tuned_audit_limits(
+            do_audit_issues, audit_max_rounds, audit_min_issues
+        )
         should_audit = (
             len(do_audit_issues) > 0
             and exit_code == 0
@@ -84,6 +136,11 @@ class RunnerAuditMixin:
         if ai_tool == "codex":
             audit_max_rounds = min(audit_max_rounds, 1)
 
+        # Explicit zero rounds means audit loop is disabled for this iteration.
+        if audit_max_rounds == 0:
+            log_info("  → audit_max_rounds=0; skipping follow-up audit rounds")
+            return False, do_audit_issues, audit_max_rounds, audit_min_issues
+
         return should_audit, do_audit_issues, audit_max_rounds, audit_min_issues
 
     def _run_single_audit_round(
@@ -94,6 +151,7 @@ class RunnerAuditMixin:
         selected_codex_model: str | None,
         audit_issue_list: str,
         audit_min_issues: int,
+        audit_max_rounds: int,
     ) -> tuple[int, float, bool, bool]:
         """Run a single audit round.
 
@@ -131,6 +189,8 @@ class RunnerAuditMixin:
             resume_session_id=session_id,
             force_ai_tool=ai_tool,
             force_codex_model=selected_codex_model,
+            audit_min_issues_override=audit_min_issues,
+            audit_max_rounds_override=audit_max_rounds,
         )
         audit_exit_code = result.exit_code
         audit_start_time = result.start_time
@@ -144,6 +204,11 @@ class RunnerAuditMixin:
         stop_file = self._check_stop_file()
         if stop_file:
             log_info(f"\n*** {stop_file} file detected - stopping audits ***")
+            stop_path = self._stop_dir / stop_file
+            reason = self._get_stop_file_reason(stop_path)
+            if reason:
+                log_info(f"    Reason: {reason}")
+            self._log_session_event("STOP", reason=reason, clean=True)
             self._consume_stop_file(stop_file)
             self.running = False
             return audit_exit_code, audit_start_time, False, True
@@ -254,6 +319,7 @@ class RunnerAuditMixin:
                 selected_codex_model,
                 audit_issue_list,
                 audit_min_issues,
+                audit_max_rounds,
             )
 
             if audit_start_time > 0:
@@ -322,19 +388,6 @@ class RunnerAuditMixin:
             log_info("📝 Session marked [INCOMPLETE] - continuing immediately")
             delay = 0
 
-        # Check for urgent-handoff issues targeting this role (#1645)
-        # Skip delay if another role urgently needs this role's attention
-        if delay > 0:
-            handoff_result = check_urgent_handoff(self.mode)
-            if handoff_result.ok and handoff_result.value:
-                issue_nums = handoff_result.value
-                log_info("")
-                log_info(
-                    f"🚨 Urgent handoff detected (#{', #'.join(map(str, issue_nums))}) - "
-                    "skipping delay"
-                )
-                delay = 0
-
         return delay
 
     def _finalize_iteration(
@@ -379,8 +432,9 @@ class RunnerAuditMixin:
             record_iteration(self.iteration_runner.pending_metrics)
             self.iteration_runner.pending_metrics = None
 
-        # Check for consecutive early abort alert (#1644)
-        check_consecutive_abort_alert()
+        # Check for consecutive early abort alert (#1644, #2408)
+        # Pass mode/worker_id for per-worker isolation
+        check_consecutive_abort_alert(mode=self.mode, worker_id=self.worker_id)
 
         # Convert unchecked checkboxes to new issues (Worker only)
         if self.mode == "worker" and session_committed:

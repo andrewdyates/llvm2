@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # spawn_all.sh - Spawn all 4 AI loops (worker, prover, researcher, manager)
 #
 # Copyright 2026 Dropbox, Inc.
@@ -38,8 +42,8 @@ Options:
   --dry-run            Show what would be executed without doing it
   --allow-dirty        Skip dirty worktree check (spawn without committing)
   --push               Push after auto-committing dirty worktree
-  --isolated           Use isolated checkouts (default)
-  --shared             Use shared checkout (opt-in)
+  --isolated           Use isolated checkouts (separate git clones per role)
+  --shared             Use shared checkout (default, all roles in same worktree)
   --roles              Comma-separated roles to spawn (default: worker,prover,researcher,manager)
   --workers=N          Number of workers to spawn (default: 2, max: 5)
   --provers=N          Number of provers to spawn (default: 1, max: 5)
@@ -53,8 +57,8 @@ Examples:
   spawn_all.sh --workers=3                  # 3 workers + prover, researcher, manager
   spawn_all.sh --provers=2                  # 2 provers (for heavy testing backlogs)
   spawn_all.sh --managers=2                 # 2 managers (for large audit backlogs)
-  spawn_all.sh --isolated                   # All roles in isolated checkouts (default)
-  spawn_all.sh --shared                     # All roles in shared checkout (opt-in)
+  spawn_all.sh --shared                     # All roles in shared checkout (default)
+  spawn_all.sh --isolated                   # All roles in isolated checkouts
   spawn_all.sh --dry-run                    # Preview what would run
 EOF
 }
@@ -63,7 +67,7 @@ EOF
 DRY_RUN=false
 ALLOW_DIRTY=false
 PUSH_AFTER_COMMIT=false
-ISOLATED=false  # Default to shared checkout; use --isolated for separate clones
+ISOLATED=false # Default to shared checkout; use --isolated for separate clones
 ROLES="worker,prover,researcher,manager"
 PROJECT=""
 NUM_WORKERS=2
@@ -75,91 +79,91 @@ SPAWN_COUNT=0
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        --version)
-            version
-            ;;
-        --dry-run)
-            DRY_RUN=true
-            shift
-            ;;
-        --allow-dirty)
-            ALLOW_DIRTY=true
-            shift
-            ;;
-        --push)
-            PUSH_AFTER_COMMIT=true
-            shift
-            ;;
-        --isolated)
-            ISOLATED=true
-            shift
-            ;;
-        --shared)
-            ISOLATED=false
-            shift
-            ;;
-        --roles)
-            if [[ -z "${2-}" ]]; then
-                echo "Error: --roles requires a comma-separated list" >&2
-                exit 1
-            fi
-            ROLES="$2"
-            shift 2
-            ;;
-        --roles=*)
-            ROLES="${1#*=}"
-            shift
-            ;;
-        --workers=*)
-            NUM_WORKERS="${1#*=}"
-            if ! [[ "$NUM_WORKERS" =~ ^[1-5]$ ]]; then
-                echo "Error: --workers must be between 1 and 5" >&2
-                exit 1
-            fi
-            shift
-            ;;
-        --provers=*)
-            NUM_PROVERS="${1#*=}"
-            if ! [[ "$NUM_PROVERS" =~ ^[1-5]$ ]]; then
-                echo "Error: --provers must be between 1 and 5" >&2
-                exit 1
-            fi
-            shift
-            ;;
-        --researchers=*)
-            NUM_RESEARCHERS="${1#*=}"
-            if ! [[ "$NUM_RESEARCHERS" =~ ^[1-5]$ ]]; then
-                echo "Error: --researchers must be between 1 and 5" >&2
-                exit 1
-            fi
-            shift
-            ;;
-        --managers=*)
-            NUM_MANAGERS="${1#*=}"
-            if ! [[ "$NUM_MANAGERS" =~ ^[1-5]$ ]]; then
-                echo "Error: --managers must be between 1 and 5" >&2
-                exit 1
-            fi
-            shift
-            ;;
-        -*)
-            echo "Error: Unknown option: $1" >&2
-            echo "Use --help for usage" >&2
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    --version)
+        version
+        ;;
+    --dry-run)
+        DRY_RUN=true
+        shift
+        ;;
+    --allow-dirty)
+        ALLOW_DIRTY=true
+        shift
+        ;;
+    --push)
+        PUSH_AFTER_COMMIT=true
+        shift
+        ;;
+    --isolated)
+        ISOLATED=true
+        shift
+        ;;
+    --shared)
+        ISOLATED=false
+        shift
+        ;;
+    --roles)
+        if [[ -z "${2-}" ]]; then
+            echo "Error: --roles requires a comma-separated list" >&2
             exit 1
-            ;;
-        *)
-            if [[ -z "$PROJECT" ]]; then
-                PROJECT="$1"
-            else
-                echo "Error: Too many arguments" >&2
-                exit 1
-            fi
-            shift
-            ;;
+        fi
+        ROLES="$2"
+        shift 2
+        ;;
+    --roles=*)
+        ROLES="${1#*=}"
+        shift
+        ;;
+    --workers=*)
+        NUM_WORKERS="${1#*=}"
+        if ! [[ "$NUM_WORKERS" =~ ^[1-5]$ ]]; then
+            echo "Error: --workers must be between 1 and 5" >&2
+            exit 1
+        fi
+        shift
+        ;;
+    --provers=*)
+        NUM_PROVERS="${1#*=}"
+        if ! [[ "$NUM_PROVERS" =~ ^[1-5]$ ]]; then
+            echo "Error: --provers must be between 1 and 5" >&2
+            exit 1
+        fi
+        shift
+        ;;
+    --researchers=*)
+        NUM_RESEARCHERS="${1#*=}"
+        if ! [[ "$NUM_RESEARCHERS" =~ ^[1-5]$ ]]; then
+            echo "Error: --researchers must be between 1 and 5" >&2
+            exit 1
+        fi
+        shift
+        ;;
+    --managers=*)
+        NUM_MANAGERS="${1#*=}"
+        if ! [[ "$NUM_MANAGERS" =~ ^[1-5]$ ]]; then
+            echo "Error: --managers must be between 1 and 5" >&2
+            exit 1
+        fi
+        shift
+        ;;
+    -*)
+        echo "Error: Unknown option: $1" >&2
+        echo "Use --help for usage" >&2
+        exit 1
+        ;;
+    *)
+        if [[ -z "$PROJECT" ]]; then
+            PROJECT="$1"
+        else
+            echo "Error: Too many arguments" >&2
+            exit 1
+        fi
+        shift
+        ;;
     esac
 done
 
@@ -184,17 +188,17 @@ else
 fi
 
 # Convert roles to array
-IFS=',' read -ra ROLE_ARRAY <<< "$ROLES"
+IFS=',' read -ra ROLE_ARRAY <<<"$ROLES"
 
 # Validate roles
 for role in "${ROLE_ARRAY[@]}"; do
     case "$role" in
-        worker|prover|researcher|manager) ;;
-        *)
-            echo "Error: Invalid role: $role" >&2
-            echo "Valid roles: worker, prover, researcher, manager" >&2
-            exit 1
-            ;;
+    worker | prover | researcher | manager) ;;
+    *)
+        echo "Error: Invalid role: $role" >&2
+        echo "Valid roles: worker, prover, researcher, manager" >&2
+        exit 1
+        ;;
     esac
 done
 
@@ -216,13 +220,13 @@ collect_stop_files "$PROJECT"
 if $ISOLATED; then
     for role in "${ROLE_ARRAY[@]}"; do
         case "$role" in
-            worker) role_count=$NUM_WORKERS ;;
-            prover) role_count=$NUM_PROVERS ;;
-            researcher) role_count=$NUM_RESEARCHERS ;;
-            manager) role_count=$NUM_MANAGERS ;;
+        worker) role_count=$NUM_WORKERS ;;
+        prover) role_count=$NUM_PROVERS ;;
+        researcher) role_count=$NUM_RESEARCHERS ;;
+        manager) role_count=$NUM_MANAGERS ;;
         esac
         if [[ "$role_count" -gt 1 ]]; then
-            for ((i=1; i<=role_count; i++)); do
+            for ((i = 1; i <= role_count; i++)); do
                 collect_stop_files "$HOME/repos/$PROJECT_NAME/${role}-${i}"
             done
         else
@@ -254,7 +258,7 @@ for pid_file in "$COORD_DIR"/.pid_*; do
     [[ -f "$pid_file" ]] || continue
     role_name=$(basename "$pid_file" | sed 's/^.pid_//')
     pid=$(cat "$pid_file" 2>/dev/null)
-    if [[ -n "$pid" ]] && ps -p "$pid" > /dev/null 2>&1; then
+    if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then
         RUNNING_PIDS+=("$role_name (PID $pid)")
     else
         STALE_PIDS+=("$(basename "$pid_file")")
@@ -312,7 +316,7 @@ check_dirty_worktree() {
     changed_files=$(git status --porcelain 2>/dev/null | head -20)
 
     if [[ -z "$changed_files" ]]; then
-        return 0  # Clean worktree
+        return 0 # Clean worktree
     fi
 
     local file_count
@@ -343,7 +347,7 @@ check_dirty_worktree() {
             commit_msg="[U]: $user_input"
         fi
     else
-        echo ""  # Newline after timeout
+        echo "" # Newline after timeout
     fi
 
     echo "Committing: $commit_msg"
@@ -375,10 +379,10 @@ fi
 TOTAL_SESSIONS=0
 for role in "${ROLE_ARRAY[@]}"; do
     case "$role" in
-        worker)     TOTAL_SESSIONS=$((TOTAL_SESSIONS + NUM_WORKERS)) ;;
-        prover)     TOTAL_SESSIONS=$((TOTAL_SESSIONS + NUM_PROVERS)) ;;
-        researcher) TOTAL_SESSIONS=$((TOTAL_SESSIONS + NUM_RESEARCHERS)) ;;
-        manager)    TOTAL_SESSIONS=$((TOTAL_SESSIONS + NUM_MANAGERS)) ;;
+    worker) TOTAL_SESSIONS=$((TOTAL_SESSIONS + NUM_WORKERS)) ;;
+    prover) TOTAL_SESSIONS=$((TOTAL_SESSIONS + NUM_PROVERS)) ;;
+    researcher) TOTAL_SESSIONS=$((TOTAL_SESSIONS + NUM_RESEARCHERS)) ;;
+    manager) TOTAL_SESSIONS=$((TOTAL_SESSIONS + NUM_MANAGERS)) ;;
     esac
 done
 
@@ -399,7 +403,7 @@ spawn_role() {
     local count=$2
     if [[ "$count" -gt 1 ]]; then
         # Multi-instance mode: spawn N instances with --id=1, --id=2, etc.
-        for ((i=1; i<=count; i++)); do
+        for ((i = 1; i <= count; i++)); do
             local -a cmd=("$SCRIPT_DIR/spawn_session.sh")
             # After the first spawn, sessions may dirty the worktree (logs, pid files).
             local allow_dirty=false
@@ -415,7 +419,7 @@ spawn_role() {
                 echo "[dry-run] ${cmd[*]}"
             else
                 "${cmd[@]}"
-                sleep 0.5  # Small delay between spawns to avoid race conditions
+                sleep 0.5 # Small delay between spawns to avoid race conditions
             fi
             SPAWN_COUNT=$((SPAWN_COUNT + 1))
         done
@@ -435,7 +439,7 @@ spawn_role() {
             echo "[dry-run] ${cmd[*]}"
         else
             "${cmd[@]}"
-            sleep 0.5  # Small delay between spawns to avoid race conditions
+            sleep 0.5 # Small delay between spawns to avoid race conditions
         fi
         SPAWN_COUNT=$((SPAWN_COUNT + 1))
     fi
@@ -444,10 +448,10 @@ spawn_role() {
 # Spawn each role
 for role in "${ROLE_ARRAY[@]}"; do
     case "$role" in
-        worker)     spawn_role "$role" "$NUM_WORKERS" ;;
-        prover)     spawn_role "$role" "$NUM_PROVERS" ;;
-        researcher) spawn_role "$role" "$NUM_RESEARCHERS" ;;
-        manager)    spawn_role "$role" "$NUM_MANAGERS" ;;
+    worker) spawn_role "$role" "$NUM_WORKERS" ;;
+    prover) spawn_role "$role" "$NUM_PROVERS" ;;
+    researcher) spawn_role "$role" "$NUM_RESEARCHERS" ;;
+    manager) spawn_role "$role" "$NUM_MANAGERS" ;;
     esac
 done
 

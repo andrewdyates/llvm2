@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -30,6 +34,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -170,7 +175,7 @@ def discover_harnesses(cwd: Path | None = None) -> list[str]:
     # Pattern to match kani proof attributes and extract function name
     # Handles both #[kani::proof] and #[cfg_attr(kani, kani::proof)]
     proof_pattern = re.compile(
-        r"#\[(kani::|cfg_attr\(kani,\s*kani::)proof\]"
+        r"#\[(?:kani::proof|cfg_attr\(kani,\s*kani::proof\))\]"
         r"[\s\S]*?"  # Non-greedy match until fn
         r"(?:pub\s+)?(?:async\s+)?fn\s+([a-zA-Z_][a-zA-Z0-9_]*)",
         re.MULTILINE,
@@ -193,7 +198,7 @@ def discover_harnesses(cwd: Path | None = None) -> list[str]:
             try:
                 content = rust_file.read_text(encoding="utf-8", errors="ignore")
                 for match in proof_pattern.finditer(content):
-                    fn_name = match.group(2)
+                    fn_name = match.group(1)
                     # Derive crate name from path
                     rel_path = rust_file.relative_to(root)
                     parts = rel_path.parts
@@ -259,6 +264,40 @@ def save_status(status: KaniStatus, status_file: Path) -> None:
     status_file.write_text(json.dumps(status.to_dict(), indent=2) + "\n")
 
 
+def _close_stdout(process: subprocess.Popen[str]) -> None:
+    """Best-effort close for subprocess stdout."""
+    if not process.stdout or process.stdout.closed:
+        return
+    with contextlib.suppress(OSError, ValueError):
+        process.stdout.close()
+
+
+def _drain_stdout(process: subprocess.Popen[str], output_lines: list[str]) -> None:
+    """Read remaining stdout output then close."""
+    if not process.stdout or process.stdout.closed:
+        return
+    try:
+        remaining_output = process.stdout.read()
+        if remaining_output:
+            output_lines.append(remaining_output)
+    except (OSError, ValueError):
+        pass
+    finally:
+        _close_stdout(process)
+
+
+def _format_timeout_error(timeout_sec: int, output_lines: list[str]) -> str:
+    """Build a short timeout message with last output excerpt."""
+    output = "".join(output_lines).strip()
+    if not output:
+        return f"Timeout after {timeout_sec}s"
+    tail_lines = output.splitlines()[-5:]
+    tail = " | ".join(line.strip() for line in tail_lines if line.strip())
+    if not tail:
+        return f"Timeout after {timeout_sec}s"
+    return f"Timeout after {timeout_sec}s (last output: {tail})"[:200]
+
+
 def run_harness(
     harness_name: str,
     timeout_sec: int,
@@ -311,6 +350,8 @@ def run_harness(
             )
             last_progress[0] = now
 
+    process = None
+    output_lines: list[str] = []
     try:
         # Run with timeout
         process = subprocess.Popen(
@@ -321,7 +362,6 @@ def run_harness(
             text=True,
         )
 
-        output_lines: list[str] = []
         deadline = time.monotonic() + timeout_sec
 
         while True:
@@ -348,17 +388,14 @@ def run_harness(
             # Check if process is done
             retcode = process.poll()
             if retcode is not None:
-                # Read any remaining output
-                if process.stdout:
-                    remaining_output = process.stdout.read()
-                    if remaining_output:
-                        output_lines.append(remaining_output)
+                _drain_stdout(process, output_lines)
                 break
 
             # Check timeout
             if time.monotonic() >= deadline:
                 process.kill()
                 process.wait()
+                _drain_stdout(process, output_lines)
                 duration = time.monotonic() - start_time
                 return HarnessResult(
                     status="timeout",
@@ -366,7 +403,7 @@ def run_harness(
                     timeout_sec=timeout_sec,
                     last_attempt=timestamp,
                     commit=commit,
-                    error_message=f"Timeout after {timeout_sec}s",
+                    error_message=_format_timeout_error(timeout_sec, output_lines),
                 )
 
         duration = time.monotonic() - start_time
@@ -411,6 +448,14 @@ def run_harness(
             last_attempt=timestamp,
             error_message=str(e)[:200],
         )
+    finally:
+        if process is not None and process.poll() is None:
+            with contextlib.suppress(OSError, ValueError):
+                process.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired, OSError, ValueError):
+                process.wait(timeout=1)
+        if process is not None:
+            _close_stdout(process)
 
 
 def _extract_error(output: str) -> str | None:

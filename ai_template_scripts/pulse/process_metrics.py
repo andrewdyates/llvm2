@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -21,6 +25,23 @@ from .constants import (
     LONG_RUNNING_EXCLUDE_PATTERNS,
     LONG_RUNNING_PROCESS_NAMES,
 )
+
+# Import shared crash categories per #2318
+try:
+    from ai_template_scripts.crash_categories import (
+        CrashCategoryStr,
+        CRASH_CATEGORIES,
+        is_expected_termination,
+    )
+except ImportError:
+    # Fallback for standalone usage
+    CrashCategoryStr = str  # type: ignore
+    CRASH_CATEGORIES = frozenset(
+        ["idle_abort", "signal_kill", "timeout", "stale_connection", "exit_error", "unknown"]
+    )
+
+    def is_expected_termination(category: str) -> bool:
+        return category in ("idle_abort", "stale_connection")
 
 try:
     from ai_template_scripts.subprocess_utils import run_cmd
@@ -263,13 +284,14 @@ def get_long_running_processes(
     return long_running
 
 
-def _classify_crash(message: str) -> str:
+def _classify_crash(message: str) -> CrashCategoryStr:
     """Classify a crash message into category.
 
-    Same categories as crash_analysis.crash_detector._get_crash_category().
-    Categories: idle_abort, signal_kill, timeout, stale_connection, exit_error, unknown.
+    Categories from CRASH_CATEGORIES per #2318 unification.
+    Same implementation as crash_analysis.crash_detector._get_crash_category().
 
     Part of #2311: Added idle_abort detection to match crash_analysis behavior.
+    Part of #2318: Now uses shared type from crash_categories module.
     """
     msg = message.lower()
     # Idle abort: expected exit when no issues are assigned
@@ -286,8 +308,19 @@ def _classify_crash(message: str) -> str:
     return "unknown"
 
 
+def _get_failure_log() -> Path:
+    """Resolve failures.log path with crashes.log fallback."""
+    failures_log = Path("worker_logs/failures.log")
+    crashes_log = Path("worker_logs/crashes.log")
+    if failures_log.exists():
+        return failures_log
+    if crashes_log.exists():
+        return crashes_log
+    return failures_log
+
+
 def get_recent_crashes() -> dict:
-    """Count crashes in last 24 hours from crashes.log, by type.
+    """Count crashes in last 24 hours from failures.log (fallback crashes.log), by type.
 
     Returns dict with:
       - total: all entries in 24h (crashes + idle_aborts + stale_connection)
@@ -302,7 +335,7 @@ def get_recent_crashes() -> dict:
     ENSURES: Returns 'by_type' as dict or None
     ENSURES: Never raises (returns zero counts on error)
     """
-    crash_log = Path("worker_logs/crashes.log")
+    crash_log = _get_failure_log()
     if not crash_log.exists():
         return {
             "total": 0,

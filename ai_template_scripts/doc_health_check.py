@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -33,6 +37,18 @@ import re
 import sys
 from pathlib import Path
 from typing import NamedTuple
+
+# Support running as script (not just as module)
+_repo_root = Path(__file__).resolve().parents[1]
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
+from ai_template_scripts.exclude_patterns import should_skip_path  # noqa: E402
+from ai_template_scripts.shared_logging import debug_swallow  # noqa: E402
+
+# Maximum file size to read for env var scanning (256KB)
+# Large files are unlikely to contain new env var references
+MAX_ENV_SCAN_FILE_SIZE = 256 * 1024
 
 
 class CheckResult(NamedTuple):
@@ -137,10 +153,14 @@ def check_env_vars(repo_path: Path) -> CheckResult:
     env_vars_used: set[str] = set()
 
     # Check Python files for os.environ or os.getenv
+    # Uses shared exclude patterns and size guard for performance (#2402)
     for py_file in repo_path.rglob("*.py"):
-        if ".venv" in str(py_file) or "node_modules" in str(py_file):
+        if should_skip_path(py_file.parts):
             continue
         try:
+            # Skip files larger than MAX_ENV_SCAN_FILE_SIZE (likely generated/vendored)
+            if py_file.stat().st_size > MAX_ENV_SCAN_FILE_SIZE:
+                continue
             content = py_file.read_text()
             # os.environ["VAR"] or os.getenv("VAR")
             env_vars_used.update(
@@ -149,15 +169,19 @@ def check_env_vars(repo_path: Path) -> CheckResult:
             # env.get("VAR")
             env_vars_used.update(re.findall(r'env\.get\(["\']([A-Z_]+)["\']', content))
         except Exception:
-            pass
+            debug_swallow("check_env_vars_py")
 
     # Check shell scripts for $VAR or ${VAR}
     for sh_file in repo_path.rglob("*.sh"):
+        if should_skip_path(sh_file.parts):
+            continue
         try:
+            if sh_file.stat().st_size > MAX_ENV_SCAN_FILE_SIZE:
+                continue
             content = sh_file.read_text()
             env_vars_used.update(re.findall(r"\$\{?([A-Z_]{3,})\}?", content))
         except Exception:
-            pass
+            debug_swallow("check_env_vars_sh")
 
     # Filter to likely project-specific vars (not PATH, HOME, etc.)
     common_vars = {
@@ -228,7 +252,7 @@ def check_recent_errors(repo_path: Path) -> CheckResult:
                     error_files.append(log_file.name)
                     break
         except Exception:
-            pass
+            debug_swallow("check_recent_errors")
 
     if error_files:
         return CheckResult(

@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -22,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from socket import gethostname
 
+from ai_template_scripts.subprocess_utils import is_process_alive
 from looper.log import log_info, log_warning
 from looper.subprocess_utils import run_git_command
 
@@ -49,17 +54,10 @@ __all__ = [
 def _is_pid_dead(pid: int) -> bool:
     """Check if a process with given PID is no longer running.
 
-    REQUIRES: pid > 0
-    ENSURES: Returns True if process is dead or inaccessible
-    ENSURES: Returns False if process is still running
+    Thin wrapper around is_process_alive for backward compatibility.
+    Exported in __all__ for tests that reference _is_pid_dead.
     """
-    try:
-        os.kill(pid, 0)  # Doesn't kill, just checks existence
-        return False  # Process exists
-    except ProcessLookupError:
-        return True  # Process doesn't exist
-    except PermissionError:
-        return False  # Process exists but we can't signal it
+    return not is_process_alive(pid)
 
 
 def _get_uncommitted_files() -> list[str]:

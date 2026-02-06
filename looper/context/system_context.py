@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -25,7 +29,7 @@ from looper.config import load_timeout_config
 from looper.context.uncommitted_warning import get_uncommitted_changes_warning
 from looper.log import debug_swallow
 from looper.result import Result
-from looper.telemetry import get_health_summary
+from looper.telemetry import get_audit_overhead_state, get_health_summary
 from looper.zones import get_zone_status_line
 
 
@@ -135,10 +139,13 @@ def get_system_status() -> Result[str]:
         if mem_pct is not None:
             parts.append(f"Mem: {mem_pct}%")
 
-        # Disk
+        # Disk - guard for edge cases (unmounted tmpfs, failed disk, container)
         disk = shutil.disk_usage(".")
-        disk_pct = int(disk.used * 100 / disk.total)
-        parts.append(f"Disk: {disk_pct}%")
+        if disk.total > 0:
+            # Clamp to [0, 100] - handles pathological states (e.g., btrfs
+            # compression where used > total is possible)
+            disk_pct = max(0, min(100, int(disk.used * 100 / disk.total)))
+            parts.append(f"Disk: {disk_pct}%")
 
         if not parts:
             return Result.success("")
@@ -169,6 +176,20 @@ def get_system_status() -> Result[str]:
                 status += f"\n{zone_line}"
         except (ValueError, Exception) as e:
             debug_swallow("get_zone_status_line", e)
+
+        # Audit-overhead circuit breaker mitigation (#2808)
+        try:
+            overhead = get_audit_overhead_state()
+            if overhead and overhead.state == "active":
+                status += (
+                    f"\nAudit-overhead circuit ACTIVE ({overhead.ratio:.0%} audit-like "
+                    f"in last {overhead.window_commits} commits): this iteration must "
+                    f"produce implementation/design/proof progress on existing tracked "
+                    f"issues; avoid filing duplicate symptom issues already covered by "
+                    f"open issues."
+                )
+        except Exception as e:
+            debug_swallow("audit_overhead_mitigation", e)
 
         # Add uncommitted changes warning if threshold exceeded (#1104)
         uncommitted_warning = get_uncommitted_changes_warning()

@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -17,6 +21,7 @@ Module contracts:
 import json
 import os
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -81,6 +86,71 @@ _STUCK_PROCESS_EXCLUDE_SUBSTRINGS = (
     "multiprocessing.spawn",
     ".claude/plugins",
 )
+
+# --- Pulse coordination constants (#2444) ---
+# When multiple sessions start simultaneously, only one should run pulse.
+# Others wait for lock, then use cached results if fresh enough.
+
+PULSE_CACHE_FRESHNESS_SEC = 60  # Cache valid for startup coordination
+PULSE_LOCK_TIMEOUT_SEC = 180  # Max wait for lock (same as pulse subprocess timeout)
+PULSE_LOCK_FILENAME = ".pulse.lock"  # Lock file in metrics/ directory
+
+# Cross-platform file locking for pulse coordination
+try:
+    import fcntl
+
+    def _pulse_lock_file(fd: int) -> None:
+        """Acquire exclusive lock on file descriptor."""
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+    def _pulse_unlock_file(fd: int) -> None:
+        """Release lock on file descriptor."""
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+    def _pulse_try_lock(fd: int, timeout_sec: float) -> bool:
+        """Attempt to acquire lock with timeout. Returns True if acquired."""
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except OSError:
+                # Lock held by another process, wait briefly
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return False
+                time.sleep(min(0.5, remaining))  # Longer sleep than gh wrapper (0.1s)
+        return False
+
+except ImportError:
+    # Windows - no fcntl, skip locking
+    def _pulse_lock_file(fd: int) -> None:  # type: ignore[misc]
+        pass
+
+    def _pulse_unlock_file(fd: int) -> None:  # type: ignore[misc]
+        pass
+
+    def _pulse_try_lock(fd: int, timeout_sec: float) -> bool:  # type: ignore[misc]
+        return True
+
+
+def _check_pulse_cache_fresh(metrics_dir: Path) -> bool:
+    """Check if pulse cache (metrics/latest.json) is fresh enough.
+
+    Contracts:
+        REQUIRES: metrics_dir is a valid Path
+        ENSURES: Returns True if latest.json exists and was modified within PULSE_CACHE_FRESHNESS_SEC
+        ENSURES: Returns False if file missing, unreadable, or too old
+    """
+    cache_file = metrics_dir / "latest.json"
+    try:
+        if not cache_file.exists():
+            return False
+        mtime = cache_file.stat().st_mtime
+        age_sec = time.time() - mtime
+        return age_sec < PULSE_CACHE_FRESHNESS_SEC
+    except OSError:
+        return False
 
 
 def _parse_ps_etime_minutes(etime: str) -> int:
@@ -229,7 +299,7 @@ def _maybe_rewrite_stuck_process_flag(*, repo_path: Path, flags_dir: Path) -> No
         if rewritten is not None:
             stuck.write_text(rewritten)
     except Exception:
-        pass
+        debug_swallow("rewrite_stuck_process_flag")
 
 
 def _read_file_tail_text(path: Path, *, max_bytes: int) -> str:
@@ -484,7 +554,7 @@ def _maybe_rewrite_untraceable_failures_flag(*, repo_path: Path, flags_dir: Path
         if rewritten is not None:
             path.write_text(rewritten)
     except Exception:
-        pass
+        debug_swallow("rewrite_untraceable_failures_flag")
 
 
 class StatusManager:
@@ -553,11 +623,15 @@ class StatusManager:
     def run_pulse(self) -> bool:
         """Run pulse.py to update health metrics and flags.
 
+        Multi-session coordination (#2444): When multiple sessions start
+        simultaneously, only one runs pulse.py. Others wait for the lock,
+        then use cached results if fresh (< 60s old).
+
         Contracts:
             REQUIRES: pulse_interval_minutes in config (default 30)
             ENSURES: Returns False if pulse interval not elapsed
             ENSURES: Returns False if pulse script missing
-            ENSURES: Returns True on successful pulse execution
+            ENSURES: Returns True on successful pulse execution or cache hit
             ENSURES: Updates self._last_pulse_time on completion
             ENSURES: Prints flag status or error message
             ENSURES: Never raises - catches TimeoutExpired and all exceptions
@@ -565,7 +639,7 @@ class StatusManager:
         interval_minutes = self.config.get("pulse_interval_minutes", 30)
         now = time.time()
 
-        # Check if enough time has passed
+        # Check if enough time has passed (per-session interval)
         elapsed_minutes = (now - self._last_pulse_time) / 60
         if self._last_pulse_time > 0 and elapsed_minutes < interval_minutes:
             return False
@@ -575,50 +649,188 @@ class StatusManager:
         if not pulse_script.exists():
             return False
 
+        metrics_dir = self._anchor_path(Path("metrics"))
+
+        # Phase 1: Pre-lock cache check (#2444)
+        # If another session just ran pulse, use cached results
+        if _check_pulse_cache_fresh(metrics_dir):
+            self._last_pulse_time = now
+            return self._report_pulse_flags(cached=True)
+
+        # Phase 2: Acquire lock and run pulse
+        return self._run_pulse_with_lock(pulse_script, metrics_dir, now)
+
+    def _run_pulse_with_lock(
+        self, pulse_script: Path, metrics_dir: Path, now: float
+    ) -> bool:
+        """Run pulse.py with coordination lock (#2444, #2685).
+
+        Emits progress every 10s during lock wait to prevent silent gaps.
+
+        Contracts:
+            REQUIRES: pulse_script exists
+            REQUIRES: metrics_dir is a valid Path
+            ENSURES: Only one session runs pulse at a time
+            ENSURES: Sessions waiting for lock get cached results when available
+            ENSURES: No silent gap >10s during lock wait (#2685)
+            ENSURES: Never raises - catches all exceptions
+        """
+        lock_path = metrics_dir / PULSE_LOCK_FILENAME
+        lock_fd = None
+
         try:
-            result = subprocess.run(
+            # Ensure metrics directory exists for lock file
+            metrics_dir.mkdir(exist_ok=True)
+            lock_fd = open(lock_path, "w")
+
+            # Try to acquire lock in 10s intervals with progress (#2685)
+            # Total timeout matches PULSE_LOCK_TIMEOUT_SEC (180s)
+            lock_attempt_sec = 10
+            attempts = 0
+            max_attempts = int(PULSE_LOCK_TIMEOUT_SEC / lock_attempt_sec)
+            got_lock = False
+
+            while attempts < max_attempts:
+                got_lock = _pulse_try_lock(lock_fd.fileno(), lock_attempt_sec)
+                if got_lock:
+                    break
+                attempts += 1
+                # Check if cache became fresh while waiting
+                if _check_pulse_cache_fresh(metrics_dir):
+                    self._last_pulse_time = now
+                    return self._report_pulse_flags(cached=True)
+                waited = attempts * lock_attempt_sec
+                log_info(
+                    f"  pulse: waiting for lock ({waited}s / "
+                    f"{PULSE_LOCK_TIMEOUT_SEC}s)..."
+                )
+
+            if not got_lock:
+                # Timeout waiting for lock - check if cache is now fresh
+                if _check_pulse_cache_fresh(metrics_dir):
+                    self._last_pulse_time = now
+                    return self._report_pulse_flags(cached=True)
+                log_warning("⚠️  Pulse lock timeout, no fresh cache")
+                return False
+
+            # Phase 3: Double-check cache after lock acquisition (#2444)
+            # Another session may have just finished while we waited
+            if _check_pulse_cache_fresh(metrics_dir):
+                self._last_pulse_time = now
+                return self._report_pulse_flags(cached=True)
+
+            # Phase 4: We're the one - run pulse
+            return self._execute_pulse(pulse_script, now)
+
+        except OSError as e:
+            # Lock file operations failed - proceed without coordination
+            debug_swallow("pulse_lock", e)
+            return self._execute_pulse(pulse_script, now)
+
+        finally:
+            # Release lock
+            if lock_fd is not None:
+                try:
+                    _pulse_unlock_file(lock_fd.fileno())
+                    lock_fd.close()
+                except OSError:
+                    pass
+
+    def _execute_pulse(self, pulse_script: Path, now: float) -> bool:
+        """Execute pulse.py subprocess, streaming stderr progress in real-time.
+
+        Contracts:
+            REQUIRES: pulse_script exists
+            ENSURES: Returns True on success, False on failure
+            ENSURES: Updates self._last_pulse_time on completion
+            ENSURES: Pulse stderr progress lines are emitted via log_info as they arrive
+        """
+        log_info("Pre-iteration: running pulse health check...")
+        timeout_sec = 180
+        proc: subprocess.Popen[str] | None = None
+        try:
+            # Pulse makes multiple sequential GitHub API calls (each up to 60s)
+            # Need enough time for: issue counts, blocked, stale, long-blocked,
+            # velocity, reopened - plus local scans. 180s covers typical case.
+            #
+            # Stream stderr so pulse _progress() messages appear in real-time
+            # instead of being swallowed by capture_output=True (#2619).
+            proc = subprocess.Popen(
                 ["python3", str(pulse_script)],
                 cwd=self.repo_path,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=60,
             )
+            # Stream stderr in a daemon thread so progress lines appear in
+            # real-time while proc.wait(timeout=) enforces the deadline.
+            # Iterating proc.stderr in the main thread would block until a
+            # line arrives, making timeout enforcement unreliable.
+            stderr_lines: list[str] = []
+
+            def _drain_stderr() -> None:
+                for raw in proc.stderr or ():
+                    line = raw.rstrip("\n")
+                    if line:
+                        stderr_lines.append(line)
+                        log_info(f"  pulse: {line.lstrip()}")
+
+            reader = threading.Thread(target=_drain_stderr, daemon=True)
+            reader.start()
+            proc.wait(timeout=timeout_sec)
+            reader.join(timeout=2)  # Give reader a moment to finish
             self._last_pulse_time = now
 
-            if result.returncode == 0:
-                # Check for flags set
-                flags_dir = self._anchor_path(FLAGS_DIR)
-                flags = list(flags_dir.glob("*")) if flags_dir.exists() else []
-                # Rewrite diagnostic flags with actionable details (#1638)
-                if flags_dir.exists():
-                    try:
-                        _maybe_rewrite_stuck_process_flag(
-                            repo_path=self.repo_path,
-                            flags_dir=flags_dir,
-                        )
-                        _maybe_rewrite_untraceable_failures_flag(
-                            repo_path=self.repo_path,
-                            flags_dir=flags_dir,
-                        )
-                    except Exception:
-                        pass
-                if flags:
-                    flag_names = ", ".join(f.name for f in flags[:5])
-                    log_info(f"⚡ Pulse: {flag_names}")
-                else:
-                    log_info("⚡ Pulse: OK (no flags)")
-                return True
+            if proc.returncode == 0:
+                return self._report_pulse_flags(cached=False)
+            stderr_text = "\n".join(stderr_lines)
             log_warning(
-                f"⚠️  Pulse error: {result.stderr[:100] if result.stderr else 'unknown'}"
+                f"⚠️  Pulse error: {stderr_text[:100] if stderr_text else 'unknown'}"
             )
             return False
         except subprocess.TimeoutExpired:
+            if proc is not None:
+                proc.kill()
+                proc.wait()
             log_warning("⚠️  Pulse timeout")
             return False
         except Exception as e:
-            # Catch-all: pulse subprocess failure logged, report failure
             log_warning(f"⚠️  Pulse failed: {e}")
             return False
+
+    def _report_pulse_flags(self, *, cached: bool) -> bool:
+        """Report pulse status based on flags.
+
+        Contracts:
+            REQUIRES: cached is a boolean
+            ENSURES: Logs pulse status with (cached) indicator if from cache
+            ENSURES: Rewrites diagnostic flags with actionable details
+            ENSURES: Returns True
+        """
+        flags_dir = self._anchor_path(FLAGS_DIR)
+        flags = list(flags_dir.glob("*")) if flags_dir.exists() else []
+
+        # Rewrite diagnostic flags with actionable details (#1638)
+        if flags_dir.exists():
+            try:
+                _maybe_rewrite_stuck_process_flag(
+                    repo_path=self.repo_path,
+                    flags_dir=flags_dir,
+                )
+                _maybe_rewrite_untraceable_failures_flag(
+                    repo_path=self.repo_path,
+                    flags_dir=flags_dir,
+                )
+            except Exception:
+                debug_swallow("pulse_rewrite_diagnostic_flags")
+
+        cache_indicator = " (cached)" if cached else ""
+        if flags:
+            flag_names = ", ".join(f.name for f in flags[:5])
+            log_info(f"⚡ Pulse: {flag_names}{cache_indicator}")
+        else:
+            log_info(f"⚡ Pulse: OK (no flags){cache_indicator}")
+        return True
 
     def rotate_logs(self) -> None:
         """Remove old log files to prevent unbounded growth.
@@ -761,6 +973,7 @@ class StatusManager:
         except subprocess.TimeoutExpired:
             return False
         except Exception:
+            debug_swallow("check_headless_violation")
             return False
 
     def _emit_headless_violation_flag(self, log_file: Path, details: str) -> None:
@@ -780,7 +993,8 @@ class StatusManager:
             # Use single timestamp for filename and content consistency
             now = datetime.now(UTC)
             timestamp = now.strftime("%Y%m%dT%H%M%S")
-            flag_file = flags_dir / f"headless_violation_{timestamp}"
+            # Include role in flag name for role-specific consumption (#2404)
+            flag_file = flags_dir / f"headless_violation_{self.mode}_{timestamp}"
             # Write violation details to flag file
             content = f"HEADLESS VIOLATION DETECTED\n"
             content += f"Log file: {log_file.name}\n"
@@ -789,7 +1003,7 @@ class StatusManager:
                 content += f"Details:\n{details[:500]}\n"
             flag_file.write_text(content)
         except Exception:
-            pass  # Best effort - don't fail the main flow
+            debug_swallow("emit_headless_violation_flag")  # Best effort
 
     def write_status(
         self,
@@ -830,13 +1044,18 @@ class StatusManager:
         if extra:
             data.update(extra)
 
-        # Atomic write
+        # Atomic write - clean up temp file on failure (#2419)
+        tmp = self.status_file.with_suffix(".tmp")
         try:
-            tmp = self.status_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, indent=2))
             tmp.rename(self.status_file)
         except OSError as e:
             debug_swallow("write_status", e)
+            # Clean up orphaned temp file if rename failed after write succeeded
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass  # Best effort cleanup
 
     def clear_status(self) -> None:
         """Remove status file on clean exit.
@@ -890,7 +1109,7 @@ class StatusManager:
             log_info("")
             log_info(f"*** {self.mode.upper()} stopped by STOP file (signal 15) ***")
             log_info("")
-            return  # Not a crash, don't log to crashes.log
+            return  # Not a crash, don't log to failures.log
 
         if exit_code < 0:
             error_msg = f"{ai_tool} killed by signal {signal_num}"
@@ -904,9 +1123,9 @@ class StatusManager:
         elif exit_code == 125:
             error_msg = f"{ai_tool} killed due to silence (stale connection)"
             is_error = False  # Expected after sleep/resume, will restart cleanly
-        elif exit_code == 126:
-            error_msg = "early abort: no issues assigned"
-            is_error = False  # Expected early abort, not an error (#1641)
+        elif exit_code == 127:
+            error_msg = "repo not initialized (no VISION.md + no issues)"
+            is_error = False  # Init failure, not an error - user needs to init
         else:
             error_msg = f"{ai_tool} exited with code {exit_code}"
             # Exit code 1 after successful commit = likely EPIPE or graceful exit

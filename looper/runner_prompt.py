@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -24,21 +28,30 @@ __all__ = ["show_prompt"]
 
 from pathlib import Path
 
-from looper.config import ROLES_DIR, inject_content, load_role_config, parse_frontmatter
+from looper.config import (
+    ROLES_DIR,
+    build_claude_autoload_context,
+    inject_content,
+    load_role_config,
+    parse_frontmatter,
+)
 from looper.context import run_session_start_commands
 from looper.rotation import get_rotation_focus
 
 
 def show_prompt(mode: str) -> None:
-    """Display the full system prompt with source annotations.
+    """Display the COMPLETE prompt that AI actually sees.
 
-    Shows how the prompt is assembled from:
-    - .claude/roles/shared.md (shared template)
-    - .claude/roles/{mode}.md (role-specific template)
-    - Injected content (git_log, gh_issues, rotation_focus, etc.)
+    For Claude, shows:
+    - [AUTO-LOADED BY CLAUDE] CLAUDE.md + .claude/rules/*.md
+    - [LOOPER INJECTED] shared.md + role.md with injection content
+
+    For Codex, shows:
+    - [LOOPER PREPENDED] CLAUDE.md + .claude/rules/*.md + .claude/codex.md
+    - [LOOPER INJECTED] shared.md + role.md with injection content
     """
     print("=" * 70)
-    print(f"SYSTEM PROMPT FOR: {mode.upper()}")
+    print(f"FULL AI PROMPT FOR: {mode.upper()}")
     print("=" * 70)
     print()
 
@@ -48,12 +61,25 @@ def show_prompt(mode: str) -> None:
     # Show source files
     print("### SOURCE FILES ###")
     print()
+    idx = 1
+    # Claude auto-loads these
+    if Path("CLAUDE.md").exists():
+        print(f"{idx}. CLAUDE.md [AUTO-LOADED BY CLAUDE]")
+        idx += 1
+    rules_dir = Path(".claude/rules")
+    if rules_dir.exists():
+        rules_files = sorted(rules_dir.glob("*.md"))
+        if rules_files:
+            print(f"{idx}. .claude/rules/*.md ({len(rules_files)} files) [AUTO-LOADED BY CLAUDE]")
+            idx += 1
     shared_path = ROLES_DIR / "shared.md"
     role_path = ROLES_DIR / f"{mode}.md"
-    print(f"1. {shared_path}")
-    print(f"2. {role_path}")
+    print(f"{idx}. {shared_path} [LOOPER INJECTED]")
+    idx += 1
+    print(f"{idx}. {role_path} [LOOPER INJECTED]")
+    idx += 1
     if Path(".looper_config.json").exists():
-        print("3. .looper_config.json (config overrides)")
+        print(f"{idx}. .looper_config.json (config overrides)")
     print()
 
     # Show config
@@ -124,6 +150,7 @@ def show_prompt(mode: str) -> None:
     replacements = {
         "git_log": session_results.get("git_log", "(unavailable)"),
         "gh_issues": session_results.get("gh_issues", "(unavailable)"),
+        "active_issue": session_results.get("active_issue", ""),
         "last_directive": session_results.get("last_directive", ""),
         "other_feedback": session_results.get("other_feedback", ""),
         "role_mentions": session_results.get("role_mentions", ""),
@@ -131,46 +158,57 @@ def show_prompt(mode: str) -> None:
         "audit_data": session_results.get("audit_data", ""),
         "rotation_focus": rotation_focus,
         "audit_min_issues": str(audit_min_issues),
+        "recovery_context": "",  # Only populated during crash recovery
+        "theme_context": "",  # Not available in diagnostic mode (#2574)
+        "handoff_context": session_results.get("handoff_context", ""),
     }
 
-    # Show template before injection
-    print("### TEMPLATE (before injection) ###")
-    print()
-    print("--- shared.md ---")
-    shared_content = (ROLES_DIR / "shared.md").read_text()
-    _, shared_body = parse_frontmatter(shared_content)
-    # Show first 20 lines
-    for line in shared_body.strip().split("\n")[:20]:
-        print(f"  {line}")
-    if shared_body.count("\n") > 20:
-        print(f"  ... ({shared_body.count(chr(10)) - 20} more lines)")
+    # Apply injections to looper prompt
+    looper_prompt = inject_content(prompt_template, replacements)
+
+    # Build complete prompt (what AI actually sees)
+    autoload_context = build_claude_autoload_context()
+    autoload_lines = autoload_context.count("\n") + 1 if autoload_context else 0
+
+    print("=" * 70)
+    print("COMPLETE PROMPT (what AI actually sees)")
+    print("=" * 70)
     print()
 
-    print(f"--- {mode}.md ---")
-    role_content = (ROLES_DIR / f"{mode}.md").read_text()
-    _, role_body = parse_frontmatter(role_content)
-    # Show first 30 lines
-    for line in role_body.strip().split("\n")[:30]:
-        print(f"  {line}")
-    if role_body.count("\n") > 30:
-        print(f"  ... ({role_body.count(chr(10)) - 30} more lines)")
-    print()
+    # Show auto-loaded content
+    if autoload_context:
+        print("### [AUTO-LOADED BY CLAUDE] ###")
+        print("-" * 70)
+        print(autoload_context)
+        print("-" * 70)
+        print()
 
-    # Apply injections and show final prompt
-    final_prompt = inject_content(prompt_template, replacements)
-
-    print("### FINAL PROMPT (after injection) ###")
-    print()
+    # Show looper-injected content
+    print("### [LOOPER INJECTED] ###")
     print("-" * 70)
-    print(final_prompt)
+    print(looper_prompt)
     print("-" * 70)
     print()
 
     # Summary
+    full_prompt = f"{autoload_context}\n\n{looper_prompt}" if autoload_context else looper_prompt
     print("### SUMMARY ###")
     print()
-    print(f"  Total prompt length: {len(final_prompt)} chars")
-    print(f"  Total prompt lines: {final_prompt.count(chr(10)) + 1}")
+    print(f"  Auto-loaded content: {len(autoload_context)} chars, {autoload_lines} lines")
+    print(f"  Looper prompt: {len(looper_prompt)} chars, {looper_prompt.count(chr(10)) + 1} lines")
+    print(f"  TOTAL: {len(full_prompt)} chars, {full_prompt.count(chr(10)) + 1} lines")
     replaced = len([k for k, v in replacements.items() if v])
     print(f"  Injection markers replaced: {replaced}")
     print()
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) < 2:
+        print("Usage: python -m looper.runner_prompt <role>")
+        print("  Roles: worker, manager, prover, researcher")
+        sys.exit(1)
+
+    role = sys.argv[1].lower()
+    show_prompt(role)

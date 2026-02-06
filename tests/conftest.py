@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -69,6 +73,29 @@ from unittest.mock import MagicMock, create_autospec
 import pytest
 
 import ai_template_scripts.cargo_wrapper as cargo_wrapper
+
+
+# ==== Required test dependency validation (#2736) ====
+# Fail fast when optional test deps are missing instead of silently degrading.
+# Prior occurrences of silent failures: #1936, #2542.
+
+def pytest_configure(config):
+    """Validate required test dependencies are installed."""
+    missing = []
+    try:
+        import pytest_timeout  # noqa: F401
+    except ImportError:
+        missing.append("pytest-timeout")
+    try:
+        import hypothesis  # noqa: F401
+    except ImportError:
+        missing.append("hypothesis")
+    if missing:
+        raise pytest.UsageError(
+            f"Required test dependencies not installed: {', '.join(missing)}. "
+            "Run: pip install -e '.[test]'"
+        )
+
 from ai_template_scripts.subprocess_utils import CmdResult, run_cmd
 from looper.issue_manager import IssueManager
 
@@ -282,7 +309,9 @@ def lock_env(tmp_path):
     Saves and restores all cargo_wrapper global state:
     - LOCK_DIR, LOCK_FILE, LOCK_META
     - BUILDS_LOG, ORPHANS_LOG
-    - _lock_held flag
+    - LOCK_KIND, _lock_held
+    - TIMEOUT_CONFIG, LIMITS_CONFIG
+    - _child_process, _child_pgid
 
     Yields:
         tmp_path: Temporary directory for test lock files
@@ -295,6 +324,10 @@ def lock_env(tmp_path):
     orig_orphans_log = cargo_wrapper.ORPHANS_LOG
     orig_lock_held = cargo_wrapper._lock_held
     orig_lock_kind = cargo_wrapper.LOCK_KIND
+    orig_timeout_config = cargo_wrapper.TIMEOUT_CONFIG
+    orig_limits_config = cargo_wrapper.LIMITS_CONFIG
+    orig_child_process = cargo_wrapper._child_process
+    orig_child_pgid = cargo_wrapper._child_pgid
 
     # Set test paths
     cargo_wrapper.LOCK_DIR = tmp_path
@@ -302,6 +335,10 @@ def lock_env(tmp_path):
     cargo_wrapper.BUILDS_LOG = tmp_path / "builds.log"
     cargo_wrapper.ORPHANS_LOG = tmp_path / "orphans.log"
     cargo_wrapper._lock_held = False
+    cargo_wrapper.TIMEOUT_CONFIG = None
+    cargo_wrapper.LIMITS_CONFIG = None
+    cargo_wrapper._child_process = None
+    cargo_wrapper._child_pgid = None
 
     yield tmp_path
 
@@ -313,6 +350,10 @@ def lock_env(tmp_path):
     cargo_wrapper.ORPHANS_LOG = orig_orphans_log
     cargo_wrapper._lock_held = orig_lock_held
     cargo_wrapper.LOCK_KIND = orig_lock_kind
+    cargo_wrapper.TIMEOUT_CONFIG = orig_timeout_config
+    cargo_wrapper.LIMITS_CONFIG = orig_limits_config
+    cargo_wrapper._child_process = orig_child_process
+    cargo_wrapper._child_pgid = orig_child_pgid
 
 
 @contextlib.contextmanager
@@ -336,6 +377,10 @@ def lock_env_context(tmp_path: Path):
     orig_orphans_log = cargo_wrapper.ORPHANS_LOG
     orig_lock_held = cargo_wrapper._lock_held
     orig_lock_kind = cargo_wrapper.LOCK_KIND
+    orig_timeout_config = cargo_wrapper.TIMEOUT_CONFIG
+    orig_limits_config = cargo_wrapper.LIMITS_CONFIG
+    orig_child_process = cargo_wrapper._child_process
+    orig_child_pgid = cargo_wrapper._child_pgid
 
     # Set test paths
     cargo_wrapper.LOCK_DIR = tmp_path
@@ -343,6 +388,10 @@ def lock_env_context(tmp_path: Path):
     cargo_wrapper.BUILDS_LOG = tmp_path / "builds.log"
     cargo_wrapper.ORPHANS_LOG = tmp_path / "orphans.log"
     cargo_wrapper._lock_held = False
+    cargo_wrapper.TIMEOUT_CONFIG = None
+    cargo_wrapper.LIMITS_CONFIG = None
+    cargo_wrapper._child_process = None
+    cargo_wrapper._child_pgid = None
 
     try:
         yield tmp_path
@@ -355,6 +404,10 @@ def lock_env_context(tmp_path: Path):
         cargo_wrapper.ORPHANS_LOG = orig_orphans_log
         cargo_wrapper._lock_held = orig_lock_held
         cargo_wrapper.LOCK_KIND = orig_lock_kind
+        cargo_wrapper.TIMEOUT_CONFIG = orig_timeout_config
+        cargo_wrapper.LIMITS_CONFIG = orig_limits_config
+        cargo_wrapper._child_process = orig_child_process
+        cargo_wrapper._child_pgid = orig_child_pgid
 
 
 # ==== IssueManager fixtures ====

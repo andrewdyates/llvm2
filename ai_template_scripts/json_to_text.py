@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -22,7 +26,7 @@ from ai_template_scripts.json_to_text import *  # noqa: F401,F403,E402
 __all__ = json_to_text_pkg.__all__
 
 
-def main():
+def main() -> None:
     """Entry point for the json_to_text shim."""
     return json_to_text_pkg.main()
 

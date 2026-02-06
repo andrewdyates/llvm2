@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -11,6 +15,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from ai_template_scripts.subprocess_utils import is_process_alive
 from looper.config import LOG_DIR
 from looper.log import debug_swallow, log_info
 from looper.rotation import (
@@ -30,19 +35,6 @@ __all__ = [
     "cleanup_stale_state_files",
     "cleanup_stale_status_files",
 ]
-
-
-def _is_pid_alive(pid: int) -> bool:
-    """Return True if the PID exists, False if not."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
 
 
 def _parse_iso_timestamp(value: str) -> datetime | None:
@@ -156,7 +148,7 @@ def cleanup_stale_pid_files(coord_dir: Path) -> int:
         except (ValueError, OSError):
             pid = 0
 
-        if pid <= 0 or not _is_pid_alive(pid):
+        if pid <= 0 or not is_process_alive(pid):
             try:
                 pid_file.unlink()
                 removed += 1
@@ -188,7 +180,7 @@ def cleanup_stale_status_files(repo_root: Path, max_age_hours: int = 1) -> int:
         except (json.JSONDecodeError, OSError, TypeError) as e:
             debug_swallow("cleanup_stale_status_files_read", e)
 
-        if pid > 0 and _is_pid_alive(pid):
+        if pid > 0 and is_process_alive(pid):
             continue
 
         age_hours = None

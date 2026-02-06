@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates
 # Licensed under the Apache License, Version 2.0
 
 """check_doc_claims.py - Verify machine-checkable documentation claims.
 
-Parses YAML frontmatter from CLAUDE.md and VISION.md, verifies that
-claimed code paths and markers actually exist in the codebase.
+Parses YAML frontmatter from CLAUDE.md, VISION.md, and README.md, verifies
+that claimed code paths and markers actually exist in the codebase.
 
 Usage:
     check_doc_claims.py                      # Check all docs, human output
@@ -68,8 +72,8 @@ __all__ = [
     "HeuristicResult",
 ]
 
-# Files to scan for claims
-DOC_FILES = ["CLAUDE.md", "VISION.md"]
+# Files to scan for claims (#2917: includes README.md for scope alignment)
+DOC_FILES = ["CLAUDE.md", "VISION.md", "README.md"]
 
 # Default keyword lists for heuristic drift detection (#1518)
 # These keywords indicate capabilities that should have code backing them
@@ -264,8 +268,11 @@ def check_claim(base_dir: Path, claim: dict) -> dict:
             base_dir, claim["code_marker"]
         )
 
-    # Determine overall verification status
-    verified = True
+    # Determine overall verification status.
+    # A claim with neither code_path nor code_marker has no verifiable
+    # assertion and must not be counted as verified (vacuous-pass guard).
+    has_assertions = "code_path_verified" in result or "code_marker_verified" in result
+    verified = has_assertions
     if "code_path_verified" in result and not result["code_path_verified"]:
         verified = False
     if "code_marker_verified" in result and not result["code_marker_verified"]:
@@ -273,6 +280,11 @@ def check_claim(base_dir: Path, claim: dict) -> dict:
 
     result["verified"] = verified
     return result
+
+
+def _has_frontmatter_delimiters(content: str) -> bool:
+    """Check if content starts with YAML frontmatter delimiters (``---``)."""
+    return bool(re.match(r"^---\s*\n", content))
 
 
 class DocClaimsResults(TypedDict):
@@ -283,6 +295,7 @@ class DocClaimsResults(TypedDict):
     verified_claims: int
     unverified_claims: int
     drift: list[dict[str, Any]]
+    parse_errors: list[dict[str, str]]
 
 
 # Heuristic keyword detection (#1518)
@@ -323,7 +336,7 @@ def load_keywords(keywords_path: Path | None) -> dict[str, list[str]]:
 def extract_doc_keywords(base_dir: Path) -> set[str]:
     """Extract all keywords mentioned in documentation.
 
-    Scans CLAUDE.md and VISION.md for keyword mentions.
+    Scans DOC_FILES (CLAUDE.md, VISION.md, README.md) for keyword mentions.
     Returns set of lowercase keywords found.
 
     REQUIRES: base_dir is a Path to existing directory
@@ -544,6 +557,7 @@ def check_doc_claims(base_dir: Path) -> DocClaimsResults:
         "verified_claims": 0,
         "unverified_claims": 0,
         "drift": [],
+        "parse_errors": [],
     }
 
     for doc_name in DOC_FILES:
@@ -581,6 +595,18 @@ def check_doc_claims(base_dir: Path) -> DocClaimsResults:
                                     "details": claim_result,
                                 }
                             )
+                elif _has_frontmatter_delimiters(content) and (
+                    frontmatter is None or "claims" not in frontmatter
+                ):
+                    # Frontmatter delimiters present but parsing yielded no
+                    # claims — likely malformed YAML (#2918).
+                    doc_result["parse_error"] = (
+                        "frontmatter delimiters found but no claims parsed"
+                    )
+                    results["parse_errors"].append({
+                        "doc": doc_name,
+                        "error": doc_result["parse_error"],
+                    })
 
             except (OSError, UnicodeDecodeError) as e:
                 doc_result["error"] = str(e)

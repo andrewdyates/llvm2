@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -26,7 +30,7 @@ from looper.config import load_role_config
 from looper.file_tracker import get_uncommitted_files
 from looper.iteration import extract_issue_numbers
 from looper.log import log_info
-from looper.sync import check_uncommitted_work_size
+from looper.sync import warn_uncommitted_work
 
 
 class RunnerLoopMixin:
@@ -70,10 +74,21 @@ class RunnerLoopMixin:
 
         try:
             while self.running:
+                # Update heartbeat and detect wake from sleep
+                # Must happen before STOP check so sleep detection informs expiry
+                self._update_heartbeat()
+
                 # Check for STOP file
                 stop_file = self._check_stop_file()
                 if stop_file:
                     log_info(f"\n*** {stop_file} detected - stopping ***")
+                    # Extract reason from STOP file content before consuming
+                    stop_path = self._stop_dir / stop_file
+                    reason = self._get_stop_file_reason(stop_path)
+                    if reason:
+                        log_info(f"    Reason: {reason}")
+                    # Log STOP event to session log (clean shutdown)
+                    self._log_session_event("STOP", reason=reason, clean=True)
                     self._consume_stop_file(stop_file)
                     self.running = False
                     break
@@ -90,6 +105,7 @@ class RunnerLoopMixin:
                 # Runs every 10 iterations to catch issues auto-closed via Fixes commits
                 cleanup_interval = self.config.get("cleanup_closed_interval", 10)
                 if cleanup_interval > 0 and self.iteration % cleanup_interval == 0:
+                    log_info("Pre-iteration: cleaning up closed issue labels...")
                     self.issue_manager.cleanup_closed_issues_labels()
 
                 # Replay pending gh operations from change_log.json (#1846)
@@ -99,6 +115,7 @@ class RunnerLoopMixin:
                         replay_pending_changes,
                     )
 
+                    log_info("Pre-iteration: replaying pending changes...")
                     replay_pending_changes(max_per_call=3)
                 except ImportError:
                     pass  # gh_post not available - skip replay
@@ -130,9 +147,10 @@ class RunnerLoopMixin:
                     "uncommitted_warn_threshold", 100
                 )
                 if uncommitted_threshold > 0:
-                    check_uncommitted_work_size(threshold=uncommitted_threshold)
+                    warn_uncommitted_work(threshold=uncommitted_threshold)
 
                 # Run main iteration
+                log_info("Pre-iteration: building iteration context...")
                 result = self.run_iteration(audit_round=0)
                 exit_code = result.exit_code
                 start_time = result.start_time

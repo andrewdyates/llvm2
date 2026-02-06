@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -9,11 +13,15 @@ canonical git repository identification functions.
 
 Public API (library usage):
     from ai_template_scripts.subprocess_utils import (
-        CmdResult,             # Structured result wrapper
-        run_cmd,               # Run command with timeout
-        run_cmd_with_retry,    # Retry wrapper for transient failures
-        get_repo_name,         # Get repo name from git remote (local use)
-        get_github_repo,       # Get owner/repo from gh CLI (GitHub API use)
+        CmdResult,                # Structured result wrapper
+        run_cmd,                  # Run command with timeout
+        run_cmd_with_retry,       # Retry wrapper for transient failures
+        get_repo_name,            # Get repo name from git remote (local use)
+        get_github_repo,          # Get owner/repo from gh CLI (GitHub API use)
+        is_process_alive,         # Check if PID is alive (consolidated from 13+ locations)
+        get_git_root,             # Get git repository root path (consolidated from 9+ locations)
+        format_duration_precise,  # Compound format: 1h02m05s (diagnostics)
+        format_duration_compact,  # Abbreviated format: 2.0h (task lists)
     )
 """
 
@@ -25,9 +33,14 @@ __all__ = [
     "run_cmd_with_retry",
     "get_repo_name",
     "get_github_repo",
+    "is_process_alive",
+    "get_git_root",
+    "format_duration_precise",
+    "format_duration_compact",
 ]
 
 import json
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -297,3 +310,116 @@ def get_github_repo(gh_path: str = "gh", cwd: Path | None = None) -> CmdResult:
             stderr=result.stdout,
             error=f"Invalid JSON response: {e}",
         )
+
+
+def is_process_alive(pid: int) -> bool:
+    """Check if process with given PID is alive.
+
+    Canonical implementation consolidated from 13+ locations across the codebase.
+    Uses os.kill(pid, 0) which sends no signal but checks process existence.
+
+    REQUIRES: pid is a valid integer (typically > 0)
+    ENSURES: Returns True if process exists (or permission denied)
+    ENSURES: Returns False if process does not exist
+    ENSURES: Never raises - returns False on any error
+
+    Args:
+        pid: Process ID to check
+
+    Returns:
+        True if process is alive, False otherwise
+
+    Example:
+        if is_process_alive(worker_pid):
+            print("Worker still running")
+        else:
+            print("Worker terminated")
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        # Process doesn't exist
+        return False
+    except PermissionError:
+        # Process exists but we don't have permission to signal it
+        return True
+    except (OSError, TypeError, ValueError):
+        # Invalid PID or other OS error
+        return False
+
+
+def get_git_root(cwd: Path | None = None) -> Path | None:
+    """Get the git repository root directory.
+
+    Canonical implementation consolidated from 9+ locations across the codebase.
+    Returns None on failure instead of raising, for consistent error handling.
+
+    REQUIRES: Optional cwd path or current directory
+    ENSURES: Returns Path to repo root if in a git repository
+    ENSURES: Returns None if not in a git repository or on error
+    ENSURES: Never raises - returns None on any error
+
+    Args:
+        cwd: Working directory to check (default: current directory)
+
+    Returns:
+        Path to git repository root, or None if not in a repository
+
+    Example:
+        root = get_git_root()
+        if root:
+            config_path = root / ".looper_config.json"
+        else:
+            print("Not in a git repository")
+
+    Note:
+        For functions that need to raise on failure, use:
+            root = get_git_root()
+            if root is None:
+                raise RuntimeError("Not in a git repository")
+    """
+    result = run_cmd(["git", "rev-parse", "--show-toplevel"], timeout=10, cwd=cwd)
+    if result.ok:
+        return Path(result.stdout.strip())
+    return None
+
+
+def format_duration_precise(seconds: int) -> str:
+    """Format seconds as compound duration (e.g. 1h02m05s).
+
+    Consolidated from cargo_lock_info.py (#2535). Use for diagnostics and lock
+    age display where exact breakdown matters.
+
+    REQUIRES: seconds is numeric (will be converted to int)
+    ENSURES: returns non-empty string in format [Dd][HHh][MMm]SSs
+    """
+    seconds = max(0, int(seconds))
+    mins, sec = divmod(seconds, 60)
+    hrs, mins = divmod(mins, 60)
+    days, hrs = divmod(hrs, 24)
+    if days:
+        return f"{days}d{hrs:02}h{mins:02}m{sec:02}s"
+    if hrs:
+        return f"{hrs}h{mins:02}m{sec:02}s"
+    if mins:
+        return f"{mins}m{sec:02}s"
+    return f"{sec}s"
+
+
+def format_duration_compact(seconds: float) -> str:
+    """Format seconds as abbreviated duration (e.g. 2.0h).
+
+    Consolidated from bg_task/cli.py (#2535). Use for brief task list display
+    where a single-unit approximation is sufficient.
+
+    REQUIRES: seconds >= 0
+    ENSURES: return ends with 's', 'm', or 'h' suffix
+    """
+    if seconds < 0:
+        raise ValueError(f"seconds must be >= 0, got {seconds}")
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds / 3600:.1f}h"

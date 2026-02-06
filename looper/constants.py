@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -18,7 +22,7 @@ __all__ = [
     # Exit codes
     "EXIT_TIMEOUT",
     "EXIT_SILENCE",
-    "EXIT_NO_ISSUES",
+    "EXIT_NOT_INITIALIZED",
     # Directories
     "LOG_DIR",
     "METRICS_DIR",
@@ -35,7 +39,8 @@ __all__ = [
 # Each code indicates a specific termination reason for telemetry categorization.
 EXIT_TIMEOUT = 124  # AI tool timed out
 EXIT_SILENCE = 125  # AI tool exceeded silence threshold
-EXIT_NO_ISSUES = 126  # No issues assigned - fail-fast (#1641)
+# 126 removed - early abort replaced by Maintenance Mode (#2410)
+EXIT_NOT_INITIALIZED = 127  # Repo not initialized (no VISION.md + no issues)
 
 # --- Directory Paths ---
 # Central definitions for directories used by looper.

@@ -7,6 +7,15 @@ This document describes the git hooks provided by ai_template.
 
 ## Installation
 
+**Hook installation methods:**
+
+| Method | When | Installs |
+|--------|------|----------|
+| `init_from_template.sh` | New repos from template | All hooks |
+| `looper.py` startup | AI session start | All hooks |
+| `install_hooks.sh` | Manual installation | All hooks |
+| Git wrapper auto-install | First `git commit` | commit-msg only |
+
 **New repos:** Hooks are installed automatically by `init_from_template.sh`.
 
 **Existing repos:** Run from your repository root after cloning:
@@ -16,6 +25,12 @@ This document describes the git hooks provided by ai_template.
 ```
 
 This installs the pre-commit framework and configures all hooks.
+
+**Partial auto-install:** The git wrapper (`ai_template_scripts/bin/git`) automatically installs the commit-msg hook on first commit. This ensures role enforcement (Fixes #N restrictions) even in fresh clones. However, pre-commit and post-commit hooks require explicit installation.
+
+**Manual sessions:** If you're working manually (not via looper), run `install_hooks.sh` to get the full hook suite:
+- **pre-commit**: Copyright headers, test ignore detection, build gate
+- **post-commit**: Claims/Unclaims label automation
 
 ## Available Hooks
 
@@ -134,3 +149,86 @@ CLAIM_VALIDATION_SKIP=1 git push
 ```
 
 Use sparingly - hooks exist to catch problems before they propagate.
+
+## Local Issues
+
+The hooks support local issue tracking via the `.issues/` directory. This enables offline development when GitHub API is unavailable.
+
+### Local Issue Syntax
+
+Local issues use `L`-prefixed IDs:
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| `#LN` | `#L42` | References local issue 42 |
+| `Part of #LN` | `Part of #L1` | Links to local issue without closing |
+| `Fixes #LN` | `Fixes #L1` | Closes local issue (Manager/User only) |
+| `Claims #LN` | `Claims #L1` | Adds in-progress label |
+| `Unclaims #LN` | `Unclaims #L1` | Removes in-progress label |
+| `Reopens #LN` | `Reopens #L1` | Reopens closed local issue |
+
+### Local Issue File Format
+
+Local issues are stored in `.issues/L<N>.md` with YAML frontmatter:
+
+```markdown
+---
+title: "Issue title"
+state: open
+labels: ["P2", "feature"]
+created: 2026-01-15T10:00:00Z
+---
+
+Issue body content here.
+
+## Comments
+- 2026-01-15: Initial filing
+```
+
+### AIT_LOCAL_MODE Environment Variable
+
+| Value | Behavior |
+|-------|----------|
+| (unset) | Normal mode - uses GitHub API for all issue operations |
+| `full` | Full local mode - skips ALL GitHub API calls, validates only local issues |
+
+In full local mode:
+- commit-msg hook skips GitHub issue validation
+- post-commit hook skips GitHub label operations
+- Local issues (#LN) work normally
+- GitHub issues (#N) are assumed to exist (no validation)
+
+**Usage:**
+
+```bash
+# Enable full local mode for offline work
+export AIT_LOCAL_MODE=full
+
+# Work on local issues without internet
+git commit -m "[W]123: Part of #L1 - Add feature"
+
+# Disable when back online
+unset AIT_LOCAL_MODE
+```
+
+### Local Issue Functions
+
+The hooks provide these internal functions for local issue handling:
+
+| Function | Hook | Purpose |
+|----------|------|---------|
+| `is_local_issue()` | Both | Check if ID matches `L[0-9]+` pattern |
+| `local_issue_field()` | commit-msg | Read field from `.issues/L<N>.md` (state, title, body, labels) |
+| `local_issue_edit()` | post-commit | Add/remove labels in local issue |
+| `local_issue_reopen()` | post-commit | Set state to open |
+| `local_issue_close()` | post-commit | Set state to closed |
+
+### Syncing Local Issues to GitHub
+
+Local issues are intended for temporary offline work. Sync to GitHub is tracked in #1834 (write-through planned).
+
+Current workflow:
+1. Work offline using local issues (`#LN`)
+2. When online, create corresponding GitHub issues
+3. Update commits to reference GitHub issue numbers
+4. Delete local issue files after sync

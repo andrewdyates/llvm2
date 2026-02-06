@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -40,7 +44,7 @@ from .code_metrics import (
     get_previous_metrics,
 )
 from .config import THRESHOLDS
-from .constants import METRICS_RETENTION_DAYS
+from .constants import FLAGS_DIR, METRICS_RETENTION_DAYS
 from .dirty_tracking import (
     _detect_dirty_file_changes,
     _format_dirty_diagnostics,
@@ -58,6 +62,7 @@ from .git_metrics import (
     get_doc_claim_status,
     get_git_status,
     get_outdated_git_deps,
+    get_vision_compliance,
 )
 from .issue_metrics import (
     _unpack_issue_counts,
@@ -92,9 +97,77 @@ from .storage import (
 from .system import get_system_resources
 from .test_metrics import get_proof_coverage, get_test_coverage, get_test_status
 
+
+# ============================================================================
+# GitHub quota overflow tracking
+# ============================================================================
+
+
+def get_gh_quota_overflow() -> dict:
+    """Read GitHub API quota overflow events from the last hour.
+
+    Returns:
+        Dict with recent_count and recent_events list.
+    """
+    import json
+
+    overflow_file = Path.home() / ".ait_gh_cache" / "overflow_log.json"
+    result: dict = {"recent_count": 0, "recent_events": []}
+
+    if not overflow_file.exists():
+        return result
+
+    try:
+        data = json.loads(overflow_file.read_text())
+        events = data.get("events", [])
+
+        # Filter to last hour
+        one_hour_ago = time.time() - 3600
+        recent = [e for e in events if e.get("timestamp", 0) > one_hour_ago]
+
+        result["recent_count"] = len(recent)
+        result["recent_events"] = recent[-10:]  # Last 10 events
+    except Exception:
+        pass
+
+    return result
+
+
 # ============================================================================
 # Core functions
 # ============================================================================
+
+
+def _check_startup_warnings() -> dict:
+    """Check for startup warnings from looper config validation.
+
+    Reads .flags/startup_warnings if it exists and extracts warning messages.
+    Part of #2459 (surface startup warnings to Manager via pulse).
+
+    Returns:
+        Dict with keys: exists (bool), count (int), warnings (list[str])
+        Empty dict if no warnings file exists.
+    """
+    flag_path = FLAGS_DIR / "startup_warnings"
+    if not flag_path.exists():
+        return {}
+
+    try:
+        content = flag_path.read_text()
+        warnings = []
+        for line in content.strip().split("\n"):
+            line = line.strip()
+            # Skip timestamps (lines starting with [) and empty lines
+            if line and not line.startswith("["):
+                warnings.append(line)
+
+        return {
+            "exists": True,
+            "count": len(warnings),
+            "warnings": warnings[:10],  # Truncate for metrics
+        }
+    except OSError:
+        return {}
 
 
 def collect_metrics(
@@ -214,7 +287,10 @@ def collect_metrics(
     loc = count_lines_by_type(repo_root=scan_root)
     _progress("scanning: large files...")
     large_files = find_large_files(
-        THRESHOLDS["max_file_lines"], repo_root=scan_root, use_git=use_git
+        THRESHOLDS["max_file_lines"],
+        repo_root=scan_root,
+        use_git=use_git,
+        warning_lines=THRESHOLDS.get("max_file_lines_warning"),  # Part of #2358
     )
     _progress("scanning: CI workflows...")
     forbidden_ci = find_forbidden_ci(repo_root=scan_root)
@@ -225,8 +301,8 @@ def collect_metrics(
         tests["coverage"] = coverage
     _progress("scanning: proof coverage...")
     proofs = get_proof_coverage(repo_root=scan_root)
-    _progress("scanning: crashes...")
-    crashes = get_recent_crashes()
+    _progress("scanning: failures...")
+    failures = get_recent_crashes()
     _progress("scanning: untraceable failures...")
     untraceable = get_untraceable_failures()
     _progress("scanning: system resources...")
@@ -244,6 +320,8 @@ def collect_metrics(
     consolidation = get_consolidation_debt(repo_root=scan_root)
     _progress("scanning: doc claims...")
     doc_claims = get_doc_claim_status(repo_root=scan_root)
+    _progress("scanning: VISION.md compliance...")
+    vision_compliance = get_vision_compliance(repo_root=scan_root)
 
     # Git dependency updates - skip if GitHub API is being avoided or rate limited
     if skip_gh_api:
@@ -290,6 +368,12 @@ def collect_metrics(
     if complexity_delta:
         complexity["delta"] = complexity_delta
 
+    # GitHub API quota overflow tracking
+    gh_overflow = get_gh_quota_overflow()
+
+    # Startup warnings from looper config validation (Part of #2459)
+    startup_warnings = _check_startup_warnings()
+
     return {
         "timestamp": datetime.now().isoformat(),
         "repo": get_repo_name(),
@@ -303,7 +387,7 @@ def collect_metrics(
         "blocked_issue_list": blocked_list,  # Per #1354
         "stale_blockers": stale_blockers,  # Per #1497
         "long_blocked": long_blocked,  # Per #1497
-        "crashes_24h": crashes,
+        "crashes_24h": failures,
         "untraceable_failures": untraceable,
         "system": system_res,
         "git": git_info,
@@ -315,8 +399,11 @@ def collect_metrics(
         "issues_reopened": issues_reopened,  # Per #1937
         "consolidation": consolidation,
         "doc_claims": doc_claims,
+        "vision_compliance": vision_compliance,  # Per #2540
         "git_deps": git_deps,  # Per #1553
         "complexity": complexity,  # Per #2129
+        "gh_quota_overflow": gh_overflow,
+        "startup_warnings": startup_warnings,  # Per #2459
     }
 
 

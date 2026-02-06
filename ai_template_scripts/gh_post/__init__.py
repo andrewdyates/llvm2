@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -7,7 +11,7 @@ gh_post - Wrapper for gh that adds AI identity to issues and comments
 
 Handles:
 - gh issue create/comment - adds identity header and signature
-- gh issue edit --add-label in-progress/in-progress-WN - auto-comments to claim with identity
+- gh issue edit --add-label in-progress (with optional ownership label like W1/prov1/R1/M1) - auto-comments to claim with identity
 - gh issue edit --add-label urgent (USER) - tracks USER ownership of label
 - gh issue edit --remove-label urgent - BLOCKED if USER set the label
 - gh issue close - BLOCKED unless MANAGER or USER role (enforces issue closure policy)
@@ -61,7 +65,9 @@ except ImportError:
     _HAS_RATE_LIMIT = False
 
 # GitHub Project integration (P0 #1190)
-PROJECT_OWNER = "dropbox-ai-prototypes"
+from ai_template_scripts.identity import get_identity as _get_ident
+
+PROJECT_OWNER = _get_ident().github_org
 PROJECT_NUMBER = 1
 PROJECT_SCHEMA_CACHE_FILE = Path.home() / ".ait_gh_cache" / "project_schema.json"
 PROJECT_SCHEMA_TTL_SECONDS = 86400  # 24 hours
@@ -266,11 +272,11 @@ def main() -> None:
             )
             print(
                 "   python3 ai_template_scripts/gh_discussion.py create "
-                '--repo dropbox-ai-prototypes/dashnews --category News --title "..." --body "..."',
+                f'--repo {PROJECT_OWNER}/dashnews --category News --title "..." --body "..."',
                 file=sys.stderr,
             )
             print(
-                "   See: https://github.com/dropbox-ai-prototypes/dashnews",
+                f"   See: https://github.com/{PROJECT_OWNER}/dashnews",
                 file=sys.stderr,
             )
             print(file=sys.stderr)

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -19,6 +23,8 @@ Public API:
 - main
 
 Usage:
+    gh_issues.py dep add PARENT CHILD     # Add dependency: PARENT blocks CHILD
+    gh_issues.py dep remove PARENT CHILD  # Remove dependency
     gh_issues.py dep list ISSUE          # List tracked/tracking relationships
     gh_issues.py sanitize                 # Detect contradictory workflow labels
     gh_issues.py sanitize --fix           # Auto-fix contradictory labels

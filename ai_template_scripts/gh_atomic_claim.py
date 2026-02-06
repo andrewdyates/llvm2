@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -28,6 +32,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
+
+from ai_template_scripts.shared_logging import debug_swallow
 
 # fcntl for file locking (Unix only, Windows unsupported)
 try:
@@ -69,7 +75,7 @@ def _get_claim_repo_name() -> str:
             # Sanitize: replace non-identifier chars
             return re.sub(r"[^a-zA-Z0-9_-]", "_", repo_name)
     except Exception:
-        pass
+        debug_swallow("get_claim_repo_name")
     return "unknown"
 
 
@@ -103,7 +109,7 @@ def _acquire_claim_lock(
             try:
                 lock_file.close()
             except OSError:
-                pass
+                debug_swallow("acquire_claim_lock_fd_close")
         return None, False
 
 
@@ -116,11 +122,11 @@ def _release_claim_lock(lock_file: TextIO | None) -> None:
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         except OSError:
-            pass
+            debug_swallow("release_claim_flock")
     try:
         lock_file.close()
     except OSError:
-        pass
+        debug_swallow("release_claim_fd_close")
 
 
 def _generate_claim_uuid() -> str:
@@ -183,9 +189,14 @@ def _fetch_issue_comments(
         cmd.extend(["--repo", repo])
 
     try:
-        result = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
+        result = subprocess.check_output(
+            cmd, stderr=subprocess.DEVNULL, text=True, timeout=30
+        )
         data = json.loads(result)
         return data.get("comments", [])
+    except subprocess.TimeoutExpired:
+        # Timeout fetching comments - return empty list (caller will retry or fail safely)
+        return []
     except Exception:
         return []
 

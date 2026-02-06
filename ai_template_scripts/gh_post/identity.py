@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -10,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ai_template_scripts.subprocess_utils import get_github_repo
+from looper.log import debug_swallow
 
 
 def get_effective_role() -> str:
@@ -99,16 +104,17 @@ def _read_iteration_file(role: str) -> str:
         if iteration_file.is_file():
             try:
                 return iteration_file.read_text().strip()
-            except Exception:
-                pass
+            except Exception as e:
+                debug_swallow("gh_post_read_iteration_file_worker", e)
 
     # Fall back to base file (e.g., .iteration_manager)
     iteration_file = Path("worker_logs") / f".iteration_{role_lower}"
     if iteration_file.is_file():
         try:
             return iteration_file.read_text().strip()
-        except Exception:
-            pass  # Best-effort: iteration file read, empty string is safe fallback
+        except Exception as e:
+            debug_swallow("gh_post_read_iteration_file", e)
+            # Best-effort: iteration file read, empty string is safe fallback
     return ""
 
 
@@ -150,7 +156,8 @@ def get_identity() -> dict:
                 identity["project"] = project
             else:
                 identity["project"] = Path.cwd().name
-        except Exception:
+        except Exception as e:
+            debug_swallow("gh_post_get_identity_project", e)
             identity["project"] = (
                 Path.cwd().name
             )  # Best-effort: git remote lookup, cwd name is safe fallback
@@ -166,7 +173,8 @@ def get_commit() -> str:
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
-    except Exception:
+    except Exception as e:
+        debug_swallow("gh_post_get_commit", e)
         return "-"  # Best-effort: git commit lookup, "-" is safe placeholder
 
 

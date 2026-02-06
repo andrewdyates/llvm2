@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -17,7 +21,9 @@ Usage:
   gh_discussion.py get 211
   gh_discussion.py get 211 --json
   gh_discussion.py create --title "Title" --body "Body" --category "General"
+  gh_discussion.py create --title "Title" --body "Body" --json
   gh_discussion.py comment --number 42 --body "Comment"
+  gh_discussion.py comment --number 42 --body "Comment" --json
   --repo dropbox-ai-prototypes/dashnews
 
 Categories for dashnews: General, Q&A, Show and tell, Ideas, Announcements, Polls
@@ -51,7 +57,11 @@ from ai_template_scripts.gh_post import (  # noqa: E402
     get_real_gh,
     process_body,
 )
+from ai_template_scripts.identity import get_identity as _get_ident  # noqa: E402
 from ai_template_scripts.subprocess_utils import run_cmd  # noqa: E402
+
+# Default discussion repo (org from identity config)
+_DEFAULT_DISCUSSION_REPO = f"{_get_ident().github_org}/dashnews"
 
 # Category IDs for dashnews (default discussion repo)
 CATEGORY_IDS = {
@@ -139,7 +149,8 @@ def usage() -> None:
     REQUIRES: None
     ENSURES: Prints help text to stdout (no return value)
     """
-    print("""Usage: gh_discussion.py <command> [OPTIONS]
+    _dr = _DEFAULT_DISCUSSION_REPO
+    print(f"""Usage: gh_discussion.py <command> [OPTIONS]
 
 Commands:
   list      List recent discussions
@@ -148,14 +159,14 @@ Commands:
   comment   Add a comment to an existing discussion
 
 List Options:
-  --repo OWNER/REPO   Target repo (default: dropbox-ai-prototypes/dashnews)
+  --repo OWNER/REPO   Target repo (default: {_dr})
   --limit N           Number of discussions to list (default: 10, max: 100)
   --category CAT      Filter by category (optional)
   --json              Output in JSON format
 
 Get Options:
   NUMBER              Discussion number (required, positional)
-  --repo OWNER/REPO   Target repo (default: dropbox-ai-prototypes/dashnews)
+  --repo OWNER/REPO   Target repo (default: {_dr})
   --json              Output in JSON format
 
 Create Options:
@@ -163,12 +174,14 @@ Create Options:
   --body BODY         Discussion body (required)
   --category CAT      Category: General, Q&A, "Show and tell", Ideas, Announcements,
                       Polls (default: General)
-  --repo OWNER/REPO   Target repo (default: dropbox-ai-prototypes/dashnews)
+  --repo OWNER/REPO   Target repo (default: {_dr})
+  --json              Output in JSON format
 
 Comment Options:
   --number N          Discussion number (required)
   --body BODY         Comment body (required)
-  --repo OWNER/REPO   Target repo (default: dropbox-ai-prototypes/dashnews)
+  --repo OWNER/REPO   Target repo (default: {_dr})
+  --json              Output in JSON format
 
 Examples:
   gh_discussion.py list
@@ -176,10 +189,12 @@ Examples:
   gh_discussion.py list --json
   gh_discussion.py get 211
   gh_discussion.py get 211 --json
-  gh_discussion.py get 211 --repo dropbox-ai-prototypes/other
+  gh_discussion.py get 211 --repo {_get_ident().github_org}/other
   gh_discussion.py create --title "New discovery" --body "Found something interesting"
   gh_discussion.py create --title "Question" --body "How do I...?" --category "Q&A"
+  gh_discussion.py create --title "Title" --body "Body" --json
   gh_discussion.py comment --number 42 --body "Great post!"
+  gh_discussion.py comment --number 42 --body "Reply" --json
 
 Notes:
   Requires GitHub token scopes: read:discussion (list/get) and write:discussion (create/comment).
@@ -246,16 +261,17 @@ def get_category_id(real_gh: str, repo: str, category: str) -> str:
     return ""  # Best-effort: category ID lookup via GraphQL, empty string allows caller to handle
 
 
-def create_discussion(args: list[str]) -> str:
+def create_discussion(args: list[str]) -> str | dict:
     """Create a GitHub discussion with identity.
 
     REQUIRES: args is list of command-line arguments
-    ENSURES: Returns discussion URL on success, exits on failure
+    ENSURES: Returns discussion URL (str) or dict with json_output=True, exits on failure
     """
     title = ""
     body = ""
     category = "General"
-    repo = "dropbox-ai-prototypes/dashnews"
+    repo = _DEFAULT_DISCUSSION_REPO
+    json_output = False
 
     # Parse arguments
     i = 0
@@ -272,6 +288,9 @@ def create_discussion(args: list[str]) -> str:
         elif args[i] == "--repo" and i + 1 < len(args):
             repo = args[i + 1]
             i += 2
+        elif args[i] == "--json":
+            json_output = True
+            i += 1
         elif args[i] in ("-h", "--help"):
             usage()
             sys.exit(0)
@@ -297,7 +316,7 @@ def create_discussion(args: list[str]) -> str:
     body = process_body(body, identity)
 
     # Get category and repo IDs
-    if repo == "dropbox-ai-prototypes/dashnews":
+    if repo == _DEFAULT_DISCUSSION_REPO:
         repo_id = DASHNEWS_REPO_ID
         category_id = CATEGORY_IDS.get(category)
         if not category_id:
@@ -331,14 +350,25 @@ def create_discussion(args: list[str]) -> str:
         }}) {{
             discussion {{
                 url
+                number
             }}
         }}
     }}'''
 
     result = graphql(mutation)
     if result.ok:
-        url = result.extract("createDiscussion.discussion.url")
-        return url if isinstance(url, str) else ""
+        discussion = result.extract("createDiscussion.discussion")
+        if json_output and isinstance(discussion, dict):
+            # Return structured data for JSON output
+            return {
+                "url": discussion.get("url"),
+                "number": discussion.get("number"),
+                "repo": repo
+            }
+        else:
+            # Return just URL for plain output (backwards compatible)
+            url = discussion.get("url") if isinstance(discussion, dict) else ""
+            return url if isinstance(url, str) else ""
     _print_scope_hint(real_gh, ("read:discussion", "write:discussion"))
     error_msg = result.errors[0]["message"] if result.errors else result.stderr
     print(f"Error: Failed to create discussion: {error_msg}", file=sys.stderr)
@@ -378,7 +408,7 @@ def get_discussion(args: list[str]) -> dict:
     Returns dict with: number, title, body, url, createdAt, category, author.
     """
     number = 0
-    repo = "dropbox-ai-prototypes/dashnews"
+    repo = _DEFAULT_DISCUSSION_REPO
     json_output = False
 
     # Parse arguments - first positional arg is number
@@ -481,15 +511,16 @@ def get_discussion(args: list[str]) -> dict:
     return discussion
 
 
-def comment_discussion(args: list[str]) -> str:
+def comment_discussion(args: list[str]) -> str | dict:
     """Add a comment to a GitHub discussion with identity.
 
     REQUIRES: args is list with --number and --body options
-    ENSURES: Returns comment URL on success, exits on failure
+    ENSURES: Returns comment URL (str) or dict with json_output=True, exits on failure
     """
     number = 0
     body = ""
-    repo = "dropbox-ai-prototypes/dashnews"
+    repo = _DEFAULT_DISCUSSION_REPO
+    json_output = False
 
     # Parse arguments
     i = 0
@@ -510,6 +541,9 @@ def comment_discussion(args: list[str]) -> str:
         elif args[i] == "--repo" and i + 1 < len(args):
             repo = args[i + 1]
             i += 2
+        elif args[i] == "--json":
+            json_output = True
+            i += 1
         elif args[i] in ("-h", "--help"):
             usage()
             sys.exit(0)
@@ -556,8 +590,18 @@ def comment_discussion(args: list[str]) -> str:
 
     result = graphql(mutation)
     if result.ok:
-        url = result.extract("addDiscussionComment.comment.url")
-        return url if isinstance(url, str) else ""
+        if json_output:
+            # Return structured data for JSON output
+            url = result.extract("addDiscussionComment.comment.url")
+            return {
+                "url": url if isinstance(url, str) else "",
+                "number": number,
+                "repo": repo
+            }
+        else:
+            # Return just URL for plain output (backwards compatible)
+            url = result.extract("addDiscussionComment.comment.url")
+            return url if isinstance(url, str) else ""
     _print_scope_hint(real_gh, ("read:discussion", "write:discussion"))
     error_msg = result.errors[0]["message"] if result.errors else result.stderr
     print(f"Error: Failed to add comment: {error_msg}", file=sys.stderr)
@@ -572,7 +616,7 @@ def list_discussions(args: list[str]) -> list[dict]:
 
     Returns list of dicts with: number, title, url, createdAt, category, author.
     """
-    repo = "dropbox-ai-prototypes/dashnews"
+    repo = _DEFAULT_DISCUSSION_REPO
     limit = 10
     category = None
     json_output = False
@@ -699,11 +743,21 @@ def main() -> None:
     elif args[0] == "get":
         get_discussion(args[1:])
     elif args[0] == "create":
-        url = create_discussion(args[1:])
-        print(url)
+        result = create_discussion(args[1:])
+        if isinstance(result, dict):
+            # JSON output
+            print(json_module.dumps(result, indent=2))
+        else:
+            # Plain URL output
+            print(result)
     elif args[0] == "comment":
-        url = comment_discussion(args[1:])
-        print(url)
+        result = comment_discussion(args[1:])
+        if isinstance(result, dict):
+            # JSON output
+            print(json_module.dumps(result, indent=2))
+        else:
+            # Plain URL output
+            print(result)
     else:
         usage()
         sys.exit(1)

@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -37,12 +41,15 @@ __all__ = [
     "write_through_from_queue",
 ]
 
+import functools
 import os
 import sys
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from looper.log import debug_swallow
 
 def _get_local_store():
     """Lazy import to avoid circular dependencies."""
@@ -73,8 +80,9 @@ def is_write_through_enabled() -> bool:
     return True
 
 
+@functools.lru_cache(maxsize=1)
 def _get_repo_root() -> Path:
-    """Get repository root directory."""
+    """Get repository root directory (cached — repo root is constant per process)."""
     import subprocess
 
     try:
@@ -87,8 +95,8 @@ def _get_repo_root() -> Path:
         )
         if result.returncode == 0:
             return Path(result.stdout.strip())
-    except Exception:
-        pass
+    except Exception as e:
+        debug_swallow("gh_post_get_repo_root", e)
     return Path.cwd()
 
 
@@ -120,6 +128,12 @@ def _issue_path(issue_number: str | int, repo: str | None = None) -> Path:
     return issues_dir / f"{issue_number}.md"
 
 
+def _new_queued_issue_id() -> str:
+    """Generate a unique temporary ID for queued create operations."""
+    timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
+    return f"Q{timestamp}_{uuid.uuid4().hex[:8]}"
+
+
 def _read_local_issue(issue_number: str | int, repo: str | None = None):
     """Read local issue if it exists.
 
@@ -139,7 +153,8 @@ def _read_local_issue(issue_number: str | int, repo: str | None = None):
     try:
         content = path.read_text()
         return LocalIssue.from_markdown(content)
-    except (ValueError, OSError):
+    except (ValueError, OSError) as e:
+        debug_swallow("gh_post_read_local_issue", e)
         return None
 
 
@@ -150,20 +165,14 @@ def _write_local_issue(issue, repo: str | None = None) -> None:
         issue: LocalIssue instance to write.
         repo: Optional repo name.
     """
-    import fcntl
+    from ai_template_scripts.atomic_write import atomic_write_text
 
     issues_dir = _get_issues_dir(repo)
     issues_dir.mkdir(parents=True, exist_ok=True)
 
     path = _issue_path(issue.id, repo)
     content = issue.to_markdown()
-
-    with open(path, "w") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        try:
-            f.write(content)
-        finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    atomic_write_text(path, content)
 
 
 def write_through_create(
@@ -407,16 +416,8 @@ def write_through_from_queue(
     repo = data.get("repo")
 
     if operation == "create":
-        # For queued creates, we don't have a GitHub issue number yet
-        # Use a temporary placeholder with timestamp-based ID
-        from ai_template_scripts.local_issue_store import LOCAL_ISSUE_PREFIX
-
-        # Generate temporary local ID (Q prefix for queued)
-        timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-        temp_id = f"Q{timestamp}"
-
         return write_through_create(
-            issue_number=temp_id,
+            issue_number=_new_queued_issue_id(),
             title=data.get("title", ""),
             body=data.get("body", ""),
             labels=data.get("labels", []),

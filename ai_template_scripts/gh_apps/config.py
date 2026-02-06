@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -14,6 +18,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from ai_template_scripts.identity import get_identity as _get_ident
 
 if TYPE_CHECKING:
     from typing import Any
@@ -140,7 +146,7 @@ def load_config(force_reload: bool = False) -> Config | None:
             _debug_log(f"  loaded app '{app_name}': repos={repos}, key={key_path}")
 
         config = Config(
-            org=data.get("org", "dropbox-ai-prototypes"),
+            org=data.get("org", _get_ident().github_org),
             default_app=data.get("default_app", "shared-ai"),
             apps=apps,
         )

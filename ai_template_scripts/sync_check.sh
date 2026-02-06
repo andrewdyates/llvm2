@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates
 # Licensed under the Apache License, Version 2.0
@@ -115,7 +119,7 @@ batch_check_archived() {
             echo "Warning: skipping invalid repo name: $repo" >&2
             continue
         fi
-        query+=" r${i}: repository(owner: \"dropbox-ai-prototypes\", name: \"$repo\") { isArchived }"
+        query+=" r${i}: repository(owner: \"$AIT_GITHUB_ORG\", name: \"$repo\") { isArchived }"
         valid_repos+=("$repo")
         i=$((i + 1))
     done
@@ -157,8 +161,8 @@ batch_check_archived() {
         echo "Warning: GraphQL rate-limited, using REST fallback for archive check" >&2
         for repo in "${repos_to_check[@]}"; do
             local api_output is_archived api_message
-            # Use || true to prevent pipefail exit on 404 (repo not in dropbox-ai-prototypes)
-            api_output=$(gh api "repos/dropbox-ai-prototypes/$repo" 2>/dev/null || true)
+            # Use || true to prevent pipefail exit on 404 (repo not in org)
+            api_output=$(gh api "repos/$AIT_GITHUB_ORG/$repo" 2>/dev/null || true)
             if [[ -z "$api_output" ]]; then
                 # Empty response - skip silently
                 continue
@@ -166,7 +170,7 @@ batch_check_archived() {
             # Check for API error response (404 returns JSON with message field)
             api_message=$(echo "$api_output" | jq -r '.message // empty' 2>/dev/null)
             if [[ "$api_message" == "Not Found" ]]; then
-                # Repo doesn't exist in dropbox-ai-prototypes - skip silently
+                # Repo doesn't exist in org - skip silently
                 continue
             fi
             is_archived=$(echo "$api_output" | jq -r '.archived // false')
@@ -194,6 +198,10 @@ is_repo_archived() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AI_TEMPLATE_ROOT="$(dirname "$SCRIPT_DIR")"
 
+# Load identity early (needed for error messages below)
+# shellcheck source=identity.sh
+source "$SCRIPT_DIR/identity.sh" 2>/dev/null || true
+
 # Check if we're in ai_template or a synced copy
 find_ai_template() {
     local candidate="$1"
@@ -220,7 +228,7 @@ if ! AI_TEMPLATE_ROOT=$(find_ai_template "$AI_TEMPLATE_ROOT"); then
         echo "    - ~/ai_template (home)" >&2
         echo "" >&2
         echo "To fix, either:" >&2
-        echo "  1. Clone ai_template as a sibling: cd .. && git clone https://github.com/dropbox-ai-prototypes/ai_template" >&2
+        echo "  1. Clone ai_template as a sibling: cd .. && git clone https://github.com/$AIT_GITHUB_ORG/ai_template" >&2
         echo "  2. Or run directly from ai_template: ~/ai_template/ai_template_scripts/sync_check.sh" >&2
         exit 1
     fi
@@ -289,26 +297,26 @@ CURRENT_SHORT=$(git rev-parse --short origin/main)
 echo "ai_template current version: $CURRENT_SHORT"
 echo ""
 
-# Check if repo is an dropbox-ai-prototypes repo (by git remote)
-is_dropbox-ai-prototypes_repo() {
+# Check if repo belongs to our org (by git remote)
+is_org_repo() {
     local dir="$1"
     local remote_url
     remote_url=$(git -C "$dir" remote get-url origin 2>/dev/null || echo "")
-    [[ "$remote_url" =~ dropbox-ai-prototypes ]]
+    [[ "$remote_url" =~ $AIT_GITHUB_ORG ]]
 }
 
 if [[ ${#ARGS[@]} -eq 0 ]]; then
-    # Default: check sibling directories that are dropbox-ai-prototypes repos
+    # Default: check sibling directories that are org repos
     PARENT_DIR="$(dirname "$AI_TEMPLATE_ROOT")"
     for dir in "$PARENT_DIR"/*/; do
         repo_name="$(basename "$dir")"
-        [[ -d "$dir/.git" ]] && [[ "$repo_name" != "ai_template" ]] && is_dropbox-ai-prototypes_repo "$dir" && ! is_excluded "$repo_name" && REPOS+=("$dir")
+        [[ -d "$dir/.git" ]] && [[ "$repo_name" != "ai_template" ]] && is_org_repo "$dir" && ! is_excluded "$repo_name" && REPOS+=("$dir")
     done
 elif [[ ${#ARGS[@]} -eq 1 && -d "${ARGS[0]}" && ! -d "${ARGS[0]}/.git" ]]; then
-    # Single directory argument that's not a repo - scan it (only dropbox-ai-prototypes repos)
+    # Single directory argument that's not a repo - scan it (only org repos)
     for dir in "${ARGS[0]}"/*/; do
         repo_name="$(basename "$dir")"
-        [[ -d "$dir/.git" ]] && is_dropbox-ai-prototypes_repo "$dir" && ! is_excluded "$repo_name" && REPOS+=("$dir")
+        [[ -d "$dir/.git" ]] && is_org_repo "$dir" && ! is_excluded "$repo_name" && REPOS+=("$dir")
     done
 else
     # Explicit repo list

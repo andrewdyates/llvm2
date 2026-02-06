@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -1083,157 +1087,213 @@ class RateLimiter:
             debug_log(f"issue_search_rest: {result.status}: {result.error}")
         return result
 
-    # --- Main entry point ---
+    # --- Unified REST fallback helper ---
 
-    def call(self, args: list[str], timeout: float = 30) -> subprocess.CompletedProcess:
-        """Execute gh command with rate limiting and caching.
+    def _try_rest_and_cache(
+        self, args: list[str], timeout: float, merge_pending: bool = True
+    ) -> subprocess.CompletedProcess | None:
+        """Try REST fallback for issue commands and cache on success.
 
-        This is the main entry point used by bin/gh wrapper.
+        Unified handler for search/list/view REST fallback. Reduces code
+        duplication from call() (#2333).
+
+        Args:
+            args: Command arguments
+            timeout: Request timeout
+            merge_pending: Whether to merge pending issues (for list commands)
+
+        Returns:
+            CompletedProcess on success, None if REST not applicable or failed
         """
-        # Opportunistic lock cleanup, throttled to once per hour (#1605)
-        self._maybe_cleanup_stale_locks()
+        if is_issue_search_command(args):
+            rest_result = self._issue_search_rest_fallback(args, timeout)
+            if rest_result.ok and rest_result.value and rest_result.value.returncode == 0:
+                self.set_cached(args, rest_result.value.stdout)
+                return rest_result.value
+        elif is_issue_list_command(args):
+            rest_result = self._issue_list_rest_fallback(args, timeout)
+            if rest_result.ok and rest_result.value and rest_result.value.returncode == 0:
+                self.set_cached(args, rest_result.value.stdout)
+                if merge_pending:
+                    return self._maybe_merge_pending_issues(rest_result.value, args)
+                return rest_result.value
+        elif is_issue_view_command(args):
+            rest_result = self._issue_view_rest_fallback(args, timeout)
+            if rest_result.ok and rest_result.value and rest_result.value.returncode == 0:
+                return rest_result.value
+        return None
 
-        # Handle pending issue views (#1854) - synthetic IDs for queued issues
+    def _try_rest_after_rate_limit(
+        self, args: list[str], timeout: float
+    ) -> subprocess.CompletedProcess | None:
+        """Try REST fallback after GraphQL rate limit, with error capture.
+
+        Unlike _try_rest_and_cache, this logs failures and captures error
+        responses for fallback. Used in post-execution rate limit handling.
+
+        Returns:
+            CompletedProcess on success or error, None to fall through to stale
+        """
+        if is_issue_search_command(args):
+            if not self._rest_fallback.has_search_quota():
+                debug_log("search quota exhausted, skipping REST fallback")
+                return None
+            rest_result = self._issue_search_rest_fallback(args, timeout)
+            if rest_result.value:
+                if rest_result.ok and rest_result.value.returncode == 0:
+                    self.set_cached(args, rest_result.value.stdout)
+                    return rest_result.value
+                return rest_result.value  # Return error response
+            if rest_result.skipped:
+                debug_log(f"issue_search: REST skipped ({rest_result.error})")
+            elif not rest_result.ok:
+                debug_log(f"issue_search: REST failed ({rest_result.error})")
+        elif is_issue_list_command(args):
+            rest_result = self._issue_list_rest_fallback(args, timeout)
+            if rest_result.value:
+                if rest_result.ok and rest_result.value.returncode == 0:
+                    self.set_cached(args, rest_result.value.stdout)
+                    return self._maybe_merge_pending_issues(rest_result.value, args)
+                return rest_result.value
+            if rest_result.skipped:
+                debug_log(f"issue_list: REST skipped ({rest_result.error})")
+            elif not rest_result.ok:
+                debug_log(f"issue_list: REST failed ({rest_result.error})")
+        elif is_issue_view_command(args):
+            rest_result = self._issue_view_rest_fallback(args, timeout)
+            if rest_result.value:
+                if rest_result.ok and rest_result.value.returncode == 0:
+                    return rest_result.value
+                return rest_result.value
+            if rest_result.skipped:
+                debug_log(f"issue_view: REST skipped ({rest_result.error})")
+            elif not rest_result.ok:
+                debug_log(f"issue_view: REST failed ({rest_result.error})")
+        return None
+
+    def _handle_pending_issue_view(
+        self, args: list[str]
+    ) -> subprocess.CompletedProcess | None:
+        """Handle synthetic pending issue views (#1854).
+
+        Returns:
+            None if args is not a pending issue view (PENDINGxxx format)
+            CompletedProcess with returncode=0 if pending issue found
+            CompletedProcess with returncode=1 if pending issue not found
+        """
         is_pending, pending_id = self._is_pending_issue_view(args)
-        if is_pending and pending_id:
-            repo_override = extract_repo_from_args(args)
-            owner_repo = self._get_owner_repo(repo_override)
-            if owner_repo:
-                pending_data = self._get_pending_issue_view(
-                    pending_id, args, owner_repo
+        if not (is_pending and pending_id):
+            return None
+
+        repo_override = extract_repo_from_args(args)
+        owner_repo = self._get_owner_repo(repo_override)
+        if owner_repo:
+            pending_data = self._get_pending_issue_view(pending_id, args, owner_repo)
+            if pending_data:
+                return subprocess.CompletedProcess(
+                    args=["gh"] + args,
+                    returncode=0,
+                    stdout=pending_data,
+                    stderr="",
                 )
-                if pending_data:
-                    return subprocess.CompletedProcess(
-                        args=["gh"] + args,
-                        returncode=0,
-                        stdout=pending_data,
-                        stderr="",
-                    )
-            # Pending issue not found
+        # Pending issue not found
+        return subprocess.CompletedProcess(
+            args=["gh"] + args,
+            returncode=1,
+            stdout="",
+            stderr=f"Pending issue {pending_id} not found in change_log",
+        )
+
+    def _handle_rate_limit_block(
+        self, args: list[str]
+    ) -> subprocess.CompletedProcess | None:
+        """Handle rate limit exceeded before command execution.
+
+        Returns:
+            CompletedProcess error if blocked, None to continue execution
+        """
+        if self.check_rate_limit(args):
+            return None  # Rate limit OK, continue
+
+        # Check if REST fallback is available for read commands
+        if self._prefer_issue_rest(args) and not self._is_write(args):
+            core_info = self._rate_state.rate_cache.get("core")
+            if core_info and core_info.remaining > 0:
+                print(
+                    "gh_rate_limit: GraphQL rate-limited, using REST fallback",
+                    file=sys.stderr,
+                )
+                return None  # Fall through to REST handling
+
+            # REST also exhausted - try stale fallback
+            stale_result = self.get_stale_fallback(args, "rate limited")
+            if stale_result is not None:
+                return stale_result
             return subprocess.CompletedProcess(
                 args=["gh"] + args,
                 returncode=1,
                 stdout="",
-                stderr=f"Pending issue {pending_id} not found in change_log",
+                stderr="Rate limit exceeded (GraphQL and REST exhausted)",
             )
 
-        # Check rate limit - but allow REST fallback for issue list/view (#1861)
-        # If command can be handled by REST and REST has quota, skip GraphQL block
-        if not self.check_rate_limit(args):
-            # Before blocking, check if REST fallback is available for this command
-            if self._prefer_issue_rest(args) and not self._is_write(args):
-                # REST quota available - try REST fallback instead of blocking
-                core_info = self._rate_state.rate_cache.get("core")
-                if core_info and core_info.remaining > 0:
-                    print(
-                        "gh_rate_limit: GraphQL rate-limited, using REST fallback",
-                        file=sys.stderr,
-                    )
-                    # Fall through to REST handling below instead of blocking
-                else:
-                    # REST also exhausted - try stale fallback
-                    stale_result = self.get_stale_fallback(args, "rate limited")
-                    if stale_result is not None:
-                        return stale_result
-                    return subprocess.CompletedProcess(
-                        args=["gh"] + args,
-                        returncode=1,
-                        stdout="",
-                        stderr="Rate limit exceeded (GraphQL and REST exhausted)",
-                    )
-            elif not self._is_write(args):
-                stale_result = self.get_stale_fallback(args, "rate limited")
-                if stale_result is not None:
-                    return stale_result
-                return subprocess.CompletedProcess(
-                    args=["gh"] + args,
-                    returncode=1,
-                    stdout="",
-                    stderr="Rate limit exceeded",
-                )
-            else:
-                return subprocess.CompletedProcess(
-                    args=["gh"] + args,
-                    returncode=1,
-                    stdout="",
-                    stderr="Rate limit exceeded",
-                )
-
-        # Check cache for reads (includes historical fallback for issue views)
+        # Non-REST read or write command
         if not self._is_write(args):
-            cached = self.get_cached_or_historical(args)
-            if cached is not None:
-                cached_result = subprocess.CompletedProcess(
-                    args=["gh"] + args,
-                    returncode=0,
-                    stdout=cached,
-                    stderr="",
-                )
-                # Merge pending issues into cached issue list results (#1854)
-                return self._maybe_merge_pending_issues(cached_result, args)
+            stale_result = self.get_stale_fallback(args, "rate limited")
+            if stale_result is not None:
+                return stale_result
 
-            # Prefer REST when GraphQL quota is low (#1074). Check BEFORE
-            # _serialized_fetch for proactive load balancing (#1689).
-            if self._prefer_issue_rest(args):
-                # Search commands use separate API (#1777)
-                if is_issue_search_command(args):
-                    rest_result = self._issue_search_rest_fallback(args, timeout)
-                    if rest_result.ok and rest_result.value is not None:
-                        if rest_result.value.returncode == 0:
-                            self.set_cached(args, rest_result.value.stdout)
-                            return rest_result.value
-                elif is_issue_list_command(args):
-                    rest_result = self._issue_list_rest_fallback(args, timeout)
-                    if rest_result.ok and rest_result.value is not None:
-                        if rest_result.value.returncode == 0:
-                            self.set_cached(args, rest_result.value.stdout)
-                            # Merge pending issues (#1854)
-                            return self._maybe_merge_pending_issues(
-                                rest_result.value, args
-                            )
-                elif is_issue_view_command(args):
-                    rest_result = self._issue_view_rest_fallback(args, timeout)
-                    if rest_result.ok and rest_result.value is not None:
-                        if rest_result.value.returncode == 0:
-                            return rest_result.value
+        return subprocess.CompletedProcess(
+            args=["gh"] + args,
+            returncode=1,
+            stdout="",
+            stderr="Rate limit exceeded",
+        )
 
-            # Cache expired - try ETag conditional request first (#1674)
-            etag_result = self._try_etag_conditional_issue_view(args, timeout)
-            if etag_result is not None:
-                return etag_result
+    def _handle_read_request(
+        self, args: list[str], timeout: float
+    ) -> subprocess.CompletedProcess | None:
+        """Handle read request with cache, REST, ETag, and serialized fetch.
 
-            # Cache expired - use serialized fetch to prevent thundering herd
-            serialized_result = self._serialized_fetch(args, timeout)
-            if serialized_result is not None:
-                # Merge pending issues into issue list results (#1854)
-                return self._maybe_merge_pending_issues(serialized_result, args)
+        Returns:
+            CompletedProcess on cache hit or successful fetch, None to fall through
+        """
+        # Check cache (includes historical fallback for issue views)
+        cached = self.get_cached_or_historical(args)
+        if cached is not None:
+            cached_result = subprocess.CompletedProcess(
+                args=["gh"] + args,
+                returncode=0,
+                stdout=cached,
+                stderr="",
+            )
+            return self._maybe_merge_pending_issues(cached_result, args)
 
-        # Write commands or non-cacheable reads go directly
-
-        # Prefer REST for JSON-based issue list/view to reduce GraphQL usage (#1074)
-        # (This path is for writes and non-cacheable reads - reads handled above)
+        # Prefer REST when GraphQL quota is low (#1074)
         if self._prefer_issue_rest(args):
-            # Search commands use separate API (#1777)
-            if is_issue_search_command(args):
-                rest_result = self._issue_search_rest_fallback(args, timeout)
-                if rest_result.ok and rest_result.value is not None:
-                    if rest_result.value.returncode == 0:
-                        self.set_cached(args, rest_result.value.stdout)
-                        return rest_result.value
-            elif is_issue_list_command(args):
-                rest_result = self._issue_list_rest_fallback(args, timeout)
-                if rest_result.ok and rest_result.value is not None:
-                    if rest_result.value.returncode == 0:
-                        self.set_cached(args, rest_result.value.stdout)
-                        # Merge pending issues (#1854)
-                        return self._maybe_merge_pending_issues(rest_result.value, args)
-            elif is_issue_view_command(args):
-                rest_result = self._issue_view_rest_fallback(args, timeout)
-                if rest_result.ok and rest_result.value is not None:
-                    if rest_result.value.returncode == 0:
-                        return rest_result.value
+            rest_result = self._try_rest_and_cache(args, timeout)
+            if rest_result is not None:
+                return rest_result
 
-        # Execute with secondary rate limit retry (#2299)
+        # Try ETag conditional request (#1674)
+        etag_result = self._try_etag_conditional_issue_view(args, timeout)
+        if etag_result is not None:
+            return etag_result
+
+        # Use serialized fetch to prevent thundering herd
+        serialized_result = self._serialized_fetch(args, timeout)
+        if serialized_result is not None:
+            return self._maybe_merge_pending_issues(serialized_result, args)
+
+        return None
+
+    def _execute_with_retry(
+        self, args: list[str], timeout: float
+    ) -> subprocess.CompletedProcess:
+        """Execute gh command with secondary rate limit retry (#2299).
+
+        Returns:
+            CompletedProcess from subprocess execution, stale fallback, or timeout error
+        """
         max_secondary_retries = 3
         for attempt in range(max_secondary_retries + 1):
             try:
@@ -1256,7 +1316,7 @@ class RateLimiter:
                     stderr=f"Timeout after {timeout}s",
                 )
 
-            # Check for secondary rate limit and retry with backoff (#2299)
+            # Check for secondary rate limit and retry with backoff
             if result.returncode != 0:
                 error_output = (result.stderr or "") + (result.stdout or "")
                 if is_secondary_rate_limit_error(error_output):
@@ -1265,84 +1325,95 @@ class RateLimiter:
                         wait_time = backoff.get_wait_time(error_output)
                         backoff.wait_with_progress(wait_time)
                         continue
-                    # Max retries exceeded - fall through to error handling
 
-            # Not a secondary rate limit or success - exit retry loop
+            # Success or non-retryable error
             break
 
-        # Check for GraphQL rate limit error and try REST fallback (#1728)
+        return result
+
+    def _handle_post_execution(
+        self, result: subprocess.CompletedProcess, args: list[str], timeout: float
+    ) -> subprocess.CompletedProcess:
+        """Handle post-execution caching, rate limit fallback, and error recovery.
+
+        Returns:
+            Final CompletedProcess result
+        """
         error_output = (result.stderr or "") + (result.stdout or "")
         is_rate_limited = (
             result.returncode != 0 and self._is_graphql_rate_limit_error(error_output)
         ) or self._is_silent_list_rate_limit(result, args)
+
+        # Try REST fallback on rate limit (#1728)
         if is_rate_limited:
-            fallback_process = None
-            # Search commands use separate search API (#1777)
-            # Check search quota before fallback (#1869)
-            if is_issue_search_command(args):
-                if not self._rest_fallback.has_search_quota():
-                    debug_log("search quota exhausted, skipping REST fallback")
-                    # Skip to stale fallback below
-                else:
-                    rest_result = self._issue_search_rest_fallback(args, timeout)
-                    if rest_result.value is not None:
-                        if rest_result.ok and rest_result.value.returncode == 0:
-                            self.set_cached(args, rest_result.value.stdout)
-                            return rest_result.value
-                        fallback_process = rest_result.value
-                    if rest_result.skipped:
-                        debug_log(f"issue_search: REST skipped ({rest_result.error})")
-                    elif not rest_result.ok:
-                        debug_log(f"issue_search: REST failed ({rest_result.error})")
-            elif is_issue_list_command(args):
-                rest_result = self._issue_list_rest_fallback(args, timeout)
-                if rest_result.value is not None:
-                    if rest_result.ok and rest_result.value.returncode == 0:
-                        self.set_cached(args, rest_result.value.stdout)
-                        # Merge pending issues (#1854)
-                        return self._maybe_merge_pending_issues(rest_result.value, args)
-                    # Capture error response for fallback (#1754)
-                    fallback_process = rest_result.value
-                if rest_result.skipped:
-                    debug_log(f"issue_list: REST skipped ({rest_result.error})")
-                elif not rest_result.ok:
-                    debug_log(f"issue_list: REST failed ({rest_result.error})")
-            elif is_issue_view_command(args):
-                rest_result = self._issue_view_rest_fallback(args, timeout)
-                if rest_result.value is not None:
-                    if rest_result.ok and rest_result.value.returncode == 0:
-                        return rest_result.value
-                    # Capture error response for fallback (#1754)
-                    fallback_process = rest_result.value
-                if rest_result.skipped:
-                    debug_log(f"issue_view: REST skipped ({rest_result.error})")
-                elif not rest_result.ok:
-                    debug_log(f"issue_view: REST failed ({rest_result.error})")
-            if fallback_process is not None:
-                return fallback_process
+            fallback_result = self._try_rest_after_rate_limit(args, timeout)
+            if fallback_result is not None:
+                return fallback_result
+            # REST failed or not applicable - try stale
             if not self._is_write(args):
                 stale_result = self.get_stale_fallback(args, "rate limited")
                 if stale_result is not None:
                     return stale_result
 
-        # Cache successful reads and reset backoff state
+        # Cache successful reads
         if result.returncode == 0 and not self._is_write(args):
             self.set_cached(args, result.stdout)
-            reset_backoff_state()  # Success - reset secondary rate limit backoff
+            reset_backoff_state()
 
-        # Invalidate cache on writes and reset backoff state
+        # Invalidate cache on successful writes
         if result.returncode == 0 and self._is_write(args):
             self._invalidate_cache(args)
-            reset_backoff_state()  # Success - reset secondary rate limit backoff
+            reset_backoff_state()
 
-        # For failed read operations, try stale fallback (#1135)
+        # Stale fallback for failed reads (#1135)
         if result.returncode != 0 and not self._is_write(args):
             stale_result = self.get_stale_fallback(args, "API error")
             if stale_result is not None:
                 return stale_result
 
-        # Merge pending issues into issue list results (#1854)
         return self._maybe_merge_pending_issues(result, args)
+
+    # --- Main entry point ---
+
+    def call(self, args: list[str], timeout: float = 30) -> subprocess.CompletedProcess:
+        """Execute gh command with rate limiting and caching.
+
+        This is the main entry point used by bin/gh wrapper.
+        Orchestrates: pending views, rate limits, caching, REST fallback,
+        subprocess execution, and post-execution handling.
+        """
+        # Opportunistic lock cleanup, throttled to once per hour (#1605)
+        self._maybe_cleanup_stale_locks()
+
+        # Handle pending issue views (#1854)
+        pending_result = self._handle_pending_issue_view(args)
+        if pending_result is not None:
+            return pending_result
+
+        # Check rate limit before execution
+        rate_limit_result = self._handle_rate_limit_block(args)
+        if rate_limit_result is not None:
+            return rate_limit_result
+
+        # Handle read requests with cache/REST/ETag/serialization
+        if not self._is_write(args):
+            read_result = self._handle_read_request(args, timeout)
+            if read_result is not None:
+                return read_result
+
+        # Try REST for non-cacheable reads that fell through (#1074)
+        # Note: _prefer_issue_rest returns False for write commands, so this
+        # only affects reads without --json or when cache/ETag/serialized paths failed
+        if self._prefer_issue_rest(args):
+            rest_result = self._try_rest_and_cache(args, timeout, merge_pending=True)
+            if rest_result is not None:
+                return rest_result
+
+        # Execute subprocess with retry
+        result = self._execute_with_retry(args, timeout)
+
+        # Handle post-execution caching, fallback, and error recovery
+        return self._handle_post_execution(result, args, timeout)
 
 
 # Singleton for bin/gh wrapper

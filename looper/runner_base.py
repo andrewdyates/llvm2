@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -30,6 +34,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,8 +62,13 @@ from looper.issue_manager import IssueManager
 from looper.iteration import IterationRunner
 from looper.log import debug_swallow, log_error, log_info, log_warning
 from looper.status import StatusManager
+from ai_template_scripts.subprocess_utils import is_process_alive
 from looper.subprocess_utils import is_local_mode, run_gh_command
-from looper.sync import check_stale_staged_files
+from looper.sync import (
+    enforce_no_stale_staged_files,
+    get_staged_files,
+    warn_stale_staged_files,
+)
 
 VALID_ROLES = frozenset({"worker", "manager", "researcher", "prover"})
 
@@ -110,7 +120,7 @@ class RunnerBase:
             self.status_file = Path(f".{mode}_{worker_id}_status.json")
         else:
             self.status_file = Path(STATUS_FILE_TEMPLATE.format(mode=mode))
-        self.crash_log = LOG_DIR / "crashes.log"
+        self.crash_log = LOG_DIR / "failures.log"
 
         # Managers for issue ops and status/logging
         repo_path = Path.cwd().resolve()
@@ -155,11 +165,26 @@ class RunnerBase:
         # Per-role STOP file (e.g., STOP_WORKER, STOP_MANAGER)
         self._role_stop_file = f"STOP_{mode.upper()}"
 
+        # Instance-specific STOP file (e.g., STOP_W1, STOP_W2) for multi-worker
+        # Part of #2369: Session coordination design
+        if worker_id is not None:
+            role_letter = mode[0].upper()
+            self._instance_stop_file: str | None = f"STOP_{role_letter}{worker_id}"
+        else:
+            self._instance_stop_file = None
+
         # STOP files are checked in current working directory
         self._stop_dir = Path(".")
 
-        # Coordination directory for iteration locks and shared state
-        self._coord_dir = LOG_DIR
+        # Coordination directory for iteration locks, PID files, and session log
+        # Uses AIT_COORD_DIR if set (for isolated mode), otherwise worker_logs/
+        # This ensures session.log is centralized with PID files in multi-worker mode
+        coord_dir_env = os.environ.get("AIT_COORD_DIR")
+        self._coord_dir = Path(coord_dir_env) if coord_dir_env else LOG_DIR
+
+        # Session audit log for tracking start/stop events (#2369)
+        # Location: AIT_COORD_DIR/session.log (isolated) or worker_logs/session.log (shared)
+        self._session_log = self._coord_dir / "session.log"
 
         # Checkpoint manager for crash recovery
         checkpoint_filename = get_checkpoint_filename(mode, worker_id)
@@ -254,9 +279,13 @@ class RunnerBase:
             log_info("✓ gh authenticated")
 
             # Check network (non-blocking warning)
-            net_result = run_gh_command(["api", "user", "--jq", ".login"], timeout=10)
+            # Use /rate_limit instead of /user - works with both user tokens
+            # and GitHub App installation tokens (#2560)
+            net_result = run_gh_command(
+                ["api", "rate_limit", "--jq", ".rate.limit"], timeout=10
+            )
             if net_result.ok and net_result.value:
-                log_info(f"✓ GitHub connected as: {net_result.value.strip()}")
+                log_info(f"✓ GitHub API connected (rate limit: {net_result.value.strip()})")
             elif net_result.error and "timeout" in net_result.error.lower():
                 log_warning("⚠ GitHub API timeout (offline mode)")
             else:
@@ -293,17 +322,42 @@ class RunnerBase:
         if self.pid_file.exists():
             try:
                 old_pid = int(self.pid_file.read_text().strip())
-                # Check if process is still running
-                os.kill(old_pid, 0)  # Doesn't kill, just checks
-                log_error(f"ERROR: Another {self.mode} loop running (PID {old_pid})")
-                log_error(f"  Stop it first or remove {self.pid_file}")
-                sys.exit(1)
-            except (ProcessLookupError, ValueError):
+                if is_process_alive(old_pid):
+                    log_error(f"ERROR: Another {self.mode} loop running (PID {old_pid})")
+                    log_error(f"  Stop it first or remove {self.pid_file}")
+                    sys.exit(1)
                 # Process not running, clean up stale PID file
                 self.pid_file.unlink()
+            except (ValueError, OSError):
+                # Malformed PID file, clean up
+                self.pid_file.unlink()
 
-        # Write our PID
-        self.pid_file.write_text(str(os.getpid()))
+        # Write our PID atomically (#2395: fixes TOCTOU race)
+        # Use a unique temp file, then atomically replace the PID file so
+        # concurrent starts don't clobber the same temp path.
+        pid_tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=self.pid_file.parent,
+                prefix=f"{self.pid_file.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp_file:
+                tmp_file.write(f"{os.getpid()}\n")
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+                pid_tmp = Path(tmp_file.name)
+            if pid_tmp is not None:
+                pid_tmp.replace(self.pid_file)  # Atomic across platforms
+                pid_tmp = None
+        finally:
+            if pid_tmp is not None and pid_tmp.exists():
+                try:
+                    pid_tmp.unlink()
+                except OSError as e:
+                    debug_swallow("cleanup_pid_tmp", e)
 
         # Restore iteration counter
         if self.iteration_file.exists():
@@ -335,12 +389,20 @@ class RunnerBase:
         # Check for stale staged files from prior sessions (#995)
         # Default: warn only. Set staged_check_abort=True in config to block.
         staged_check_abort = self.config.get("staged_check_abort", False)
-        check_stale_staged_files(abort=staged_check_abort)
+        staged = get_staged_files()
+        if staged:
+            if staged_check_abort:
+                enforce_no_stale_staged_files()  # Raises RuntimeError
+            else:
+                warn_stale_staged_files(staged)
 
         # Check for crash recovery
         self._recovery_context = self.checkpoint_manager.check_recovery()
         if self._recovery_context:
             self.iteration_runner.set_recovery_context(self._recovery_context)
+
+        # Check for headless violations from previous session
+        self._check_and_clear_headless_violations()
 
         # Clean up stale file trackers from crashed workers (multi-worker mode)
         if self.worker_id is not None:
@@ -365,6 +427,67 @@ class RunnerBase:
         log_info("")
         log_info(f"Starting {self.mode} loop...")
         log_info("")
+
+        # Log session START event to audit log (#2369)
+        self._log_session_event("START")
+
+    def _check_and_clear_headless_violations(self) -> None:
+        """Check for headless violation flags and inject correction context.
+
+        Headless roles (WORKER, PROVER, RESEARCHER, MANAGER) must not ask users
+        for direction. When a violation is detected (by check_headless_violation
+        in status.py), a flag file is created.
+
+        This method:
+        1. Looks for .flags/headless_violation_* files
+        2. If found, injects a correction message via recovery context
+        3. Clears the flag files
+
+        The correction message tells the AI about the violation and instructs
+        it to make decisions autonomously without asking for direction.
+        """
+        if not FLAGS_DIR.exists():
+            return
+
+        # Only consume flags for THIS role to prevent cross-role correction (#2404)
+        violation_flags = list(FLAGS_DIR.glob(f"headless_violation_{self.mode}_*"))
+        if not violation_flags:
+            return
+
+        # Found violation(s) - inject correction context
+        log_warning(
+            f"⚠️  Found {len(violation_flags)} headless violation flag(s) from "
+            "previous session"
+        )
+
+        # Build correction message
+        correction = (
+            "## HEADLESS VIOLATION CORRECTION\n\n"
+            "**Previous session violated headless mode** by asking for user direction.\n"
+            "This is FORBIDDEN for autonomous roles.\n\n"
+            "**DO NOT:**\n"
+            "- Ask 'What would you like me to do?'\n"
+            "- Ask 'How should I proceed?'\n"
+            "- Wait for user input or confirmation\n\n"
+            "**DO:**\n"
+            "- Make autonomous decisions\n"
+            "- Document your reasoning in commits\n"
+            "- Pick work from your issue queue or rotation phase\n"
+            "- If blocked, file an issue and move on\n\n"
+            "Continue with your work autonomously."
+        )
+
+        # Inject via recovery context mechanism
+        self.iteration_runner._prompt_builder.set_recovery_context(correction)
+        log_info("  Injected correction context for next iteration")
+
+        # Clear the flag files
+        for flag_file in violation_flags:
+            try:
+                flag_file.unlink()
+                log_info(f"  Cleared: {flag_file.name}")
+            except OSError as e:
+                debug_swallow("clear_headless_violation_flag", e)
 
     def _start_memory_watchdog(self) -> None:
         """Start memory watchdog daemon for OOM prevention (#1468).
@@ -398,16 +521,13 @@ class RunnerBase:
         if watchdog_pid_file.exists():
             try:
                 existing_pid = int(watchdog_pid_file.read_text().strip())
-                # Check if process is still running
-                os.kill(existing_pid, 0)  # Just checks existence
-                log_info(f"✓ Memory watchdog already running (PID {existing_pid})")
-                return
-            except (ProcessLookupError, ValueError, OSError):
+                if is_process_alive(existing_pid):
+                    log_info(f"✓ Memory watchdog already running (PID {existing_pid})")
+                    return
                 # Stale PID file, remove it
-                try:
-                    watchdog_pid_file.unlink()
-                except OSError as e:
-                    debug_swallow("unlink_watchdog_pid_stale", e)
+                watchdog_pid_file.unlink()
+            except (ValueError, OSError) as e:
+                debug_swallow("unlink_watchdog_pid_stale", e)
 
         # Get threshold from config (default: critical)
         threshold = self.config.get("memory_watchdog_threshold", "critical")

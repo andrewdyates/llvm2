@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -15,6 +19,10 @@ set -euo pipefail
 
 # Script directory for calling other scripts
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Load identity configuration from ait_identity.toml
+# shellcheck source=identity.sh
+source "$SCRIPT_DIR/identity.sh" 2>/dev/null || true
 
 # Version function
 version() {
@@ -38,6 +46,9 @@ usage() {
     echo "  --clean      Delete obsolete and forbidden files automatically"
     echo "  --version    Show version information"
     echo "  -h, --help   Show this help message"
+    echo ""
+    echo "Acknowledgments:"
+    echo "  .audit_ack  Optional file with one warning substring per line to acknowledge"
     echo ""
     echo "Examples:"
     echo "  $0                # Check alignment (no changes)"
@@ -70,6 +81,41 @@ if ! git rev-parse --git-dir >/dev/null 2>&1; then
     echo -e "${RED}ERROR: Not in a git repository${NC}"
     exit 1
 fi
+
+# Load acknowledged warnings from .audit_ack
+# Format: one pattern per line, # comments allowed
+# Patterns match warning text (substring match)
+declare -a ACK_PATTERNS=()
+if [[ -f ".audit_ack" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Strip comments
+        line="${line%%#*}"
+        # Skip empty lines
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*$ ]] && continue
+        # Trim leading/trailing whitespace
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" ]] && continue
+        ACK_PATTERNS+=("$line")
+    done <".audit_ack"
+    if [[ ${#ACK_PATTERNS[@]} -gt 0 ]]; then
+        echo -e "${GREEN}Acknowledged warnings (.audit_ack): ${#ACK_PATTERNS[@]} pattern(s)${NC}"
+        echo
+    fi
+fi
+
+# Helper: check if a warning is acknowledged
+is_acknowledged() {
+    local warning="$1"
+    # Handle empty array (set -u safe)
+    [[ ${#ACK_PATTERNS[@]} -eq 0 ]] && return 1
+    for pattern in "${ACK_PATTERNS[@]}"; do
+        if [[ "$warning" == *"$pattern"* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 # Files that SHOULD exist (from template)
 # Keep in sync with sync_repo.sh
@@ -135,7 +181,7 @@ fi
 # Files that look deletable but AREN'T
 KEEP=(
     "worker_logs" # Used by looper.py - contains iteration logs
-    "AGENTS.md"   # Used by Codex
+    "AGENTS.md"   # Stub; Codex rules injected by looper at runtime
     "GEMINI.md"   # Used by Gemini
     ".mcp.json"   # MCP config
 )
@@ -153,16 +199,23 @@ done
 echo
 
 echo -e "${YELLOW}Obsolete files (should delete):${NC}"
-found_obsolete=0
+found_obsolete_total=0
+found_obsolete_unacked=0
 for f in "${OBSOLETE[@]}"; do
     if [[ -e "$f" ]]; then
         if [[ "$CLEAN" == "true" ]]; then
             rm -rf "$f"
             echo -e "  ${GREEN}✓ $f (DELETED)${NC}"
         else
-            echo -e "  ${RED}! $f (DELETE THIS)${NC}"
+            message="$f (DELETE THIS)"
+            if is_acknowledged "$message"; then
+                echo -e "  ${GREEN}✓ $message (acknowledged)${NC}"
+            else
+                echo -e "  ${RED}! $message${NC}"
+                ((found_obsolete_unacked++)) || true
+            fi
         fi
-        ((found_obsolete++)) || true
+        ((found_obsolete_total++)) || true
     fi
 done
 
@@ -174,14 +227,20 @@ for pattern in "${OBSOLETE_PATTERNS[@]}"; do
             rm -rf "$f"
             echo -e "  ${GREEN}✓ $f (DELETED)${NC}"
         else
-            echo -e "  ${RED}! $f (DELETE THIS)${NC}"
+            message="$f (DELETE THIS)"
+            if is_acknowledged "$message"; then
+                echo -e "  ${GREEN}✓ $message (acknowledged)${NC}"
+            else
+                echo -e "  ${RED}! $message${NC}"
+                ((found_obsolete_unacked++)) || true
+            fi
         fi
-        ((found_obsolete++)) || true
+        ((found_obsolete_total++)) || true
     done
 done
 shopt -u nullglob
 
-[[ $found_obsolete -eq 0 ]] && echo "  (none found)"
+[[ $found_obsolete_total -eq 0 ]] && echo "  (none found)"
 echo
 
 echo -e "${RED}Forbidden files (violates template rules):${NC}"
@@ -217,31 +276,66 @@ echo
 
 # Check CLAUDE.md for content that belongs elsewhere
 echo -e "${YELLOW}CLAUDE.md content audit:${NC}"
-claude_issues=0
+claude_issues_total=0
+claude_issues_unacked=0
 if [[ -f "CLAUDE.md" ]]; then
     # Patterns that suggest content belongs elsewhere
     if grep -qi "## Roadmap\|## Current Tasks\|## Status\|## Progress" CLAUDE.md 2>/dev/null; then
-        echo -e "  ${RED}! Contains status/progress content - use GitHub Issues for tasks${NC}"
-        ((claude_issues++)) || true
+        message="Contains status/progress content - use GitHub Issues for tasks"
+        if is_acknowledged "$message"; then
+            echo -e "  ${GREEN}✓ $message (acknowledged)${NC}"
+        else
+            echo -e "  ${RED}! $message${NC}"
+            ((claude_issues_unacked++)) || true
+        fi
+        ((claude_issues_total++)) || true
     fi
     if grep -qi "## Anti-Patterns\|## Commit Structure\|## Session Start" CLAUDE.md 2>/dev/null; then
-        echo -e "  ${RED}! Contains rules covered by ai_template.md - remove duplication${NC}"
-        ((claude_issues++)) || true
+        message="Contains rules covered by ai_template.md - remove duplication"
+        if is_acknowledged "$message"; then
+            echo -e "  ${GREEN}✓ $message (acknowledged)${NC}"
+        else
+            echo -e "  ${RED}! $message${NC}"
+            ((claude_issues_unacked++)) || true
+        fi
+        ((claude_issues_total++)) || true
     fi
     if grep -qi "\[x\]\|\[ \]\|TODO:\|DONE:\|RESOLVED:" CLAUDE.md 2>/dev/null; then
-        echo -e "  ${RED}! Contains task tracking - move to GitHub Issues${NC}"
-        ((claude_issues++)) || true
+        message="Contains task tracking - move to GitHub Issues"
+        if is_acknowledged "$message"; then
+            echo -e "  ${GREEN}✓ $message (acknowledged)${NC}"
+        else
+            echo -e "  ${RED}! $message${NC}"
+            ((claude_issues_unacked++)) || true
+        fi
+        ((claude_issues_total++)) || true
     fi
     if grep -qi "## WORKER\|## MANAGER\|## RESEARCHER\|## PROVER" CLAUDE.md 2>/dev/null; then
-        echo -e "  ${RED}! Contains role definitions - covered by ai_template.md${NC}"
-        ((claude_issues++)) || true
+        message="Contains role definitions - covered by ai_template.md"
+        if is_acknowledged "$message"; then
+            echo -e "  ${GREEN}✓ $message (acknowledged)${NC}"
+        else
+            echo -e "  ${RED}! $message${NC}"
+            ((claude_issues_unacked++)) || true
+        fi
+        ((claude_issues_total++)) || true
     fi
-    [[ $claude_issues -eq 0 ]] && echo "  ✓ CLAUDE.md looks clean"
+    if [[ $claude_issues_total -eq 0 ]]; then
+        echo "  ✓ CLAUDE.md looks clean"
+    elif [[ $claude_issues_unacked -eq 0 ]]; then
+        echo "  ✓ CLAUDE.md issues acknowledged"
+    fi
 
     # Check for Director designation
     if ! grep -q '\*\*Director:\*\*' CLAUDE.md 2>/dev/null; then
-        echo -e "  ${RED}! Missing **Director:** designation${NC}"
-        ((claude_issues++)) || true
+        message="Missing Director designation (**Director:** not found)"
+        if is_acknowledged "$message"; then
+            echo -e "  ${GREEN}✓ $message (acknowledged)${NC}"
+        else
+            echo -e "  ${RED}! $message${NC}"
+            ((claude_issues_unacked++)) || true
+        fi
+        ((claude_issues_total++)) || true
     else
         echo "  ✓ Director designation present"
     fi
@@ -256,7 +350,7 @@ hooks_missing=0
 HOOKS_DIR=$(git rev-parse --git-path hooks 2>/dev/null || echo ".git/hooks")
 [[ "$HOOKS_DIR" != /* ]] && HOOKS_DIR="$(pwd)/$HOOKS_DIR"
 
-for hook in commit-msg pre-commit post-commit; do
+for hook in commit-msg pre-commit post-commit pre-push; do
     hook_file="$HOOKS_DIR/$hook"
     if [[ -f "$hook_file" && -x "$hook_file" && ! "$hook_file" =~ \.sample$ ]]; then
         echo "  ✓ $hook installed"
@@ -272,23 +366,33 @@ echo
 
 # Check required directories
 echo -e "${YELLOW}Required directories:${NC}"
-dirs_missing=0
+dirs_missing_unacked=0
 if [[ -d "ideas" ]]; then
     echo "  ✓ ideas/ exists"
 else
-    echo -e "  ${YELLOW}! ideas/ missing - create for future considerations${NC}"
-    ((dirs_missing++)) || true
+    message="ideas/ missing - create for future considerations"
+    if is_acknowledged "$message"; then
+        echo -e "  ${GREEN}✓ $message (acknowledged)${NC}"
+    else
+        echo -e "  ${YELLOW}! $message${NC}"
+        ((dirs_missing_unacked++)) || true
+    fi
 fi
 echo
 
 # Check .looper_config.json
 echo -e "${YELLOW}Looper configuration:${NC}"
-looper_missing=0
+looper_missing_unacked=0
 if [[ -f ".looper_config.json" ]]; then
     echo "  ✓ .looper_config.json exists"
 else
-    echo -e "  ${YELLOW}! .looper_config.json missing - looper will use defaults${NC}"
-    ((looper_missing++)) || true
+    message=".looper_config.json missing - looper will use defaults"
+    if is_acknowledged "$message"; then
+        echo -e "  ${GREEN}✓ $message (acknowledged)${NC}"
+    else
+        echo -e "${YELLOW}! $message${NC}"
+        ((looper_missing_unacked++)) || true
+    fi
 fi
 echo
 
@@ -390,7 +494,8 @@ echo
 
 # Check for oversized files (>5000 lines)
 echo -e "${YELLOW}Oversized files (>5000 lines):${NC}"
-oversized_count=0
+oversized_count_total=0
+oversized_count_unacked=0
 if ! $IS_TEMPLATE; then
     # Find tracked source files over 5000 lines
     while IFS= read -r file; do
@@ -402,13 +507,21 @@ if ! $IS_TEMPLATE; then
 
         lines=$(wc -l <"$file" 2>/dev/null | tr -d ' ')
         if [[ $lines -gt 5000 ]]; then
-            echo -e "  ${YELLOW}! $file: $lines lines${NC}"
-            ((oversized_count++)) || true
+            message="$file: $lines lines"
+            if is_acknowledged "$message"; then
+                echo -e "  ${GREEN}✓ $message (acknowledged)${NC}"
+            else
+                echo -e "  ${YELLOW}! $message${NC}"
+                ((oversized_count_unacked++)) || true
+            fi
+            ((oversized_count_total++)) || true
         fi
     done < <(git ls-files 2>/dev/null | grep -E '\.(rs|py|js|ts|jsx|tsx|go|java|c|cpp|h|hpp|swift|kt)$')
 
-    if [[ $oversized_count -eq 0 ]]; then
+    if [[ $oversized_count_total -eq 0 ]]; then
         echo "  ✓ No oversized source files"
+    elif [[ $oversized_count_unacked -eq 0 ]]; then
+        echo "  ✓ Oversized files acknowledged"
     else
         echo "  Consider splitting files >5000 lines for maintainability"
     fi
@@ -419,10 +532,11 @@ echo
 
 # Check for author headers in source files
 echo -e "${YELLOW}Author headers:${NC}"
-missing_author=0
+missing_author_total=0
+missing_author_unacked=0
 if ! $IS_TEMPLATE; then
     # Sample up to 20 source files and check for author header
-    # We check for "Andrew Yates" or "andrewdyates" in the first 10 lines
+    # We check for owner identity in the first 10 lines
     sampled=0
     missing_list=()
     while IFS= read -r file; do
@@ -431,19 +545,25 @@ if ! $IS_TEMPLATE; then
         [[ $sampled -ge 20 ]] && break
         ((sampled++)) || true
 
-        # Check first 10 lines for author attribution (word boundaries to avoid jayates, etc.)
-        if ! head -10 "$file" 2>/dev/null | grep -qiE '\bAndrew Yates\b|\bandrewdyates\b|\bayates\b'; then
+        # Check first 10 lines for author attribution from identity config
+        if ! head -10 "$file" 2>/dev/null | grep -qi "$AIT_AUTHOR_GREP_PATTERN"; then
             missing_list+=("$file")
-            ((missing_author++)) || true
+            ((missing_author_total++)) || true
         fi
     done < <(git ls-files 2>/dev/null | grep -E '\.(rs|py)$' | head -30)
 
-    if [[ $missing_author -gt 0 ]]; then
-        echo -e "  ${YELLOW}! $missing_author of $sampled sampled files missing author header${NC}"
-        for f in "${missing_list[@]:0:5}"; do
-            echo "    - $f"
-        done
-        [[ ${#missing_list[@]} -gt 5 ]] && echo "    ... and $((${#missing_list[@]} - 5)) more"
+    if [[ $missing_author_total -gt 0 ]]; then
+        message="$missing_author_total of $sampled sampled files missing author header"
+        if is_acknowledged "$message"; then
+            echo -e "  ${GREEN}✓ $message (acknowledged)${NC}"
+        else
+            echo -e "  ${YELLOW}! $message${NC}"
+            missing_author_unacked=$missing_author_total
+            for f in "${missing_list[@]:0:5}"; do
+                echo "    - $f"
+            done
+            [[ ${#missing_list[@]} -gt 5 ]] && echo "    ... and $((${#missing_list[@]} - 5)) more"
+        fi
     else
         echo "  ✓ Sampled files have author headers"
     fi
@@ -454,18 +574,24 @@ echo
 
 # Check for VISION.md
 echo -e "${YELLOW}Strategic docs:${NC}"
-vision_missing=0
+vision_missing_unacked=0
 if [[ -f "VISION.md" ]]; then
     echo "  ✓ VISION.md exists"
 else
-    echo -e "  ${YELLOW}! VISION.md missing - should document strategic direction${NC}"
-    vision_missing=1
+    message="VISION.md missing - should document strategic direction"
+    if is_acknowledged "$message"; then
+        echo -e "  ${GREEN}✓ $message (acknowledged)${NC}"
+    else
+        echo -e "  ${YELLOW}! $message${NC}"
+        vision_missing_unacked=1
+    fi
 fi
 echo
 
 # Check optional features (#1076)
 echo -e "${YELLOW}Optional features:${NC}"
-optional_issues=0
+optional_issues_total=0
+optional_issues_unacked=0
 if [[ -f ".ai_template_features" ]]; then
     # Parse enabled features
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -476,8 +602,14 @@ if [[ -f ".ai_template_features" ]]; then
 
         # Validate feature name
         if [[ "$line" == */* || "$line" == *\\* || "$line" == *..* ]]; then
-            echo -e "  ${RED}! Invalid feature name: $line${NC}"
-            ((optional_issues++)) || true
+            message="Invalid feature name: $line"
+            if is_acknowledged "$message"; then
+                echo -e "  ${GREEN}✓ $message (acknowledged)${NC}"
+            else
+                echo -e "  ${RED}! $message${NC}"
+                ((optional_issues_unacked++)) || true
+            fi
+            ((optional_issues_total++)) || true
             continue
         fi
 
@@ -486,8 +618,14 @@ if [[ -f ".ai_template_features" ]]; then
         if [[ -d "$feature_dir" ]]; then
             echo "  ✓ $line (enabled and present)"
         else
-            echo -e "  ${YELLOW}! $line (enabled but missing - run sync_repo.sh)${NC}"
-            ((optional_issues++)) || true
+            message="$line (enabled but missing - run sync_repo.sh)"
+            if is_acknowledged "$message"; then
+                echo -e "  ${GREEN}✓ $message (acknowledged)${NC}"
+            else
+                echo -e "  ${YELLOW}! $message${NC}"
+                ((optional_issues_unacked++)) || true
+            fi
+            ((optional_issues_total++)) || true
         fi
     done <".ai_template_features"
 else
@@ -517,11 +655,15 @@ echo
 echo -e "${RED}System health (.flags/):${NC}"
 health_failures=0
 if [[ -d ".flags" ]]; then
-    # Check for crash flag
-    if [[ -f ".flags/crashes" ]]; then
-        crash_count=$(cat ".flags/crashes" 2>/dev/null | grep -cE '^[0-9]+' || echo "0")
+    # Check for failure flag (fallback to legacy crashes flag)
+    crash_flag_path=".flags/failures"
+    if [[ ! -f "$crash_flag_path" && -f ".flags/crashes" ]]; then
+        crash_flag_path=".flags/crashes"
+    fi
+    if [[ -f "$crash_flag_path" ]]; then
+        crash_count=$(cat "$crash_flag_path" 2>/dev/null | grep -cE '^[0-9]+' || echo "0")
         if [[ "$crash_count" =~ ^[0-9]+$ ]] && [[ "$crash_count" -gt 0 ]]; then
-            echo -e "  ${RED}! .flags/crashes: $crash_count crash(es) detected${NC}"
+            echo -e "  ${RED}! $crash_flag_path: $crash_count failure(s) detected${NC}"
             ((health_failures++)) || true
         fi
     fi
@@ -591,41 +733,41 @@ if [[ $health_failures -gt 0 ]]; then
 fi
 
 # Warnings (don't affect exit code)
-if [[ $found_obsolete -gt 0 ]]; then
+if [[ $found_obsolete_total -gt 0 ]]; then
     if [[ "$CLEAN" == "true" ]]; then
-        echo -e "${GREEN}[OK] Deleted $found_obsolete obsolete file(s)${NC}"
-    else
-        echo -e "${YELLOW}[WARN] Found $found_obsolete obsolete file(s) - run with --clean to delete${NC}"
-        ((warnings += found_obsolete)) || true
+        echo -e "${GREEN}[OK] Deleted $found_obsolete_total obsolete file(s)${NC}"
+    elif [[ $found_obsolete_unacked -gt 0 ]]; then
+        echo -e "${YELLOW}[WARN] Found $found_obsolete_unacked obsolete file(s) - run with --clean to delete${NC}"
+        ((warnings += found_obsolete_unacked)) || true
     fi
 fi
-if [[ $claude_issues -gt 0 ]]; then
-    echo -e "${YELLOW}[WARN] Found $claude_issues CLAUDE.md content issue(s) - clean up recommended${NC}"
-    ((warnings += claude_issues)) || true
+if [[ $claude_issues_unacked -gt 0 ]]; then
+    echo -e "${YELLOW}[WARN] Found $claude_issues_unacked CLAUDE.md content issue(s) - clean up recommended${NC}"
+    ((warnings += claude_issues_unacked)) || true
 fi
-if [[ $vision_missing -eq 1 ]]; then
+if [[ $vision_missing_unacked -eq 1 ]]; then
     echo -e "${YELLOW}[WARN] VISION.md missing - create to document strategic direction${NC}"
     ((warnings++)) || true
 fi
-if [[ $dirs_missing -gt 0 ]]; then
-    echo -e "${YELLOW}[WARN] Missing $dirs_missing required directory(s) (ideas/)${NC}"
-    ((warnings += dirs_missing)) || true
+if [[ $dirs_missing_unacked -gt 0 ]]; then
+    echo -e "${YELLOW}[WARN] Missing $dirs_missing_unacked required directory(s) (ideas/)${NC}"
+    ((warnings += dirs_missing_unacked)) || true
 fi
-if [[ $looper_missing -gt 0 ]]; then
+if [[ $looper_missing_unacked -gt 0 ]]; then
     echo -e "${YELLOW}[WARN] .looper_config.json missing - looper will use defaults${NC}"
     ((warnings++)) || true
 fi
-if [[ $oversized_count -gt 0 ]]; then
-    echo -e "${YELLOW}[WARN] $oversized_count oversized file(s) >5000 lines${NC}"
-    ((warnings += oversized_count)) || true
+if [[ $oversized_count_unacked -gt 0 ]]; then
+    echo -e "${YELLOW}[WARN] $oversized_count_unacked oversized file(s) >5000 lines${NC}"
+    ((warnings += oversized_count_unacked)) || true
 fi
-if [[ $missing_author -gt 0 ]]; then
-    echo -e "${YELLOW}[WARN] $missing_author file(s) missing author header${NC}"
-    ((warnings += missing_author)) || true
+if [[ $missing_author_unacked -gt 0 ]]; then
+    echo -e "${YELLOW}[WARN] $missing_author_unacked file(s) missing author header${NC}"
+    ((warnings += missing_author_unacked)) || true
 fi
-if [[ $optional_issues -gt 0 ]]; then
-    echo -e "${YELLOW}[WARN] $optional_issues optional feature issue(s) - run sync_repo.sh${NC}"
-    ((warnings += optional_issues)) || true
+if [[ $optional_issues_unacked -gt 0 ]]; then
+    echo -e "${YELLOW}[WARN] $optional_issues_unacked optional feature issue(s) - run sync_repo.sh${NC}"
+    ((warnings += optional_issues_unacked)) || true
 fi
 
 # Final summary
@@ -647,7 +789,7 @@ if [[ $failures -gt 0 || $warnings -gt 0 ]]; then
     if [[ -f "docs/MIGRATION_CHECKLIST.md" ]]; then
         echo -e "${YELLOW}See docs/MIGRATION_CHECKLIST.md for step-by-step alignment guide${NC}"
     else
-        echo -e "${YELLOW}See docs/MIGRATION_CHECKLIST.md in ai_template (https://github.com/dropbox-ai-prototypes/ai_template/blob/main/docs/MIGRATION_CHECKLIST.md)${NC}"
+        echo -e "${YELLOW}See docs/MIGRATION_CHECKLIST.md in ai_template (https://github.com/$AIT_GITHUB_ORG/ai_template/blob/main/docs/MIGRATION_CHECKLIST.md)${NC}"
         echo -e "${YELLOW}Or run ./ai_template_scripts/sync_repo.sh from the ai_template repo${NC}"
     fi
 fi

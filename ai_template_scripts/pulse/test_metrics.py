@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -41,6 +45,19 @@ from .constants import (
 def _resolve_root(repo_root: Path | None) -> Path:
     """Return repo root or current directory when unset."""
     return repo_root if repo_root is not None else Path(".")
+
+
+def _parse_count_from_result(result) -> int:
+    """Parse integer count from command result, returning 0 on bad output."""
+    if not result.ok:
+        return 0
+    text = result.stdout.strip()
+    if not text:
+        return 0
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _relative_path(path: Path, root: Path) -> str:
@@ -351,6 +368,8 @@ def _get_recent_test_results(repo_root: Path | None = None) -> dict | None:
 
     Note: command_errors are cargo invocation errors (e.g., passing --test-threads
     to criterion benches) which should not be counted as test failures (#929).
+    Current malformed-log behavior: a JSONDecodeError on any line in the recent
+    window aborts parsing and returns None.
     """
     root = _resolve_root(repo_root)
     test_log = root / "logs/tests.jsonl"
@@ -768,7 +787,7 @@ def _detect_smt_coverage(repo_root: Path | None = None) -> dict | None:
         timeout=10,
         cwd=root,
     )
-    smt_count = int(result.stdout.strip()) if result.ok and result.stdout.strip() else 0
+    smt_count = _parse_count_from_result(result)
 
     # Also check for z4 usage in Rust (use --exclude-dir for speed)
     result = run_cmd(
@@ -781,7 +800,7 @@ def _detect_smt_coverage(repo_root: Path | None = None) -> dict | None:
         timeout=10,
         cwd=root,
     )
-    z4_usage = int(result.stdout.strip()) if result.ok and result.stdout.strip() else 0
+    z4_usage = _parse_count_from_result(result)
 
     if smt_count == 0 and z4_usage == 0:
         return None
@@ -808,9 +827,7 @@ def _detect_nn_verification(repo_root: Path | None = None) -> dict | None:
         timeout=10,
         cwd=root,
     )
-    onnx_count = (
-        int(result.stdout.strip()) if result.ok and result.stdout.strip() else 0
-    )
+    onnx_count = _parse_count_from_result(result)
 
     result = run_cmd(
         [
@@ -822,9 +839,7 @@ def _detect_nn_verification(repo_root: Path | None = None) -> dict | None:
         timeout=10,
         cwd=root,
     )
-    vnnlib_count = (
-        int(result.stdout.strip()) if result.ok and result.stdout.strip() else 0
-    )
+    vnnlib_count = _parse_count_from_result(result)
 
     if onnx_count == 0 and vnnlib_count == 0:
         return None
@@ -959,49 +974,6 @@ def _parse_coverage_xml(coverage_xml: Path) -> dict | None:
         return None
 
 
-def _parse_coverage_sqlite(coverage_db: Path) -> dict | None:
-    """Parse .coverage SQLite database from coverage.py.
-
-    Args:
-        coverage_db: Path to .coverage file.
-
-    Returns:
-        Dict with coverage_pct, lines_total, lines_covered, etc.
-        Or None if parsing fails.
-    """
-    import sqlite3
-
-    try:
-        with sqlite3.connect(str(coverage_db)) as conn:
-            cursor = conn.cursor()
-
-            # Get total executable lines (num_statements)
-            cursor.execute(
-                "SELECT SUM(num_statements) FROM file WHERE num_statements IS NOT NULL"
-            )
-            row = cursor.fetchone()
-            lines_total = int(row[0]) if row and row[0] else 0
-
-            # Get covered lines count from line_bits
-            cursor.execute("SELECT SUM(num_statements - missing_lines) FROM file")
-            row = cursor.fetchone()
-            lines_covered = int(row[0]) if row and row[0] else 0
-
-        if lines_total == 0:
-            return None
-
-        return {
-            "coverage_pct": round(100 * lines_covered / lines_total, 1),
-            "lines_total": lines_total,
-            "lines_covered": lines_covered,
-            "lines_missing": lines_total - lines_covered,
-            "source": ".coverage",
-            "timestamp": coverage_db.stat().st_mtime,
-        }
-    except (sqlite3.Error, OSError, ZeroDivisionError):
-        return None
-
-
 def get_test_coverage(repo_root: Path | None = None) -> dict | None:
     """Get test coverage metrics from existing coverage data.
 
@@ -1009,7 +981,6 @@ def get_test_coverage(repo_root: Path | None = None) -> dict | None:
     Checks for coverage files in order of preference:
     1. coverage.json (most complete data)
     2. coverage.xml (Cobertura format)
-    3. .coverage (SQLite database)
 
     Args:
         repo_root: Repository root path (defaults to cwd).
@@ -1036,12 +1007,6 @@ def get_test_coverage(repo_root: Path | None = None) -> dict | None:
     coverage_xml = root / "coverage.xml"
     if coverage_xml.exists():
         if result := _parse_coverage_xml(coverage_xml):
-            return result
-
-    # Try .coverage SQLite database (least preferred - schema can change)
-    coverage_db = root / ".coverage"
-    if coverage_db.exists():
-        if result := _parse_coverage_sqlite(coverage_db):
             return result
 
     return None

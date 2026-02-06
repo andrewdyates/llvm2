@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -18,7 +22,6 @@ Public API (library usage):
     from ai_template_scripts.cargo_lock_info import (
         STALE_LOCK_AGE_SEC,  # Threshold for stale lock detection
         get_repo_lock_dir,   # Get per-repo lock directory path
-        pid_alive,           # Check if process is running
         parse_etime,         # Parse ps etime format to seconds
         run_ps,              # Get ps fields for a PID
         format_duration,     # Format seconds as human-readable
@@ -39,7 +42,6 @@ from __future__ import annotations
 
 __all__ = [
     "STALE_LOCK_AGE_SEC",
-    "pid_alive",
     "parse_etime",
     "run_ps",
     "format_duration",
@@ -60,7 +62,11 @@ _repo_root = Path(__file__).resolve().parents[1]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from ai_template_scripts.subprocess_utils import get_repo_name  # noqa: E402
+from ai_template_scripts.subprocess_utils import (  # noqa: E402
+    format_duration_precise,
+    get_repo_name,
+    is_process_alive,
+)
 from ai_template_scripts.version import get_version  # noqa: E402
 
 STALE_LOCK_AGE_SEC = 2 * 60 * 60
@@ -71,6 +77,9 @@ def get_repo_lock_dir(repo: str | None = None) -> Path:
 
     Auto-detects repo from git remote if not provided. Falls back to
     ~/.ait_cargo_lock if detection fails.
+
+    REQUIRES: repo is None or non-empty string
+    ENSURES: returns Path; ~/.ait_cargo_lock/<repo>/ if repo provided/detected, else ~/.ait_cargo_lock/
 
     Args:
         repo: Optional explicit repo name
@@ -95,10 +104,6 @@ def log(msg: str) -> None:
     """Print message to stdout."""
     print(msg)
 
-
-def eprint(msg: str) -> None:
-    """Print message to stderr."""
-    print(msg, file=sys.stderr)
 
 
 def read_text(path: Path) -> str | None:
@@ -131,33 +136,20 @@ def parse_iso8601(ts: str) -> datetime | None:
 
 
 def format_duration(seconds: int) -> str:
-    """Format seconds as human-readable duration (e.g. 1h23m45s)."""
-    seconds = max(0, int(seconds))
-    mins, sec = divmod(seconds, 60)
-    hrs, mins = divmod(mins, 60)
-    days, hrs = divmod(hrs, 24)
-    if days:
-        return f"{days}d{hrs:02}h{mins:02}m{sec:02}s"
-    if hrs:
-        return f"{hrs}h{mins:02}m{sec:02}s"
-    if mins:
-        return f"{mins}m{sec:02}s"
-    return f"{sec}s"
+    """Format seconds as human-readable duration (e.g. 1h23m45s).
 
+    DEPRECATED: Use format_duration_precise from subprocess_utils (#2535).
+    """
+    return format_duration_precise(seconds)
 
-def pid_alive(pid: int) -> bool:
-    """Check if process with PID is alive using kill(0)."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
 
 
 def parse_etime(etime: str) -> int:
-    """Parse ps etime format to seconds (MM:SS, HH:MM:SS, or DD-HH:MM:SS)."""
+    """Parse ps etime format to seconds (MM:SS, HH:MM:SS, or DD-HH:MM:SS).
+
+    REQUIRES: etime is string (may be malformed)
+    ENSURES: returns non-negative int; 0 if parsing fails
+    """
     try:
         etime = etime.strip()
         days = 0
@@ -177,7 +169,11 @@ def parse_etime(etime: str) -> int:
 
 
 def run_ps(pid: int) -> dict | None:
-    """Return a dict with basic ps fields for pid, or None if unavailable."""
+    """Return a dict with basic ps fields for pid, or None if unavailable.
+
+    REQUIRES: pid is integer PID; ps command available
+    ENSURES: returns dict with pid/ppid/pgid/stat/etime/command, or None on failure
+    """
     # Keep to fields supported by macOS + Linux ps.
     fmt = "pid=,ppid=,pgid=,stat=,etime=,command="
     cmd = ["ps", "-p", str(pid), "-o", fmt]
@@ -240,12 +236,18 @@ def main() -> int:
         version=get_version("cargo_lock_info.py"),
     )
     parser.add_argument(
-        "--repo",
+        "--repo-name",
         help="Repository name (auto-detected from git remote if not specified)",
+    )
+    # Deprecated --repo flag for backwards compatibility
+    parser.add_argument(
+        "--repo",
+        dest="deprecated_repo",
+        help="DEPRECATED: Use --repo-name instead (Repository name)",
     )
     parser.add_argument(
         "--lock-dir",
-        help="Explicit lock directory (overrides --repo and auto-detection)",
+        help="Explicit lock directory (overrides --repo-name and auto-detection)",
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON and exit")
     parser.add_argument(
@@ -256,11 +258,23 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Determine lock directory: explicit > --repo > auto-detect
+    # Handle deprecated --repo flag with warning
+    repo_name = None
+    if args.deprecated_repo:
+        print(
+            "Warning: --repo is deprecated and will be removed in V2. "
+            "Use --repo-name instead.",
+            file=sys.stderr,
+        )
+        repo_name = args.deprecated_repo
+    elif hasattr(args, 'repo_name') and args.repo_name:
+        repo_name = args.repo_name
+
+    # Determine lock directory: explicit > --repo-name > auto-detect
     if args.lock_dir:
         lock_dir = Path(args.lock_dir).expanduser()
     else:
-        lock_dir = get_repo_lock_dir(args.repo)
+        lock_dir = get_repo_lock_dir(repo_name)
     basename = lock_basename(args.kind)
     lock_pid_path = lock_dir / f"{basename}.pid"
     lock_meta_path = lock_dir / f"{basename}.json"
@@ -280,7 +294,7 @@ def main() -> int:
     now = datetime.now(UTC)
     lock_age_sec = int((now - acquired_dt).total_seconds()) if acquired_dt else None
 
-    alive = pid_alive(pid) if pid is not None else False
+    alive = is_process_alive(pid) if pid is not None else False
     ps_info = run_ps(pid) if (pid is not None and alive) else None
 
     stale = False

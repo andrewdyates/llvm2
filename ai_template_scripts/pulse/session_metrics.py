@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -26,13 +30,14 @@ except ModuleNotFoundError:
 from .constants import WORKER_LOG_PATTERN
 
 # Optional status fields preserved for diagnostics (#1858)
-_STATUS_OPTIONAL_FIELDS = ("mode", "status", "iteration", "log_file", "updated_at")
+_STATUS_OPTIONAL_FIELDS = ("mode", "status", "iteration", "log_file", "updated_at", "ai_tool", "model")
 
 # Exit codes that indicate infrastructure failures, not lost work (#1486)
 # These are "traceable" in the sense we know why they failed.
 INFRASTRUCTURE_EXIT_CODES = {
     124,  # Timeout (command timed out)
     125,  # Silence-killed (no output, stale connection)
+    126,  # No issues assigned (expected fail-fast abort, #1641, #2418)
 }
 
 # Patterns in worker logs that indicate known infrastructure failures (#1486)

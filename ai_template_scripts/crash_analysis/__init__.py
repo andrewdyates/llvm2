@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -5,13 +9,13 @@
 """
 crash_analysis - System health monitoring for AI fleet workers
 
-PURPOSE: Analyzes crash logs to calculate failure rate and health status.
+PURPOSE: Analyzes failure logs (crash logs) to calculate failure rate and health status.
 CALLED BY: MANAGER (audit workflow via audit_context.py), human (debugging)
 REFERENCED: .claude/rules/ai_template.md (Available Tools table)
 
 Analyzes:
-- Failure rate (crashes / total iterations)
-- Recent crash patterns
+- Failure rate (failures / total iterations)
+- Recent failure patterns
 - System health status (healthy/warning/critical)
 
 Public API:
@@ -209,7 +213,7 @@ def get_health_report(hours: int = RECENT_HOURS) -> HealthReport:
         recommendation = (
             f"ESCALATE: {failure_rate:.0%} failure rate in last {hours}h "
             f"(threshold: {critical_threshold:.0%}). "
-            "Check crashes.log for patterns. Post to Dash News (GitHub Discussions) "
+            "Check failures.log for patterns. Post to Dash News (GitHub Discussions) "
             "if systemic."
         )
     elif failure_rate >= warning_threshold:
@@ -217,7 +221,7 @@ def get_health_report(hours: int = RECENT_HOURS) -> HealthReport:
         recommendation = (
             f"Monitor: {failure_rate:.0%} failure rate in last {hours}h "
             f"(threshold: {warning_threshold:.0%}). "
-            "Review recent crashes for patterns."
+            "Review recent failures for patterns."
         )
     else:
         status = "healthy"
@@ -238,7 +242,7 @@ def get_health_report(hours: int = RECENT_HOURS) -> HealthReport:
     # Warn if iteration count is unreliable
     if iterations_unreliable:
         recommendation += (
-            " ⚠️ WARNING: Iteration count is 0 but crashes exist - "
+            " ⚠️ WARNING: Iteration count is 0 but failures exist - "
             "failure rate may be inaccurate (git log may have failed or "
             "time window too narrow)."
         )
@@ -276,7 +280,7 @@ def main() -> int:
         ENSURES: result == 2 if critical
     """
     parser = argparse.ArgumentParser(
-        description="Check system health from crash logs and git history",
+        description="Check system health from failure logs and git history",
     )
     parser.add_argument(
         "--version",

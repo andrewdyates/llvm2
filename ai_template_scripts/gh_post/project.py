@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -12,6 +16,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from ai_template_scripts.repo_directors import get_director
+from looper.log import debug_swallow
 
 
 def _gh_post():
@@ -64,7 +69,8 @@ def _load_cached_schema() -> _ProjectSchema | None:
         if time.time() - schema.fetched_at > ttl_seconds:
             return None
         return schema
-    except Exception:
+    except Exception as e:
+        debug_swallow("gh_post_project_load_cached_schema", e)
         return None
 
 
@@ -243,7 +249,8 @@ def _get_issue_node_id(real_gh: str, repo: str, issue_number: str) -> str | None
     try:
         data = json.loads(result.stdout)
         return data["data"]["repository"]["issue"]["id"]
-    except Exception:
+    except Exception as e:
+        debug_swallow("gh_post_project_get_issue_node_id", e)
         return None
 
 
@@ -252,7 +259,9 @@ def _ensure_full_repo_name(repo: str) -> str:
     gh_post_module = _gh_post()
 
     if not repo:
-        return f"{gh_post_module.PROJECT_OWNER}/{repo}"
+        # Get current repo from git when repo is empty (#2449)
+        # _get_current_repo_name() already returns owner/repo format
+        return gh_post_module._get_current_repo_name()
     if "/" in repo:
         return repo
     return f"{gh_post_module.PROJECT_OWNER}/{repo}"
@@ -303,7 +312,8 @@ def _add_issue_to_project(real_gh: str, issue_node_id: str, repo_name: str) -> b
             .get("item", {})
             .get("id")
         )
-    except Exception:
+    except Exception as e:
+        debug_swallow("gh_post_project_parse_item_id", e)
         item_id = None
 
     if not item_id:
@@ -447,7 +457,8 @@ def _extract_issue_info(issue_url: str) -> tuple[str | None, str | None]:
 
     try:
         parsed = urlparse(issue_url)
-    except Exception:
+    except Exception as e:
+        debug_swallow("gh_post_project_extract_issue_info", e)
         return None, None
 
     # Validate domain is exactly github.com (#1216)

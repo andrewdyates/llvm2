@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -33,6 +37,7 @@ from ai_template_scripts.gh_rate_limit.limiter import (
     UsageStats,
     debug_log,
 )
+from ai_template_scripts.shared_logging import debug_swallow
 from ai_template_scripts.gh_rate_limit.rest_fallback import (
     has_json_flag,
     is_issue_list_command,
@@ -43,6 +48,15 @@ from ai_template_scripts.gh_rate_limit.serialize import lock_file, unlock_file
 
 # Velocity tracking
 MAX_USAGE_LOG_ENTRIES = 60  # Keep ~1 hour of samples at 1/min
+
+# Rate state TTL - cached quota data expires after this many seconds
+# Also respects reset_timestamp - if reset has passed, data is stale
+RATE_STATE_TTL_SECONDS = 300  # 5 minutes
+
+# Overflow tracking - log file for quota overflow events
+# Pulse reads this to alert Manager when overflows occur
+OVERFLOW_LOG_FILE = "overflow_log.json"
+MAX_OVERFLOW_LOG_ENTRIES = 100  # Keep last 100 overflow events
 
 
 class RateState:
@@ -80,6 +94,21 @@ class RateState:
         # Load existing rate state if fresh
         self._load_rate_state()
 
+    def _get_current_repo(self) -> str | None:
+        """Get the current repository name."""
+        repo = os.environ.get("AIT_CURRENT_REPO")
+        if not repo:
+            result = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if result.returncode == 0:
+                repo = Path(result.stdout.strip()).name
+        return repo
+
     def _get_current_app(self) -> str:
         """Get the current GitHub App identity.
 
@@ -89,23 +118,10 @@ class RateState:
         if os.environ.get("AIT_GH_APP_ACTIVE") != "1":
             return self.DEFAULT_IDENTITY
 
-        # Try to get app name from gh_apps module
         try:
             from ai_template_scripts.gh_apps.selector import get_app_for_repo
 
-            # Get current repo
-            repo = os.environ.get("AIT_CURRENT_REPO")
-            if not repo:
-                result = subprocess.run(
-                    ["git", "rev-parse", "--show-toplevel"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    check=False,
-                )
-                if result.returncode == 0:
-                    repo = Path(result.stdout.strip()).name
-
+            repo = self._get_current_repo()
             if repo:
                 app_name = get_app_for_repo(repo)
                 if app_name:
@@ -115,13 +131,187 @@ class RateState:
 
         return self.DEFAULT_IDENTITY
 
+    def get_fallback_apps(self, repo: str | None = None) -> list[str]:
+        """Get ordered list of fallback apps for overflow.
+
+        Order: per-repo app → director app → global app (dbx-ai)
+
+        Args:
+            repo: Repository name. If None, uses current repo.
+
+        Returns:
+            List of app names in priority order.
+        """
+        if not repo:
+            repo = self._get_current_repo()
+        if not repo:
+            return ["dbx-ai"]
+
+        try:
+            from ai_template_scripts.gh_apps.selector import (
+                KNOWN_DIRECTOR_APPS,
+                load_config,
+            )
+
+            apps: list[str] = []
+            config = load_config()
+            if not config:
+                return ["dbx-ai"]
+
+            per_repo_app = None
+            director_app = None
+            wildcard_app = None
+
+            for app_name, app_config in config.apps.items():
+                if "*" in app_config.repos:
+                    wildcard_app = app_name
+                    continue
+                if repo not in app_config.repos:
+                    continue
+                if app_name in KNOWN_DIRECTOR_APPS:
+                    director_app = app_name
+                else:
+                    per_repo_app = app_name
+
+            if per_repo_app:
+                apps.append(per_repo_app)
+            if director_app:
+                apps.append(director_app)
+            if wildcard_app:
+                apps.append(wildcard_app)
+
+            return apps if apps else ["dbx-ai"]
+        except ImportError:
+            return ["dbx-ai"]
+
+    def _log_overflow(
+        self,
+        resource: str,
+        from_app: str,
+        to_app: str,
+        repo: str | None,
+    ) -> None:
+        """Log an overflow event for Manager visibility via pulse.
+
+        Uses file locking to prevent corruption from concurrent writes.
+
+        Args:
+            resource: Rate limit resource (core, graphql, search).
+            from_app: Primary app that was exhausted.
+            to_app: Fallback app that will be used.
+            repo: Repository name.
+        """
+        overflow_file = self.cache_dir / OVERFLOW_LOG_FILE
+        lock_path = self.cache_dir / ".overflow_lock"
+        lock_fd = None
+        try:
+            lock_fd = open(lock_path, "w")
+            lock_file(lock_fd)
+            try:
+                # Load existing log
+                if overflow_file.exists():
+                    data = json.loads(overflow_file.read_text())
+                else:
+                    data = {"events": []}
+
+                # Add new event
+                data["events"].append({
+                    "timestamp": time.time(),
+                    "resource": resource,
+                    "from_app": from_app,
+                    "to_app": to_app,
+                    "repo": repo or "unknown",
+                })
+
+                # Trim to max entries
+                data["events"] = data["events"][-MAX_OVERFLOW_LOG_ENTRIES:]
+
+                # Write back
+                overflow_file.write_text(json.dumps(data))
+                debug_log(f"overflow logged: {from_app} -> {to_app} for {resource}")
+            finally:
+                unlock_file(lock_fd)
+        except Exception as e:
+            debug_log(f"failed to log overflow: {e}")
+        finally:
+            if lock_fd is not None:
+                try:
+                    lock_fd.close()
+                except OSError:
+                    debug_swallow("lock_fd_close")
+
+    def get_best_available_app(
+        self, resource: str, repo: str | None = None
+    ) -> str | None:
+        """Get the best app with available quota for a resource.
+
+        Tries apps in priority order (per-repo → director → global),
+        returning the first one with remaining quota. Logs overflow
+        events when falling back to lower-priority apps.
+
+        Args:
+            resource: Rate limit resource (core, graphql, search).
+            repo: Repository name. If None, uses current repo.
+
+        Returns:
+            App name with available quota, or None if all exhausted.
+        """
+        apps = self.get_fallback_apps(repo)
+        debug_log(f"get_best_available_app: checking {apps} for {resource}")
+
+        exhausted_apps: list[str] = []
+
+        for app_name in apps:
+            app_cache = self._app_rate_cache.get(app_name, {})
+            info = app_cache.get(resource)
+
+            # No cached info - assume available
+            if not info:
+                debug_log(f"  {app_name}: no cached info, assuming available")
+                if exhausted_apps:
+                    self._log_overflow(resource, exhausted_apps[0], app_name, repo)
+                return app_name
+
+            # Stale info - assume available (quota likely reset)
+            if not self._is_rate_info_fresh(info):
+                debug_log(f"  {app_name}: stale, assuming available")
+                if exhausted_apps:
+                    self._log_overflow(resource, exhausted_apps[0], app_name, repo)
+                return app_name
+
+            if info.remaining > 0:
+                debug_log(f"  {app_name}: {info.remaining} remaining")
+                if exhausted_apps:
+                    self._log_overflow(resource, exhausted_apps[0], app_name, repo)
+                return app_name
+            else:
+                debug_log(f"  {app_name}: exhausted")
+                exhausted_apps.append(app_name)
+
+        debug_log("  all apps exhausted")
+        return None
+
     @property
     def rate_cache(self) -> dict[str, RateLimitInfo]:
         """Access to rate cache for components that need it."""
         return self._rate_cache
 
+    def _is_rate_info_fresh(self, info: RateLimitInfo) -> bool:
+        """Check if rate limit info is still valid.
+
+        Info is stale if reset_timestamp has passed (quota has reset).
+        """
+        now = time.time()
+        if info.reset_timestamp > 0 and now > info.reset_timestamp:
+            return False
+        return True
+
     def _load_rate_state(self) -> None:
-        """Load rate state from file if fresh (< 60s old).
+        """Load rate state from file if fresh.
+
+        Freshness checks:
+        - File timestamp within RATE_STATE_TTL_SECONDS
+        - Per-resource reset_timestamp not passed (quota hasn't reset)
 
         Supports both legacy format (single identity) and new per-app format.
         """
@@ -134,38 +324,52 @@ class RateState:
             self._usage_log = data.get("usage_log", [])[-MAX_USAGE_LOG_ENTRIES:]
 
             current_app = self._get_current_app()
+            now = time.time()
+            file_age = now - data.get("timestamp", 0)
 
-            if time.time() - data.get("timestamp", 0) < 60:
-                # Load per-app data if available (new format)
-                if "apps" in data:
-                    self._app_rate_cache = {}
-                    for app_name, app_data in data.get("apps", {}).items():
-                        self._app_rate_cache[app_name] = {}
-                        for name, info in app_data.items():
-                            self._app_rate_cache[app_name][name] = RateLimitInfo(
-                                resource=name,
-                                limit=info.get("limit", 0),
-                                remaining=info.get("remaining", 0),
-                                reset_timestamp=info.get("reset", 0),
-                            )
-                    # Set current app's data as active rate_cache
-                    if current_app in self._app_rate_cache:
-                        self._rate_cache = self._app_rate_cache[current_app]
-                    else:
-                        self._rate_cache = {}
-                else:
-                    # Legacy format: single identity under "resources"
-                    for name, info in data.get("resources", {}).items():
-                        self._rate_cache[name] = RateLimitInfo(
+            # Check file-level TTL
+            if file_age >= RATE_STATE_TTL_SECONDS:
+                debug_log(f"rate_state too old ({file_age:.0f}s), ignoring")
+                return
+
+            # Load per-app data if available (new format)
+            if "apps" in data:
+                self._app_rate_cache = {}
+                for app_name, app_data in data.get("apps", {}).items():
+                    self._app_rate_cache[app_name] = {}
+                    for name, info_data in app_data.items():
+                        info = RateLimitInfo(
                             resource=name,
-                            limit=info.get("limit", 0),
-                            remaining=info.get("remaining", 0),
-                            reset_timestamp=info.get("reset", 0),
+                            limit=info_data.get("limit", 0),
+                            remaining=info_data.get("remaining", 0),
+                            reset_timestamp=info_data.get("reset", 0),
                         )
-                    # Store in per-app cache for consistency
-                    self._app_rate_cache[current_app] = self._rate_cache
+                        # Only keep fresh data (reset hasn't passed)
+                        if self._is_rate_info_fresh(info):
+                            self._app_rate_cache[app_name][name] = info
+                        else:
+                            debug_log(f"  {app_name}/{name}: stale (reset passed)")
 
-                self._last_rate_check = data.get("timestamp", 0)
+                # Set current app's data as active rate_cache
+                if current_app in self._app_rate_cache:
+                    self._rate_cache = self._app_rate_cache[current_app]
+                else:
+                    self._rate_cache = {}
+            else:
+                # Legacy format: single identity under "resources"
+                for name, info_data in data.get("resources", {}).items():
+                    info = RateLimitInfo(
+                        resource=name,
+                        limit=info_data.get("limit", 0),
+                        remaining=info_data.get("remaining", 0),
+                        reset_timestamp=info_data.get("reset", 0),
+                    )
+                    if self._is_rate_info_fresh(info):
+                        self._rate_cache[name] = info
+                # Store in per-app cache for consistency
+                self._app_rate_cache[current_app] = self._rate_cache
+
+            self._last_rate_check = data.get("timestamp", 0)
         except Exception as e:
             debug_log(f"_load_rate_state failed: {e}")
 
@@ -238,7 +442,7 @@ class RateState:
                 try:
                     lock_fd.close()
                 except OSError:
-                    pass
+                    debug_swallow("lock_fd_close")
 
     def get_usage_stats(self, resource: str = "core") -> UsageStats | None:
         """Calculate usage velocity and time to exhaustion for a resource.

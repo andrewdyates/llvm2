@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -52,10 +56,11 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
 from ai_template_scripts.gh_apps.config import CONFIG_DIR, CONFIG_FILE
+from ai_template_scripts.identity import get_identity as _get_ident
 
 # Constants
-ORG = "dropbox-ai-prototypes"
-TARGET_USER = "dropbox-ai-prototypes"
+ORG = _get_ident().github_org
+TARGET_USER = ORG
 BROWSER_PROFILE = Path.home() / ".playwright_github"
 
 # Priority tiers for batch creation

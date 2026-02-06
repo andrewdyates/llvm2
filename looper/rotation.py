@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -13,8 +17,10 @@ Manages phase rotation for roles that cycle through different focus areas:
 """
 
 __all__ = [
+    "ROTATION_STATE_VERSION",
     "get_rotation_focus",
     "load_rotation_state",
+    "migrate_rotation_state",
     "save_rotation_state",
     "select_phase_by_priority",
     "update_rotation_state",
@@ -24,7 +30,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from looper.log import debug_swallow
+from looper.log import debug_swallow, log_info, log_warning
 
 # fcntl is Unix-only for file locking
 try:
@@ -36,6 +42,12 @@ except ImportError:
 
 ROTATION_STATE_FILE = Path(".rotation_state.json")
 ROTATION_LOCK_FILE = Path(".rotation_state.lock")
+
+# Schema version for rotation state - increment when changing structure
+# Version history:
+# - 0: Implicit/missing - no version field (original schema)
+# - 1: Added _version field
+ROTATION_STATE_VERSION = 1
 
 # Phase scoring constants
 # NEVER_RUN_HOURS: Synthetic "hours since last run" for phases that have never run
@@ -57,6 +69,38 @@ MAX_OVERTIME_BONUS = 168.0
 MAX_PHASE_SCORE = 50000.0
 
 
+def migrate_rotation_state(state: dict) -> tuple[dict, bool]:
+    """Migrate rotation state from older versions to current.
+
+    Contracts:
+        REQUIRES: state is a dict (may be empty or any version)
+        ENSURES: Returns (state, migrated) where migrated is True if state was changed
+        ENSURES: For versions < ROTATION_STATE_VERSION: _version is upgraded
+        ENSURES: For versions >= ROTATION_STATE_VERSION: state unchanged
+        ENSURES: Logs warning when migration is applied
+        ENSURES: Never raises (defensive parsing)
+
+    Migration history:
+        v0 -> v1: Add _version field (no structural changes)
+    """
+    version = state.get("_version", 0)
+    migrated = False
+
+    if version < ROTATION_STATE_VERSION:
+        # v0 -> v1: Add version field
+        if version < 1:
+            state["_version"] = 1
+            migrated = True
+            # Log that migration was applied (only if state had content)
+            if any(k for k in state if not k.startswith("_")):
+                log_warning(
+                    f"Migrated .rotation_state.json from v{version} to "
+                    f"v{ROTATION_STATE_VERSION}"
+                )
+
+    return state, migrated
+
+
 def load_rotation_state() -> dict[str, dict[str, object]]:
     """Load rotation state from .rotation_state.json.
 
@@ -64,17 +108,23 @@ def load_rotation_state() -> dict[str, dict[str, object]]:
         REQUIRES: Current directory is project root (contains .rotation_state.json)
         ENSURES: Returns dict mapping role -> {phase -> {last_run: iso_timestamp}}
         ENSURES: If file missing or invalid JSON, returns empty dict {}
+        ENSURES: Migrates state if version < ROTATION_STATE_VERSION and persists
         ENSURES: Never raises (silent fallback to empty state)
     """
     if ROTATION_STATE_FILE.exists():
         try:
             data = json.loads(ROTATION_STATE_FILE.read_text())
             if isinstance(data, dict):
-                # Validate structure - should be dict of dicts
+                # Migrate to current version if needed
+                data, migrated = migrate_rotation_state(data)
+                # Persist migration so it doesn't repeat on next load
+                if migrated:
+                    save_rotation_state(data)
+                # Validate structure - return role->dict state only (exclude metadata)
                 return {
                     k: v
                     for k, v in data.items()
-                    if isinstance(k, str) and isinstance(v, dict)
+                    if isinstance(k, str) and not k.startswith("_") and isinstance(v, dict)
                 }
         except (json.JSONDecodeError, OSError) as e:
             debug_swallow("load_rotation_state", e)
@@ -87,10 +137,14 @@ def save_rotation_state(state: dict[str, dict[str, object]]) -> None:
     Contracts:
         REQUIRES: state is a dict (type-hinted)
         ENSURES: Writes JSON to .rotation_state.json with indent=2 and trailing newline
+        ENSURES: State includes _version field
         ENSURES: If write fails (OSError), silently returns (no exception)
         ENSURES: Never raises (graceful degradation)
     """
     try:
+        # Ensure version is set
+        if "_version" not in state:
+            state["_version"] = ROTATION_STATE_VERSION
         ROTATION_STATE_FILE.write_text(json.dumps(state, indent=2) + "\n")
     except OSError as e:
         debug_swallow("save_rotation_state", e)
@@ -267,10 +321,30 @@ def get_rotation_focus(
 
     # Check for freeform iteration
     if freeform_frequency > 0 and iteration % freeform_frequency == 0:
-        # Worker follows issues, other roles follow directives
-        if role == "worker":
+        # Audit-overhead circuit breaker (#2808 §4): override researcher freeform
+        # to "design" phase when breaker is active, producing design artifacts
+        # instead of repeated observations.
+        if role == "researcher" and "design" in phases:
+            try:
+                from looper.telemetry import get_audit_overhead_state
+
+                overhead = get_audit_overhead_state()
+                if overhead and overhead.state == "active":
+                    log_info(
+                        "Audit-overhead circuit active: overriding researcher "
+                        "freeform to design phase"
+                    )
+                    # Fall through to normal phase selection with force_phase="design"
+                    force_phase = "design"
+                else:
+                    return "**Freeform** - Follow directives or your judgment", None
+            except Exception as e:
+                debug_swallow("audit_overhead_freeform_override", e)
+                return "**Freeform** - Follow directives or your judgment", None
+        elif role == "worker":
             return "**Freeform** - Follow issues or your judgment", None
-        return "**Freeform** - Follow directives or your judgment", None
+        else:
+            return "**Freeform** - Follow directives or your judgment", None
 
     # Check for forced phase
     if force_phase and force_phase in phases:

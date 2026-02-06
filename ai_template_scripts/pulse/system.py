@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -483,6 +487,128 @@ def _get_gh_rate_limits() -> dict | None:
         return None
 
 
+def _get_claude_cli_version() -> dict | None:
+    """Get Claude CLI version info and check against pinned version.
+
+    Returns dict with installed, pinned, and mismatch flag, or None if not installed.
+    """
+    # Get installed version
+    result = run_cmd(["claude", "--version"], timeout=5)
+    if not result.ok or not result.stdout.strip():
+        return None
+
+    installed = result.stdout.strip().split()[0]  # "2.1.31 (Claude Code)" -> "2.1.31"
+
+    # Get pinned version from .claude-version
+    pinned = None
+    version_file = Path(".claude-version")
+    if version_file.exists():
+        try:
+            pinned = version_file.read_text().strip().split("\n")[0].strip()
+        except Exception:
+            pass
+
+    info: dict[str, object] = {"installed": installed}
+    if pinned:
+        info["pinned"] = pinned
+        info["mismatch"] = installed != pinned
+
+    return info
+
+
+def _get_codex_cli_version() -> dict | None:
+    """Get Codex CLI version info.
+
+    Returns dict with installed version, or None if not installed.
+    """
+    result = run_cmd(["codex", "--version"], timeout=5)
+    if not result.ok or not result.stdout.strip():
+        return None
+
+    # "codex 0.98.0" or "0.98.0" -> extract version number
+    parts = result.stdout.strip().split()
+    installed = parts[-1] if parts else result.stdout.strip()
+
+    return {"installed": installed}
+
+
+# Expected model configuration (canonical source of truth)
+EXPECTED_CLAUDE_MODEL = "us.anthropic.claude-opus-4-6-v1"
+EXPECTED_CODEX_MODEL = "gpt-5.3-codex"
+EXPECTED_CODEX_REASONING_EFFORT = "xhigh"
+
+
+def _get_model_config() -> dict:
+    """Check model configuration against expected values.
+
+    Reads:
+    - ~/.claude/settings.json for ANTHROPIC_MODEL, CLAUDE_CODE_SUBAGENT_MODEL
+    - ~/.codex/config.toml for model, model_reasoning_effort
+
+    Returns dict with claude and codex model info and any mismatches.
+    """
+    result: dict[str, object] = {}
+    mismatches: list[str] = []
+
+    # Check Claude settings
+    claude_settings = Path.home() / ".claude" / "settings.json"
+    if claude_settings.exists():
+        try:
+            data = json.loads(claude_settings.read_text())
+            env = data.get("env", {})
+            anthropic_model = env.get("ANTHROPIC_MODEL")
+            subagent_model = env.get("CLAUDE_CODE_SUBAGENT_MODEL")
+            result["claude_model"] = anthropic_model
+            result["claude_subagent_model"] = subagent_model
+            if anthropic_model != EXPECTED_CLAUDE_MODEL:
+                mismatches.append(
+                    f"ANTHROPIC_MODEL={anthropic_model} (expected {EXPECTED_CLAUDE_MODEL})"
+                )
+            if subagent_model != EXPECTED_CLAUDE_MODEL:
+                mismatches.append(
+                    f"CLAUDE_CODE_SUBAGENT_MODEL={subagent_model} (expected {EXPECTED_CLAUDE_MODEL})"
+                )
+        except Exception:
+            mismatches.append("~/.claude/settings.json unreadable")
+    else:
+        mismatches.append("~/.claude/settings.json missing")
+
+    # Check Codex config
+    codex_config = Path.home() / ".codex" / "config.toml"
+    if codex_config.exists():
+        try:
+            content = codex_config.read_text()
+            codex_model = None
+            codex_effort = None
+            for line in content.splitlines():
+                line = line.strip()
+                if line.startswith("model_reasoning_effort"):
+                    val = line.split("=", 1)[1].strip().strip('"')
+                    codex_effort = val
+                elif line.startswith("model"):
+                    val = line.split("=", 1)[1].strip().strip('"')
+                    codex_model = val
+            result["codex_model"] = codex_model
+            result["codex_reasoning_effort"] = codex_effort
+            if codex_model != EXPECTED_CODEX_MODEL:
+                mismatches.append(
+                    f"codex model={codex_model} (expected {EXPECTED_CODEX_MODEL})"
+                )
+            if codex_effort != EXPECTED_CODEX_REASONING_EFFORT:
+                mismatches.append(
+                    f"codex reasoning_effort={codex_effort} (expected {EXPECTED_CODEX_REASONING_EFFORT})"
+                )
+        except Exception:
+            mismatches.append("~/.codex/config.toml unreadable")
+    else:
+        mismatches.append("~/.codex/config.toml missing")
+
+    if mismatches:
+        result["mismatches"] = mismatches
+
+    return result
+
+
 def get_system_resources(fast: bool = False) -> dict:
     """Get system resource usage (memory, disk, build artifacts) for trend tracking.
 
@@ -490,7 +616,7 @@ def get_system_resources(fast: bool = False) -> dict:
         fast: If True, use faster estimation for build artifact sizes.
 
     REQUIRES: None (platform-agnostic)
-    ENSURES: Returns dict with optional memory/disk/build_artifacts/disk_bloat/gh_rate_limits
+    ENSURES: Returns dict with optional memory/disk/build_artifacts/disk_bloat/gh_rate_limits/claude_cli/codex_cli
     ENSURES: Memory/disk values include percent_used as percentage
     ENSURES: Never raises (returns partial dict on error)
     """
@@ -520,6 +646,19 @@ def get_system_resources(fast: bool = False) -> dict:
         if bloat.get("bloat_detected"):
             resources["disk_bloat"] = bloat
 
+    # Claude CLI version check
+    if claude_cli := _get_claude_cli_version():
+        resources["claude_cli"] = claude_cli
+
+    # Codex CLI version check
+    if codex_cli := _get_codex_cli_version():
+        resources["codex_cli"] = codex_cli
+
+    # Model configuration verification
+    model_config = _get_model_config()
+    if model_config:
+        resources["model_config"] = model_config
+
     return resources
 
 
@@ -531,6 +670,9 @@ __all__ = [
     "DiskBloatResult",
     # Constants
     "BLOAT_ARTIFACT_EXTENSIONS",
+    "EXPECTED_CLAUDE_MODEL",
+    "EXPECTED_CODEX_MODEL",
+    "EXPECTED_CODEX_REASONING_EFFORT",
     # Public functions
     "get_system_resources",
     "detect_disk_bloat",
@@ -540,5 +682,8 @@ __all__ = [
     "_get_disk_usage",
     "_get_build_artifact_sizes",
     "_get_gh_rate_limits",
+    "_get_claude_cli_version",
+    "_get_codex_cli_version",
+    "_get_model_config",
     "_resolve_root",
 ]

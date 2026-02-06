@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -98,7 +102,7 @@ def parse_args(args: list[str]) -> dict:
         "repo": None,
         "has_mail_label": False,
         "has_p_label": False,  # True if any P0/P1/P2/P3 label present
-        "adding_in_progress": False,  # For issue edit --add-label in-progress/in-progress-WN
+        "adding_in_progress": False,  # For issue edit --add-label in-progress (legacy in-progress-* supported)
         "issue_number": None,  # For issue edit/comment N
         "add_labels": add_labels,  # All labels being added (edit)
         "remove_labels": remove_labels,  # All labels being removed (edit)

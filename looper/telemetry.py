@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -5,17 +9,23 @@
 """looper/telemetry.py - Looper self-telemetry."""
 
 __all__ = [
+    "AuditOverheadSnapshot",
+    "AuditOverheadState",
     "IterationMetrics",
     "LooperStats",
     "check_consecutive_abort_alert",
     "compute_stats",
     "extract_token_usage",
+    "get_audit_overhead_state",
     "get_health_summary",
+    "get_prior_iteration_diagnostic",
     "record_iteration",
+    "update_audit_overhead",
     "update_oversight_metrics",
 ]
 
 import json
+import os
 import re
 import time
 from dataclasses import asdict, dataclass
@@ -23,13 +33,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from looper.constants import (
-    EXIT_NO_ISSUES,
+    EXIT_NOT_INITIALIZED,
     EXIT_SILENCE,
     EXIT_TIMEOUT,
     FLAGS_DIR,
     MAX_METRICS_LINES,
     METRICS_DIR,
 )
+from ai_template_scripts.atomic_write import atomic_write_json, atomic_write_text
 from looper.log import debug_swallow, log_warning
 from looper.subprocess_utils import run_git_command
 
@@ -37,8 +48,31 @@ LOOPER_METRICS_FILE = METRICS_DIR / "looper.jsonl"
 OVERSIGHT_DEFAULT_WINDOW_HOURS = 24
 OVERSIGHT_DEFAULT_THRESHOLD = 2.0
 OVERSIGHT_DEFAULT_ALERT_HOURS = 6
-ROLE_PREFIX_RE = re.compile(r"^\[(?P<role>[A-Z])\](?P<iteration>\d+)")
+ROLE_PREFIX_RE = re.compile(r"^\[(?P<role>[A-Z])(?P<worker_id>\d+)?\](?P<iteration>\d+)")
 KNOWN_ROLES = ("W", "M", "R", "P", "U")
+
+# Audit-overhead circuit breaker constants (#2808)
+# Thresholds recalibrated against post-#2860 classifier data per #2872.
+# Corrected structural floor is ~53% (not ~80% as measured pre-fix).
+# warn=0.65 (12pp above floor), trigger=0.70 (17pp), clear=0.60 (7pp).
+AUDIT_OVERHEAD_DEFAULT_WINDOW = 60
+AUDIT_OVERHEAD_DEFAULT_WARN_RATIO = 0.65
+AUDIT_OVERHEAD_DEFAULT_TRIGGER_RATIO = 0.70
+AUDIT_OVERHEAD_DEFAULT_TRIGGER_CONSECUTIVE = 2
+AUDIT_OVERHEAD_DEFAULT_CLEAR_RATIO = 0.60
+AUDIT_OVERHEAD_DEFAULT_CLEAR_CONSECUTIVE = 3
+
+AUDIT_LIKE_PATTERNS = [
+    re.compile(r"self-audit", re.IGNORECASE),
+    re.compile(r"needs-review", re.IGNORECASE),
+    re.compile(r"do-audit", re.IGNORECASE),
+    re.compile(r"reflection", re.IGNORECASE),
+    re.compile(r"\[DONE\]"),
+]
+# Separate Re: pattern: audit-like but lower signal than keyword patterns
+_RE_ISSUE_PATTERN = re.compile(r"Re:\s*#")
+# Primary work indicators override ALL audit patterns (#2847, #2860)
+_PRIMARY_WORK_PATTERN = re.compile(r"(Fixes|Part of)\s+#", re.IGNORECASE)
 
 
 def _coerce_int(value: object, default: int, min_value: int | None = None) -> int:
@@ -200,7 +234,7 @@ def update_oversight_metrics() -> None:
                     state["last_alert_time"] = now
         state["last_checked"] = now
         state["last_ratio"] = ratio
-        state_file.write_text(json.dumps(state, indent=2))
+        atomic_write_json(state_file, state)
         metrics_file = METRICS_DIR / "latest.json"
         metrics: dict[str, object] = {}
         if metrics_file.exists():
@@ -230,13 +264,344 @@ def update_oversight_metrics() -> None:
             ).isoformat()
         else:
             metrics["oversight_ratio_above_threshold_since"] = None
-        metrics_file.write_text(json.dumps(metrics, indent=2))
+        metrics["timestamp"] = datetime.now().isoformat()
+        atomic_write_json(metrics_file, metrics)
         if alert_triggered:
             r = "inf" if ratio is None else f"{ratio:.2f}:1"
             hrs = (now - since_ts) / 3600 if isinstance(since_ts, (int, float)) else 0
             log_warning(f"Warning: oversight ratio {r} > {threshold}:1 for {hrs:.1f}h")
     except Exception as e:
         log_warning(f"Warning: oversight ratio update failed: {e}")
+
+
+# --- Audit-Overhead Circuit Breaker (#2808) ---
+
+
+@dataclass
+class AuditOverheadSnapshot:
+    """Snapshot of audit overhead classification over a commit window."""
+
+    window_commits: int
+    audit_like_commits: int
+    primary_commits: int
+    audit_overhead_ratio: float
+    classified_at: str
+
+
+@dataclass
+class AuditOverheadState:
+    """Persisted circuit breaker state."""
+
+    state: str  # healthy, warning, active, recovering
+    ratio: float
+    window_commits: int
+    audit_like_commits: int
+    primary_commits: int
+    triggered_at: str | None
+    last_transition_at: str
+    consecutive_above_trigger: int
+    consecutive_below_clear: int
+
+
+def _load_audit_overhead_config() -> dict[str, object]:
+    """Load audit_overhead_circuit config from .looper_config.json."""
+    config_file = Path(".looper_config.json")
+    if not config_file.exists():
+        return {}
+    try:
+        raw = json.loads(config_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    section = raw.get("audit_overhead_circuit")
+    if isinstance(section, dict):
+        return section
+    return {}
+
+
+def _get_audit_overhead_params() -> dict[str, object]:
+    """Resolve audit overhead parameters with defaults and validation."""
+    cfg = _load_audit_overhead_config()
+    window = _coerce_int(cfg.get("window_commits"), AUDIT_OVERHEAD_DEFAULT_WINDOW, min_value=20)
+    if window > 200:
+        window = AUDIT_OVERHEAD_DEFAULT_WINDOW
+    warn_ratio = _coerce_float(
+        cfg.get("warn_ratio"), AUDIT_OVERHEAD_DEFAULT_WARN_RATIO, min_value=0.0
+    )
+    if warn_ratio > 1.0:
+        warn_ratio = AUDIT_OVERHEAD_DEFAULT_WARN_RATIO
+    trigger_ratio = _coerce_float(
+        cfg.get("trigger_ratio"), AUDIT_OVERHEAD_DEFAULT_TRIGGER_RATIO, min_value=0.0
+    )
+    if trigger_ratio > 1.0:
+        trigger_ratio = AUDIT_OVERHEAD_DEFAULT_TRIGGER_RATIO
+    trigger_consecutive = _coerce_int(
+        cfg.get("trigger_consecutive_windows"),
+        AUDIT_OVERHEAD_DEFAULT_TRIGGER_CONSECUTIVE,
+        min_value=1,
+    )
+    if trigger_consecutive > 10:
+        trigger_consecutive = AUDIT_OVERHEAD_DEFAULT_TRIGGER_CONSECUTIVE
+    clear_ratio = _coerce_float(
+        cfg.get("clear_ratio"), AUDIT_OVERHEAD_DEFAULT_CLEAR_RATIO, min_value=0.0
+    )
+    if clear_ratio > 1.0:
+        clear_ratio = AUDIT_OVERHEAD_DEFAULT_CLEAR_RATIO
+    clear_consecutive = _coerce_int(
+        cfg.get("clear_consecutive_windows"),
+        AUDIT_OVERHEAD_DEFAULT_CLEAR_CONSECUTIVE,
+        min_value=1,
+    )
+    if clear_consecutive > 10:
+        clear_consecutive = AUDIT_OVERHEAD_DEFAULT_CLEAR_CONSECUTIVE
+    raw_enabled = cfg.get("enabled")
+    enabled = _coerce_bool(raw_enabled) if raw_enabled is not None else True
+    return {
+        "enabled": enabled,
+        "window_commits": window,
+        "warn_ratio": warn_ratio,
+        "trigger_ratio": trigger_ratio,
+        "trigger_consecutive_windows": trigger_consecutive,
+        "clear_ratio": clear_ratio,
+        "clear_consecutive_windows": clear_consecutive,
+    }
+
+
+def _is_audit_like(subject: str) -> bool:
+    """Classify a commit subject as audit-like based on pattern matching.
+
+    Commits containing primary work indicators (Fixes, Part of) are always
+    classified as primary work, regardless of audit keywords. See #2847, #2860.
+    """
+    # Primary work indicators override all audit patterns (#2860)
+    if _PRIMARY_WORK_PATTERN.search(subject):
+        return False
+    for pattern in AUDIT_LIKE_PATTERNS:
+        if pattern.search(subject):
+            return True
+    if _RE_ISSUE_PATTERN.search(subject):
+        return True
+    return False
+
+
+def _classify_commits(subjects: list[str]) -> AuditOverheadSnapshot:
+    """Classify commit subjects into audit-like vs primary work."""
+    audit_count = sum(1 for s in subjects if _is_audit_like(s))
+    primary_count = len(subjects) - audit_count
+    ratio = audit_count / len(subjects) if subjects else 0.0
+    return AuditOverheadSnapshot(
+        window_commits=len(subjects),
+        audit_like_commits=audit_count,
+        primary_commits=primary_count,
+        audit_overhead_ratio=ratio,
+        classified_at=datetime.now().isoformat(),
+    )
+
+
+def _get_recent_commit_subjects(window_commits: int) -> list[str]:
+    """Get the last N commit subjects from git log."""
+    result = run_git_command(
+        ["log", f"-{window_commits}", "--pretty=%s"],
+        timeout=10,
+    )
+    if not result.ok or not result.value:
+        return []
+    return [line for line in result.value.splitlines() if line.strip()]
+
+
+def _load_breaker_state() -> dict[str, object]:
+    """Load persisted circuit breaker state from metrics dir."""
+    state_file = METRICS_DIR / "audit_overhead_state.json"
+    if not state_file.exists():
+        return {}
+    try:
+        data = json.loads(state_file.read_text())
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_breaker_state(state: dict[str, object]) -> None:
+    """Persist circuit breaker state."""
+    state_file = METRICS_DIR / "audit_overhead_state.json"
+    atomic_write_json(state_file, state)
+
+
+def _transition_breaker(
+    current_state: str,
+    ratio: float,
+    params: dict[str, object],
+    persisted: dict[str, object],
+) -> tuple[str, dict[str, object]]:
+    """Compute the next circuit breaker state based on ratio and history.
+
+    Returns (new_state, updated_persisted_dict).
+    """
+    warn_ratio = float(params.get("warn_ratio", AUDIT_OVERHEAD_DEFAULT_WARN_RATIO))
+    trigger_ratio = float(params.get("trigger_ratio", AUDIT_OVERHEAD_DEFAULT_TRIGGER_RATIO))
+    trigger_consec_required = int(
+        params.get("trigger_consecutive_windows", AUDIT_OVERHEAD_DEFAULT_TRIGGER_CONSECUTIVE)
+    )
+    clear_ratio = float(params.get("clear_ratio", AUDIT_OVERHEAD_DEFAULT_CLEAR_RATIO))
+    clear_consec_required = int(
+        params.get("clear_consecutive_windows", AUDIT_OVERHEAD_DEFAULT_CLEAR_CONSECUTIVE)
+    )
+
+    consec_above = _coerce_int(persisted.get("consecutive_above_trigger"), 0, min_value=0)
+    consec_below = _coerce_int(persisted.get("consecutive_below_clear"), 0, min_value=0)
+    now_iso = datetime.now().isoformat()
+
+    new_state = current_state
+
+    if current_state == "healthy":
+        if ratio >= warn_ratio:
+            new_state = "warning"
+            consec_above = 1 if ratio >= trigger_ratio else 0
+            consec_below = 0
+        else:
+            consec_above = 0
+            consec_below = 0
+
+    elif current_state == "warning":
+        if ratio >= trigger_ratio:
+            consec_above += 1
+            if consec_above >= trigger_consec_required:
+                new_state = "active"
+                persisted["triggered_at"] = now_iso
+        elif ratio < warn_ratio:
+            new_state = "healthy"
+            consec_above = 0
+        else:
+            consec_above = 0
+        consec_below = 0
+
+    elif current_state == "active":
+        if ratio < trigger_ratio:
+            new_state = "recovering"
+            consec_below = 1 if ratio <= clear_ratio else 0
+            consec_above = 0
+        else:
+            consec_above += 1
+            consec_below = 0
+
+    elif current_state == "recovering":
+        if ratio >= trigger_ratio:
+            new_state = "active"
+            consec_above = 1
+            consec_below = 0
+        elif ratio <= clear_ratio:
+            consec_below += 1
+            if consec_below >= clear_consec_required:
+                new_state = "healthy"
+                consec_below = 0
+                persisted["triggered_at"] = None
+            consec_above = 0
+        else:
+            consec_below = 0
+            consec_above = 0
+
+    if new_state != current_state:
+        persisted["last_transition_at"] = now_iso
+
+    persisted["consecutive_above_trigger"] = consec_above
+    persisted["consecutive_below_clear"] = consec_below
+
+    return new_state, persisted
+
+
+def update_audit_overhead() -> None:
+    """Update audit-overhead metric and circuit breaker state.
+
+    REQUIRES: Called from within a git repository
+    ENSURES: Updates metrics/audit_overhead_state.json with current state
+    ENSURES: Updates metrics/latest.json with audit overhead metrics
+    ENSURES: Never raises (catches all exceptions)
+    """
+    try:
+        params = _get_audit_overhead_params()
+        if not params.get("enabled", True):
+            return
+
+        window = int(params["window_commits"])
+        subjects = _get_recent_commit_subjects(window)
+        snapshot = _classify_commits(subjects)
+
+        # Load existing breaker state
+        persisted = _load_breaker_state()
+        current_state = persisted.get("state", "healthy")
+        if current_state not in ("healthy", "warning", "active", "recovering"):
+            current_state = "healthy"
+
+        # Transition
+        new_state, persisted = _transition_breaker(
+            current_state, snapshot.audit_overhead_ratio, params, persisted
+        )
+
+        # Persist breaker state
+        persisted["state"] = new_state
+        persisted["ratio"] = snapshot.audit_overhead_ratio
+        persisted["window_commits"] = snapshot.window_commits
+        persisted["audit_like_commits"] = snapshot.audit_like_commits
+        persisted["primary_commits"] = snapshot.primary_commits
+        _save_breaker_state(persisted)
+
+        # Update latest.json
+        METRICS_DIR.mkdir(exist_ok=True)
+        metrics_file = METRICS_DIR / "latest.json"
+        metrics: dict[str, object] = {}
+        if metrics_file.exists():
+            try:
+                loaded = json.loads(metrics_file.read_text())
+                if isinstance(loaded, dict):
+                    metrics = loaded
+            except (json.JSONDecodeError, OSError):
+                metrics = {}
+        metrics.update({
+            "audit_overhead_window_commits": snapshot.window_commits,
+            "audit_overhead_audit_like_commits": snapshot.audit_like_commits,
+            "audit_overhead_primary_commits": snapshot.primary_commits,
+            "audit_overhead_ratio": snapshot.audit_overhead_ratio,
+            "audit_overhead_state": new_state,
+            "audit_overhead_triggered_at": persisted.get("triggered_at"),
+            "audit_overhead_last_transition_at": persisted.get("last_transition_at"),
+            "audit_overhead_mitigation_active": new_state == "active",
+        })
+        metrics["timestamp"] = datetime.now().isoformat()
+        atomic_write_json(metrics_file, metrics)
+
+        if new_state == "active":
+            pct = f"{snapshot.audit_overhead_ratio:.0%}"
+            log_warning(
+                f"Warning: audit-overhead circuit ACTIVE ({pct} audit-like in "
+                f"last {snapshot.window_commits} commits)"
+            )
+    except Exception as e:
+        log_warning(f"Warning: audit overhead update failed: {e}")
+
+
+def get_audit_overhead_state() -> AuditOverheadState | None:
+    """Load current audit overhead state from persisted file.
+
+    Returns None if state file doesn't exist or can't be parsed.
+    """
+    persisted = _load_breaker_state()
+    if not persisted or "state" not in persisted:
+        return None
+    state_str = str(persisted.get("state", "healthy"))
+    if state_str not in ("healthy", "warning", "active", "recovering"):
+        state_str = "healthy"
+    return AuditOverheadState(
+        state=state_str,
+        ratio=float(persisted.get("ratio", 0.0)),
+        window_commits=int(persisted.get("window_commits", 0)),
+        audit_like_commits=int(persisted.get("audit_like_commits", 0)),
+        primary_commits=int(persisted.get("primary_commits", 0)),
+        triggered_at=persisted.get("triggered_at"),
+        last_transition_at=str(persisted.get("last_transition_at", "")),
+        consecutive_above_trigger=int(persisted.get("consecutive_above_trigger", 0)),
+        consecutive_below_clear=int(persisted.get("consecutive_below_clear", 0)),
+    )
 
 
 def extract_token_usage(log_file: Path, ai_tool: str) -> dict[str, int | float]:
@@ -413,6 +778,7 @@ def record_iteration(metrics: IterationMetrics) -> bool:
             _prune_metrics()
         if metrics.audit_round == 0:
             update_oversight_metrics()
+            update_audit_overhead()
         return True
     except Exception as e:
         log_warning(f"Warning: telemetry write failed: {e}")
@@ -426,7 +792,10 @@ def _prune_metrics() -> None:
     try:
         lines = LOOPER_METRICS_FILE.read_text().strip().split("\n")
         if len(lines) > MAX_METRICS_LINES:
-            LOOPER_METRICS_FILE.write_text("\n".join(lines[-MAX_METRICS_LINES:]) + "\n")
+            atomic_write_text(
+                LOOPER_METRICS_FILE,
+                "\n".join(lines[-MAX_METRICS_LINES:]) + "\n",
+            )
     except Exception as e:
         debug_swallow("prune_metrics", e)
 
@@ -505,6 +874,13 @@ def _normalize_tool(value: object) -> str:
     return value.strip().lower()
 
 
+def _normalize_role(value: object) -> str:
+    """Normalize role names to lowercase for consistent comparison."""
+    if not isinstance(value, str):
+        return ""
+    return value.strip().lower()
+
+
 def _filter_by_ai_tool(
     entries: list[dict[str, object]],
     tool: str,
@@ -512,6 +888,27 @@ def _filter_by_ai_tool(
     """Filter entries to only those using the specified AI tool (claude/codex)."""
     normalized_tool = _normalize_tool(tool)
     return [e for e in entries if _normalize_tool(e.get("ai_tool")) == normalized_tool]
+
+
+def _filter_by_role_and_worker(
+    entries: list[dict[str, object]],
+    role: str | None,
+    worker_id: int | None,
+) -> list[dict[str, object]]:
+    """Filter entries by role and worker ID when provided."""
+    filtered = entries
+    normalized_role = _normalize_role(role)
+    if normalized_role:
+        filtered = [
+            e for e in filtered if _normalize_role(e.get("role")) == normalized_role
+        ]
+    if worker_id is not None:
+        filtered = [
+            e
+            for e in filtered
+            if _coerce_int(e.get("worker_id"), -1, min_value=0) == worker_id
+        ]
+    return filtered
 
 
 def _compute_phase_success_rates(
@@ -579,7 +976,7 @@ def _compute_exit_counts(entries: list[dict[str, object]]) -> tuple[int, int, in
             continue
         if exit_code == EXIT_SILENCE:
             continue
-        if exit_code == EXIT_NO_ISSUES:
+        if exit_code == EXIT_NOT_INITIALIZED:
             early_aborts += 1
             continue
         if exit_code != 0 and not _coerce_bool(entry.get("committed")):
@@ -588,11 +985,10 @@ def _compute_exit_counts(entries: list[dict[str, object]]) -> tuple[int, int, in
 
 
 def _compute_consecutive_early_aborts(entries: list[dict[str, object]]) -> int:
-    """Compute the current streak of consecutive early aborts (#1644).
+    """Compute the current streak of consecutive uninitialized exits (#1644, #2410).
 
-    Sorts entries by start_time and counts how many consecutive early aborts
-    (exit_code 126) are at the end of the sequence. A non-126 exit code
-    breaks the streak.
+    Sorts entries by start_time and counts how many consecutive EXIT_NOT_INITIALIZED
+    (exit_code 127) are at the end of the sequence.
 
     REQUIRES: entries is a list of metric dicts
     ENSURES: Returns 0 if no early aborts at end
@@ -606,11 +1002,11 @@ def _compute_consecutive_early_aborts(entries: list[dict[str, object]]) -> int:
         entries, key=lambda e: _coerce_float(e.get("start_time"), 0.0)
     )
 
-    # Count consecutive early aborts from the end
+    # Count consecutive uninitialized exits from the end
     streak = 0
     for entry in reversed(sorted_entries):
         exit_code = _coerce_int(entry.get("exit_code"), 0)
-        if exit_code == EXIT_NO_ISSUES:
+        if exit_code == EXIT_NOT_INITIALIZED:
             streak += 1
         else:
             break
@@ -676,12 +1072,23 @@ def _compute_tool_call_stats(
     return total_calls, tool_distribution, tool_duration_total_ms
 
 
-def compute_stats(window_hours: int = 24) -> LooperStats | None:
-    """Compute aggregate stats from recent iterations."""
+def compute_stats(
+    window_hours: int = 24,
+    role: str | None = None,
+    worker_id: int | None = None,
+) -> LooperStats | None:
+    """Compute aggregate stats from recent iterations.
+
+    Args:
+        window_hours: Time window for stats aggregation.
+        role: Optional role filter (worker, manager, etc.).
+        worker_id: Optional worker instance ID filter.
+    """
     if not LOOPER_METRICS_FILE.exists():
         return None
     try:
         entries = _load_recent_entries(window_hours)
+        entries = _filter_by_role_and_worker(entries, role, worker_id)
         if not entries:
             return None
         main_iters, _ = _partition_iterations(entries)
@@ -770,6 +1177,11 @@ def get_health_summary(window_hours: int = 24) -> str:
     # Tool call stats (#1630) - show avg per iteration if data available
     if stats.avg_tool_calls_per_iteration > 0:
         parts.append(f"| Tools: {stats.avg_tool_calls_per_iteration:.0f}/iter")
+    # Audit overhead circuit breaker state (#2808)
+    overhead_state = get_audit_overhead_state()
+    if overhead_state and overhead_state.state != "healthy":
+        pct = f"{overhead_state.ratio:.0%}"
+        parts.append(f"| AuditOverhead: {pct} {overhead_state.state.upper()}")
     return " ".join(parts)
 
 
@@ -777,15 +1189,24 @@ def get_health_summary(window_hours: int = 24) -> str:
 CONSECUTIVE_ABORT_THRESHOLD = 3
 
 
-def check_consecutive_abort_alert(threshold: int = CONSECUTIVE_ABORT_THRESHOLD) -> bool:
+def check_consecutive_abort_alert(
+    threshold: int = CONSECUTIVE_ABORT_THRESHOLD,
+    mode: str | None = None,
+    worker_id: int | None = None,
+) -> bool:
     """Check and write flag if consecutive early aborts exceed threshold (#1644).
 
     This function computes the current streak of early aborts and writes
     a flag file if it exceeds the threshold. Called by looper after each
     iteration to provide early warning of sustained empty-issues situations.
 
-    REQUIRES: threshold > 0
-    ENSURES: Writes .flags/consecutive_early_aborts if streak >= threshold
+    Args:
+        threshold: Number of consecutive aborts before alerting (default 3)
+        mode: Role name (worker, prover, etc.) for per-role isolation (#2408)
+        worker_id: Worker instance ID for multi-worker isolation (#2408)
+
+    REQUIRES: threshold is an int (<=0 falls back to default)
+    ENSURES: Writes .flags/consecutive_early_aborts[_role[_id]] if streak >= threshold
     ENSURES: Removes flag if streak < threshold
     ENSURES: Returns True if alert was written, False otherwise
 
@@ -795,9 +1216,33 @@ def check_consecutive_abort_alert(threshold: int = CONSECUTIVE_ABORT_THRESHOLD) 
     if threshold <= 0:
         threshold = CONSECUTIVE_ABORT_THRESHOLD  # Fall back to default
 
-    flag_file = FLAGS_DIR / "consecutive_early_aborts"
+    # Per-role/worker flag naming for isolation (#2408)
+    # Without mode: global flag (backwards compatible)
+    # With mode only: per-role flag
+    # With mode + worker_id: per-worker flag
+    normalized_mode = _normalize_role(mode)
+    normalized_worker_id = None
+    if worker_id is not None:
+        coerced_worker_id = _coerce_int(worker_id, -1, min_value=0)
+        normalized_worker_id = (
+            coerced_worker_id if coerced_worker_id >= 0 else None
+        )
 
-    stats = compute_stats(window_hours=6)  # Look at recent window
+    if normalized_mode and normalized_worker_id is not None:
+        flag_name = (
+            f"consecutive_early_aborts_{normalized_mode}_{normalized_worker_id}"
+        )
+    elif normalized_mode:
+        flag_name = f"consecutive_early_aborts_{normalized_mode}"
+    else:
+        flag_name = "consecutive_early_aborts"
+    flag_file = FLAGS_DIR / flag_name
+
+    stats = compute_stats(
+        window_hours=6,
+        role=normalized_mode,
+        worker_id=normalized_worker_id,
+    )  # Look at recent window
     if not stats:
         # No stats - clear flag if present
         if flag_file.exists():
@@ -805,6 +1250,13 @@ def check_consecutive_abort_alert(threshold: int = CONSECUTIVE_ABORT_THRESHOLD) 
                 flag_file.unlink()
             except OSError as e:
                 debug_swallow("unlink_abort_flag_no_stats", e)
+        if normalized_mode and flag_name != "consecutive_early_aborts":
+            legacy_flag = FLAGS_DIR / "consecutive_early_aborts"
+            if legacy_flag.exists():
+                try:
+                    legacy_flag.unlink()
+                except OSError as e:
+                    debug_swallow("unlink_abort_flag_legacy", e)
         return False
 
     streak = stats.consecutive_early_aborts
@@ -828,7 +1280,7 @@ def check_consecutive_abort_alert(threshold: int = CONSECUTIVE_ABORT_THRESHOLD) 
         try:
             flag_file.write_text(content)
             log_warning(
-                f"⚠️  Alert: {streak} consecutive early aborts - see .flags/consecutive_early_aborts"
+                f"⚠️  Alert: {streak} consecutive early aborts - see .flags/{flag_name}"
             )
             return True
         except OSError as e:
@@ -839,5 +1291,60 @@ def check_consecutive_abort_alert(threshold: int = CONSECUTIVE_ABORT_THRESHOLD) 
             flag_file.unlink()
         except OSError as e:
             debug_swallow("unlink_abort_flag_clear", e)
+    if normalized_mode and flag_name != "consecutive_early_aborts":
+        legacy_flag = FLAGS_DIR / "consecutive_early_aborts"
+        if legacy_flag.exists():
+            try:
+                legacy_flag.unlink()
+            except OSError as e:
+                debug_swallow("unlink_abort_flag_legacy", e)
 
     return False
+
+
+def get_prior_iteration_diagnostic(
+    role: str, worker_id: int | None, iteration: int
+) -> str:
+    """Summarize prior failed iterations for diagnostic injection (#2564).
+
+    When a worker has reached iteration N with zero commits, this reads
+    metrics/looper.jsonl to report what happened in prior iterations
+    (timeouts, silence-kills, crashes, exit codes).
+
+    Returns:
+        Human-readable summary of prior iteration outcomes, or empty string
+        if metrics are unavailable or no prior iterations found.
+    """
+    if not LOOPER_METRICS_FILE.exists():
+        return ""
+    try:
+        entries = _load_recent_entries(window_hours=24)
+        entries = _filter_by_role_and_worker(entries, role, worker_id)
+        main_iters, _ = _partition_iterations(entries)
+        if not main_iters:
+            return ""
+        prior = [
+            e for e in main_iters
+            if _coerce_int(e.get("iteration"), 0) < iteration
+        ]
+        if not prior:
+            return ""
+        crashes, timeouts, early_aborts = _compute_exit_counts(prior)
+        silence_kills = sum(
+            1 for e in prior
+            if _coerce_int(e.get("exit_code"), 0) == EXIT_SILENCE
+        )
+        parts: list[str] = []
+        if timeouts:
+            parts.append(f"{timeouts} timed out")
+        if silence_kills:
+            parts.append(f"{silence_kills} silence-killed")
+        if crashes:
+            parts.append(f"{crashes} crashed")
+        if early_aborts:
+            parts.append(f"{early_aborts} aborted (not initialized)")
+        if not parts:
+            return ""
+        return f"Prior iterations: {', '.join(parts)}."
+    except Exception:
+        return ""

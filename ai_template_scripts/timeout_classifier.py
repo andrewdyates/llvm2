@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -8,8 +13,13 @@ This module classifies silence timeout events into categories:
 - long_command: Long-running commands (benchmarks, builds) that exceed silence timeout
 - stuck_query: SMT/verification queries with no progress
 - network_stall: API calls or network operations that timed out
-- idle_session: Session idle with no activity
+- idle_abort: Session idle with no activity (renamed from idle_session per #2318)
+- stale_connection: Machine slept, connection became stale (exit 125) - added per #2318
+- exit_error: Non-zero exit code
+- signal_kill: Killed by signal (OOM, etc.)
 - unknown: Unclassifiable timeouts
+
+Categories imported from ai_template_scripts.crash_categories per #2318.
 
 Usage:
     # Classify a single timeout event
@@ -27,13 +37,19 @@ See: #2310 for background on why crash/timeout distinction matters.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Add parent dir to path for imports when run as script
+_script_dir = Path(__file__).resolve().parent
+if str(_script_dir.parent) not in sys.path:
+    sys.path.insert(0, str(_script_dir.parent))
+
 import argparse
 import json
 import re
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Literal
 
 # Failure log location (renamed from crashes.log per #2310)
@@ -43,16 +59,11 @@ CRASHES_LOG = Path("worker_logs/crashes.log")
 # Timeout context file (written by looper on silence timeout)
 TIMEOUT_CONTEXT_FILE = Path("worker_logs/timeout_context.jsonl")
 
-# Event categories
-EventCategory = Literal[
-    "long_command",
-    "stuck_query",
-    "network_stall",
-    "idle_session",
-    "error_exit",
-    "signal_kill",
-    "unknown",
-]
+# Event categories - imported from shared module per #2318
+from ai_template_scripts.crash_categories import (
+    TimeoutCategoryStr as EventCategory,
+    normalize_category,
+)
 
 
 @dataclass
@@ -134,8 +145,8 @@ class TimeoutClassifier:
     1. exit_code 125 (silence timeout) → check last_command
     2. exit_code 124 (iteration timeout) → long_command or stuck_query
     3. exit_code 137/-9 (SIGKILL) → signal_kill (OOM or forced)
-    4. exit_code 1 → error_exit
-    5. No last_command → idle_session
+    4. exit_code 1 → exit_error
+    5. No last_command → idle_abort
     """
 
     # Commands that are expected to run long
@@ -210,11 +221,14 @@ class TimeoutClassifier:
 
         # Error exits
         if exit_code == 1:
-            return "error_exit", 0.9
+            return "exit_error", 0.9
 
-        # No command running - idle session
+        # No command running - idle abort (renamed from idle_session per #2318)
+        # Exit 125 (silence timeout) with no command is stale_connection
         if not last_command:
-            return "idle_session", 0.8
+            if exit_code == 125:
+                return "stale_connection", 0.9
+            return "idle_abort", 0.8
 
         cmd_lower = last_command.lower()
 
@@ -262,11 +276,21 @@ class TimeoutClassifier:
         # Determine exit code from message
         exit_code = self._exit_code_from_message(message)
 
-        # Extract command info if present (not currently in log format)
+        # Extract command info if present in message
         last_command = self._extract_command_from_message(message)
+        command_duration_sec = None
+
+        # If not in message, try to find from timeout context file
+        if not last_command:
+            context = self.find_context_for_event(timestamp)
+            if context:
+                last_command = context.get("last_command")
+                command_duration_sec = context.get("command_duration_sec")
 
         # Classify the event
-        category, confidence = self.classify_event(last_command, None, exit_code)
+        category, confidence = self.classify_event(
+            last_command, command_duration_sec, exit_code
+        )
 
         return TimeoutEvent(
             timestamp=timestamp,
@@ -275,6 +299,7 @@ class TimeoutClassifier:
             exit_code=exit_code,
             category=category,
             last_command=last_command,
+            command_duration_sec=command_duration_sec,
             message=message,
             confidence=confidence,
         )
@@ -302,11 +327,90 @@ class TimeoutClassifier:
     def _extract_command_from_message(self, message: str) -> str | None:
         """Extract command from message if present.
 
-        Current log format doesn't include command info, so this returns None.
-        Future enhancement: Include last_command in failure log.
+        Checks for command info in the message itself or matches
+        against timeout context entries by timestamp.
+
+        Args:
+            message: The failure message to parse
+
+        Returns:
+            The command if found, None otherwise
+
+        ENSURES: Returns str or None
         """
-        # TODO: Parse command from enhanced log format when available
+        # Pattern 1: Command embedded in message (future enhancement)
+        # Format: "... | cmd: <command>"
+        cmd_match = re.search(r"\| cmd:\s*(.+?)(?:\||$)", message)
+        if cmd_match:
+            return cmd_match.group(1).strip()
+
+        # Pattern 2: Check timeout context file for recent entries
+        # This correlates failure events with timeout context
         return None
+
+    def load_timeout_context(self) -> list[dict]:
+        """Load timeout context entries from JSONL file.
+
+        The timeout context file is written by looper when silence timeouts occur,
+        capturing the last command that was running.
+
+        Returns:
+            List of context entries with timestamp, last_command, and duration
+
+        ENSURES: Returns list (may be empty if file doesn't exist)
+        """
+        if not TIMEOUT_CONTEXT_FILE.exists():
+            return []
+
+        entries = []
+        try:
+            with open(TIMEOUT_CONTEXT_FILE) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        # Parse timestamp for matching
+                        if "timestamp" in entry:
+                            entry["_parsed_ts"] = datetime.fromisoformat(
+                                entry["timestamp"]
+                            )
+                        entries.append(entry)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+        except OSError:
+            return []
+
+        return entries
+
+    def find_context_for_event(
+        self, event_timestamp: datetime, tolerance_sec: int = 60
+    ) -> dict | None:
+        """Find timeout context entry matching an event timestamp.
+
+        Args:
+            event_timestamp: The timestamp of the failure event
+            tolerance_sec: Maximum seconds difference to consider a match
+
+        Returns:
+            The context entry if found, None otherwise
+
+        ENSURES: Returns dict with last_command and command_duration_sec or None
+        """
+        context_entries = self.load_timeout_context()
+        best_match = None
+        best_diff: float | None = None
+
+        for entry in context_entries:
+            if "_parsed_ts" not in entry:
+                continue
+            diff = abs((entry["_parsed_ts"] - event_timestamp).total_seconds())
+            if diff <= tolerance_sec and (best_diff is None or diff < best_diff):
+                best_diff = diff
+                best_match = entry
+
+        return best_match
 
     def generate_report(
         self,
@@ -337,8 +441,9 @@ class TimeoutClassifier:
         top_commands: dict[str, int] = {}
 
         for event in recent:
-            by_category[event.category] = by_category.get(event.category, 0) + 1
-            if event.last_command and event.category == "long_command":
+            category = normalize_category(event.category)
+            by_category[category] = by_category.get(category, 0) + 1
+            if event.last_command and category == "long_command":
                 # Extract base command (first word)
                 base_cmd = event.last_command.split()[0] if event.last_command else ""
                 if base_cmd:
@@ -363,7 +468,7 @@ class TimeoutClassifier:
                     "are stuck queries"
                 )
 
-            idle_pct = by_category.get("idle_session", 0) * 100 // total
+            idle_pct = by_category.get("idle_abort", 0) * 100 // total
             if idle_pct > 40:
                 recommendations.append(
                     f"High idle rate ({idle_pct}%): Check for issue availability "
@@ -416,7 +521,7 @@ def _match_context_to_event(
 ) -> TimeoutEvent:
     """Match a timeout event to its context entry if available.
 
-    Looks for context entries within 5 minutes of the event timestamp.
+    Looks for context entries within 5 minutes (<= 300 seconds) of the event timestamp.
 
     REQUIRES: event is a valid TimeoutEvent
     ENSURES: Returns event with enriched fields if context found
@@ -426,12 +531,15 @@ def _match_context_to_event(
     for ts_str, ctx in context.items():
         try:
             ctx_ts = datetime.fromisoformat(ts_str)
-            # Match if within 5 minutes
-            if abs((event_ts - ctx_ts).total_seconds()) < 300:
+            # Match if within 5 minutes, inclusive of the 300s boundary.
+            if abs((event_ts - ctx_ts).total_seconds()) <= 300:
                 # Found matching context - enrich event
                 if ctx.get("last_command") and not event.last_command:
                     event.last_command = ctx["last_command"]
-                if ctx.get("command_duration_sec") and not event.command_duration_sec:
+                if (
+                    ctx.get("command_duration_sec") is not None
+                    and event.command_duration_sec is None
+                ):
                     event.command_duration_sec = ctx["command_duration_sec"]
                 break
         except ValueError:

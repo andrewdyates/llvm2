@@ -1,4 +1,8 @@
 #!/bin/bash
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # post-commit-hook.sh - Git post-commit hook for issue label management
 #
 # Copyright 2026 Dropbox, Inc.
@@ -16,13 +20,17 @@
 #   Fixes/Closes/Resolves #N -> removes workflow labels + invalidates historical cache (#1277)
 #
 # Multi-worker support:
-#   When AI_WORKER_ID env var is set (e.g., "1"), uses in-progress-W1 label
+#   When AI_WORKER_ID env var is set (e.g., "1"), uses in-progress + W1 ownership label
 #   Otherwise uses in-progress label
 #
 # Note: The claim comment (e.g., "Claiming this issue") is added by gh_post.py
 # when it detects --add-label in-progress, not by this script. See #1017.
 
 set -euo pipefail
+
+# Script directory (for finding tracker_utils.py)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TRACKER_UTILS="$SCRIPT_DIR/tracker_utils.py"
 
 # Get the commit message
 MSG=$(git log -1 --pretty=%B)
@@ -137,7 +145,7 @@ local_issue_close() {
 # In full local mode (AIT_LOCAL_MODE=full), force GH_AVAILABLE to false
 # to prevent any GitHub API calls
 GH_AVAILABLE=false
-if [[ "${AIT_LOCAL_MODE:-}" != "full" ]] && command -v gh &> /dev/null; then
+if [[ "${AIT_LOCAL_MODE:-}" != "full" ]] && command -v gh &>/dev/null; then
     GH_AVAILABLE=true
 fi
 
@@ -288,7 +296,7 @@ echo "$MSG" | grep -oiE "$AUTO_CLOSE_PATTERN" | grep -oE "$AUTO_CLOSE_REF_PATTER
             if [[ -n "$label" && "$label" =~ ^(W[1-5]|prov[1-3]|R[1-3]|M[1-3])$ ]]; then
                 gh issue edit "$ISSUE" --remove-label "$label" 2>/dev/null || true
             fi
-        done <<< "$ISSUE_LABELS"
+        done <<<"$ISSUE_LABELS"
         # Invalidate historical cache since issue is now closed (#1277)
         # Path format: ~/.ait_gh_cache/historical/<owner>/<repo>/issue-<num>.json
         if [[ -n "$REPO_SLUG" ]]; then
@@ -312,32 +320,8 @@ if [[ -n "${AI_WORKER_ID:-}" ]]; then
         COMMITTED_FILES=$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null || true)
 
         if [[ -n "$COMMITTED_FILES" ]]; then
-            # Update tracker to remove committed files
-            python3 -c "
-import json
-import sys
-
-tracker_file = '$TRACKER_FILE'
-committed = '''$COMMITTED_FILES'''.strip().split('\n')
-committed_set = set(f.strip() for f in committed if f.strip())
-
-try:
-    with open(tracker_file) as f:
-        data = json.load(f)
-
-    original_files = set(data.get('files', []))
-    remaining_files = sorted(original_files - committed_set)
-
-    if len(remaining_files) != len(original_files):
-        data['files'] = remaining_files
-        with open(tracker_file, 'w') as f:
-            json.dump(data, f, indent=2)
-        removed = len(original_files) - len(remaining_files)
-        print(f'[file_tracker] Cleared {removed} committed file(s) from tracker', file=sys.stderr)
-except Exception as e:
-    # Non-fatal - tracker will be refreshed next iteration
-    pass
-" 2>/dev/null || true
+            # Use shared tracker_utils to clear committed files
+            printf '%s\n' "$COMMITTED_FILES" | python3 "$TRACKER_UTILS" clear_committed --stdin "$TRACKER_FILE" 2>/dev/null || true
         fi
     fi
 fi

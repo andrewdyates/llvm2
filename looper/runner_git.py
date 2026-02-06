@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -371,6 +375,10 @@ class RunnerGitMixin:
         Returns:
             Number of commits behind, or None if check not possible.
         """
+        # ai_template repo itself is always up to date with itself - it IS the source
+        if Path.cwd().name == "ai_template":
+            return 0
+
         version_file = Path(".ai_template_version")
         if not version_file.exists():
             log_warning("⚠ No .ai_template_version - repo may never have been synced")

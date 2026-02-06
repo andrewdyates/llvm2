@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -57,10 +61,9 @@ class IterationIssueCache:
     The cache is populated on first access and remains valid for the entire
     iteration. Call clear() at the start of each iteration to reset.
 
-    This consolidates 4-8 API calls per iteration into 1:
+    This consolidates API calls per iteration into 1:
     - get_sampled_issues() - main issue list
     - get_do_audit_issues() - do-audit filtered
-    - check_urgent_handoff() - urgent-handoff filtered
     - _get_domain_issues_targeted() - P0 + domain labels
 
     Usage:
@@ -155,7 +158,7 @@ class IterationIssueCache:
         """Get issues with a specific label from the cache.
 
         Args:
-            label: Label to filter by (e.g., "P0", "do-audit", "urgent-handoff").
+            label: Label to filter by (e.g., "P0", "do-audit", "do-audit").
 
         Returns:
             Result with filtered issue list.

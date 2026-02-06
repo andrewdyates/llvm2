@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -17,6 +21,8 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+
+from ai_template_scripts.shared_logging import debug_swallow
 
 
 class RepoContext:
@@ -60,7 +66,7 @@ class RepoContext:
                 self._repo = Path(result.stdout.strip()).name
                 return self._repo
         except Exception:
-            pass
+            debug_swallow("get_current_repo")
         self._repo = "unknown"
         return self._repo
 
@@ -111,6 +117,7 @@ class RepoContext:
                 if normalized:
                     return normalized
         except Exception:
+            debug_swallow("get_owner_repo")
             return None
         return None
 
@@ -127,5 +134,5 @@ class RepoContext:
             if result.returncode == 0:
                 return result.stdout.strip()
         except Exception:
-            pass
+            debug_swallow("get_commit_hash")
         return None

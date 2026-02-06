@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -82,7 +86,7 @@ BLOCKER_PATTERN = re.compile(
 )
 # Sub-pattern to extract individual issue refs (#N)
 ISSUE_REF_PATTERN = re.compile(r"#(\d+)")
-# Crash log entry pattern (consistent with health_check.py)
+# Failure log entry pattern (consistent with health_check.py)
 CRASH_LOG_PATTERN = re.compile(
     r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] Iteration \d+: (.+)",
 )
@@ -99,9 +103,10 @@ GIT_DEP_PATTERN = re.compile(
 
 # Default thresholds (can be overridden via pulse.toml)
 DEFAULT_THRESHOLDS = {
-    "max_file_lines": 500,
+    "max_file_lines": 1000,  # Notice tier - files getting large (Part of #2358)
+    "max_file_lines_warning": 5000,  # Warning tier - files too large (Part of #2358)
     "max_complexity": 15,
-    "max_files_over_limit": 3,
+    "max_files_over_limit": 3,  # Flag when this many files exceed warning tier
     "stale_issue_days": 7,
     "memory_warning_percent": 80,  # Flag when memory usage exceeds this
     "memory_critical_percent": 90,  # Critical flag
@@ -118,6 +123,10 @@ DEFAULT_THRESHOLDS = {
     # Set BOTH to 0 to disable staleness filter (flag any outdated dep).
     "git_dep_stale_days": 3,  # Flag if pinned rev is >=N days old
     "git_dep_stale_commits": 10,  # Flag if pinned rev is >=N commits behind
+    # GitHub API quota overflow threshold (#2362)
+    # Flag when overflow events in last hour exceed this count
+    # Set to 0 to flag on any overflow
+    "gh_quota_overflow_threshold": 10,
 }
 
 # Processes to monitor for long-running detection (#922)

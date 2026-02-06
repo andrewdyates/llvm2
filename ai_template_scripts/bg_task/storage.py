@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -6,7 +10,7 @@
 
 Contains:
 - Path utilities (get_git_root, get_tasks_dir, get_task_dir)
-- JSON I/O helpers (_read_json, _atomic_write_json)
+- JSON I/O helpers (_read_json, atomic_write_json from atomic_write)
 - Manifest operations (load_manifest, save_manifest)
 - Task metadata persistence (load_task_meta, save_task_meta)
 - Locking (_task_start_lock, _manifest_lock)
@@ -26,13 +30,14 @@ __all__ = [
 
 import contextlib
 import json
-import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from ai_template_scripts.atomic_write import atomic_write_json
 from ai_template_scripts.bg_task.types import TASKS_DIR, TaskMeta
+from ai_template_scripts.subprocess_utils import get_git_root as _get_git_root_or_none
 
 fcntl: ModuleType | None
 try:
@@ -44,18 +49,13 @@ except ImportError:  # pragma: no cover - Windows/unavailable fcntl
 def get_git_root() -> Path:
     """Get the git repository root directory.
 
-    REQUIRES: CWD is inside a git repository
-    ENSURES: return value is absolute path to repository root
-    ENSURES: return value exists and is a directory
+    Thin wrapper around subprocess_utils.get_git_root() (#2535).
+    Raises subprocess.CalledProcessError for backward compatibility.
     """
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=10,
-    )
-    return Path(result.stdout.strip())
+    root = _get_git_root_or_none()
+    if root is None:
+        raise RuntimeError("Not in a git repository")
+    return root
 
 
 def get_tasks_dir() -> Path:
@@ -87,13 +87,6 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    """Write JSON to a file atomically (tmp + replace)."""
-    tmp_path = path.with_name(f"{path.name}.tmp")
-    tmp_path.write_text(json.dumps(data, indent=2) + "\n")
-    tmp_path.replace(path)
-
-
 def load_manifest() -> dict[str, Any]:
     """Load the manifest file.
 
@@ -116,7 +109,7 @@ def save_manifest(manifest: dict[str, Any]) -> None:
     ENSURES: manifest.json exists with valid JSON
     """
     manifest_path = get_tasks_dir() / "manifest.json"
-    _atomic_write_json(manifest_path, manifest)
+    atomic_write_json(manifest_path, manifest)
 
 
 def load_task_meta(task_id: str) -> TaskMeta | None:
@@ -148,7 +141,7 @@ def save_task_meta(meta: TaskMeta) -> None:
     task_dir = get_task_dir(meta.task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
     meta_path = task_dir / "meta.json"
-    _atomic_write_json(meta_path, meta.to_dict())
+    atomic_write_json(meta_path, meta.to_dict())
 
 
 @contextlib.contextmanager

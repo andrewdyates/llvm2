@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -8,7 +12,7 @@ from __future__ import annotations
 
 import tomllib
 
-from looper.config_validation import check_unknown_keys
+from looper.config_validation import get_unknown_keys
 
 from . import _state
 from .constants import (
@@ -100,7 +104,7 @@ def _warn_unknown_keys(
     - Warn on unknown keys in [limits]
     - Sort keys for deterministic output
 
-    Uses shared check_unknown_keys() utility from looper/config_validation.py.
+    Uses shared get_unknown_keys() utility from looper/config_validation.py.
 
     Args:
         data: Full parsed config dict.
@@ -114,15 +118,15 @@ def _warn_unknown_keys(
         log_stderr(f"[cargo] {msg.replace('Warning:', 'WARNING:')}")
 
     # Check for unknown top-level sections
-    check_unknown_keys(data, _KNOWN_SECTIONS, str(source), logger=cargo_warn)
+    get_unknown_keys(data, _KNOWN_SECTIONS, str(source), logger=cargo_warn)
 
     # Check for unknown keys in [timeouts]
-    check_unknown_keys(
+    get_unknown_keys(
         timeouts, _KNOWN_TIMEOUT_KEYS, f"{source} [timeouts]", logger=cargo_warn
     )
 
     # Check for unknown keys in [limits]
-    check_unknown_keys(
+    get_unknown_keys(
         limits, _KNOWN_LIMIT_KEYS, f"{source} [limits]", logger=cargo_warn
     )
 

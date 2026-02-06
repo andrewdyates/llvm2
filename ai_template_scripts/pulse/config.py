@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -15,7 +19,7 @@ Part of #404: pulse.py module split
 import sys
 import tomllib
 
-from looper.config_validation import check_unknown_keys
+from looper.config_validation import get_unknown_keys
 
 from .constants import (
     CONFIG_PATHS,
@@ -38,7 +42,7 @@ def _warn_unknown_keys(config: dict, config_path: str) -> None:
     - Warn on unknown keys within known sections
     - Sort keys for deterministic output
 
-    Uses shared check_unknown_keys() utility from looper/config_validation.py.
+    Uses shared get_unknown_keys() utility from looper/config_validation.py.
 
     Args:
         config: Parsed config dict.
@@ -50,7 +54,7 @@ def _warn_unknown_keys(config: dict, config_path: str) -> None:
         print(msg, file=sys.stderr)
 
     # Check for unknown top-level sections
-    check_unknown_keys(config, KNOWN_SECTIONS, config_path, logger=stderr_warn)
+    get_unknown_keys(config, KNOWN_SECTIONS, config_path, logger=stderr_warn)
 
     # Check for unknown keys in [thresholds]
     thresholds = config.get("thresholds")
@@ -58,7 +62,7 @@ def _warn_unknown_keys(config: dict, config_path: str) -> None:
         if not isinstance(thresholds, dict):
             stderr_warn(f"Warning: {config_path} [thresholds] must be a table")
         else:
-            check_unknown_keys(
+            get_unknown_keys(
                 thresholds,
                 set(DEFAULT_THRESHOLDS.keys()),
                 f"{config_path} [thresholds]",
@@ -71,7 +75,7 @@ def _warn_unknown_keys(config: dict, config_path: str) -> None:
         if not isinstance(large_files, dict):
             stderr_warn(f"Warning: {config_path} [large_files] must be a table")
         else:
-            check_unknown_keys(
+            get_unknown_keys(
                 large_files,
                 KNOWN_LARGE_FILES_KEYS,
                 f"{config_path} [large_files]",
@@ -84,7 +88,7 @@ def _warn_unknown_keys(config: dict, config_path: str) -> None:
         if not isinstance(runtime, dict):
             stderr_warn(f"Warning: {config_path} [runtime] must be a table")
         else:
-            check_unknown_keys(
+            get_unknown_keys(
                 runtime,
                 KNOWN_RUNTIME_KEYS,
                 f"{config_path} [runtime]",

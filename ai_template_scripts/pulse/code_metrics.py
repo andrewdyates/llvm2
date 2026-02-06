@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -189,6 +193,7 @@ def find_large_files(
     max_lines: int,
     repo_root: Path | None = None,
     use_git: bool = True,
+    warning_lines: int | None = None,
 ) -> list[dict]:
     """Find tracked files exceeding line limit using git ls-files+wc.
 
@@ -197,13 +202,31 @@ def find_large_files(
 
     Respects LARGE_FILE_EXCLUDE_PATTERNS from pulse.toml config.
 
+    Args:
+        max_lines: Minimum line count for "notice" tier (Part of #2358)
+        repo_root: Repository root directory
+        use_git: Whether to use git ls-files (vs find)
+        warning_lines: Minimum line count for "warning" tier. If set, adds
+            'tier' field to each result ('notice' or 'warning')
+
     REQUIRES: max_lines > 0
+    REQUIRES: warning_lines is None or warning_lines > max_lines
     REQUIRES: repo_root is None or a valid directory Path
-    ENSURES: Returns list of dicts with 'file' (str) and 'lines' (int) keys
+    ENSURES: Returns list of dicts with 'file' (str), 'lines' (int), optionally 'tier' (str)
     ENSURES: All returned files have lines > max_lines
     ENSURES: On error, returns empty list (never raises)
     ENSURES: If use_git=True, only includes git-tracked files
     """
+    # Validate warning_lines makes sense (Part of #2358 audit)
+    if warning_lines is not None and warning_lines <= max_lines:
+        import sys
+
+        print(
+            f"Warning: warning_lines ({warning_lines}) should be > max_lines ({max_lines})",
+            file=sys.stderr,
+        )
+        # Continue anyway, but tiers may be confusing
+
     root = _resolve_root(repo_root)
     large = []
     extensions = [".py", ".rs", ".go", ".cpp", ".c", ".js", ".ts"]
@@ -261,7 +284,11 @@ def find_large_files(
                             filepath, LARGE_FILE_EXCLUDE_PATTERNS
                         ):
                             continue
-                    large.append({"file": filepath, "lines": lines})
+                    entry: dict = {"file": filepath, "lines": lines}
+                    # Add tier info if warning_lines specified (Part of #2358)
+                    if warning_lines is not None:
+                        entry["tier"] = "warning" if lines >= warning_lines else "notice"
+                    large.append(entry)
                 except ValueError:
                     pass
 

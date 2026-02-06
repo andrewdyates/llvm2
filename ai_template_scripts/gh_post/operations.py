@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -9,6 +13,7 @@ import re
 import subprocess
 import sys
 
+from ai_template_scripts.identity import get_identity as _get_ident
 from ai_template_scripts.gh_post.labels import PROTECTED_LABELS
 from ai_template_scripts.gh_post.validation import (
     _check_malformed_in_progress_labels,
@@ -16,6 +21,7 @@ from ai_template_scripts.gh_post.validation import (
     _get_p_labels_from_list,
     _is_p_label,
 )
+from looper.log import debug_swallow
 
 
 def _gh_post():
@@ -57,8 +63,8 @@ def _get_issue_info(
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode == 0:
             return json.loads(result.stdout)
-    except Exception:
-        pass
+    except Exception as e:
+        debug_swallow("gh_post_get_issue_info", e)
     return None
 
 
@@ -143,7 +149,7 @@ def _notify_mail_sender_on_close(
             "issue",
             "create",
             "--repo",
-            f"dropbox-ai-prototypes/{sender}",
+            f"{_get_ident().github_org}/{sender}",
             "--title",
             notif_title,
             "--body",
@@ -194,8 +200,9 @@ def _handle_close(real_gh: str, args: list, parsed: dict) -> None:
     commit_hash: str | None = None
 
     # MANAGER must have a fix commit to close (USER can override)
-    # Exceptions: duplicate/environmental/stale issues can be closed without Fixes commit
+    # Exceptions: duplicate/environmental/stale/deferred issues can be closed without Fixes commit
     # stale = auto-generated child issues that became obsolete when parent closed (#962, #963)
+    # deferred = considered but deprioritized, closed as "not planned" (#2777)
     if role == "MANAGER" and parsed["issue_number"]:
         issue_labels = gh_post_module.get_issue_labels(
             real_gh, parsed["issue_number"], parsed["repo"]
@@ -203,8 +210,9 @@ def _handle_close(real_gh: str, args: list, parsed: dict) -> None:
         is_duplicate = "duplicate" in issue_labels
         is_environmental = "environmental" in issue_labels
         is_stale = "stale" in issue_labels
+        is_deferred = "deferred" in issue_labels
         has_fix, commit_hash = gh_post_module._has_fix_commit(parsed["issue_number"])
-        if not has_fix and not is_duplicate and not is_environmental and not is_stale:
+        if not has_fix and not is_duplicate and not is_environmental and not is_stale and not is_deferred:
             print(file=sys.stderr)
             print(
                 "❌ ERROR: Cannot close issue without 'Fixes #N' commit",
@@ -227,11 +235,11 @@ def _handle_close(real_gh: str, args: list, parsed: dict) -> None:
             print("     3. Then close the issue", file=sys.stderr)
             print(file=sys.stderr)
             print(
-                "   Or, if this is a duplicate, environmental, or stale issue:",
+                "   Or, if this is a duplicate, environmental, stale, or deferred issue:",
                 file=sys.stderr,
             )
             print(
-                "     1. Add 'duplicate', 'environmental', or 'stale' label",
+                "     1. Add 'duplicate', 'environmental', 'stale', or 'deferred' label",
                 file=sys.stderr,
             )
             print("     2. Then close the issue", file=sys.stderr)
@@ -247,6 +255,231 @@ def _handle_close(real_gh: str, args: list, parsed: dict) -> None:
             real_gh, parsed["issue_number"], parsed["repo"], commit_hash
         )
     sys.exit(gh_post_module._execute_gh_with_queue(real_gh, args, parsed))
+
+
+def _enforce_do_audit_role(add_labels: list[str], role: str) -> None:
+    """Enforce that only WORKER can add do-audit label."""
+    if "do-audit" in add_labels and role != "WORKER":
+        print(file=sys.stderr)
+        print("❌ ERROR: Only WORKER role can add 'do-audit' label", file=sys.stderr)
+        print(f"   Current role: {role}", file=sys.stderr)
+        print(
+            "   Workflow: Worker → do-audit → needs-review → Manager closes",
+            file=sys.stderr,
+        )
+        print("   Other roles: → needs-review → Manager closes", file=sys.stderr)
+        print(file=sys.stderr)
+        sys.exit(1)
+
+
+def _auto_remove_mutually_exclusive_labels(
+    args: list, parsed: dict, current_labels: list[str] | None
+) -> None:
+    """Auto-remove mutually exclusive labels (in-progress, P-labels, deferred)."""
+    gh_post_module = _gh_post()
+    if current_labels is None:
+        return
+
+    # AUTO-REMOVE: in-progress labels when do-audit is added
+    if "do-audit" in parsed["add_labels"]:
+        for label in current_labels:
+            if (
+                gh_post_module._is_in_progress_label(label)
+                and label not in parsed["remove_labels"]
+            ):
+                args.extend(["--remove-label", label])
+                parsed["remove_labels"].append(label)
+
+    # AUTO-REMOVE: other in-progress labels when adding in-progress (single owner)
+    if parsed["adding_in_progress"]:
+        new_in_progress = [
+            lbl
+            for lbl in parsed["add_labels"]
+            if gh_post_module._is_in_progress_label(lbl)
+        ]
+        for label in current_labels:
+            if (
+                gh_post_module._is_in_progress_label(label)
+                and label not in new_in_progress
+                and label not in parsed["remove_labels"]
+            ):
+                args.extend(["--remove-label", label])
+                parsed["remove_labels"].append(label)
+
+    # AUTO-REMOVE: other P labels when adding a P label (single priority)
+    adding_p_labels = _get_p_labels_from_list(parsed["add_labels"])
+    if adding_p_labels:
+        for label in current_labels:
+            if (
+                _is_p_label(label)
+                and label not in adding_p_labels
+                and label not in parsed["remove_labels"]
+            ):
+                args.extend(["--remove-label", label])
+                parsed["remove_labels"].append(label)
+
+    # AUTO-REMOVE: P labels when adding deferred (deferred = no priority)
+    if "deferred" in parsed["add_labels"]:
+        for label in current_labels:
+            if _is_p_label(label) and label not in parsed["remove_labels"]:
+                args.extend(["--remove-label", label])
+                parsed["remove_labels"].append(label)
+
+
+def _enforce_protected_label_removal(
+    real_gh: str, role: str, parsed: dict
+) -> None:
+    """Enforce that non-USER cannot remove USER-protected labels."""
+    gh_post_module = _gh_post()
+    if role == "USER" or not parsed["remove_labels"]:
+        return
+
+    for label in parsed["remove_labels"]:
+        if label in PROTECTED_LABELS:
+            if gh_post_module.is_label_user_protected(
+                real_gh, parsed["issue_number"], label, parsed.get("repo")
+            ):
+                print(file=sys.stderr)
+                print(
+                    f"❌ ERROR: Cannot remove USER-protected label '{label}'",
+                    file=sys.stderr,
+                )
+                print(f"   Current role: {role}", file=sys.stderr)
+                print(
+                    f"   The '{label}' label was set by USER and is protected.",
+                    file=sys.stderr,
+                )
+                print("   Only USER can remove labels they set.", file=sys.stderr)
+                print(file=sys.stderr)
+                sys.exit(1)
+
+
+def _try_queue_rate_limited_edit(real_gh: str, parsed: dict) -> bool:
+    """Check rate limit and queue edit if limited. Returns True if queued."""
+    gh_post_module = _gh_post()
+    if not gh_post_module._HAS_RATE_LIMIT:
+        return False
+
+    gh_post_module._sync_pending_changes(real_gh)
+    limiter = gh_post_module.get_limiter()
+    if limiter.check_rate_limit(["issue", "edit"]):
+        return False
+
+    # Rate limited - queue for later
+    change_log = gh_post_module.get_change_log()
+    repo = gh_post_module._get_current_repo_name()
+    data = {
+        "repo": parsed.get("repo") or repo,
+        "issue": parsed.get("issue_number"),
+        "add_labels": parsed.get("add_labels", []),
+        "remove_labels": parsed.get("remove_labels", []),
+    }
+    change_id = change_log.add_change(repo, "edit", data)
+    print(
+        f"[gh_post] Rate limited - queued edit as {change_id}",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _handle_atomic_claim(
+    real_gh: str, args: list, parsed: dict, current_labels: list[str] | None
+) -> bool:
+    """Handle atomic claiming protocol. Returns True if claim was processed."""
+    gh_post_module = _gh_post()
+    if not parsed["adding_in_progress"] or current_labels is None:
+        return False
+
+    already_claimed = any(
+        gh_post_module._is_in_progress_label(lbl) for lbl in current_labels
+    )
+    if already_claimed:
+        return False
+
+    # Get the in-progress label being added
+    in_progress_label = next(
+        (
+            lbl
+            for lbl in parsed["add_labels"]
+            if gh_post_module._is_in_progress_label(lbl)
+        ),
+        "in-progress",
+    )
+
+    # Use atomic claiming protocol
+    success, message = gh_post_module._atomic_claim_issue(
+        real_gh,
+        parsed["issue_number"],
+        in_progress_label,
+        repo=parsed.get("repo"),
+        get_identity_fn=gh_post_module.get_identity,
+        get_commit_fn=gh_post_module.get_commit,
+        process_body_fn=gh_post_module.process_body,
+        invalidate_cache_fn=gh_post_module._invalidate_issue_cache,
+    )
+
+    if not success:
+        if message.startswith("Yielding to claim:"):
+            print(f"[gh_post] {message}", file=sys.stderr)
+            sys.exit(0)
+        print(f"[gh_post] Claim failed: {message}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[gh_post] {message}", file=sys.stderr)
+
+    # Execute remaining edit operations (non-in-progress labels)
+    remaining_args = gh_post_module._strip_in_progress_additions(args)
+    if gh_post_module._has_edit_modifiers(remaining_args):
+        result = subprocess.run([real_gh] + remaining_args)
+        if result.returncode != 0:
+            sys.exit(result.returncode)
+        gh_post_module._invalidate_issue_cache(
+            "edit", parsed["issue_number"], parsed.get("repo")
+        )
+
+    sys.exit(0)
+
+
+def _try_rest_label_edit(real_gh: str, args: list, parsed: dict, role: str) -> bool:
+    """Try REST API for label-only edits. Returns True if handled."""
+    gh_post_module = _gh_post()
+
+    title, body = gh_post_module._extract_title_body(args, parsed)
+    label_only = (
+        (parsed.get("add_labels") or parsed.get("remove_labels"))
+        and not title
+        and not body
+    )
+    if not label_only or parsed["adding_in_progress"]:
+        return False
+
+    repo = parsed.get("repo") or gh_post_module._guess_repo_name_from_cwd()
+    rest_result = gh_post_module._rest_edit_issue(real_gh, args, parsed, repo)
+    if rest_result is None:
+        return False
+
+    if rest_result == 0:
+        gh_post_module._invalidate_issue_cache("edit", parsed["issue_number"], repo)
+        _track_user_protected_labels(real_gh, role, parsed)
+        sys.exit(0)
+    sys.exit(rest_result)
+
+
+def _track_user_protected_labels(real_gh: str, role: str, parsed: dict) -> None:
+    """Track USER-added protected labels."""
+    gh_post_module = _gh_post()
+    if role != "USER" or not parsed["add_labels"]:
+        return
+
+    target_repo = parsed.get("repo")
+    for label in parsed["add_labels"]:
+        if label in PROTECTED_LABELS:
+            if not gh_post_module.is_label_user_protected(
+                real_gh, parsed["issue_number"], label, target_repo
+            ):
+                gh_post_module.add_user_label_marker(
+                    real_gh, parsed["issue_number"], label, target_repo
+                )
 
 
 def _handle_edit(real_gh: str, args: list, parsed: dict) -> None:
@@ -273,22 +506,10 @@ def _handle_edit(real_gh: str, args: list, parsed: dict) -> None:
     _check_malformed_in_progress_labels(parsed["add_labels"])
 
     # ENFORCE: Only WORKER can add do-audit label
-    if "do-audit" in parsed["add_labels"] and role != "WORKER":
-        print(file=sys.stderr)
-        print("❌ ERROR: Only WORKER role can add 'do-audit' label", file=sys.stderr)
-        print(f"   Current role: {role}", file=sys.stderr)
-        print(
-            "   Workflow: Worker → do-audit → needs-review → Manager closes",
-            file=sys.stderr,
-        )
-        print("   Other roles: → needs-review → Manager closes", file=sys.stderr)
-        print(file=sys.stderr)
-        sys.exit(1)
-
-    # Check if we're adding any P labels or in-progress labels
-    adding_p_labels = _get_p_labels_from_list(parsed["add_labels"])
+    _enforce_do_audit_role(parsed["add_labels"], role)
 
     # Fetch current labels once if needed for mutual exclusion checks
+    adding_p_labels = _get_p_labels_from_list(parsed["add_labels"])
     current_labels: list[str] | None = None
     if parsed["issue_number"] and (
         "do-audit" in parsed["add_labels"]
@@ -299,171 +520,21 @@ def _handle_edit(real_gh: str, args: list, parsed: dict) -> None:
             real_gh, parsed["issue_number"], parsed["repo"]
         )
 
-    # AUTO-REMOVE: in-progress labels when do-audit is added (mutually exclusive)
-    if "do-audit" in parsed["add_labels"] and current_labels is not None:
-        for label in current_labels:
-            if (
-                gh_post_module._is_in_progress_label(label)
-                and label not in parsed["remove_labels"]
-            ):
-                args.extend(["--remove-label", label])
-                parsed["remove_labels"].append(label)
-
-    # AUTO-REMOVE: other in-progress labels when adding in-progress (single owner)
-    if parsed["adding_in_progress"] and current_labels is not None:
-        new_in_progress = [
-            lbl
-            for lbl in parsed["add_labels"]
-            if gh_post_module._is_in_progress_label(lbl)
-        ]
-        for label in current_labels:
-            if (
-                gh_post_module._is_in_progress_label(label)
-                and label not in new_in_progress
-                and label not in parsed["remove_labels"]
-            ):
-                args.extend(["--remove-label", label])
-                parsed["remove_labels"].append(label)
-
-    # AUTO-REMOVE: other P labels when adding a P label (single priority)
-    if adding_p_labels and current_labels is not None:
-        for label in current_labels:
-            if (
-                _is_p_label(label)
-                and label not in adding_p_labels
-                and label not in parsed["remove_labels"]
-            ):
-                args.extend(["--remove-label", label])
-                parsed["remove_labels"].append(label)
-
-    # AUTO-REMOVE: P labels when adding deferred (deferred = no priority)
-    adding_deferred = "deferred" in parsed["add_labels"]
-    if adding_deferred and current_labels is not None:
-        for label in current_labels:
-            if _is_p_label(label) and label not in parsed["remove_labels"]:
-                args.extend(["--remove-label", label])
-                parsed["remove_labels"].append(label)
+    # Auto-remove mutually exclusive labels
+    _auto_remove_mutually_exclusive_labels(args, parsed, current_labels)
 
     # ENFORCE: Non-USER cannot remove USER-protected labels
-    if role != "USER" and parsed["remove_labels"]:
-        for label in parsed["remove_labels"]:
-            if label in PROTECTED_LABELS:
-                if gh_post_module.is_label_user_protected(
-                    real_gh, parsed["issue_number"], label, parsed.get("repo")
-                ):
-                    print(file=sys.stderr)
-                    print(
-                        f"❌ ERROR: Cannot remove USER-protected label '{label}'",
-                        file=sys.stderr,
-                    )
-                    print(f"   Current role: {role}", file=sys.stderr)
-                    print(
-                        f"   The '{label}' label was set by USER and is protected.",
-                        file=sys.stderr,
-                    )
-                    print("   Only USER can remove labels they set.", file=sys.stderr)
-                    print(file=sys.stderr)
-                    sys.exit(1)
+    _enforce_protected_label_removal(real_gh, role, parsed)
 
     # Check rate limit and possibly queue
-    if gh_post_module._HAS_RATE_LIMIT:
-        # Try to sync pending first
-        gh_post_module._sync_pending_changes(real_gh)
-        limiter = gh_post_module.get_limiter()
-        if not limiter.check_rate_limit(["issue", "edit"]):
-            # Rate limited - queue for later
-            change_log = gh_post_module.get_change_log()
-            repo = gh_post_module._get_current_repo_name()
-            data = {
-                "repo": parsed.get("repo") or repo,
-                "issue": parsed.get("issue_number"),
-                "add_labels": parsed.get("add_labels", []),
-                "remove_labels": parsed.get("remove_labels", []),
-            }
-            change_id = change_log.add_change(repo, "edit", data)
-            print(
-                f"[gh_post] Rate limited - queued edit as {change_id}",
-                file=sys.stderr,
-            )
-            sys.exit(0)
+    if _try_queue_rate_limited_edit(real_gh, parsed):
+        sys.exit(0)
 
     # ATOMIC CLAIMING: Use atomic protocol when adding in-progress label (#731)
-    # This prevents race conditions between workers claiming the same issue
-    if parsed["adding_in_progress"] and current_labels is not None:
-        already_claimed = any(
-            gh_post_module._is_in_progress_label(lbl) for lbl in current_labels
-        )
-        if not already_claimed:
-            # Get the in-progress label being added
-            in_progress_label = next(
-                (
-                    lbl
-                    for lbl in parsed["add_labels"]
-                    if gh_post_module._is_in_progress_label(lbl)
-                ),
-                "in-progress",
-            )
+    _handle_atomic_claim(real_gh, args, parsed, current_labels)
 
-            # Use atomic claiming protocol
-            success, message = gh_post_module._atomic_claim_issue(
-                real_gh,
-                parsed["issue_number"],
-                in_progress_label,
-                repo=parsed.get("repo"),
-                get_identity_fn=gh_post_module.get_identity,
-                get_commit_fn=gh_post_module.get_commit,
-                process_body_fn=gh_post_module.process_body,
-                invalidate_cache_fn=gh_post_module._invalidate_issue_cache,
-            )
-
-            if not success:
-                if message.startswith("Yielding to claim:"):
-                    print(f"[gh_post] {message}", file=sys.stderr)
-                    sys.exit(0)
-                print(f"[gh_post] Claim failed: {message}", file=sys.stderr)
-                sys.exit(1)
-
-            print(f"[gh_post] {message}", file=sys.stderr)
-
-            # Execute remaining edit operations (non-in-progress labels)
-            remaining_args = gh_post_module._strip_in_progress_additions(args)
-            if gh_post_module._has_edit_modifiers(remaining_args):
-                result = subprocess.run([real_gh] + remaining_args)
-                if result.returncode != 0:
-                    sys.exit(result.returncode)
-                gh_post_module._invalidate_issue_cache(
-                    "edit", parsed["issue_number"], parsed.get("repo")
-                )
-
-            sys.exit(0)
-
-    title, body = gh_post_module._extract_title_body(args, parsed)
-    label_only = (
-        (parsed.get("add_labels") or parsed.get("remove_labels"))
-        and not title
-        and not body
-    )
-    if label_only and not parsed["adding_in_progress"]:
-        repo = parsed.get("repo") or gh_post_module._guess_repo_name_from_cwd()
-        rest_result = gh_post_module._rest_edit_issue(real_gh, args, parsed, repo)
-        if rest_result is not None:
-            if rest_result == 0:
-                gh_post_module._invalidate_issue_cache(
-                    "edit", parsed["issue_number"], repo
-                )
-                # Track: USER adding protected labels
-                if role == "USER" and parsed["add_labels"]:
-                    target_repo = parsed.get("repo")
-                    for label in parsed["add_labels"]:
-                        if label in PROTECTED_LABELS:
-                            if not gh_post_module.is_label_user_protected(
-                                real_gh, parsed["issue_number"], label, target_repo
-                            ):
-                                gh_post_module.add_user_label_marker(
-                                    real_gh, parsed["issue_number"], label, target_repo
-                                )
-                sys.exit(0)
-            sys.exit(rest_result)
+    # Try REST API for label-only edits
+    _try_rest_label_edit(real_gh, args, parsed, role)
 
     # Execute the edit command (non-claiming edits or already-claimed issues)
     result = subprocess.run([real_gh] + args)
@@ -474,16 +545,7 @@ def _handle_edit(real_gh: str, args: list, parsed: dict) -> None:
     )
 
     # Track: USER adding protected labels
-    if role == "USER" and parsed["add_labels"]:
-        target_repo = parsed.get("repo")
-        for label in parsed["add_labels"]:
-            if label in PROTECTED_LABELS:
-                if not gh_post_module.is_label_user_protected(
-                    real_gh, parsed["issue_number"], label, target_repo
-                ):
-                    gh_post_module.add_user_label_marker(
-                        real_gh, parsed["issue_number"], label, target_repo
-                    )
+    _track_user_protected_labels(real_gh, role, parsed)
 
     sys.exit(0)
 

@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -16,6 +20,7 @@ from ai_template_scripts.labels import (
     IN_PROGRESS_PREFIX,
     WORKFLOW_LABELS,
 )
+from looper.log import debug_swallow
 
 __all__ = [
     "IN_PROGRESS_ALL_LABELS",
@@ -63,7 +68,8 @@ def is_label_user_protected(
         data = json.loads(result)
         comments = "\n".join(c.get("body", "") for c in data.get("comments", []))
         return marker in comments
-    except Exception:
+    except Exception as e:
+        debug_swallow("gh_post_is_label_user_protected", e)
         return False  # Best-effort: label protection check, False is safe default
 
 
@@ -107,8 +113,8 @@ def get_issue_labels(real_gh: str, issue_number: str, repo: str | None) -> list[
         error_output = ((result.stderr or "") + (result.stdout or "")).lower()
         if "rate limit" in error_output:
             return gh_post_module._get_issue_labels_rest(real_gh, issue_number, repo)
-    except Exception:
-        pass
+    except Exception as e:
+        debug_swallow("gh_post_get_issue_labels", e)
     return []
 
 
@@ -138,7 +144,8 @@ def _get_issue_labels_rest(
                     return []
             else:
                 return []
-        except Exception:
+        except Exception as e:
+            debug_swallow("gh_post_get_issue_labels_rest_repo", e)
             return []
 
     # Use gh api for REST endpoint
@@ -157,8 +164,8 @@ def _get_issue_labels_rest(
                 for label in result.stdout.strip().split("\n")
                 if label.strip()
             ]
-    except Exception:
-        pass
+    except Exception as e:
+        debug_swallow("gh_post_get_issue_labels_rest", e)
     return []
 
 
@@ -264,7 +271,8 @@ def cleanup_closed_issues_workflow_labels(
         try:
             result = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
             issues = json.loads(result)
-        except Exception:
+        except Exception as e:
+            debug_swallow("gh_post_cleanup_closed_issue_labels", e)
             continue
 
         for issue in issues:

@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -124,6 +128,293 @@ def extract_repo_from_args(args: list[str]) -> str | None:
             return arg[2:]
         i += 1
     return None
+
+
+# REST/GraphQL field name mapping for issue list/search
+_ISSUE_FIELD_MAPPING = {
+    "state": ".state",
+    "labels": "[.labels[] | {name: .name}]",
+    "title": ".title",
+    "number": ".number",
+    "body": ".body",
+    "createdAt": ".created_at",
+    "closedAt": ".closed_at",
+    "author": ".user.login",
+}
+
+
+def _parse_issue_list_args(
+    args: list[str],
+) -> Result[dict[str, Any]]:
+    """Parse gh issue list arguments for REST fallback.
+
+    Returns Result with parsed params dict or failure/skip reason.
+    Params dict contains: state, labels, limit, json_fields, repo_override, user_jq.
+    """
+    state = "open"
+    labels: list[str] = []
+    limit = 30
+    json_fields: list[str] = []
+    repo_override: str | None = None
+    user_jq: str | None = None
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("--state", "-s") and i + 1 < len(args):
+            state = args[i + 1]
+            i += 2
+        elif arg.startswith("--state="):
+            state = arg.split("=", 1)[1]
+            i += 1
+        elif arg in ("--label", "-l") and i + 1 < len(args):
+            labels.append(args[i + 1])
+            i += 2
+        elif arg.startswith("--label="):
+            labels.append(arg.split("=", 1)[1])
+            i += 1
+        elif arg in ("--limit", "-L") and i + 1 < len(args):
+            try:
+                limit = int(args[i + 1])
+            except ValueError:
+                return Result.failure("invalid_limit")
+            i += 2
+        elif arg.startswith("--limit="):
+            try:
+                limit = int(arg.split("=", 1)[1])
+            except ValueError:
+                return Result.failure("invalid_limit")
+            i += 1
+        elif arg in ("--repo", "-R") and i + 1 < len(args):
+            repo_override = args[i + 1]
+            i += 2
+        elif arg.startswith("--repo="):
+            repo_override = arg.split("=", 1)[1]
+            i += 1
+        elif arg == "--json" and i + 1 < len(args):
+            json_fields = args[i + 1].split(",")
+            i += 2
+        elif arg.startswith("--json="):
+            json_fields = arg.split("=", 1)[1].split(",")
+            i += 1
+        elif arg in ("--jq", "-q") and i + 1 < len(args):
+            user_jq = args[i + 1]
+            i += 2
+        elif arg.startswith("--jq="):
+            user_jq = arg.split("=", 1)[1]
+            i += 1
+        elif arg in ("issue", "list"):
+            i += 1
+        elif arg.startswith("-"):
+            return Result.skip(f"unsupported_flag:{arg}")
+        else:
+            i += 1
+
+    if limit < 1:
+        return Result.failure("invalid_limit")
+    if state not in ("open", "closed", "all"):
+        return Result.failure(f"invalid_state:{state}")
+
+    return Result.success({
+        "state": state,
+        "labels": labels,
+        "limit": limit,
+        "json_fields": json_fields,
+        "repo_override": repo_override,
+        "user_jq": user_jq,
+    })
+
+
+def _build_issue_list_jq_filter(
+    json_fields: list[str], user_jq: str | None
+) -> str:
+    """Build jq filter for issue list REST response."""
+    if json_fields:
+        jq_parts = []
+        for field in json_fields:
+            if field in _ISSUE_FIELD_MAPPING:
+                jq_parts.append(f"{field}: {_ISSUE_FIELD_MAPPING[field]}")
+            else:
+                jq_parts.append(f"{field}: .{field}")
+        jq_filter = (
+            f"[.[] | select(.pull_request == null) | {{{', '.join(jq_parts)}}}]"
+        )
+    else:
+        jq_filter = "[.[] | select(.pull_request == null)]"
+    if user_jq:
+        jq_filter = f"({jq_filter}) | {user_jq}"
+    return jq_filter
+
+
+def _build_search_jq_filter(json_fields: list[str], user_jq: str | None) -> str:
+    """Build jq filter for search REST response.
+
+    Search API returns {items: [...], total_count: N} structure.
+    """
+    if json_fields:
+        jq_parts = []
+        for field in json_fields:
+            if field in _ISSUE_FIELD_MAPPING:
+                jq_parts.append(f"{field}: {_ISSUE_FIELD_MAPPING[field]}")
+            else:
+                jq_parts.append(f"{field}: .{field}")
+        jq_filter = f"[.items[] | {{{', '.join(jq_parts)}}}]"
+    else:
+        jq_filter = ".items"
+    if user_jq:
+        jq_filter = f"({jq_filter}) | {user_jq}"
+    return jq_filter
+
+
+def _parse_issue_search_args(
+    args: list[str],
+) -> Result[dict[str, Any]]:
+    """Parse gh issue list --search arguments for REST fallback.
+
+    Extends issue_list parsing with search query extraction.
+    Returns Result with parsed params dict or failure/skip reason.
+    """
+    search_query: str | None = None
+    state = "open"
+    labels: list[str] = []
+    limit = 30
+    json_fields: list[str] = []
+    repo_override: str | None = None
+    user_jq: str | None = None
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("--search", "-S") and i + 1 < len(args):
+            search_query = args[i + 1]
+            i += 2
+        elif arg.startswith("--search="):
+            search_query = arg.split("=", 1)[1]
+            i += 1
+        elif arg in ("--state", "-s") and i + 1 < len(args):
+            state = args[i + 1]
+            i += 2
+        elif arg.startswith("--state="):
+            state = arg.split("=", 1)[1]
+            i += 1
+        elif arg in ("--label", "-l") and i + 1 < len(args):
+            labels.append(args[i + 1])
+            i += 2
+        elif arg.startswith("--label="):
+            labels.append(arg.split("=", 1)[1])
+            i += 1
+        elif arg in ("--limit", "-L") and i + 1 < len(args):
+            try:
+                limit = int(args[i + 1])
+            except ValueError:
+                return Result.failure("invalid_limit")
+            i += 2
+        elif arg.startswith("--limit="):
+            try:
+                limit = int(arg.split("=", 1)[1])
+            except ValueError:
+                return Result.failure("invalid_limit")
+            i += 1
+        elif arg in ("--repo", "-R") and i + 1 < len(args):
+            repo_override = args[i + 1]
+            i += 2
+        elif arg.startswith("--repo="):
+            repo_override = arg.split("=", 1)[1]
+            i += 1
+        elif arg == "--json" and i + 1 < len(args):
+            json_fields = args[i + 1].split(",")
+            i += 2
+        elif arg.startswith("--json="):
+            json_fields = arg.split("=", 1)[1].split(",")
+            i += 1
+        elif arg in ("--jq", "-q") and i + 1 < len(args):
+            user_jq = args[i + 1]
+            i += 2
+        elif arg.startswith("--jq="):
+            user_jq = arg.split("=", 1)[1]
+            i += 1
+        elif arg in ("issue", "list"):
+            i += 1
+        elif arg.startswith("-"):
+            # Unknown flag - skip (may fail but better than rejecting)
+            i += 1
+        else:
+            i += 1
+
+    if not search_query:
+        return Result.skip("missing_search_query")
+    if limit < 1:
+        return Result.failure("invalid_limit")
+    if state not in ("open", "closed", "all"):
+        return Result.failure(f"invalid_state:{state}")
+
+    return Result.success({
+        "search_query": search_query,
+        "state": state,
+        "labels": labels,
+        "limit": limit,
+        "json_fields": json_fields,
+        "repo_override": repo_override,
+        "user_jq": user_jq,
+    })
+
+
+def _build_search_query(
+    owner_repo: str, search_query: str, state: str, labels: list[str]
+) -> str:
+    """Build full search query string with qualifiers."""
+    query_parts = [f"repo:{owner_repo}", "is:issue", search_query]
+
+    if state == "open":
+        query_parts.append("is:open")
+    elif state == "closed":
+        query_parts.append("is:closed")
+
+    for label in labels:
+        query_parts.append(f'label:"{label}"')
+
+    return " ".join(query_parts)
+
+
+def _process_paginated_response(
+    stdout: str, use_paginate: bool, limit: int
+) -> tuple[str | None, bool]:
+    """Process paginated REST response.
+
+    Returns (processed_stdout, parse_error).
+    processed_stdout is None if no processing needed.
+    """
+    stdout = stdout.strip()
+    if not stdout:
+        return None, False
+
+    all_items: list | None = None
+    parse_error = False
+
+    if use_paginate and "\n" in stdout:
+        all_items = []
+        for line in stdout.split("\n"):
+            line = line.strip()
+            if line:
+                try:
+                    all_items.extend(json.loads(line))
+                except json.JSONDecodeError:
+                    parse_error = True
+    else:
+        try:
+            all_items = json.loads(stdout)
+        except json.JSONDecodeError:
+            parse_error = True
+
+    if parse_error:
+        return None, True
+
+    if isinstance(all_items, list):
+        if len(all_items) > limit:
+            all_items = all_items[:limit]
+        return json.dumps(all_items) + "\n", False
+
+    return None, False
 
 
 class IssueRestFallback:
@@ -330,126 +621,34 @@ class IssueRestFallback:
         Converts gh issue list args to REST API call.
         Returns Result with explicit skip/failure reasons.
         """
-        # Parse args to extract state, labels, and filters
-        state = "open"  # Default matches `gh issue list`
-        labels: list[str] = []
-        limit = 30
-        json_fields: list[str] = []
-        repo_override: str | None = None
-        user_jq: str | None = None
+        # Parse args
+        parse_result = _parse_issue_list_args(args)
+        if not parse_result.ok:
+            return parse_result  # type: ignore
 
-        i = 0
-        while i < len(args):
-            arg = args[i]
-            # --state / -s: filter by state
-            if arg in ("--state", "-s") and i + 1 < len(args):
-                state = args[i + 1]
-                i += 2
-            elif arg.startswith("--state="):
-                state = arg.split("=", 1)[1]
-                i += 1
-            # --label / -l: filter by label (can be repeated)
-            elif arg in ("--label", "-l") and i + 1 < len(args):
-                labels.append(args[i + 1])
-                i += 2
-            elif arg.startswith("--label="):
-                labels.append(arg.split("=", 1)[1])
-                i += 1
-            # --limit / -L: max issues to fetch
-            elif arg in ("--limit", "-L") and i + 1 < len(args):
-                try:
-                    limit = int(args[i + 1])
-                except ValueError:
-                    # User error - invalid number (#1755)
-                    return Result.failure("invalid_limit")
-                i += 2
-            elif arg.startswith("--limit="):
-                try:
-                    limit = int(arg.split("=", 1)[1])
-                except ValueError:
-                    # User error - invalid number (#1755)
-                    return Result.failure("invalid_limit")
-                i += 1
-            # --repo / -R: repository override
-            elif arg in ("--repo", "-R") and i + 1 < len(args):
-                repo_override = args[i + 1]
-                i += 2
-            elif arg.startswith("--repo="):
-                repo_override = arg.split("=", 1)[1]
-                i += 1
-            elif arg == "--json" and i + 1 < len(args):
-                json_fields = args[i + 1].split(",")
-                i += 2
-            elif arg.startswith("--json="):
-                json_fields = arg.split("=", 1)[1].split(",")
-                i += 1
-            elif arg in ("--jq", "-q") and i + 1 < len(args):
-                user_jq = args[i + 1]
-                i += 2
-            elif arg.startswith("--jq="):
-                user_jq = arg.split("=", 1)[1]
-                i += 1
-            # Skip "issue" and "list" positional args
-            elif arg in ("issue", "list"):
-                i += 1
-            elif arg.startswith("-"):
-                # Unknown flag - can't convert to REST (#1728)
-                return Result.skip(f"unsupported_flag:{arg}")
-            else:
-                i += 1
+        params = parse_result.value
+        state = params["state"]
+        labels = params["labels"]
+        limit = params["limit"]
+        json_fields = params["json_fields"]
+        repo_override = params["repo_override"]
+        user_jq = params["user_jq"]
 
-        if limit < 1:
-            # User error - invalid limit value (#1755)
-            return Result.failure("invalid_limit")
-        if state not in ("open", "closed", "all"):
-            # User error - invalid state value (#1755)
-            return Result.failure(f"invalid_state:{state}")
-
-        # Build REST API URL - need owner/repo format for API
+        # Build REST API URL
         owner_repo = self._get_owner_repo(repo_override)
         if not owner_repo:
             return Result.skip("missing_repo")
 
-        # Build API path with query params
         api_path = f"/repos/{owner_repo}/issues"
-        params = [f"per_page={min(limit, 100)}"]
-        # REST API defaults to state=open, so we must specify state for all/closed
+        url_params = [f"per_page={min(limit, 100)}"]
         if state != "open":
-            params.append(f"state={state}")
+            url_params.append(f"state={state}")
         if labels:
-            params.append(f"labels={','.join(labels)}")
+            url_params.append(f"labels={','.join(labels)}")
+        api_url = api_path + "?" + "&".join(url_params)
 
-        api_url = api_path + "?" + "&".join(params)
-
-        # Build jq filter to match requested json fields
-        # REST returns different field names than GraphQL
-        field_mapping = {
-            "state": ".state",
-            "labels": "[.labels[] | {name: .name}]",
-            "title": ".title",
-            "number": ".number",
-            "body": ".body",
-            "createdAt": ".created_at",
-            "closedAt": ".closed_at",
-            "author": ".user.login",
-        }
-
-        if json_fields:
-            # Filter out PRs and select requested fields
-            jq_parts = []
-            for field in json_fields:
-                if field in field_mapping:
-                    jq_parts.append(f"{field}: {field_mapping[field]}")
-                else:
-                    jq_parts.append(f"{field}: .{field}")
-            jq_filter = (
-                f"[.[] | select(.pull_request == null) | {{{', '.join(jq_parts)}}}]"
-            )
-        else:
-            # Just filter out PRs
-            jq_filter = "[.[] | select(.pull_request == null)]"
-        if user_jq:
-            jq_filter = f"({jq_filter}) | {user_jq}"
+        # Build jq filter
+        jq_filter = _build_issue_list_jq_filter(json_fields, user_jq)
 
         # Execute REST API call
         try:
@@ -469,46 +668,22 @@ class IssueRestFallback:
             if result.returncode != 0:
                 error_output = (result.stderr or "") + (result.stdout or "")
                 if is_graphql_rate_limit_error(error_output):
-                    # REST also rate limited
                     return Result.failure("rate_limited", value=result)
-                # Other error - return as-is
                 return Result.failure(f"rest_error:{result.returncode}", value=result)
 
-            # Flatten paginated output if needed (one JSON array per line)
-            stdout = result.stdout.strip()
-            if stdout:
-                all_items: list | None = None
-                parse_error = False
-                if use_paginate and "\n" in stdout:
-                    # Multiple arrays from pagination - flatten into single array
-                    all_items = []
-                    for line in stdout.split("\n"):
-                        line = line.strip()
-                        if line:
-                            try:
-                                all_items.extend(json.loads(line))
-                            except json.JSONDecodeError:
-                                parse_error = True
-                else:
-                    try:
-                        all_items = json.loads(stdout)
-                    except json.JSONDecodeError:
-                        parse_error = True
-
-                if parse_error:
-                    return Result.failure("invalid_json", value=result)
-
-                if isinstance(all_items, list):
-                    if len(all_items) > limit:
-                        all_items = all_items[:limit]
-                    # Add trailing newline to prevent stderr interleaving (#1722)
-                    list_stdout = json.dumps(all_items) + "\n"
-                    result = subprocess.CompletedProcess(
-                        args=result.args,
-                        returncode=0,
-                        stdout=list_stdout,
-                        stderr=result.stderr,
-                    )
+            # Process paginated response
+            processed_stdout, parse_error = _process_paginated_response(
+                result.stdout or "", use_paginate, limit
+            )
+            if parse_error:
+                return Result.failure("invalid_json", value=result)
+            if processed_stdout is not None:
+                result = subprocess.CompletedProcess(
+                    args=result.args,
+                    returncode=0,
+                    stdout=processed_stdout,
+                    stderr=result.stderr,
+                )
 
             # Buffer diagnostic message into result.stderr to prevent interleaving (#1773)
             # gh_wrapper.py outputs stdout first, then stderr, ensuring clean separation
@@ -711,147 +886,34 @@ class IssueRestFallback:
         - Issues and PRs mixed (filter with is:issue in query)
         - Different field names (created_at vs createdAt)
         """
-        # Parse args to extract search query and other filters
-        search_query: str | None = None
-        state = "open"
-        labels: list[str] = []
-        limit = 30
-        json_fields: list[str] = []
-        repo_override: str | None = None
-        user_jq: str | None = None
+        # Parse args
+        parse_result = _parse_issue_search_args(args)
+        if not parse_result.ok:
+            return parse_result  # type: ignore
 
-        i = 0
-        while i < len(args):
-            arg = args[i]
-            # --search / -S: the search query
-            if arg in ("--search", "-S") and i + 1 < len(args):
-                search_query = args[i + 1]
-                i += 2
-            elif arg.startswith("--search="):
-                search_query = arg.split("=", 1)[1]
-                i += 1
-            # --state / -s: filter by state
-            elif arg in ("--state", "-s") and i + 1 < len(args):
-                state = args[i + 1]
-                i += 2
-            elif arg.startswith("--state="):
-                state = arg.split("=", 1)[1]
-                i += 1
-            # --label / -l: filter by label (can be repeated)
-            elif arg in ("--label", "-l") and i + 1 < len(args):
-                labels.append(args[i + 1])
-                i += 2
-            elif arg.startswith("--label="):
-                labels.append(arg.split("=", 1)[1])
-                i += 1
-            # --limit / -L: max issues to fetch
-            elif arg in ("--limit", "-L") and i + 1 < len(args):
-                try:
-                    limit = int(args[i + 1])
-                except ValueError:
-                    return Result.failure("invalid_limit")
-                i += 2
-            elif arg.startswith("--limit="):
-                try:
-                    limit = int(arg.split("=", 1)[1])
-                except ValueError:
-                    return Result.failure("invalid_limit")
-                i += 1
-            # --repo / -R: repository override
-            elif arg in ("--repo", "-R") and i + 1 < len(args):
-                repo_override = args[i + 1]
-                i += 2
-            elif arg.startswith("--repo="):
-                repo_override = arg.split("=", 1)[1]
-                i += 1
-            elif arg == "--json" and i + 1 < len(args):
-                json_fields = args[i + 1].split(",")
-                i += 2
-            elif arg.startswith("--json="):
-                json_fields = arg.split("=", 1)[1].split(",")
-                i += 1
-            elif arg in ("--jq", "-q") and i + 1 < len(args):
-                user_jq = args[i + 1]
-                i += 2
-            elif arg.startswith("--jq="):
-                user_jq = arg.split("=", 1)[1]
-                i += 1
-            # Skip "issue" and "list" positional args
-            elif arg in ("issue", "list"):
-                i += 1
-            elif arg.startswith("-"):
-                # Unknown flag that's not --search - skip it
-                # (may fail but better than rejecting)
-                i += 1
-            else:
-                i += 1
-
-        if not search_query:
-            return Result.skip("missing_search_query")
-
-        if limit < 1:
-            return Result.failure("invalid_limit")
-        if state not in ("open", "closed", "all"):
-            return Result.failure(f"invalid_state:{state}")
+        params = parse_result.value
+        search_query = params["search_query"]
+        state = params["state"]
+        labels = params["labels"]
+        limit = params["limit"]
+        json_fields = params["json_fields"]
+        repo_override = params["repo_override"]
+        user_jq = params["user_jq"]
 
         # Build search query with repo qualifier
         owner_repo = self._get_owner_repo(repo_override)
         if not owner_repo:
             return Result.skip("missing_repo")
 
-        # Build the search query with qualifiers
-        # Always include repo: and is:issue qualifiers
-        query_parts = [f"repo:{owner_repo}", "is:issue", search_query]
-
-        # Add state qualifier
-        if state == "open":
-            query_parts.append("is:open")
-        elif state == "closed":
-            query_parts.append("is:closed")
-        # "all" means no state filter
-
-        # Add label qualifiers
-        for label in labels:
-            query_parts.append(f'label:"{label}"')
-
-        full_query = " ".join(query_parts)
-
-        # URL encode the query
+        # Build and encode query
+        full_query = _build_search_query(owner_repo, search_query, state, labels)
         encoded_query = urllib.parse.quote(full_query, safe="")
-
-        # Build API URL (search API uses different endpoint)
         api_url = f"/search/issues?q={encoded_query}&per_page={min(limit, 100)}"
 
-        # Build jq filter to convert search results to issue list format
-        # REST search returns {items: [...], total_count: N}
-        field_mapping = {
-            "state": ".state",
-            "labels": "[.labels[] | {name: .name}]",
-            "title": ".title",
-            "number": ".number",
-            "body": ".body",
-            "createdAt": ".created_at",
-            "closedAt": ".closed_at",
-            "author": ".user.login",
-        }
-
-        if json_fields:
-            jq_parts = []
-            for field in json_fields:
-                if field in field_mapping:
-                    jq_parts.append(f"{field}: {field_mapping[field]}")
-                else:
-                    jq_parts.append(f"{field}: .{field}")
-            jq_filter = f"[.items[] | {{{', '.join(jq_parts)}}}]"
-        else:
-            # Default: return items array without transformation
-            jq_filter = ".items"
-
-        if user_jq:
-            jq_filter = f"({jq_filter}) | {user_jq}"
+        # Build jq filter
+        jq_filter = _build_search_jq_filter(json_fields, user_jq)
 
         # Execute REST API call
-        # Initialize api_args before try block to ensure it's defined in except handlers
         api_args = ["api", api_url, "-q", jq_filter]
         try:
             result = subprocess.run(
@@ -865,9 +927,7 @@ class IssueRestFallback:
             if result.returncode != 0:
                 error_output = (result.stderr or "") + (result.stdout or "")
                 if is_graphql_rate_limit_error(error_output):
-                    # Search API also rate limited (rare - 30/min)
                     return Result.failure("rate_limited", value=result)
-                # Check for search-specific rate limit
                 if "secondary rate limit" in error_output.lower():
                     return Result.failure("search_rate_limited", value=result)
                 return Result.failure(f"rest_error:{result.returncode}", value=result)

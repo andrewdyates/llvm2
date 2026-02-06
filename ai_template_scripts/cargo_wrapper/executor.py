@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -19,7 +23,7 @@ from pathlib import Path
 
 from . import _state
 from .lock import release_lock
-from .logging import log_stderr
+from .logging import debug_swallow, log_stderr
 
 __all__ = [
     "_make_process_group",
@@ -93,7 +97,7 @@ def kill_child() -> None:
                 f"[cargo] WARNING: Child process {pid} did not terminate after SIGKILL"
             )
     except Exception:
-        pass  # Best-effort: process cleanup during termination (already dying)
+        debug_swallow("kill_child")
     _state._child_process = None
     _state._child_pgid = None
 
@@ -338,6 +342,6 @@ def find_built_binary(package_or_bin: str | None, args: list[str]) -> str | None
                 if binary.exists() and os.access(binary, os.X_OK):
                     return str(binary)
     except Exception:
-        pass  # Best-effort: binary lookup from Cargo.toml
+        debug_swallow("find_built_binary")
 
     return None

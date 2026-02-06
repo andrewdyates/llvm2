@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -66,6 +70,45 @@ from ai_template_scripts.version import get_version  # noqa: E402
 LOGS_DIR = Path("logs")
 TEST_LOG = LOGS_DIR / "tests.jsonl"
 ACTIVE_FILE = LOGS_DIR / ".active_test"
+
+# Known removed or stale pytest targets with canonical replacements (#2881)
+PYTEST_REMOVED_TARGETS = {
+    "tests/test_telemetry.py": (
+        "tests/test_telemetry_core.py",
+        "tests/test_telemetry_health.py",
+        "tests/test_telemetry_tokens.py",
+        "tests/test_looper/test_telemetry.py",
+    ),
+}
+PYTEST_SHELL_SEPARATORS = {"|", "||", "&&", ";"}
+PYTEST_OPTIONS_WITH_VALUE = {
+    "-c",
+    "-k",
+    "-m",
+    "--basetemp",
+    "--capture",
+    "--confcutdir",
+    "--durations",
+    "--durations-min",
+    "--ignore",
+    "--ignore-glob",
+    "--junitxml",
+    "--log-cli-date-format",
+    "--log-cli-format",
+    "--log-cli-level",
+    "--log-date-format",
+    "--log-file",
+    "--log-file-date-format",
+    "--log-file-format",
+    "--log-file-level",
+    "--log-format",
+    "--log-level",
+    "--maxfail",
+    "--override-ini",
+    "--rootdir",
+    "--tb",
+}
+REPO_ROOT = _repo_root.resolve()
 
 
 def get_session_info() -> dict:
@@ -144,6 +187,126 @@ def cmd_end(exit_code: int) -> None:
 STDERR_TAIL_BYTES = 4096
 
 
+def _get_pytest_args_start(tokens: list[str]) -> int | None:
+    """Return index where pytest args begin, or None if command is not pytest."""
+    if not tokens:
+        return None
+
+    exe_name = Path(tokens[0]).name
+    if exe_name == "pytest":
+        return 1
+
+    for i, token in enumerate(tokens[:-1]):
+        if token == "-m" and tokens[i + 1] == "pytest":
+            return i + 2
+
+    return None
+
+
+def _iter_pytest_targets(tokens: list[str]) -> list[str]:
+    """Extract explicit pytest path targets from argument tokens."""
+    targets = []
+    skip_next = False
+    for token in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+
+        if token in PYTEST_SHELL_SEPARATORS:
+            break
+        if token == "--":
+            continue
+        if token.startswith("-"):
+            if token in PYTEST_OPTIONS_WITH_VALUE:
+                skip_next = True
+            continue
+
+        candidate = token.split("::", 1)[0]
+        if not candidate:
+            continue
+        if any(char in candidate for char in "*?[]"):
+            continue
+
+        normalized = candidate.replace("\\", "/")
+        if (
+            "/" not in normalized
+            and not normalized.endswith(".py")
+            and normalized != "tests"
+        ):
+            continue
+
+        targets.append(candidate)
+
+    return targets
+
+
+def _target_match_keys(target: str) -> set[str]:
+    """Return normalized target variants for removed-target matching."""
+    match_keys = set()
+
+    normalized = target.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    match_keys.add(normalized)
+
+    path = Path(target)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+
+    try:
+        rel = path.resolve(strict=False).relative_to(REPO_ROOT).as_posix()
+        match_keys.add(rel)
+    except ValueError:
+        pass
+
+    return match_keys
+
+
+def _target_exists(target: str) -> bool:
+    """Check target existence from CWD and repo root."""
+    path = Path(target)
+    if path.exists():
+        return True
+    if not path.is_absolute() and (REPO_ROOT / path).exists():
+        return True
+    return False
+
+
+def _validate_pytest_targets(command: str) -> tuple[bool, str | None]:
+    """Detect stale or missing pytest path targets before execution."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        # Let subprocess handle malformed command strings.
+        return True, None
+
+    args_start = _get_pytest_args_start(tokens)
+    if args_start is None:
+        return True, None
+
+    for target in _iter_pytest_targets(tokens[args_start:]):
+        match_keys = _target_match_keys(target)
+        removed_target = next(
+            (key for key in match_keys if key in PYTEST_REMOVED_TARGETS), None
+        )
+        if removed_target:
+            replacements = PYTEST_REMOVED_TARGETS[removed_target]
+            replacement_text = " ".join(replacements)
+            return (
+                False,
+                f"Refusing pytest run: '{removed_target}' is a removed target. "
+                f"Use: {replacement_text}",
+            )
+
+        is_tests_target = any(
+            key == "tests" or key.startswith("tests/") for key in match_keys
+        )
+        if is_tests_target and not _target_exists(target):
+            return False, f"Refusing pytest run: target '{target}' does not exist."
+
+    return True, None
+
+
 def cmd_run(command: str) -> int:
     """Run a test command with automatic logging.
 
@@ -155,6 +318,27 @@ def cmd_run(command: str) -> int:
     """
     cmd_start(command)
     start = time.time()
+
+    targets_ok, target_error = _validate_pytest_targets(command)
+    if not targets_ok:
+        duration_s = round(time.time() - start, 1)
+        info = get_session_info()
+        entry = {
+            "event": "end",
+            "timestamp": datetime.now().isoformat(),
+            "command": command,
+            "exit_code": 2,
+            "duration_s": duration_s,
+            "error_type": "command_error",
+            **info,
+        }
+        if target_error:
+            entry["stderr_tail"] = target_error[-STDERR_TAIL_BYTES:]
+            print(target_error, file=sys.stderr)
+        log_entry(entry)
+        ACTIVE_FILE.unlink(missing_ok=True)
+        print(f"[test-log] Completed: {command} - failed (exit 2) ({duration_s}s)")
+        return 2
 
     # Check if command needs shell features
     shell_chars = {"|", ">", "<", "&", ";", "*", "?", "$", "`", "(", ")"}

@@ -1,3 +1,7 @@
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -12,6 +16,7 @@ Usage:
     from ai_template_scripts.shared_logging import (
         append_log,
         debug_log,
+        debug_swallow,
         format_json_entry,
         is_debug_mode,
         log_stderr,
@@ -21,6 +26,12 @@ Usage:
 
     # Debug logging (controlled by AIT_DEBUG or module-specific env var)
     debug_log("my_module", f"processed {count} items")
+
+    # Swallowed exception logging (replaces bare except:pass)
+    try:
+        optional_operation()
+    except OSError:
+        debug_swallow("optional_operation")
 
     # Stderr output (immediate flush for AI visibility)
     log_stderr("Processing complete")
@@ -38,12 +49,14 @@ from __future__ import annotations
 import json
 import os
 import sys
+import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
 __all__ = [
     "append_log",
     "debug_log",
+    "debug_swallow",
     "format_json_entry",
     "is_debug_mode",
     "log_stderr",
@@ -91,6 +104,36 @@ def debug_log(module: str, msg: str, module_env_var: str | None = None) -> None:
         return
     print(f"{module} [DEBUG]: {msg}", file=sys.stderr)
     sys.stderr.flush()
+
+
+def debug_swallow(operation: str, exc: BaseException | None = None) -> None:
+    """Log swallowed exception when AIT_DEBUG is enabled.
+
+    Use in except blocks where exceptions are intentionally swallowed:
+
+        try:
+            do_something()
+        except OSError:
+            debug_swallow("do_something")  # Logs traceback if AIT_DEBUG=1
+
+    API-compatible with looper.log.debug_swallow but uses AIT_DEBUG instead
+    of LOOPER_DEBUG, so non-looper modules can use it without importing looper.
+
+    Part of #2555 - migrate bare except:pass to debug_swallow.
+
+    Args:
+        operation: Name of the operation that failed (for log message)
+        exc: Optional exception to log. If None, uses current exception info.
+    """
+    if not is_debug_mode():
+        return
+
+    timestamp = datetime.now(UTC).strftime("%H:%M:%S.%f")[:-3]
+    print(f"[{timestamp}] swallowed exception in {operation}", file=sys.stderr)
+    if exc is not None:
+        traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+    else:
+        traceback.print_exc(file=sys.stderr)
 
 
 def log_stderr(msg: str) -> None:

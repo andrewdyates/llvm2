@@ -66,7 +66,6 @@ Entries are listed alphabetically by script name (LC_ALL=C / ASCII byte order).
 | `bump_git_dep_rev.sh` | Bump git dependency revision in Cargo.toml files | AI, human |
 | `cargo_lock_info.py` | Inspect serialized cargo lock status | AI, human |
 | `cargo_wrapper/` | Serialize cargo builds org-wide to prevent OOM | `bin/cargo` wrapper |
-| `check_claude_version.sh` | Verify Claude Code CLI matches `.claude-version` | Looper, human |
 | `check_deps.py` | Check project dependencies and verification tools | MANAGER, init |
 | `check_doc_claims.py` | Verify documentation claims match code reality | MANAGER, pulse.py |
 | `check_path_order.sh` | Verify ai_template wrappers have PATH precedence | Codex, human |
@@ -81,9 +80,11 @@ Entries are listed alphabetically by script name (LC_ALL=C / ASCII byte order).
 | `commit-msg-hook.sh` | Git hook for structured commits | Git |
 | `crash_analysis.py` | Crash log analysis, system health | MANAGER, human |
 | `crash_analysis/` | Package with log analysis modules | `crash_analysis.py` |
+| `crash_categories.py` | Shared crash/timeout category definitions | Import only |
 | `design_issue_audit.py` | Audit design docs and issue cross-references | MANAGER, human |
 | `doc_health_check.py` | Check CLAUDE.md completeness for AI operations | MANAGER doc_health phase |
 | `exclude_patterns.py` | Shared directory exclusion patterns for codebase analysis | Import only |
+| `find_duplicate_issues.py` | Find and close duplicate issues from checkbox conversion | MANAGER, human |
 | `find_ignores.sh` | Find forbidden test ignores for audit | Human, scripts |
 | `find_tla_tools.sh` | Locate Java, tla2tools.jar, and timeout binaries | TLA+ scripts |
 | `file_stuck_spec.py` | File stuck Kani/TLA+ specs to zani/tla2 | AI, human |
@@ -138,6 +139,7 @@ Entries are listed alphabetically by script name (LC_ALL=C / ASCII byte order).
 | `sync_local_issues.py` | Sync local issues to GitHub | Human, AI |
 | `sync_repo.sh` | Sync template files to target repo | Human, scripts |
 | `test_utils.py` | Test subprocess utilities with default timeouts | Tests |
+| `tla_runner.py` | Run TLA+ specs with timeout management and status tracking | PROVER, AI |
 | `timeout_classifier.py` | Classify timeout events (long_command, stuck_query, etc.) | MANAGER, human |
 | `update_claude_user_settings.py` | Update ~/.claude/settings.json with recommended env vars | `init_from_template.sh`, Human |
 | `update_line_counts.py` | Update CLAUDE.md "Files Loaded Per Session" table line counts | Human, scripts |
@@ -154,6 +156,22 @@ Checks if a repository is properly aligned with the ai_template. Detects missing
 Usage:
 ```bash
 ./ai_template_scripts/audit_alignment.sh    # Run in any repo
+```
+
+Acknowledgments:
+Use a `.audit_ack` file in the repo root to acknowledge expected warnings.
+Each non-empty line is a substring match against warning text; `#` starts a
+comment. Acknowledged warnings show as green checks and do not count toward
+the warning total.
+
+### find_duplicate_issues.py
+Finds and reports duplicate child issues created from checkbox conversion race conditions. When multiple sessions convert the same checkbox on different machines, duplicates can occur before GitHub indexes the first issue.
+
+Usage:
+```bash
+./ai_template_scripts/find_duplicate_issues.py            # Report duplicates
+./ai_template_scripts/find_duplicate_issues.py --dry-run  # Show what would be closed
+./ai_template_scripts/find_duplicate_issues.py --close    # Close duplicates (keeps oldest)
 ```
 
 ### find_ignores.sh
@@ -201,11 +219,36 @@ python3 -m ai_template_scripts.kani_runner --dry-run
 
 **Status tracking:** Results are stored in `kani_status.json` at repo root. The Prover role audits this file against actual harnesses each rotation.
 
+### tla_runner.py
+Runs TLA+ specs with configurable timeouts, tracks results to `tla_status.json`, and integrates with the looper 60s progress requirement.
+
+Usage:
+```bash
+# Run all specs with 5-minute timeout
+python3 -m ai_template_scripts.tla_runner --timeout 300
+
+# Run specific spec with custom timeout
+python3 -m ai_template_scripts.tla_runner --spec MySpec --timeout 600
+
+# Run only not_run specs
+python3 -m ai_template_scripts.tla_runner --filter not_run
+
+# Audit: compare tracking file to actual specs
+python3 -m ai_template_scripts.tla_runner --audit
+
+# Dry run: discover specs without executing
+python3 -m ai_template_scripts.tla_runner --dry-run
+```
+
+**Status tracking:** Results are stored in `tla_status.json` at repo root. The Prover role audits this file against actual specs each rotation.
+
+**Spec discovery:** Finds `.tla` files in `specs/` and `tla/` directories. Excludes `*_MC.tla` (model config) files.
+
 ### code_stats.py
 Analyzes cyclomatic/cognitive complexity across multiple languages (Python, Rust, Go, C++, etc). Uses best-in-class tools per language (radon for Python, gocyclo for Go, etc).
 
 ### crash_analysis.py
-Parses `worker_logs/crashes.log` to calculate failure rates and system health status. Used by MANAGER for auditing.
+Parses `worker_logs/failures.log` (fallback `worker_logs/crashes.log`) to calculate failure rates and system health status. Used by MANAGER for auditing.
 
 ### bg_task.py
 Manages long-running background tasks that survive worker iteration timeouts. Stores state in `.background_tasks/`.
@@ -259,15 +302,6 @@ Limit concurrency (build/test lock sharing) via the optional `[limits]` table:
 ```toml
 [limits]
 max_concurrent_cargo = 1   # 1 = shared lock, 2 = build/test split (default)
-```
-
-### check_claude_version.sh
-Verifies the installed Claude Code CLI matches the repo's `.claude-version` pin. Used by looper to warn about mismatches; `--strict` exits non-zero.
-
-Usage:
-```bash
-./ai_template_scripts/check_claude_version.sh
-./ai_template_scripts/check_claude_version.sh --strict
 ```
 
 ### check_path_order.sh
@@ -476,7 +510,7 @@ Shared label constants for GitHub issue management. Single source of truth for i
 
 **Exports:**
 - `IN_PROGRESS_PREFIX` - Base prefix ("in-progress")
-- `IN_PROGRESS_ALL_LABELS` - All in-progress variants (in-progress, in-progress-W1..W5, etc.)
+- `IN_PROGRESS_ALL_LABELS` - All in-progress variants (in-progress plus legacy in-progress-W1..W5, etc.)
 - `OWNERSHIP_WORKER_LABELS` - Worker ownership (W1-W5)
 - `OWNERSHIP_ALL_LABELS` - All ownership labels
 - `WORKFLOW_LABELS` - Labels cleared on issue close
@@ -574,8 +608,17 @@ Transparent gh wrapper that routes commands through rate limiting and caching. C
 
 **How it works:**
 - Delegates to `gh_rate_limit.RateLimiter` for actual rate limit management
-- Caches read operations with configurable TTL (3 minutes for issue list/view)
+- Caches read operations with per-command TTLs (see table below)
 - Blocks when quota critical, waits if reset imminent
+
+| Command | TTL |
+|---------|-----|
+| `gh issue list` | `20s` |
+| `gh issue view` | `20s` |
+| `gh pr list` | `20s` |
+| `gh repo view` | `180s` |
+| `gh label list` | `180s` |
+| `gh search ...`, `gh api /search/...` | `300s` |
 
 AIs don't interact with this directly - they just run `gh` normally. The `bin/gh` shim routes commands appropriately:
 - Issue create/comment/edit/close → `gh_post.py`
@@ -635,10 +678,13 @@ Usage:
 
 ### log_test.py
 Records test invocations for MANAGER pattern detection: concurrent test runs, duration trends, frequent failures.
+Also validates pytest path targets before execution and fails fast on stale/missing
+targets (for example, removed `tests/test_telemetry.py`).
 
 Usage:
 ```bash
 ./ai_template_scripts/log_test.py run "cargo test -p solver"  # Wrap and log
+./ai_template_scripts/log_test.py run "python3 -m pytest tests/test_telemetry_health.py -v"  # Guarded pytest run
 ./ai_template_scripts/log_test.py report                       # Analyze logs
 ```
 

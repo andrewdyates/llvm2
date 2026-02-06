@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Your Name
+# Author: Your Name
+# Licensed under the Apache License, Version 2.0
+
 """
 looper.py - Autonomous continuous loop for AI workers and managers
 
@@ -13,21 +17,7 @@ Usage:
     ./looper.py manager     # Audit and coordination loop (5-min intervals)
     ./looper.py cleanup     # Remove stale state files and exit
 
-Module structure:
-    looper/__init__.py       - Package exports
-    looper/config.py         - Configuration loading, frontmatter parsing
-    looper/context/          - Session context subpackage (git, issue, audit, system)
-    looper/hooks.py          - Git hook installation
-    looper/issue_manager.py  - Issue operations (gh wrapper, sampling)
-    looper/iteration.py      - Iteration execution (prompt build, AI run, metrics)
-    looper/result.py         - Result monad for error handling
-    looper/rotation.py       - Phase rotation state management
-    looper/runner.py         - LoopRunner class and main loop logic
-    looper/status.py         - Status tracking (metrics, logs)
-    looper/subprocess_utils.py - Result[T] wrappers for subprocess commands
-    looper/sync.py           - Multi-machine zone branch syncing
-    looper/telemetry.py      - Metrics collection
-    looper/zones.py          - Zone-based file locking for multi-worker
+Module structure: See README.md "Looper Package" section for complete module listing.
 """
 
 # Disable bytecode caching to prevent stale .pyc issues after git operations.

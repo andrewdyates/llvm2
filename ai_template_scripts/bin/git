@@ -26,8 +26,11 @@
 # Config:
 #   AI_ROLE              - WORKER/PROVER/RESEARCHER/MANAGER/USER (set by looper.py)
 #   AIT_ALLOW_NO_VERIFY  - Set to 1 to allow --no-verify/-n for AI roles on git commit
-#   AIT_GIT_LOCK_WAIT_S  - Seconds to wait for lock (default: 300)
+#   AIT_GIT_LOCK_WAIT_S  - Seconds to wait for lock (default: 300, see also .looper_config.json)
 #   AIT_GIT_LOCK_DISABLE - Set to 1 to disable commit locking
+#
+# Per-repo config (.looper_config.json):
+#   git_lock_wait_sec    - Seconds to wait for commit lock (overrides AIT_GIT_LOCK_WAIT_S)
 #
 # Author: Andrew Yates <ayates@dropbox.com>
 # Copyright 2026 Dropbox, Inc.
@@ -47,7 +50,7 @@ done
 
 # Fall back to PATH search if not found
 if [[ -z "$REAL_GIT" ]]; then
-    IFS=':' read -ra PATH_DIRS <<< "$PATH"
+    IFS=':' read -ra PATH_DIRS <<<"$PATH"
     for p in "${PATH_DIRS[@]}"; do
         [[ -d "$p" ]] || continue
         git_candidate="$p/git"
@@ -74,7 +77,7 @@ is_zone_branch() {
 block_branch() {
     local branch="${1:-}"
     if [[ -n "$branch" ]] && is_zone_branch "$branch"; then
-        return 0  # Allow zone/* branches for multi-machine mode
+        return 0 # Allow zone/* branches for multi-machine mode
     fi
     cat >&2 <<'EOF'
 ERROR: Branch creation is blocked.
@@ -104,7 +107,7 @@ workers_active() {
         local pid
         pid="$(cat "$pidfile" 2>/dev/null || true)"
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            return 0  # At least one worker is active
+            return 0 # At least one worker is active
         fi
     done
     return 1
@@ -161,13 +164,139 @@ has_no_verify() {
 
 is_ai_role() {
     case "${AI_ROLE:-}" in
-        WORKER|PROVER|RESEARCHER|MANAGER) return 0 ;;
-        *) return 1 ;;
+    WORKER | PROVER | RESEARCHER | MANAGER) return 0 ;;
+    *) return 1 ;;
     esac
 }
 
 is_worker_role() {
     [[ "${AI_ROLE:-}" == "WORKER" ]]
+}
+
+extract_role_from_git_identity() {
+    local identity_name="${1:-}"
+    [[ -z "$identity_name" ]] && return 0
+
+    local normalized_name
+    normalized_name="$(printf '%s' "$identity_name" | tr '[:upper:]' '[:lower:]')"
+
+    # setup_git_identity() uses "{project}-{role}-{iteration}".
+    if [[ "$normalized_name" =~ -worker-[0-9]+$ ]]; then
+        echo "WORKER"
+    elif [[ "$normalized_name" =~ -prover-[0-9]+$ ]]; then
+        echo "PROVER"
+    elif [[ "$normalized_name" =~ -researcher-[0-9]+$ ]]; then
+        echo "RESEARCHER"
+    elif [[ "$normalized_name" =~ -manager-[0-9]+$ ]]; then
+        echo "MANAGER"
+    fi
+}
+
+validate_git_identity_role() {
+    if ! is_ai_role; then
+        return 0
+    fi
+
+    local identity_var identity_name detected_role
+    for identity_var in GIT_AUTHOR_NAME GIT_COMMITTER_NAME; do
+        identity_name="${!identity_var:-}"
+        [[ -z "$identity_name" ]] && continue
+
+        detected_role="$(extract_role_from_git_identity "$identity_name")"
+        [[ -z "$detected_role" ]] && continue
+
+        if [[ "$detected_role" != "${AI_ROLE:-}" ]]; then
+            echo "ERROR: Git identity role mismatch (#2958)" >&2
+            echo "   ${identity_var}=${identity_name} implies ${detected_role}, but AI_ROLE=${AI_ROLE}" >&2
+            echo "   This can happen when role-specific git identity leaks across sessions." >&2
+            echo "   Re-run looper identity setup before committing." >&2
+            exit 1
+        fi
+    done
+}
+
+# Get git_lock_wait_sec from .looper_config.json if present (default: 300)
+get_git_lock_wait_sec() {
+    local repo_root config_file value
+    repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -z "$repo_root" ]] && echo "300" && return
+
+    config_file="$repo_root/.looper_config.json"
+    [[ -f "$config_file" ]] || {
+        echo "300"
+        return
+    }
+
+    # Try to extract git_lock_wait_sec using python3 (portable JSON parsing)
+    if command -v python3 &>/dev/null; then
+        value=$(python3 -c "
+import json
+import sys
+try:
+    with open('$config_file') as f:
+        data = json.load(f)
+    val = data.get('git_lock_wait_sec')
+    if val is not None and isinstance(val, int) and val > 0:
+        print(val)
+    else:
+        print('300')
+except Exception:
+    print('300')
+" 2>/dev/null || echo "300")
+        echo "$value"
+    else
+        # No python3, fall back to default
+        echo "300"
+    fi
+}
+
+# Parse git global flags to find the actual subcommand.
+# Git grammar: git [global-flags] <subcommand> [subcommand-args]
+# Sets GIT_SUBCMD to the subcommand and GIT_SUBCMD_POS to its 1-based
+# position in "$@" (so subcommand args start at position GIT_SUBCMD_POS+1).
+# If no subcommand found, GIT_SUBCMD="" and GIT_SUBCMD_POS=0.
+parse_git_subcommand() {
+    GIT_SUBCMD=""
+    GIT_SUBCMD_POS=0
+    local pos=1
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        # Global flags that take a value argument
+        -C | -c | --git-dir | --work-tree | --namespace | --super-prefix | --config-env)
+            shift 2 || return  # skip flag + value
+            pos=$((pos + 2))
+            ;;
+        # Global flags with = syntax (already consume value)
+        --git-dir=* | --work-tree=* | --namespace=* | --super-prefix=* | --config-env=* | -c*)
+            # -c can be -ckey=value (no space)
+            shift
+            pos=$((pos + 1))
+            ;;
+        # --exec-path with optional =value (--exec-path alone is a query, not flag+value)
+        --exec-path=* | --exec-path)
+            shift
+            pos=$((pos + 1))
+            ;;
+        # Global boolean flags (no value)
+        --bare | --no-replace-objects | --literal-pathspecs | --glob-pathspecs | --noglob-pathspecs | --icase-pathspecs | --no-optional-locks | --no-lazy-fetch | --no-advice | --html-path | --man-path | --info-path | --paginate | -p | --no-pager | --version | --help)
+            shift
+            pos=$((pos + 1))
+            ;;
+        -*)
+            # Unknown flag - assume it's a global flag and skip.
+            # This is conservative: better to skip an unknown flag and
+            # reach the subcommand than to misidentify a flag as a subcommand.
+            shift
+            pos=$((pos + 1))
+            ;;
+        *)
+            # First non-flag argument is the subcommand
+            GIT_SUBCMD="$1"
+            GIT_SUBCMD_POS=$pos
+            return
+            ;;
+        esac
+    done
 }
 
 ensure_commit_msg_hook() {
@@ -181,7 +310,18 @@ ensure_commit_msg_hook() {
     hooks_dir="$("$REAL_GIT" rev-parse --git-path hooks 2>/dev/null || echo "$repo_root/.git/hooks")"
     hook_target="$hooks_dir/commit-msg"
 
+    # Install if missing, not executable, or stale compared to source (#2958).
+    # Stale hooks miss critical checks like cross-role prefix enforcement and
+    # forensic trailers. The source hook has a re-exec mechanism, but the
+    # installed hook may predate that mechanism.
+    local needs_install=false
     if [[ ! -x "$hook_target" ]]; then
+        needs_install=true
+    elif ! cmp -s "$hook_source" "$hook_target" 2>/dev/null; then
+        needs_install=true
+    fi
+
+    if [[ "$needs_install" == "true" ]]; then
         mkdir -p "$hooks_dir" 2>/dev/null || true
         if cp "$hook_source" "$hook_target" && chmod +x "$hook_target"; then
             echo "[git wrapper] Installed commit-msg hook at $hook_target" >&2
@@ -193,136 +333,193 @@ ensure_commit_msg_hook() {
     fi
 }
 
-# Check for branch-creating patterns
-case "$1" in
-    branch)
-        # Allow: git branch (list), git branch -d/-D (delete), git branch -a/--list/--show-current
-        # Block: git branch <name> (creates branch) unless zone/*
-        shift
-        saved_args=("$@")
-        while [[ $# -gt 0 ]]; do
-            case "$1" in
-                -d|-D|--delete|-m|-M|--move|-c|-C|--copy|-a|--all|--list|--show-current|-v|-vv|--verbose|-r|--remotes|--merged|--no-merged|--contains|--no-contains|--sort=*|--format=*)
-                    # Safe flags - pass through
-                    exec "$REAL_GIT" branch "${saved_args[@]}"
-                    ;;
-                -*)
-                    # Other flags - continue checking
-                    shift
-                    ;;
-                *)
-                    # Positional argument = branch name = creating a branch
-                    # Allow zone/* for multi-machine mode, block others
-                    if block_branch "$1"; then
-                        # zone/* allowed - pass through to real git
-                        exec "$REAL_GIT" branch "${saved_args[@]}"
-                    fi
-                    # block_branch exits on failure, so we never reach here for blocked branches
-                    ;;
-            esac
-        done
-        # No positional args - safe (listing branches)
-        exec "$REAL_GIT" branch "${saved_args[@]}"
-        ;;
-    checkout)
-        # Block: git checkout -b <name> unless zone/*
-        prev_arg=""
-        for arg in "$@"; do
-            if [[ "$prev_arg" == "-b" || "$prev_arg" == "-B" ]]; then
-                # $arg is the branch name after -b/-B
-                block_branch "$arg"
-            fi
-            prev_arg="$arg"
-        done
-        # Block: git checkout -- <file> when workers active (discards changes)
-        # Pattern: checkout followed by -- followed by paths
-        has_double_dash=false
-        for arg in "$@"; do
-            [[ "$arg" == "--" ]] && has_double_dash=true && break
-        done
-        if $has_double_dash && workers_active && ! has_force_override "$@"; then
-            block_destructive "checkout -- <paths>"
-        fi
-        if has_force_override "$@"; then
-            exec_without_force_flag "$@"
-        fi
-        ;;
-    switch)
-        # Block: git switch -c/-C <name> unless zone/*
-        prev_arg=""
-        for arg in "$@"; do
-            if [[ "$prev_arg" == "-c" || "$prev_arg" == "-C" || "$prev_arg" == "--create" || "$prev_arg" == "--force-create" ]]; then
-                # $arg is the branch name after the create flag
-                block_branch "$arg"
-            fi
-            prev_arg="$arg"
-        done
-        ;;
-    restore)
-        # Block: git restore <file> when workers active (unless --staged)
-        # Allow: git restore --staged (only touches index, not working tree)
-        has_staged=false
-        for arg in "$@"; do
-            [[ "$arg" == "--staged" || "$arg" == "-S" ]] && has_staged=true && break
-        done
-        if ! $has_staged && workers_active && ! has_force_override "$@"; then
-            block_destructive "restore <paths>"
-        fi
-        if has_force_override "$@"; then
-            exec_without_force_flag "$@"
-        fi
-        ;;
-    reset)
-        # Block: git reset --hard when workers active
-        has_hard=false
-        for arg in "$@"; do
-            [[ "$arg" == "--hard" ]] && has_hard=true && break
-        done
-        if $has_hard && workers_active && ! has_force_override "$@"; then
-            block_destructive "reset --hard"
-        fi
-        if has_force_override "$@"; then
-            exec_without_force_flag "$@"
-        fi
-        ;;
-    clean)
-        # Block: git clean -f/-fd/--force when workers active
-        has_force=false
-        for arg in "$@"; do
-            # Match -f, -fd, -ffd, etc or --force
-            if [[ "$arg" =~ ^-[a-zA-Z]*f ]] || [[ "$arg" == "--force" ]]; then
-                has_force=true
-                break
-            fi
-        done
-        if $has_force && workers_active && ! has_force_override "$@"; then
-            block_destructive "clean -f"
-        fi
-        if has_force_override "$@"; then
-            exec_without_force_flag "$@"
-        fi
-        ;;
-    add)
-        # Multi-worker mode: warn when staging files not tracked by this worker
-        # Advisory only - warns but doesn't block
-        if [[ -n "${AI_WORKER_ID:-}" ]]; then
-            repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null || pwd)"
-            tracker_file="$repo_root/.worker_${AI_WORKER_ID}_files.json"
+# Parse global flags to find the actual subcommand (#3021).
+# Without this, `git -C /path commit ...` would bypass all guards because
+# $1 would be "-C", not "commit".
+parse_git_subcommand "$@"
 
-            # Check for dangerous patterns: git add . or git add -A
-            for arg in "$@"; do
-                if [[ "$arg" == "." || "$arg" == "-A" || "$arg" == "--all" ]]; then
-                    echo "[git add] WARNING: 'git add $arg' in multi-worker mode" >&2
-                    echo "   This may stage files modified by other workers." >&2
-                    echo "   Consider staging specific files instead." >&2
-                    break
-                fi
+# Extract subcommand-specific args (everything after the subcommand).
+# Guards must iterate SUBCMD_ARGS, not "$@", to avoid confusing global flags
+# (e.g., -C <path>) with subcommand flags (e.g., switch -C <branch>).
+SUBCMD_ARGS=()
+if [[ $GIT_SUBCMD_POS -gt 0 ]]; then
+    local_pos=0
+    for arg in "$@"; do
+        local_pos=$((local_pos + 1))
+        if [[ $local_pos -gt $GIT_SUBCMD_POS ]]; then
+            SUBCMD_ARGS+=("$arg")
+        fi
+    done
+fi
+
+# Save original args for passthrough to real git (includes global flags).
+ORIG_ARGS=("$@")
+
+# Dispatch on the actual subcommand (not $1 which may be a global flag)
+case "$GIT_SUBCMD" in
+branch)
+    # Allow: git branch (list), git branch -d/-D (delete), git branch -a/--list/--show-current
+    # Block: git branch <name> (creates branch) unless zone/*
+    # Block: git branch -c/-C/--copy <old> <new> (copy creates branch) unless zone/*
+    # Block: git branch -m/-M/--move <old> <new> (move creates new name) unless zone/*
+    # Parse only subcmd args to avoid confusing global -C with branch -C (copy).
+    set -- "${SUBCMD_ARGS[@]}"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -c | -C | --copy | -m | -M | --move)
+            # Copy/move: `git branch -c [old] <new>` or `git branch -m [old] <new>`
+            # The LAST positional arg after the flag is the new branch name.
+            shift
+            new_name=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                -*) shift ;;  # skip additional flags (e.g. --force)
+                *)  new_name="$1"; shift ;;
+                esac
             done
+            if [[ -n "$new_name" ]]; then
+                block_branch "$new_name"
+            fi
+            # If block_branch allowed it (zone/*) or no name given, pass through
+            exec "$REAL_GIT" "${ORIG_ARGS[@]}"
+            ;;
+        -d | -D | --delete | -a | --all | --list | --show-current | -v | -vv | --verbose | -r | --remotes | --merged | --no-merged | --contains | --no-contains | --sort=* | --format=*)
+            # Safe flags - pass through with original args (preserves global flags)
+            exec "$REAL_GIT" "${ORIG_ARGS[@]}"
+            ;;
+        -*)
+            # Other flags - continue checking
+            shift
+            ;;
+        *)
+            # Positional argument = branch name = creating a branch
+            # Allow zone/* for multi-machine mode, block others
+            if block_branch "$1"; then
+                # zone/* allowed - pass through to real git
+                exec "$REAL_GIT" "${ORIG_ARGS[@]}"
+            fi
+            # block_branch exits on failure, so we never reach here for blocked branches
+            ;;
+        esac
+    done
+    # No positional args - safe (listing branches)
+    exec "$REAL_GIT" "${ORIG_ARGS[@]}"
+    ;;
+checkout)
+    # Block: git checkout -b <name> unless zone/*
+    prev_arg=""
+    for arg in "${SUBCMD_ARGS[@]}"; do
+        if [[ "$prev_arg" == "-b" || "$prev_arg" == "-B" ]]; then
+            # $arg is the branch name after -b/-B
+            block_branch "$arg"
+        fi
+        prev_arg="$arg"
+    done
+    # Block: git checkout -- <file> when workers active (discards changes)
+    # Pattern: checkout followed by -- followed by paths
+    has_double_dash=false
+    for arg in "${SUBCMD_ARGS[@]}"; do
+        [[ "$arg" == "--" ]] && has_double_dash=true && break
+    done
+    if $has_double_dash && workers_active && ! has_force_override "$@"; then
+        block_destructive "checkout -- <paths>"
+    fi
+    if has_force_override "$@"; then
+        exec_without_force_flag "$@"
+    fi
+    ;;
+switch)
+    # Block: git switch -c/-C <name> unless zone/*
+    prev_arg=""
+    for arg in "${SUBCMD_ARGS[@]}"; do
+        if [[ "$prev_arg" == "-c" || "$prev_arg" == "-C" || "$prev_arg" == "--create" || "$prev_arg" == "--force-create" ]]; then
+            # $arg is the branch name after the create flag
+            block_branch "$arg"
+        fi
+        prev_arg="$arg"
+    done
+    ;;
+restore)
+    # Block: git restore <file> when workers active (unless --staged)
+    # Allow: git restore --staged (only touches index, not working tree)
+    has_staged=false
+    for arg in "${SUBCMD_ARGS[@]}"; do
+        [[ "$arg" == "--staged" || "$arg" == "-S" ]] && has_staged=true && break
+    done
+    if ! $has_staged && workers_active && ! has_force_override "$@"; then
+        block_destructive "restore <paths>"
+    fi
+    if has_force_override "$@"; then
+        exec_without_force_flag "$@"
+    fi
+    ;;
+reset)
+    # Block: git reset --hard when workers active
+    has_hard=false
+    for arg in "${SUBCMD_ARGS[@]}"; do
+        [[ "$arg" == "--hard" ]] && has_hard=true && break
+    done
+    if $has_hard && workers_active && ! has_force_override "$@"; then
+        block_destructive "reset --hard"
+    fi
+    if has_force_override "$@"; then
+        exec_without_force_flag "$@"
+    fi
+    ;;
+clean)
+    # Block: git clean -f/-fd/--force when workers active
+    has_force=false
+    for arg in "${SUBCMD_ARGS[@]}"; do
+        # Match -f, -fd, -ffd, etc or --force
+        if [[ "$arg" =~ ^-[a-zA-Z]*f ]] || [[ "$arg" == "--force" ]]; then
+            has_force=true
+            break
+        fi
+    done
+    if $has_force && workers_active && ! has_force_override "$@"; then
+        block_destructive "clean -f"
+    fi
+    if has_force_override "$@"; then
+        exec_without_force_flag "$@"
+    fi
+    ;;
+add)
+    # Block git add -A / git add . for AI roles (#2405)
+    # These can stage other workers' files, sensitive files, or large binaries
+    for arg in "${SUBCMD_ARGS[@]}"; do
+        if [[ "$arg" == "." || "$arg" == "-A" || "$arg" == "--all" ]]; then
+            if is_ai_role; then
+                cat >&2 <<EOF
+ERROR: 'git add $arg' is blocked for AI roles (#2405).
 
-            # Check specific files against tracker
-            if [[ -f "$tracker_file" ]] && command -v python3 &>/dev/null; then
-                # Get tracked files
-                tracked_files=$(python3 -c "
+Always stage specific files by name:
+  git add file1.py file2.rs
+
+Using 'git add -A' or 'git add .' can:
+- Stage other workers' uncommitted changes
+- Include sensitive files (.env, credentials)
+- Add large binaries accidentally
+
+See ai_template rule: "No git add -A or git add ."
+EOF
+                exit 1
+            else
+                # USER role - just warn
+                echo "[git add] WARNING: 'git add $arg' may stage unintended files" >&2
+            fi
+            break
+        fi
+    done
+
+    # Multi-worker mode: additional check for files not tracked by this worker
+    if [[ -n "${AI_WORKER_ID:-}" ]]; then
+        repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null || pwd)"
+        tracker_file="$repo_root/.worker_${AI_WORKER_ID}_files.json"
+
+        # Check specific files against tracker
+        if [[ -f "$tracker_file" ]] && command -v python3 &>/dev/null; then
+            # Get tracked files
+            tracked_files=$(python3 -c "
 import json
 import sys
 try:
@@ -334,159 +531,200 @@ except Exception:
     sys.exit(0)
 " 2>/dev/null || true)
 
-                # Check each file argument
-                skip_next=false
-                for arg in "$@"; do
-                    # Skip flags and their values
-                    if $skip_next; then
-                        skip_next=false
-                        continue
-                    fi
-                    case "$arg" in
-                        -p|--patch|-e|--edit|-i|--interactive|-N|--intent-to-add|--chmod=*)
-                            continue ;;
-                        .|--all|-A)
-                            continue ;;  # Already warned above
-                        -*)
-                            # Other flags - continue checking
-                            continue ;;
-                        *)
-                            # This is a file path - check if tracked
-                            if [[ -n "$tracked_files" ]]; then
-                                if ! echo "$tracked_files" | grep -qxF "$arg"; then
-                                    echo "[git add] Advisory: '$arg' is not in worker $AI_WORKER_ID's tracked files" >&2
-                                fi
-                            fi
-                            ;;
-                    esac
-                done
-            fi
-        fi
-        ;;
-    commit)
-        if has_no_verify "$@"; then
-            if is_ai_role && [[ "${AIT_ALLOW_NO_VERIFY:-}" != "1" ]]; then
-                echo "ERROR: --no-verify is blocked for AI roles." >&2
-                echo "   Commit hooks enforce issue workflow and role boundaries." >&2
-                echo "   Remove --no-verify or set AIT_ALLOW_NO_VERIFY=1 to override." >&2
-                exit 1
-            fi
-        fi
-
-        ensure_commit_msg_hook
-
-        # Enforce Worker cannot use Fixes #N (fallback when hook isn't installed)
-        # This prevents gamma-crown-style bypasses when hook source is missing (#1269)
-        # Note: Does not handle stdin commits (-F -) - hook catches those if installed
-        if is_worker_role; then
-            COMMIT_MSG=""
-            # Extract commit message from -m "msg" or -F file (not stdin)
-            PREV_ARG=""
-            for arg in "$@"; do
-                if [[ "$PREV_ARG" == "-m" ]]; then
-                    COMMIT_MSG="$arg"
-                    break
-                elif [[ "$PREV_ARG" == "-F" && -f "$arg" ]]; then
-                    COMMIT_MSG="$(cat "$arg" 2>/dev/null || true)"
-                    break
+            # Check each file argument (subcmd args only, not global flags)
+            skip_next=false
+            for arg in "${SUBCMD_ARGS[@]}"; do
+                # Skip flags and their values
+                if $skip_next; then
+                    skip_next=false
+                    continue
                 fi
-                PREV_ARG="$arg"
-            done
-
-            # Check for auto-close patterns (case insensitive)
-            if [[ -n "$COMMIT_MSG" ]] && echo "$COMMIT_MSG" | grep -qiE '(^|[^[:alnum:]_])(fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved):?[[:space:]]*(([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]+)'; then
-                echo "ERROR: Worker role cannot close issues with Fixes/Closes/Resolves." >&2
-                echo "   Use 'Part of #N' to link without closing." >&2
-                echo "   Only MANAGER or USER can close issues." >&2
-                exit 1
-            fi
-        fi
-
-        # Serialize commits with per-repo lock to prevent cross-session collisions
-        if [[ -z "${AIT_GIT_LOCK_DISABLE:-}" ]]; then
-            GIT_DIR="$("$REAL_GIT" rev-parse --absolute-git-dir 2>/dev/null || true)"
-            if [[ -n "$GIT_DIR" ]]; then
-                LOCK_DIR="${GIT_DIR}/ait_commit_lock"
-                LOCK_PID_FILE="${LOCK_DIR}/pid"
-                LOCK_WAIT_S="${AIT_GIT_LOCK_WAIT_S:-300}"
-                START_TS="$(date +%s)"
-
-                LAST_STATUS_TS="$START_TS"
-
-                while true; do
-                    if mkdir "$LOCK_DIR" 2>/dev/null; then
-                        echo "$$" > "$LOCK_PID_FILE" 2>/dev/null || true
-                        break
-                    fi
-
-                    # Check if lock holder is still alive
-                    if [[ -f "$LOCK_PID_FILE" ]]; then
-                        LOCK_PID="$(cat "$LOCK_PID_FILE" 2>/dev/null || true)"
-                        if [[ -n "$LOCK_PID" ]] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
-                            # Lock holder died, clean up stale lock
-                            rm -rf "$LOCK_DIR"
-                            continue
+                case "$arg" in
+                -p | --patch | -e | --edit | -i | --interactive | -N | --intent-to-add | --chmod=*)
+                    continue
+                    ;;
+                . | --all | -A)
+                    continue
+                    ;; # Already warned above
+                -*)
+                    # Other flags - continue checking
+                    continue
+                    ;;
+                *)
+                    # This is a file path - check if tracked
+                    if [[ -n "$tracked_files" ]]; then
+                        if ! echo "$tracked_files" | grep -qxF "$arg"; then
+                            echo "[git add] Advisory: '$arg' is not in worker $AI_WORKER_ID's tracked files" >&2
                         fi
                     fi
+                    ;;
+                esac
+            done
+        fi
+    fi
+    ;;
+commit)
+    if has_no_verify "${SUBCMD_ARGS[@]}"; then
+        if is_ai_role && [[ "${AIT_ALLOW_NO_VERIFY:-}" != "1" ]]; then
+            echo "ERROR: --no-verify is blocked for AI roles." >&2
+            echo "   Commit hooks enforce issue workflow and role boundaries." >&2
+            echo "   Remove --no-verify from the command." >&2
+            exit 1
+        fi
+    fi
 
-                    NOW_TS="$(date +%s)"
-                    if (( NOW_TS - START_TS >= LOCK_WAIT_S )); then
-                        echo "ERROR: Timed out waiting for git commit lock at $LOCK_DIR" >&2
-                        echo "   Set AIT_GIT_LOCK_DISABLE=1 to bypass if lock is stale." >&2
-                        exit 1
-                    fi
+    # ENFORCE: AI_ROLE must match role-encoded git identity when present (#2958).
+    # This catches leaked Worker identity in Manager sessions even when commit
+    # titles are unprefixed and would otherwise pass wrapper pre-checks.
+    validate_git_identity_role
 
-                    # Emit progress every 60s to prevent looper silence timeout
-                    if (( NOW_TS - LAST_STATUS_TS >= 60 )); then
-                        WAITED=$(( NOW_TS - START_TS ))
-                        echo "[git commit lock] Waiting for lock... (${WAITED}s/${LOCK_WAIT_S}s)" >&2
-                        LAST_STATUS_TS="$NOW_TS"
-                    fi
+    ensure_commit_msg_hook
 
-                    sleep 0.2
-                done
+    # Extract commit message from -m "msg" or -F file (not stdin) for pre-hook checks.
+    # Note: Does not handle stdin commits (-F -) - hook catches those if installed.
+    # Use SUBCMD_ARGS to avoid confusing global flags with commit flags.
+    COMMIT_MSG=""
+    PREV_ARG=""
+    for arg in "${SUBCMD_ARGS[@]}"; do
+        if [[ "$PREV_ARG" == "-m" ]]; then
+            COMMIT_MSG="$arg"
+            break
+        elif [[ "$PREV_ARG" == "-F" && -f "$arg" ]]; then
+            COMMIT_MSG="$(cat "$arg" 2>/dev/null || true)"
+            break
+        fi
+        PREV_ARG="$arg"
+    done
 
-                # shellcheck disable=SC2329  # Used via trap
-                cleanup_lock() {
-                    rm -rf "$LOCK_DIR"
-                }
-                trap cleanup_lock EXIT INT TERM
+    # Enforce Worker cannot use Fixes #N (fallback when hook isn't installed)
+    # This prevents gamma-crown-style bypasses when hook source is missing (#1269)
+    if is_worker_role; then
+        if [[ -n "$COMMIT_MSG" ]] && echo "$COMMIT_MSG" | grep -qiE '(^|[^[:alnum:]_])(fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved):?[[:space:]]*(([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]+)'; then
+            echo "ERROR: Worker role cannot close issues with Fixes/Closes/Resolves." >&2
+            echo "   Use 'Part of #N' to link without closing." >&2
+            echo "   Only MANAGER or USER can close issues." >&2
+            exit 1
+        fi
+    fi
 
-                status=0
-                "$REAL_GIT" "$@" || status=$?
-                exit "$status"
+    # ENFORCE: Cross-role prefix mismatch detection (#2958)
+    # Block commits where the message prefix role doesn't match AI_ROLE.
+    # This is a pre-hook defense layer - the commit-msg hook has the same check,
+    # but if the hook is stale or missing, this catches the mismatch.
+    if is_ai_role && [[ -n "$COMMIT_MSG" ]]; then
+        COMMIT_TITLE=$(echo "$COMMIT_MSG" | head -1)
+        # Extract role letter from prefix: [W2]42:, [M]10:, [sat-W1]42:
+        MSG_ROLE_CHAR=$(echo "$COMMIT_TITLE" | sed -nE 's/^\[[^]]*-?([UWPRM])[0-9]*\][0-9]+:.*/\1/p')
+        if [[ -n "$MSG_ROLE_CHAR" ]]; then
+            EXPECTED_ROLE_CHAR=""
+            case "${AI_ROLE:-}" in
+            WORKER) EXPECTED_ROLE_CHAR="W" ;;
+            PROVER) EXPECTED_ROLE_CHAR="P" ;;
+            RESEARCHER) EXPECTED_ROLE_CHAR="R" ;;
+            MANAGER) EXPECTED_ROLE_CHAR="M" ;;
+            esac
+            if [[ -n "$EXPECTED_ROLE_CHAR" ]] && [[ "$MSG_ROLE_CHAR" != "$EXPECTED_ROLE_CHAR" ]]; then
+                echo "ERROR: Cross-role commit prefix mismatch (#2958)" >&2
+                echo "   AI_ROLE=$AI_ROLE expects prefix [${EXPECTED_ROLE_CHAR}] but message has [${MSG_ROLE_CHAR}]" >&2
+                echo "   Title: $COMMIT_TITLE" >&2
+                echo "" >&2
+                echo "   This prevents one role from accidentally committing another role's message." >&2
+                echo "   If the prefix was copied from another commit, remove it and let the hook add it." >&2
+                exit 1
             fi
         fi
-        ;;
-    status)
-        # Enhanced git status: show worker file ownership after standard output
-        "$REAL_GIT" "$@"
-        status_exit=$?
+    fi
 
-        # Skip ownership info for machine-readable formats (--porcelain, -s, -z, etc.)
-        is_machine_format=false
-        for arg in "$@"; do
-            case "$arg" in
-                --porcelain|--porcelain=*|-s|--short|-z|--null)
-                    is_machine_format=true
+    # Serialize commits with per-repo lock to prevent cross-session collisions
+    if [[ -z "${AIT_GIT_LOCK_DISABLE:-}" ]]; then
+        GIT_DIR="$("$REAL_GIT" rev-parse --absolute-git-dir 2>/dev/null || true)"
+        if [[ -n "$GIT_DIR" ]]; then
+            LOCK_DIR="${GIT_DIR}/ait_commit_lock"
+            LOCK_PID_FILE="${LOCK_DIR}/pid"
+            # Priority: env var > .looper_config.json > default (300)
+            if [[ -n "${AIT_GIT_LOCK_WAIT_S:-}" ]]; then
+                LOCK_WAIT_S="$AIT_GIT_LOCK_WAIT_S"
+            else
+                LOCK_WAIT_S="$(get_git_lock_wait_sec)"
+            fi
+            START_TS="$(date +%s)"
+
+            LAST_STATUS_TS="$START_TS"
+
+            while true; do
+                if mkdir "$LOCK_DIR" 2>/dev/null; then
+                    echo "$$" >"$LOCK_PID_FILE" 2>/dev/null || true
                     break
-                    ;;
-            esac
-        done
+                fi
 
-        # Only show ownership info when status succeeded, in a repo, and human format
-        if [[ $status_exit -eq 0 ]] && ! $is_machine_format; then
-            repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null)" || repo_root=""
+                # Check if lock holder is still alive
+                if [[ -f "$LOCK_PID_FILE" ]]; then
+                    LOCK_PID="$(cat "$LOCK_PID_FILE" 2>/dev/null || true)"
+                    if [[ -n "$LOCK_PID" ]] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+                        # Lock holder died, clean up stale lock
+                        rm -rf "$LOCK_DIR"
+                        continue
+                    fi
+                fi
 
-            if [[ -n "$repo_root" ]]; then
-                # Check for tracker files
-                shopt -s nullglob
-                trackers=("$repo_root"/.worker_*_files.json)
-                shopt -u nullglob
+                NOW_TS="$(date +%s)"
+                if ((NOW_TS - START_TS >= LOCK_WAIT_S)); then
+                    echo "ERROR: Timed out waiting for git commit lock at $LOCK_DIR" >&2
+                    echo "   Set AIT_GIT_LOCK_DISABLE=1 to bypass if lock is stale." >&2
+                    exit 1
+                fi
 
-                if [[ ${#trackers[@]} -gt 0 ]] && command -v python3 &>/dev/null; then
-                    # Show worker file ownership
-                    python3 - "$repo_root" "${AI_WORKER_ID:-}" <<'PYEOF'
+                # Emit progress every 60s to prevent looper silence timeout
+                if ((NOW_TS - LAST_STATUS_TS >= 60)); then
+                    WAITED=$((NOW_TS - START_TS))
+                    echo "[git commit lock] Waiting for lock... (${WAITED}s/${LOCK_WAIT_S}s)" >&2
+                    LAST_STATUS_TS="$NOW_TS"
+                fi
+
+                sleep 0.2
+            done
+
+            # shellcheck disable=SC2329  # Used via trap
+            cleanup_lock() {
+                rm -rf "$LOCK_DIR"
+            }
+            trap cleanup_lock EXIT INT TERM
+
+            status=0
+            "$REAL_GIT" "$@" || status=$?
+            exit "$status"
+        fi
+    fi
+    ;;
+status)
+    # Enhanced git status: show worker file ownership after standard output
+    "$REAL_GIT" "$@"
+    status_exit=$?
+
+    # Skip ownership info for machine-readable formats (--porcelain, -s, -z, etc.)
+    is_machine_format=false
+    for arg in "${SUBCMD_ARGS[@]}"; do
+        case "$arg" in
+        --porcelain | --porcelain=* | -s | --short | -z | --null)
+            is_machine_format=true
+            break
+            ;;
+        esac
+    done
+
+    # Only show ownership info when status succeeded, in a repo, and human format
+    if [[ $status_exit -eq 0 ]] && ! $is_machine_format; then
+        repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null)" || repo_root=""
+
+        if [[ -n "$repo_root" ]]; then
+            # Check for tracker files
+            shopt -s nullglob
+            trackers=("$repo_root"/.worker_*_files.json)
+            shopt -u nullglob
+
+            if [[ ${#trackers[@]} -gt 0 ]] && command -v python3 &>/dev/null; then
+                # Show worker file ownership
+                python3 - "$repo_root" "${AI_WORKER_ID:-}" <<'PYEOF'
 import json
 import os
 import re
@@ -538,15 +776,15 @@ if worker_files:
         if len(files) > 5:
             print(f"    ... and {len(files) - 5} more", file=sys.stderr)
 PYEOF
-                fi
             fi
         fi
+    fi
 
-        exit "$status_exit"
-        ;;
-    stash)
-        # Block all git stash operations - "Never stash - always commit (WIP if needed)"
-        cat >&2 <<'EOF'
+    exit "$status_exit"
+    ;;
+stash)
+    # Block all git stash operations - "Never stash - always commit (WIP if needed)"
+    cat >&2 <<'EOF'
 ERROR: git stash is blocked.
 
 AI workers must never stash - stashed changes become invisible context.
@@ -558,8 +796,8 @@ This keeps changes visible in git history and prevents lost work.
 
 See ai_template rule: "Commit AND push: Files invisible until pushed"
 EOF
-        exit 1
-        ;;
+    exit 1
+    ;;
 esac
 
 # Pass through to real git
