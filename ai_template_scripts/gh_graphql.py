@@ -68,6 +68,23 @@ def _get_real_gh() -> str:
     raise RuntimeError("gh CLI not found")
 
 
+def _get_limiter():
+    """Get the singleton rate limiter, or None if unavailable.
+
+    Returns None (graceful fallback to direct subprocess) if:
+    - gh_rate_limit package is not importable (broken install)
+    - GH_GRAPHQL_NO_LIMITER=1 is set (testing/debugging)
+    """
+    if os.environ.get("GH_GRAPHQL_NO_LIMITER") == "1":
+        return None
+    try:
+        from ai_template_scripts.gh_rate_limit import get_limiter
+
+        return get_limiter()
+    except (ImportError, Exception):
+        return None
+
+
 def _encode_variables(variables: dict[str, Any]) -> list[str]:
     """Encode variables for gh api graphql command.
 
@@ -181,19 +198,27 @@ def graphql(
         ...     variables={'owner': 'dropbox-ai-prototypes'}
         ... )
     """
-    cmd = [_get_real_gh(), "api", "graphql", "-f", f"query={query}"]
-
+    # Build args for gh api graphql (without the gh binary path itself)
+    gh_args = ["api", "graphql", "-f", f"query={query}"]
     if variables:
-        cmd.extend(_encode_variables(variables))
+        gh_args.extend(_encode_variables(variables))
+
+    # Route through rate limiter if available (#3072).
+    # Falls back to direct subprocess when limiter is unavailable.
+    limiter = _get_limiter()
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+        if limiter is not None:
+            result = limiter.call(gh_args, timeout=timeout)
+        else:
+            cmd = [_get_real_gh()] + gh_args
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
     except subprocess.TimeoutExpired:
         return GraphQLResult(
             data=None,

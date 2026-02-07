@@ -47,7 +47,7 @@ Runs before each commit. Performs:
 5. **Test ignore detection** - BLOCKS commits adding test ignores (#341)
 6. **Zone enforcement** - Advisory (or strict) zone checks for multi-worker mode
 7. **AppleScript syntax** - Validates `osascript` usage in staged `.sh` files (macOS only)
-8. **Multi-worker safety** - Warns on stale trees, regressions, and untracked staged files (multi-worker only)
+8. **Multi-worker safety** - Warns on stale trees, regressions, and file ownership conflicts (multi-worker only). Ownership conflicts create `.flags/ownership_conflict_W<N>` for Manager review and append to `.ownership_conflicts.log`. Set `AIT_BLOCK_UNTRACKED=1` for hard block mode.
 9. **TLA+ property tests** - Runs `scripts/run_tla_property_tests.py --staged` when present
 10. **Build gate** - AI-only build checks for staged code (cargo check, npm run build, py_compile)
 11. **Linting** - Runs ruff (Python) and shellcheck (bash) via pre-commit framework

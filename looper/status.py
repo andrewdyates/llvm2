@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -429,9 +425,13 @@ def _summarize_worker_log_for_untraceable_flag(
         if "tool" in out:
             break
 
-    if "[cargo] Waiting for build lock" in tail:
+    if "[cargo-lock] Waiting for" in tail or "[cargo] Waiting for" in tail:
         out["hint"] = "cargo_build_lock_wait"
         out["cargo_lock"] = f"~/.ait_cargo_lock/{repo_path.name}/lock.json"
+
+    if "[git commit lock]" in tail:
+        out["hint"] = "git_commit_lock_wait"
+        out["git_lock"] = f"{repo_path}/.git/ait_commit_lock/"
 
     try:
         if (
@@ -531,6 +531,8 @@ def _format_untraceable_failures_flag(*, repo_path: Path, flag_text: str) -> str
             parts.append(f"hint={summary['hint']}")
             if summary.get("cargo_lock"):
                 parts.append(f"cargo_lock={summary['cargo_lock']}")
+            if summary.get("git_lock"):
+                parts.append(f"git_lock={summary['git_lock']}")
         out_lines.append("  " + " ".join(parts))
 
     return "\n".join(out_lines) + "\n"
@@ -1044,14 +1046,19 @@ class StatusManager:
         if extra:
             data.update(extra)
 
-        # Atomic write - clean up temp file on failure (#2419)
-        tmp = self.status_file.with_suffix(".tmp")
+        # Atomic write with unique temp path to avoid cross-thread/process collisions
+        # when multiple writers overlap (#3164). Keep temp file in same directory so
+        # os.replace remains atomic on POSIX filesystems.
+        tmp = self.status_file.with_name(
+            f"{self.status_file.name}.tmp.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"
+        )
         try:
+            self.status_file.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps(data, indent=2))
-            tmp.rename(self.status_file)
+            os.replace(tmp, self.status_file)
         except OSError as e:
             debug_swallow("write_status", e)
-            # Clean up orphaned temp file if rename failed after write succeeded
+            # Clean up orphaned temp file if write/replace failed.
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:

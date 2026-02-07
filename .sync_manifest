@@ -32,6 +32,7 @@ SUPPORT.md
 
 # Config files
 .claude-version
+.codex-version
 ruff.toml
 requirements.txt
 .mcp.json

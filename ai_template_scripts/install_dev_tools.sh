@@ -6,9 +6,9 @@
 #
 # install_dev_tools.sh - Install development tools for ai_template
 #
-# PURPOSE: Installs tools needed by code_stats.py and other scripts.
+# PURPOSE: Installs tools needed by ai_template_scripts.code_stats and other scripts.
 # CALLED BY: Human (one-time setup after cloning)
-# REFERENCED: code_stats.py, README.md
+# REFERENCED: code_stats package, README.md
 #
 # Usage:
 #   ./ai_template_scripts/install_dev_tools.sh           # Install everything
@@ -33,7 +33,7 @@ usage() {
     echo ""
     echo "Install development tools for ai_template projects."
     echo ""
-    echo "Installs tools needed by code_stats.py and other scripts:"
+    echo "Installs tools needed by ai_template_scripts.code_stats and other scripts:"
     echo "  - Python tools (mypy, ruff, pre-commit)"
     echo "  - TLA+ tools (TLA+ toolbox, Apalache)"
     echo "  - Go tools (staticcheck)"
@@ -424,7 +424,7 @@ print_summary() {
     fi
 
     echo ""
-    echo "Run './ai_template_scripts/code_stats.py .' to analyze your codebase."
+    echo "Run 'python3 -m ai_template_scripts.code_stats .' to analyze your codebase."
     echo ""
 }
 
@@ -434,10 +434,10 @@ check_mode() {
     echo ""
     verify_installations
 
-    # Also run code_stats.py to show what would be analyzed
-    if [[ -f "./ai_template_scripts/code_stats.py" ]]; then
-        log_info "Running code_stats.py to check tool availability..."
-        python3 ./ai_template_scripts/code_stats.py . --quiet 2>&1 | grep -E "(Missing tools|lizard|radon|gocyclo|pmccabe)" || true
+    # Also run code_stats package CLI to show what would be analyzed
+    if [[ -d "./ai_template_scripts/code_stats" ]]; then
+        log_info "Running code_stats package CLI to check tool availability..."
+        python3 -m ai_template_scripts.code_stats . --quiet 2>&1 | grep -E "(Missing tools|lizard|radon|gocyclo|pmccabe)" || true
     fi
 }
 

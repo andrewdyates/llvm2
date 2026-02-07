@@ -169,7 +169,7 @@ Note: Unlike OTel, our logs embed timestamp in filenames rather than per-record.
 Existing logs use the schema above. To add new fields:
 1. Use snake_case for new field names
 2. Add field to this schema documentation
-3. Update `json_to_text.py` if field needs display formatting
+3. Update `json_to_text/` package if field needs display formatting
 
 ## References
 

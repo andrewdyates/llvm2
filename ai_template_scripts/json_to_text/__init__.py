@@ -29,9 +29,9 @@ Public API (library usage):
     )
 
 CLI usage:
-    Pipe JSON streaming output: <ai-cli> | ./json_to_text.py
-    ./json_to_text.py --version  # Show version information
-    ./json_to_text.py --compact  # Compact mode for manager audits
+    Pipe JSON streaming output: <ai-cli> | python3 -m ai_template_scripts.json_to_text
+    python3 -m ai_template_scripts.json_to_text --version  # Show version information
+    python3 -m ai_template_scripts.json_to_text --compact  # Compact mode for manager audits
 
 Copyright 2026 Dropbox, Inc.
 Licensed under the Apache License, Version 2.0
@@ -210,9 +210,9 @@ def _get_version() -> str:
     try:
         from ai_template_scripts.version import get_version
 
-        return get_version("json_to_text.py")
+        return get_version("json_to_text")
     except ImportError:
-        return "json_to_text.py (version unavailable)"
+        return "json_to_text (version unavailable)"
 
 
 def main() -> None:

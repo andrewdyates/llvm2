@@ -7,7 +7,7 @@
 Shared directory exclusion patterns for codebase analysis tools.
 
 Single source of truth for directories to skip during filesystem traversal.
-Used by: code_stats.py, integration_audit.py, check_doc_claims.py, check_deps.py,
+Used by: code_stats/, integration_audit.py, check_doc_claims.py, check_deps.py,
 pulse/constants.py
 
 Fixes #1798: Inconsistent SKIP_DIRS definitions across modules.

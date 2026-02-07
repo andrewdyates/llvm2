@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -27,7 +23,12 @@ from .issue_metrics import _unpack_issue_counts
 # These flags should not be cleared during pulse write_flags() cleanup
 # because they need to persist until consumed by the next looper session.
 # startup_warnings added in #2459 (phase rotation postmortem follow-up)
-LOOPER_MANAGED_PREFIXES = ("headless_violation_", "startup_warnings")
+# ownership_conflict_ added in #3224 (multi-worker ownership escalation path)
+LOOPER_MANAGED_PREFIXES = (
+    "headless_violation_",
+    "startup_warnings",
+    "ownership_conflict_",
+)
 
 
 def check_thresholds(metrics: dict) -> list[str]:

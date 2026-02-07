@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 """
 looper.py - Autonomous continuous loop for AI workers and managers
 

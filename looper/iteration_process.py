@@ -139,14 +139,14 @@ class ProcessManager:
 
                 try:
                     text_proc = subprocess.Popen(
-                        ["./ai_template_scripts/json_to_text.py"],
+                        [sys.executable, "-m", "ai_template_scripts.json_to_text"],
                         stdin=subprocess.PIPE,
                         stdout=sys.stdout,
                         stderr=sys.stderr,
                     )
                 except OSError as e:
                     # If text_proc fails to start, still need to cleanup ai_proc
-                    log_warning(f"Warning: json_to_text.py failed to start: {e}")
+                    log_warning(f"Warning: json_to_text failed to start: {e}")
                     text_proc = None
 
                 try:
@@ -205,12 +205,13 @@ class ProcessManager:
                                 last_output_time = time.time()
                                 last_output_mono = time.monotonic()
                                 last_progress_time = time.time()
-                                log_f.write(line.decode())
+                                decoded = line.decode(errors="replace")
+                                log_f.write(decoded)
                                 log_f.flush()
                                 write_to_text_proc(line)
 
                                 try:
-                                    msg = json.loads(line.decode())
+                                    msg = json.loads(decoded)
                                     cmd_str, is_completed = (
                                         self._extract_command_from_message(msg)
                                     )
@@ -271,7 +272,8 @@ class ProcessManager:
         """Gracefully terminate a process, falling back to SIGKILL if needed.
 
         REQUIRES: proc was started and is a valid Popen instance
-        ENSURES: proc is terminated (or killed) and reaped
+        ENSURES: proc is terminated (or killed) and reaped, OR abandoned
+                 after bounded timeout with a warning (#3116)
 
         Args:
             proc: Process to terminate
@@ -283,7 +285,13 @@ class ProcessManager:
         except subprocess.TimeoutExpired:
             log_info("Grace period expired, sending SIGKILL")
             proc.kill()
-            proc.wait()  # Reap zombie after SIGKILL
+            try:
+                proc.wait(timeout=5)  # Reap zombie after SIGKILL (#3116)
+            except subprocess.TimeoutExpired:
+                log_warning(
+                    "Process did not exit after SIGKILL (uninterruptible?), "
+                    "abandoning wait"
+                )
 
     def _check_iteration_timeout(
         self,
@@ -476,7 +484,7 @@ class ProcessManager:
                 line = ai_proc.stdout.readline()
                 if not line:
                     break
-                log_f.write(line.decode())
+                log_f.write(line.decode(errors="replace"))
                 log_f.flush()
                 write_func(line)
             elif ai_proc.poll() is not None:

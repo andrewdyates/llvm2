@@ -64,7 +64,10 @@ class RunnerSyncMixin:
 
         # Check for uncommitted changes
         result = run_git_command(["status", "--porcelain"], timeout=10)
-        if result.ok and result.value and result.value.strip():
+        if not result.ok:
+            log_error(f"Error: Failed to check uncommitted changes: {result.error}")
+            sys.exit(1)
+        if result.value and result.value.strip():
             log_error(
                 f"Error: Uncommitted changes. Commit before switching to {target_branch}"
             )

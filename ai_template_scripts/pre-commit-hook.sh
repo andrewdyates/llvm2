@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # pre-commit-hook.sh - Validates copyright headers and author metadata
 #
 # WARNING mode: Warns but allows commit to proceed.
@@ -607,7 +603,7 @@ check_regression() {
     # 2. Per-file git log bounded by --max-count (AC1).
     # 3. Batch rev-parse: collect all ref queries, resolve in one git cat-file
     #    --batch-check call per file (reduces 2N rev-parse to 1 subprocess).
-    local max_commits=10  # Cap per-file commit lookback (#2848 AC1)
+    local max_commits=10 # Cap per-file commit lookback (#2848 AC1)
 
     # Note: We iterate on word-split STAGED_FILES. This matches git diff output format
     # where filenames with spaces are quoted. For our use case (AI repos), filenames
@@ -635,7 +631,7 @@ check_regression() {
             fi
             local commit_hash_only="${line%% *}"
             other_commits="${other_commits}${commit_hash_only}"$'\n'
-        done <<< "$commits_with_subjects"
+        done <<<"$commits_with_subjects"
 
         [[ -z "$other_commits" ]] && continue
 
@@ -646,7 +642,7 @@ check_regression() {
             [[ -z "$commit" ]] && continue
             batch_input="${batch_input}${commit}^:${file}"$'\n'
             batch_input="${batch_input}${commit}:${file}"$'\n'
-        done <<< "$other_commits"
+        done <<<"$other_commits"
 
         [[ -z "$batch_input" ]] && continue
 
@@ -660,7 +656,7 @@ check_regression() {
         local batch_lines=()
         while IFS= read -r _bline; do
             batch_lines+=("$_bline")
-        done <<< "$batch_output"
+        done <<<"$batch_output"
 
         local line_idx=0
         while IFS= read -r commit; do
@@ -686,7 +682,7 @@ check_regression() {
                 regression_found=1
                 WARNINGS=$((WARNINGS + 1))
             fi
-        done <<< "$other_commits"
+        done <<<"$other_commits"
     done
 
     if [[ $regression_found -eq 1 ]]; then
@@ -701,15 +697,18 @@ if [[ -n "${AI_WORKER_ID:-}" ]]; then
 fi
 
 # === Worker File Tracking Check ===
-# BLOCK commits that include files tracked by OTHER workers.
-# This prevents workers from stepping on each other's files in shared checkout.
+# WARN on commits that include files tracked by OTHER workers.
+# This detects workers stepping on each other's files in shared checkout.
+# Conflicts escalate to Manager via flag file; commits proceed with warning.
 #
 # Design change (Part of #2365): Instead of checking "is file in MY tracker"
 # (which gets stale mid-iteration), check "is file in ANOTHER worker's tracker"
 # (which correctly blocks stepping on other workers but allows committing
 # files we modified during this session).
 #
-# Override: AIT_ALLOW_UNTRACKED=1 (for emergencies only)
+# Behavior (Part of #3198):
+#   Default: WARNING + escalation (commit proceeds)
+#   AIT_BLOCK_UNTRACKED=1: Hard block on conflicts (opt-in strict mode)
 check_untracked_staged_files() {
     # Skip if no staged files
     [[ -z "$STAGED_FILES" ]] && return 0
@@ -766,7 +765,7 @@ check_untracked_staged_files() {
     fi
 
     if [[ ${#conflicts[@]} -gt 0 ]]; then
-        echo "ERROR: Worker $AI_WORKER_ID staging files owned by other workers:"
+        warn "Worker $AI_WORKER_ID staging files owned by other workers:"
         for entry in "${conflicts[@]}"; do
             local wid="${entry%%:*}"
             local fname="${entry#*:}"
@@ -774,16 +773,57 @@ check_untracked_staged_files() {
         done
         echo ""
         echo "These files are tracked by another active worker."
-        echo "Workers must only commit files they own to prevent interference."
-        echo ""
-        if [[ "${AIT_ALLOW_UNTRACKED:-}" == "1" ]]; then
-            warn "Proceeding anyway (AIT_ALLOW_UNTRACKED=1)"
-            WARNINGS=$((WARNINGS + 1))
-        else
-            echo "Contact User if this is blocking legitimate work."
+
+        # Escalate to Manager: create flag file and append to conflict log (#3198)
+        _escalate_ownership_conflict "${conflicts[@]}"
+
+        if [[ "${AIT_BLOCK_UNTRACKED:-}" == "1" ]]; then
+            echo "BLOCKED: AIT_BLOCK_UNTRACKED=1 is set (strict mode)."
+            echo "  Unset AIT_BLOCK_UNTRACKED to allow the commit with a warning."
             exit 1
         fi
+
+        warn "Proceeding with commit. Manager will review file ownership conflict."
+        WARNINGS=$((WARNINGS + 1))
     fi
+}
+
+# Escalate ownership conflict to Manager via flag file and log (#3198).
+# Creates .flags/ownership_conflict_W<N> for Manager's team_health phase.
+# Appends to .ownership_conflicts.log for persistent history.
+_escalate_ownership_conflict() {
+    local conflicts=("$@")
+    local flags_dir="$REPO_ROOT/.flags"
+    local flag_file="$flags_dir/ownership_conflict_W${AI_WORKER_ID}"
+    local log_file="$REPO_ROOT/.ownership_conflicts.log"
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Create .flags/ if needed
+    mkdir -p "$flags_dir"
+
+    # Write flag file (overwritten each time — Manager clears after resolution)
+    {
+        echo "# Ownership conflict detected at $timestamp"
+        echo "# Worker $AI_WORKER_ID attempted to commit files owned by other workers"
+        echo "# Manager: review and reassign work to prevent future collisions"
+        echo ""
+        for entry in "${conflicts[@]}"; do
+            local wid="${entry%%:*}"
+            local fname="${entry#*:}"
+            echo "$fname  # owned by W$wid"
+        done
+    } >"$flag_file"
+
+    # Append to persistent conflict log
+    {
+        echo "[$timestamp] W$AI_WORKER_ID conflict:"
+        for entry in "${conflicts[@]}"; do
+            local wid="${entry%%:*}"
+            local fname="${entry#*:}"
+            echo "  $fname (W$wid)"
+        done
+    } >>"$log_file"
 }
 
 # === Worker Tracker Existence Check (#2364) ===

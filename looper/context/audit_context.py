@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -318,6 +314,28 @@ def get_audit_data() -> Result[str]:
                             )
                     except OSError as e:
                         debug_swallow("startup_warnings read", e)
+                # Surface ownership conflict flag contents (#3225, #3198)
+                conflict_flags = sorted(
+                    f for f in flags if f.name.startswith("ownership_conflict_")
+                )
+                if conflict_flags:
+                    conflict_lines = []
+                    for cf in conflict_flags:
+                        try:
+                            body = cf.read_text().strip()
+                            if body:
+                                conflict_lines.append(
+                                    f"**{cf.name}:**\n{body}"
+                                )
+                            else:
+                                conflict_lines.append(f"**{cf.name}:** (empty)")
+                        except OSError as e:
+                            debug_swallow(f"ownership_conflict read {cf.name}", e)
+                    if conflict_lines:
+                        sections.append(
+                            "### Ownership Conflicts\n"
+                            + "\n".join(conflict_lines)
+                        )
 
         # metrics/latest.json summary (with freshness gate, #2969)
         metrics_file = METRICS_DIR / "latest.json"

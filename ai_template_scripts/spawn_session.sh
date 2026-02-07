@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # spawn_session.sh - Spawn worker, prover, researcher, or manager in new iTerm2 tab
 #
 # Copyright 2026 Dropbox, Inc.

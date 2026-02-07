@@ -9,6 +9,7 @@
 # - Blocks git stash operations (stash push/pop/apply/drop) - use WIP commits instead
 # - Guards destructive operations when workers active (restore, checkout --, reset --hard, clean -f)
 # - Serializes git commit operations with a per-repo lock to prevent collisions
+# - Isolates worker staging via per-worker GIT_INDEX_FILE (#3197)
 # - Blocks --no-verify/-n on git commit for AI roles unless explicitly allowed
 # - Auto-installs the commit-msg hook on git commit if missing (when hook source exists)
 # - Passes all other commands to the real git unchanged
@@ -27,6 +28,7 @@
 #   AI_ROLE              - WORKER/PROVER/RESEARCHER/MANAGER/USER (set by looper.py)
 #   AIT_ALLOW_NO_VERIFY  - Set to 1 to allow --no-verify/-n for AI roles on git commit
 #   AIT_GIT_LOCK_WAIT_S  - Seconds to wait for lock (default: 300, see also .looper_config.json)
+#   AIT_GIT_LOCK_STATUS_INTERVAL_S - Seconds between lock-wait progress lines (default: 60)
 #   AIT_GIT_LOCK_DISABLE - Set to 1 to disable commit locking
 #
 # Per-repo config (.looper_config.json):
@@ -98,7 +100,7 @@ EOF
 # Check if workers are active (any .pid_worker or .pid_worker_* with valid process)
 workers_active() {
     local repo_root
-    repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null || true)"
+    repo_root="$(git_with_globals rev-parse --show-toplevel 2>/dev/null || true)"
     [[ -z "$repo_root" ]] && return 1
 
     # Check both single-worker (.pid_worker) and multi-worker (.pid_worker_*) formats
@@ -117,7 +119,7 @@ workers_active() {
 block_destructive() {
     local op="$1"
     local repo_root
-    repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null || echo .)"
+    repo_root="$(git_with_globals rev-parse --show-toplevel 2>/dev/null || echo .)"
     local worker_count
     # Count both single-worker (.pid_worker) and multi-worker (.pid_worker_*) files
     worker_count="$(find "$repo_root" -maxdepth 1 \( -name '.pid_worker' -o -name '.pid_worker_*' \) 2>/dev/null | wc -l)"
@@ -218,7 +220,7 @@ validate_git_identity_role() {
 # Get git_lock_wait_sec from .looper_config.json if present (default: 300)
 get_git_lock_wait_sec() {
     local repo_root config_file value
-    repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null || true)"
+    repo_root="$(git_with_globals rev-parse --show-toplevel 2>/dev/null || true)"
     [[ -z "$repo_root" ]] && echo "300" && return
 
     config_file="$repo_root/.looper_config.json"
@@ -263,7 +265,7 @@ parse_git_subcommand() {
         case "$1" in
         # Global flags that take a value argument
         -C | -c | --git-dir | --work-tree | --namespace | --super-prefix | --config-env)
-            shift 2 || return  # skip flag + value
+            shift 2 || return # skip flag + value
             pos=$((pos + 2))
             ;;
         # Global flags with = syntax (already consume value)
@@ -299,15 +301,247 @@ parse_git_subcommand() {
     done
 }
 
+# Commands that require index isolation in multi-worker mode.
+needs_index_isolation() {
+    case "$GIT_SUBCMD" in
+    add | commit | status | diff | restore | reset | checkout | rm | mv) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
+# Run real git with preserved global flags (e.g., -C, --git-dir).
+git_with_globals() {
+    "$REAL_GIT" "${GLOBAL_ARGS[@]}" "$@"
+}
+
+# Resolve worker-specific index file paths.
+# Sets WORKER_INDEX_PATH and WORKER_INDEX_BASE_FILE on success.
+get_worker_index_paths() {
+    WORKER_INDEX_PATH=""
+    WORKER_INDEX_BASE_FILE=""
+
+    local git_dir repo_root
+    git_dir="$(git_with_globals rev-parse --git-dir 2>/dev/null || true)"
+    [[ -z "$git_dir" ]] && return 1
+
+    if [[ "$git_dir" != /* ]]; then
+        repo_root="$(git_with_globals rev-parse --show-toplevel 2>/dev/null || true)"
+        [[ -n "$repo_root" ]] || return 1
+        git_dir="${repo_root}/${git_dir#./}"
+    fi
+    [[ -d "$git_dir" ]] || return 1
+
+    WORKER_INDEX_PATH="${git_dir%/}/index.worker_${AI_WORKER_ID}"
+    WORKER_INDEX_BASE_FILE="${WORKER_INDEX_PATH}.base_head"
+    return 0
+}
+
+get_current_head_ref() {
+    local head_ref
+    head_ref="$(git_with_globals rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+    if [[ -z "$head_ref" ]]; then
+        echo "UNBORN"
+    else
+        echo "$head_ref"
+    fi
+}
+
+# Resolve shared index file path (.git/index), respecting global git flags (-C, etc.)
+get_shared_index_path() {
+    local shared_index repo_root
+    shared_index="$(git_with_globals rev-parse --git-path index 2>/dev/null || true)"
+    [[ -n "$shared_index" ]] || return 1
+
+    if [[ "$shared_index" != /* ]]; then
+        repo_root="$(git_with_globals rev-parse --show-toplevel 2>/dev/null || true)"
+        [[ -n "$repo_root" ]] || return 1
+        shared_index="${repo_root}/${shared_index#./}"
+    fi
+    echo "$shared_index"
+    return 0
+}
+
+# Initialize index file from a specific HEAD ref.
+# Uses a temp file + rename to avoid partially-written indexes.
+init_worker_index_from_head() {
+    local index_path="$1"
+    local head_ref="$2"
+    local tmp_index="${index_path}.tmp.$$"
+
+    rm -f "$tmp_index" 2>/dev/null || true
+
+    if [[ "$head_ref" == "UNBORN" ]]; then
+        : >"$tmp_index" || return 1
+    else
+        if ! GIT_INDEX_FILE="$tmp_index" git_with_globals read-tree "$head_ref" >/dev/null 2>&1; then
+            rm -f "$tmp_index" 2>/dev/null || true
+            return 1
+        fi
+    fi
+
+    if ! mv "$tmp_index" "$index_path" 2>/dev/null; then
+        rm -f "$tmp_index" 2>/dev/null || true
+        return 1
+    fi
+    return 0
+}
+
+# Initialize worker index from shared index snapshot when available.
+# Falls back to HEAD-based initialization (same behavior as previous versions).
+init_worker_index_from_shared_or_head() {
+    local index_path="$1"
+    local head_ref="$2"
+    local tmp_index="${index_path}.tmp.$$"
+    local shared_index
+
+    rm -f "$tmp_index" 2>/dev/null || true
+
+    shared_index="$(get_shared_index_path 2>/dev/null || true)"
+    if [[ -n "$shared_index" && -f "$shared_index" ]]; then
+        if cp "$shared_index" "$tmp_index" 2>/dev/null && mv "$tmp_index" "$index_path" 2>/dev/null; then
+            return 0
+        fi
+        rm -f "$tmp_index" 2>/dev/null || true
+    fi
+
+    init_worker_index_from_head "$index_path" "$head_ref"
+}
+
+# If worker index is clean but shared index has staged files, adopt shared staged
+# state for read/commit commands. This handles staging done outside the wrapper
+# (e.g., /usr/bin/git add) without silently skipping pre-commit checks.
+adopt_shared_index_when_worker_clean() {
+    local head_ref="$1"
+    local worker_staged shared_staged
+
+    case "$GIT_SUBCMD" in
+    diff | status | commit) ;;
+    *) return 0 ;;
+    esac
+
+    worker_staged="$(GIT_INDEX_FILE="$WORKER_INDEX_PATH" git_with_globals diff --cached --name-only 2>/dev/null || true)"
+    [[ -n "$worker_staged" ]] && return 0
+
+    # Use --diff-filter=ACMR to detect real staged additions/modifications.
+    # A stale shared index (behind HEAD after another worker commits) shows
+    # deletions in diff --cached which are artifacts, not intentional staging.
+    shared_staged="$(git_with_globals diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)"
+
+    # Also detect intentional deletions (#3255): D entries where the file is
+    # absent from the working tree are real (e.g., /usr/bin/git rm). D entries
+    # where the file exists on disk are stale artifacts from another worker's commit.
+    local has_real_deletion=0
+    if [[ -z "$shared_staged" ]]; then
+        local shared_deletions repo_root
+        shared_deletions="$(git_with_globals diff --cached --name-only --diff-filter=D 2>/dev/null || true)"
+        if [[ -n "$shared_deletions" ]]; then
+            repo_root="$(git_with_globals rev-parse --show-toplevel 2>/dev/null || true)"
+            while IFS= read -r file; do
+                [[ -n "$file" ]] || continue
+                if [[ ! -e "${repo_root}/${file}" ]]; then
+                    has_real_deletion=1
+                    break
+                fi
+            done <<<"$shared_deletions"
+        fi
+    fi
+
+    [[ -n "$shared_staged" || "$has_real_deletion" -eq 1 ]] || return 0
+
+    if init_worker_index_from_shared_or_head "$WORKER_INDEX_PATH" "$head_ref"; then
+        printf '%s\n' "$head_ref" >"$WORKER_INDEX_BASE_FILE" 2>/dev/null || true
+        echo "[git wrapper] WARNING: Worker index W${AI_WORKER_ID} adopted staged entries from shared index; prefer staging via wrapper git." >&2
+    else
+        echo "[git wrapper] WARNING: Failed to adopt shared staged entries for worker index W${AI_WORKER_ID}." >&2
+    fi
+    return 0
+}
+
+# Configure per-worker index isolation for multi-worker staging (#3197).
+# Safety: if HEAD changed since last sync, refresh index. For commit with staged
+# files in a stale index, block and require restage to avoid silent reverts.
+setup_worker_index_isolation() {
+    [[ -n "${AI_WORKER_ID:-}" ]] || return 0
+    [[ "${AI_WORKER_ID:-}" =~ ^[0-9]+$ ]] || return 0
+    [[ -z "${GIT_INDEX_FILE:-}" ]] || return 0
+
+    local head_ref base_head staged_files just_refreshed=0
+    if ! get_worker_index_paths; then
+        return 0
+    fi
+
+    head_ref="$(get_current_head_ref)"
+
+    if [[ ! -f "$WORKER_INDEX_PATH" ]]; then
+        # For read/commit commands, seed from shared index to preserve staged
+        # files created outside the wrapper. For mutating commands, initialize
+        # from HEAD to avoid copying stale stat cache from shared index.
+        if [[ "$GIT_SUBCMD" == "diff" || "$GIT_SUBCMD" == "status" || "$GIT_SUBCMD" == "commit" ]]; then
+            if ! init_worker_index_from_shared_or_head "$WORKER_INDEX_PATH" "$head_ref"; then
+                echo "[git wrapper] WARNING: Failed to initialize worker index; using shared index." >&2
+                return 0
+            fi
+        elif ! init_worker_index_from_head "$WORKER_INDEX_PATH" "$head_ref"; then
+            echo "[git wrapper] WARNING: Failed to initialize worker index; using shared index." >&2
+            return 0
+        fi
+        printf '%s\n' "$head_ref" >"$WORKER_INDEX_BASE_FILE" 2>/dev/null || true
+    else
+        base_head=""
+        if [[ -f "$WORKER_INDEX_BASE_FILE" ]]; then
+            base_head="$(cat "$WORKER_INDEX_BASE_FILE" 2>/dev/null || true)"
+        fi
+
+        if [[ "$base_head" != "$head_ref" ]]; then
+            local diff_base="$base_head"
+            if [[ -z "$diff_base" ]]; then
+                diff_base="$head_ref"
+            fi
+            staged_files="$(GIT_INDEX_FILE="$WORKER_INDEX_PATH" git_with_globals diff --cached --name-only "$diff_base" 2>/dev/null || true)"
+
+            if ! init_worker_index_from_head "$WORKER_INDEX_PATH" "$head_ref"; then
+                echo "[git wrapper] WARNING: Failed to refresh stale worker index; using shared index." >&2
+                return 0
+            fi
+            printf '%s\n' "$head_ref" >"$WORKER_INDEX_BASE_FILE" 2>/dev/null || true
+            just_refreshed=1
+
+            if [[ -n "$staged_files" ]]; then
+                if [[ "$GIT_SUBCMD" == "commit" ]]; then
+                    echo "ERROR: Worker index W${AI_WORKER_ID} was refreshed after HEAD changed." >&2
+                    echo "  Restage and recommit these files:" >&2
+                    while IFS= read -r file; do
+                        [[ -n "$file" ]] && echo "    $file" >&2
+                    done <<<"$staged_files"
+                    return 1
+                fi
+                echo "[git wrapper] WARNING: Worker index W${AI_WORKER_ID} refreshed after HEAD changed; re-stage intended files." >&2
+            fi
+        fi
+    fi
+
+    # Skip adoption if index was just refreshed due to HEAD change (#3246).
+    # Adopting shared index after a refresh can undo the safety reset.
+    if [[ "$just_refreshed" -eq 0 ]]; then
+        adopt_shared_index_when_worker_clean "$head_ref"
+    fi
+
+    export GIT_INDEX_FILE="$WORKER_INDEX_PATH"
+    return 0
+}
+
 ensure_commit_msg_hook() {
     local repo_root hook_source hooks_dir hook_target
-    repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null || true)"
+    repo_root="$(git_with_globals rev-parse --show-toplevel 2>/dev/null || true)"
     [[ -z "$repo_root" ]] && return 0
 
     hook_source="$repo_root/ai_template_scripts/commit-msg-hook.sh"
     [[ -f "$hook_source" ]] || return 0
 
-    hooks_dir="$("$REAL_GIT" rev-parse --git-path hooks 2>/dev/null || echo "$repo_root/.git/hooks")"
+    hooks_dir="$(git_with_globals rev-parse --git-path hooks 2>/dev/null || echo "$repo_root/.git/hooks")"
+    if [[ "$hooks_dir" != /* ]]; then
+        hooks_dir="${repo_root}/${hooks_dir#./}"
+    fi
     hook_target="$hooks_dir/commit-msg"
 
     # Install if missing, not executable, or stale compared to source (#2958).
@@ -338,6 +572,19 @@ ensure_commit_msg_hook() {
 # $1 would be "-C", not "commit".
 parse_git_subcommand "$@"
 
+# Extract global args (everything before the subcommand).
+# Needed for helper git calls that must honor -C/--git-dir context.
+GLOBAL_ARGS=()
+if [[ $GIT_SUBCMD_POS -gt 1 ]]; then
+    local_pos=0
+    for arg in "$@"; do
+        local_pos=$((local_pos + 1))
+        if [[ $local_pos -lt $GIT_SUBCMD_POS ]]; then
+            GLOBAL_ARGS+=("$arg")
+        fi
+    done
+fi
+
 # Extract subcommand-specific args (everything after the subcommand).
 # Guards must iterate SUBCMD_ARGS, not "$@", to avoid confusing global flags
 # (e.g., -C <path>) with subcommand flags (e.g., switch -C <branch>).
@@ -354,6 +601,13 @@ fi
 
 # Save original args for passthrough to real git (includes global flags).
 ORIG_ARGS=("$@")
+
+# Multi-worker safety: isolate index for commands that read/write staged state.
+if needs_index_isolation; then
+    if ! setup_worker_index_isolation; then
+        exit 1
+    fi
+fi
 
 # Dispatch on the actual subcommand (not $1 which may be a global flag)
 case "$GIT_SUBCMD" in
@@ -373,8 +627,11 @@ branch)
             new_name=""
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                -*) shift ;;  # skip additional flags (e.g. --force)
-                *)  new_name="$1"; shift ;;
+                -*) shift ;; # skip additional flags (e.g. --force)
+                *)
+                    new_name="$1"
+                    shift
+                    ;;
                 esac
             done
             if [[ -n "$new_name" ]]; then
@@ -513,7 +770,7 @@ EOF
 
     # Multi-worker mode: additional check for files not tracked by this worker
     if [[ -n "${AI_WORKER_ID:-}" ]]; then
-        repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null || pwd)"
+        repo_root="$(git_with_globals rev-parse --show-toplevel 2>/dev/null || pwd)"
         tracker_file="$repo_root/.worker_${AI_WORKER_ID}_files.json"
 
         # Check specific files against tracker
@@ -586,11 +843,33 @@ commit)
     COMMIT_MSG=""
     PREV_ARG=""
     for arg in "${SUBCMD_ARGS[@]}"; do
-        if [[ "$PREV_ARG" == "-m" ]]; then
+        if [[ "$PREV_ARG" == "-m" || "$PREV_ARG" == "--message" ]]; then
             COMMIT_MSG="$arg"
             break
-        elif [[ "$PREV_ARG" == "-F" && -f "$arg" ]]; then
-            COMMIT_MSG="$(cat "$arg" 2>/dev/null || true)"
+        elif [[ "$PREV_ARG" == "-F" || "$PREV_ARG" == "--file" ]]; then
+            if [[ -f "$arg" ]]; then
+                COMMIT_MSG="$(cat "$arg" 2>/dev/null || true)"
+            fi
+            break
+        elif [[ "$arg" == --message=* ]]; then
+            COMMIT_MSG="${arg#--message=}"
+            break
+        elif [[ "$arg" == --file=* ]]; then
+            _FPATH="${arg#--file=}"
+            if [[ -f "$_FPATH" ]]; then
+                COMMIT_MSG="$(cat "$_FPATH" 2>/dev/null || true)"
+            fi
+            break
+        elif [[ "$arg" == -m* && ${#arg} -gt 2 ]]; then
+            # Concatenated short-form: -m"msg" or -mmsg
+            COMMIT_MSG="${arg:2}"
+            break
+        elif [[ "$arg" == -F* && ${#arg} -gt 2 ]]; then
+            # Concatenated short-form: -Fpath
+            _FPATH="${arg:2}"
+            if [[ -f "$_FPATH" ]]; then
+                COMMIT_MSG="$(cat "$_FPATH" 2>/dev/null || true)"
+            fi
             break
         fi
         PREV_ARG="$arg"
@@ -637,7 +916,7 @@ commit)
 
     # Serialize commits with per-repo lock to prevent cross-session collisions
     if [[ -z "${AIT_GIT_LOCK_DISABLE:-}" ]]; then
-        GIT_DIR="$("$REAL_GIT" rev-parse --absolute-git-dir 2>/dev/null || true)"
+        GIT_DIR="$(git_with_globals rev-parse --absolute-git-dir 2>/dev/null || true)"
         if [[ -n "$GIT_DIR" ]]; then
             LOCK_DIR="${GIT_DIR}/ait_commit_lock"
             LOCK_PID_FILE="${LOCK_DIR}/pid"
@@ -647,6 +926,11 @@ commit)
             else
                 LOCK_WAIT_S="$(get_git_lock_wait_sec)"
             fi
+            LOCK_STATUS_INTERVAL_S="${AIT_GIT_LOCK_STATUS_INTERVAL_S:-60}"
+            if [[ ! "$LOCK_STATUS_INTERVAL_S" =~ ^[0-9]+$ ]] || [[ "$LOCK_STATUS_INTERVAL_S" -le 0 ]]; then
+                LOCK_STATUS_INTERVAL_S="60"
+            fi
+            LOCK_REPO_NAME="${AI_PROJECT:-$(basename "$(git_with_globals rev-parse --show-toplevel 2>/dev/null || pwd)")}"
             START_TS="$(date +%s)"
 
             LAST_STATUS_TS="$START_TS"
@@ -669,15 +953,15 @@ commit)
 
                 NOW_TS="$(date +%s)"
                 if ((NOW_TS - START_TS >= LOCK_WAIT_S)); then
-                    echo "ERROR: Timed out waiting for git commit lock at $LOCK_DIR" >&2
+                    echo "[git commit lock] ERROR: Timed out waiting for lock on ${LOCK_REPO_NAME} (${LOCK_WAIT_S}s)" >&2
                     echo "   Set AIT_GIT_LOCK_DISABLE=1 to bypass if lock is stale." >&2
                     exit 1
                 fi
 
                 # Emit progress every 60s to prevent looper silence timeout
-                if ((NOW_TS - LAST_STATUS_TS >= 60)); then
+                if ((NOW_TS - LAST_STATUS_TS >= LOCK_STATUS_INTERVAL_S)); then
                     WAITED=$((NOW_TS - START_TS))
-                    echo "[git commit lock] Waiting for lock... (${WAITED}s/${LOCK_WAIT_S}s)" >&2
+                    echo "[git commit lock] Waiting for lock on ${LOCK_REPO_NAME}... (${WAITED}s/${LOCK_WAIT_S}s)" >&2
                     LAST_STATUS_TS="$NOW_TS"
                 fi
 
@@ -714,7 +998,7 @@ status)
 
     # Only show ownership info when status succeeded, in a repo, and human format
     if [[ $status_exit -eq 0 ]] && ! $is_machine_format; then
-        repo_root="$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null)" || repo_root=""
+        repo_root="$(git_with_globals rev-parse --show-toplevel 2>/dev/null)" || repo_root=""
 
         if [[ -n "$repo_root" ]]; then
             # Check for tracker files

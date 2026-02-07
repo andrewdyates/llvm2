@@ -35,7 +35,7 @@ Status update from <project>:
 
 Check worker log status:
 ```bash
-tail -200 worker_logs/worker_*_iter_*.jsonl | ./ai_template_scripts/json_to_text.py
+tail -200 worker_logs/worker_*_iter_*.jsonl | python3 -m ai_template_scripts.json_to_text
 ```
 
 Classify: Productive (reading/writing/committing) | Blocked (build/test/cargo) | Stuck (looping, no progress)

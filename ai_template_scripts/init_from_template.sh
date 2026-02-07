@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates
 # Licensed under the Apache License, Version 2.0
@@ -57,14 +53,23 @@ usage() {
 
 # Parse args first
 case "${1:-}" in
-    --version) version ;;
-    -h|--help) usage ;;
-    --check-deps|--verify|"") ;; # Valid options or no option
-    -*) echo "ERROR: Unknown option: $1"; exit 1 ;;
-    *) echo "ERROR: Unexpected argument: $1"; exit 1 ;;
+--version) version ;;
+-h | --help) usage ;;
+--check-deps | --verify | "") ;; # Valid options or no option
+-*)
+    echo "ERROR: Unknown option: $1"
+    exit 1
+    ;;
+*)
+    echo "ERROR: Unexpected argument: $1"
+    exit 1
+    ;;
 esac
 
-[[ -f "CLAUDE.md" ]] || { echo "ERROR: Run from project root"; exit 1; }
+[[ -f "CLAUDE.md" ]] || {
+    echo "ERROR: Run from project root"
+    exit 1
+}
 
 # SAFETY: Refuse to run in ai_template itself (#2202)
 # Note: .ai_template_self directory IS tracked in git and is copied to fresh clones.
@@ -137,9 +142,9 @@ find postmortems -name '*.md' ! -name 'TEMPLATE.md' -delete 2>/dev/null || true
 find tests -name '*.py' ! -name 'test_example.py' ! -name 'conftest.py' ! -name '__init__.py' -delete 2>/dev/null || true
 
 # Create ideas directory with README (replaces obsolete IDEAS.md)
-rm -f IDEAS.md  # Remove obsolete file if present
+rm -f IDEAS.md # Remove obsolete file if present
 mkdir -p ideas
-cat > ideas/README.md << EOF
+cat >ideas/README.md <<EOF
 # Ideas
 
 Copyright $AIT_COPYRIGHT_YEAR ${AIT_COPYRIGHT_HOLDER:-$AIT_OWNER_NAME}
@@ -160,7 +165,7 @@ Future considerations and backlog items. These are NOT actionable tasks.
 EOF
 
 # Create VISION.md template
-cat > VISION.md << 'EOF'
+cat >VISION.md <<'EOF'
 # Vision: <project>
 
 > One-sentence mission statement. What does success look like?
@@ -211,7 +216,7 @@ External benchmarks, not internal vanity metrics.
 EOF
 
 # Flush README.md to template
-cat > README.md << 'EOF'
+cat >README.md <<'EOF'
 # Project Name
 
 One-line description.
@@ -319,19 +324,19 @@ _apply_init_identity_substitution() {
     rm -f "${dst}.bak"
 }
 
-# Check if current identity differs from template defaults AND is not just placeholder defaults.
-# identity.sh returns placeholders ("Your Name", "your-org") when no ait_identity.toml exists.
-# We must not substitute placeholder values into CLAUDE.md.
+# Check if current identity differs from template defaults.
+# identity.sh returns hardcoded Dropbox defaults when no ait_identity.toml exists.
+# If identity matches the template defaults, no substitution is needed.
 _INIT_IDENTITY_DIFFERS=false
-if [[ "$AIT_GITHUB_ORG" == "your-org" || "$AIT_OWNER_NAME" == "Your Name" ]]; then
-    # Still using identity.sh placeholder defaults — user hasn't customized yet
+if [[ "$AIT_GITHUB_ORG" == "dropbox-ai-prototypes" && "$AIT_OWNER_NAME" == "Andrew Yates" ]]; then
+    # Using default identity — no substitution needed
     _INIT_IDENTITY_DIFFERS=false
-elif [[ "$AIT_GITHUB_ORG" != "$_TMPL_GITHUB_ORG" || \
-        "$AIT_OWNER_NAME" != "$_TMPL_OWNER_NAME" || \
-        "$AIT_OWNER_EMAIL" != "$_TMPL_OWNER_EMAIL" || \
-        "$AIT_COMPANY_NAME" != "$_TMPL_COMPANY_NAME" || \
-        "$AIT_COMPANY_ABBREV" != "$_TMPL_COMPANY_ABBREV" || \
-        "$AIT_OWNER_USERNAMES" != "$_TMPL_OWNER_USERNAMES" ]]; then
+elif [[ "$AIT_GITHUB_ORG" != "$_TMPL_GITHUB_ORG" ||
+    "$AIT_OWNER_NAME" != "$_TMPL_OWNER_NAME" ||
+    "$AIT_OWNER_EMAIL" != "$_TMPL_OWNER_EMAIL" ||
+    "$AIT_COMPANY_NAME" != "$_TMPL_COMPANY_NAME" ||
+    "$AIT_COMPANY_ABBREV" != "$_TMPL_COMPANY_ABBREV" ||
+    "$AIT_OWNER_USERNAMES" != "$_TMPL_OWNER_USERNAMES" ]]; then
     _INIT_IDENTITY_DIFFERS=true
 fi
 
@@ -346,7 +351,7 @@ if [[ "$_INIT_IDENTITY_DIFFERS" == "true" ]]; then
     for f in "${_INIT_SUB_FILES[@]}"; do
         if [[ -f "$f" ]]; then
             _apply_init_identity_substitution "$f"
-            (( _sub_count++ ))
+            ((_sub_count++))
         fi
     done
     echo "  Substituted identity in $_sub_count file(s)"

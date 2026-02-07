@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -24,19 +20,96 @@ Not used during normal looper operation - purely a development tool.
 
 from __future__ import annotations
 
-__all__ = ["show_prompt"]
+__all__ = ["assemble_full_prompt", "show_prompt"]
 
 from pathlib import Path
 
 from looper.config import (
     ROLES_DIR,
     build_claude_autoload_context,
+    build_codex_context,
     inject_content,
     load_role_config,
     parse_frontmatter,
 )
 from looper.context import run_session_start_commands
+from looper.context.helpers import enforce_prompt_budget
 from looper.rotation import get_rotation_focus
+
+
+def assemble_full_prompt(role: str, backend: str = "claude") -> str:
+    """Assemble the complete prompt that an AI session receives.
+
+    Consolidates the full assembly pipeline into one callable function:
+    1. Load role config and prompt template
+    2. Gather injection content (git log, issues, directives, etc.)
+    3. Calculate rotation focus
+    4. Build replacements dict and enforce prompt budget
+    5. Inject content into template
+    6. Prepend backend-specific context (autoload for claude, codex context for codex)
+
+    Args:
+        role: AI role (worker, manager, prover, researcher)
+        backend: Target backend ("claude" or "codex")
+
+    Returns:
+        The complete assembled prompt string
+    """
+    # 1. Load role config
+    config, prompt_template = load_role_config(role)
+
+    # 2. Gather injection content
+    session_results = run_session_start_commands(role)
+
+    # 3. Calculate rotation focus
+    rotation_type = config.get("rotation_type", "")
+    rotation_phases = config.get("rotation_phases", [])
+    freeform_frequency = config.get("freeform_frequency", 3)
+    force_phase = config.get("force_phase")
+    starvation_hours = config.get("starvation_hours", 24)
+
+    rotation_focus, _selected_phase = get_rotation_focus(
+        iteration=1,
+        rotation_type=rotation_type,
+        phases=rotation_phases,
+        phase_data=config.get("phase_data", {}),
+        role=role,
+        freeform_frequency=freeform_frequency,
+        force_phase=force_phase,
+        starvation_hours=starvation_hours,
+    )
+
+    # 4. Build replacements and enforce budget
+    audit_min_issues = config.get("audit_min_issues", 3)
+    replacements = {
+        "git_log": session_results.get("git_log", "(unavailable)"),
+        "gh_issues": session_results.get("gh_issues", "(unavailable)"),
+        "active_issue": session_results.get("active_issue", ""),
+        "last_directive": session_results.get("last_directive", ""),
+        "other_feedback": session_results.get("other_feedback", ""),
+        "role_mentions": session_results.get("role_mentions", ""),
+        "system_status": session_results.get("system_status", ""),
+        "audit_data": session_results.get("audit_data", ""),
+        "rotation_focus": rotation_focus,
+        "audit_min_issues": str(audit_min_issues),
+        "recovery_context": "",
+        "theme_context": "",
+        "handoff_context": session_results.get("handoff_context", ""),
+    }
+    replacements = enforce_prompt_budget(replacements)
+
+    # 5. Inject content into template
+    looper_prompt = inject_content(prompt_template, replacements)
+
+    # 6. Backend dispatch
+    if backend == "codex":
+        codex_context = build_codex_context()
+        return codex_context + looper_prompt
+    else:
+        autoload_context = build_claude_autoload_context()
+        if autoload_context:
+            return autoload_context + "\n\n" + looper_prompt
+        return looper_prompt
 
 
 def show_prompt(mode: str) -> None:

@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -118,6 +114,17 @@ AI_ENVIRONMENT_VARS = [
     "AI_FLEET_CONFIG_DIR",
     "AIT_VERSION",
     "PROJECT_ROOT",
+    "AI_PHASE",
+    "AI_INPUT_ISSUES",
+    "AI_THEME",
+    "AIT_LOCAL_MODE",
+    "CLAUDE_CODE_VERSION",
+    "AIT_SYNCED",
+    # Git identity vars set by looper/runner_git.py — leak causes #2958 mismatch
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
 ]
 
 

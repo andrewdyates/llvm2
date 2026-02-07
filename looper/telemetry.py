@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -25,6 +21,7 @@ __all__ = [
 ]
 
 import json
+import math
 import os
 import re
 import time
@@ -76,11 +73,22 @@ _PRIMARY_WORK_PATTERN = re.compile(r"(Fixes|Part of)\s+#", re.IGNORECASE)
 
 
 def _coerce_int(value: object, default: int, min_value: int | None = None) -> int:
-    """Safely convert value to int, returning default on failure or below min."""
+    """Safely convert value to int, returning default on failure or below min.
+
+    Handles float-like strings (e.g. "60.0") by trying float conversion
+    first, then truncating to int (#3137).
+    """
     try:
         coerced: int = int(str(value))
     except (TypeError, ValueError):
-        return default
+        # Fall back to float→int for strings like "60.0"
+        try:
+            f = float(str(value))
+        except (TypeError, ValueError):
+            return default
+        if not math.isfinite(f):
+            return default
+        coerced = int(f)
     if min_value is not None and coerced < min_value:
         return default
     return coerced
@@ -89,10 +97,12 @@ def _coerce_int(value: object, default: int, min_value: int | None = None) -> in
 def _coerce_float(
     value: object, default: float, min_value: float | None = None
 ) -> float:
-    """Safely convert value to float, returning default on failure or at/below min."""
+    """Safely convert value to float, returning default on failure or non-finite (#3137)."""
     try:
         coerced: float = float(str(value))
     except (TypeError, ValueError):
+        return default
+    if not math.isfinite(coerced):
         return default
     if min_value is not None and coerced <= min_value:
         return default
@@ -112,6 +122,22 @@ def _coerce_bool(value: object) -> bool:
         if normalized in {"false", "0", "no", "n", ""}:
             return False
     return False
+
+
+def _coerce_optional_str(value: object) -> str | None:
+    """Coerce to str or None. Non-string truthy values become str; None stays None (#3137)."""
+    if value is None:
+        return None
+    s = str(value)
+    return s if s and s != "None" else None
+
+
+def _coerce_str(value: object) -> str:
+    """Coerce to str, mapping None to empty string (#3137)."""
+    if value is None:
+        return ""
+    s = str(value)
+    return "" if s == "None" else s
 
 
 def _empty_role_counts() -> dict[str, int]:
@@ -258,9 +284,10 @@ def update_oversight_metrics() -> None:
                 "oversight_ratio_updated_at": datetime.now().isoformat(),
             }
         )
-        if isinstance(since_ts, (int, float)):
+        persisted_since = state.get("above_threshold_since")
+        if isinstance(persisted_since, (int, float)):
             metrics["oversight_ratio_above_threshold_since"] = datetime.fromtimestamp(
-                since_ts
+                persisted_since
             ).isoformat()
         else:
             metrics["oversight_ratio_above_threshold_since"] = None
@@ -593,14 +620,14 @@ def get_audit_overhead_state() -> AuditOverheadState | None:
         state_str = "healthy"
     return AuditOverheadState(
         state=state_str,
-        ratio=float(persisted.get("ratio", 0.0)),
-        window_commits=int(persisted.get("window_commits", 0)),
-        audit_like_commits=int(persisted.get("audit_like_commits", 0)),
-        primary_commits=int(persisted.get("primary_commits", 0)),
-        triggered_at=persisted.get("triggered_at"),
-        last_transition_at=str(persisted.get("last_transition_at", "")),
-        consecutive_above_trigger=int(persisted.get("consecutive_above_trigger", 0)),
-        consecutive_below_clear=int(persisted.get("consecutive_below_clear", 0)),
+        ratio=_coerce_float(persisted.get("ratio"), 0.0),
+        window_commits=_coerce_int(persisted.get("window_commits"), 0, min_value=0),
+        audit_like_commits=_coerce_int(persisted.get("audit_like_commits"), 0, min_value=0),
+        primary_commits=_coerce_int(persisted.get("primary_commits"), 0, min_value=0),
+        triggered_at=_coerce_optional_str(persisted.get("triggered_at")),
+        last_transition_at=_coerce_str(persisted.get("last_transition_at")),
+        consecutive_above_trigger=_coerce_int(persisted.get("consecutive_above_trigger"), 0, min_value=0),
+        consecutive_below_clear=_coerce_int(persisted.get("consecutive_below_clear"), 0, min_value=0),
     )
 
 

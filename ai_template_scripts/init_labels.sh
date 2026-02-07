@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -88,6 +84,10 @@ LABELS=(
     "urgent|D93F0B|Work on NOW"
     "in-progress|1D76DB|Currently claimed"
     "do-audit|FBCA04|Ready for self-audit (Worker only)"
+    # Issue type labels
+    "bug|D73A4A|Bug report"
+    "feature|0E8A16|Feature request"
+    "documentation|0075CA|Documentation improvement"
     # Ownership labels (orthogonal to state - kept through workflow)
     # Worker ownership (W1-W5)
     "W1|C5DEF5|Owned by Worker 1"

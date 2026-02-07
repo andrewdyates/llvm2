@@ -1,8 +1,4 @@
 #!/bin/bash
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates
 # Licensed under the Apache License, Version 2.0
@@ -139,22 +135,55 @@ if [[ -n "$VERIFIED_SECTION" ]]; then
         echo "" >&2
         exit 1
     fi
-    # Check for backtick command substitution
-    if echo "$VERIFIED_SECTION" | grep -qE '\`[^\`]+\`'; then
-        PLACEHOLDER=$(echo "$VERIFIED_SECTION" | grep -oE '\`[^\`]+\`' | head -1)
-        echo "" >&2
-        echo "❌ ERROR: ## Verified contains backtick command substitution: $PLACEHOLDER" >&2
-        echo "" >&2
-        echo "   Per #1879: ## Verified must contain ACTUAL command output you ran." >&2
-        echo "   Backticks cause command substitution - this may inject unexpected content." >&2
-        echo "" >&2
-        echo "   Fix: Use a heredoc with single-quoted delimiter to prevent substitution:" >&2
-        echo "     git commit -m \"\$(cat <<'EOF'" >&2
-        echo "     ... message with actual output ..." >&2
-        echo "     EOF" >&2
-        echo "     )\"" >&2
-        echo "" >&2
-        exit 1
+    # WARN: Detect ## Verified command lines missing output (#3079).
+    # Per #1879, commands in ## Verified should include their real output.
+    # Skip section-level checks for N/A and fenced code blocks.
+    VERIFIED_BODY=$(echo "$VERIFIED_SECTION" | sed '1d') # Strip "## Verified" header
+    if [[ -n "$VERIFIED_BODY" ]]; then
+        _has_code_block=false
+        if echo "$VERIFIED_BODY" | grep -qE '^[[:space:]]*```'; then
+            _has_code_block=true
+        fi
+
+        _is_na=false
+        _non_blank_verified=$(echo "$VERIFIED_BODY" | sed '/^[[:space:]]*$/d')
+        if [[ "$(echo "$_non_blank_verified" | wc -l | tr -d '[:space:]')" -eq 1 ]] &&
+            echo "$_non_blank_verified" | grep -qiE '^[[:space:]]*N/A[[:space:]]*$'; then
+            _is_na=true
+        fi
+
+        if [[ "$_is_na" == "false" && "$_has_code_block" == "false" ]]; then
+            _cmd_lines=0
+            _missing_output=0
+            _awaiting_output=false
+
+            while IFS= read -r _line; do
+                if echo "$_line" | grep -qE '^[[:space:]]*([-*$])[[:space:]]'; then
+                    if [[ "$_awaiting_output" == "true" ]]; then
+                        _missing_output=$((_missing_output + 1))
+                    fi
+                    _cmd_lines=$((_cmd_lines + 1))
+                    _awaiting_output=true
+                    continue
+                fi
+
+                if [[ "$_awaiting_output" == "true" ]] && [[ ! "$_line" =~ ^[[:space:]]*$ ]]; then
+                    _awaiting_output=false
+                fi
+            done <<<"$VERIFIED_BODY"
+
+            if [[ "$_awaiting_output" == "true" ]]; then
+                _missing_output=$((_missing_output + 1))
+            fi
+
+            if [[ "$_cmd_lines" -gt 0 && "$_missing_output" -gt 0 ]]; then
+                echo "" >&2
+                echo "[WARN] ## Verified has $_missing_output of $_cmd_lines command(s) without output (#3079)" >&2
+                echo "   Per #1879: Include at least one line of output per command" >&2
+                echo "   (pass count, exit code, or explicit 'no output' statement)." >&2
+                echo "" >&2
+            fi
+        fi
     fi
 fi
 
@@ -689,7 +718,7 @@ if ! git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
         # Ignore markdown section headers (e.g., "## Changes") and only match whole
         # action words/inflections to avoid substring false positives (prefix -> fix).
         MSG_CONTENT_FOR_CLAIMS=$(echo "$MSG_LOWER" | grep -vE '^[[:space:]]*##[[:space:]]+' || true)
-        CHANGE_KEYWORD_PATTERN='(^|[^[:alnum:]_-])(add(ed|ing|s)?|remov(e|ed|es|ing)|fix(ed|es|ing)?|updat(e|ed|es|ing)|refactor(ed|s|ing)?|renam(e|ed|es|ing)|delet(e|ed|es|ing)|creat(e|ed|es|ing)|implement(ed|s|ing)?|chang(e|ed|es|ing)|modif(y|ied|ies|ying)|mov(e|ed|es|ing)|extend(ed|s|ing)?|enhanc(e|ed|es|ing))($|[^[:alnum:]_])'
+        CHANGE_KEYWORD_PATTERN='(^|[^[:alnum:]_-])(add(ed|ing|s)?|remov(e|ed|es|ing)|fix(ed|es|ing)?|update[ds]?|updating|refactor(ed|s|ing)?|rename[ds]?|renaming|delete[ds]?|deleting|create[ds]?|creating|implement(ed|s|ing)?|change[ds]?|changing|modif(y|ied|ies|ying)|mov(e|ed|es|ing)|extend(ed|s|ing)?|enhance[ds]?|enhancing)($|[^[:alnum:]_])'
         CHANGE_KEYWORDS=$(echo "$MSG_CONTENT_FOR_CLAIMS" | grep -oE "$CHANGE_KEYWORD_PATTERN" | sed -E 's/^[^[:alnum:]_]+//; s/[^[:alnum:]_]+$//' | head -3 | tr '\n' ',' | sed 's/,$//')
         if [[ -n "$CHANGE_KEYWORDS" ]]; then
             # Error for non-Manager/non-USER roles, warning for Manager/USER
@@ -736,8 +765,8 @@ if [[ ${#STAGED_FILES_ARRAY[@]} -gt 0 ]]; then
         # Extract file paths: alphanumeric sequences ending in common extensions
         # Matches both paths (foo/bar.py) and bare filenames (README.md)
         # grep -oE already excludes backticks/parens/colons (not in character class)
-        MENTIONED_FILES=$(echo "$CHANGES_SECTION" | \
-            grep -oE '[A-Za-z0-9_./-]+\.(py|rs|sh|toml|json|yaml|yml|md|ts|js|cfg)' | \
+        MENTIONED_FILES=$(echo "$CHANGES_SECTION" |
+            grep -oE '[A-Za-z0-9_./-]+\.(py|rs|sh|toml|json|yaml|yml|md|ts|js|cfg)' |
             sort -u || true)
         if [[ -n "$MENTIONED_FILES" ]]; then
             PHANTOM_FILES=""
@@ -754,7 +783,7 @@ if [[ ${#STAGED_FILES_ARRAY[@]} -gt 0 ]]; then
                 if [[ "$FOUND" -eq 0 ]]; then
                     PHANTOM_FILES="${PHANTOM_FILES}  - ${mentioned}\n"
                 fi
-            done <<< "$MENTIONED_FILES"
+            done <<<"$MENTIONED_FILES"
             if [[ -n "$PHANTOM_FILES" ]]; then
                 echo "" >&2
                 echo "⚠️  WARNING: ## Changes mentions files not in staged diff" >&2

@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -36,6 +32,7 @@ from looper.log import debug_swallow, log_info, log_warning
 from looper.subprocess_utils import run_git_command
 
 __all__ = [
+    "FileTimestamp",
     "FileTracker",
     "TrackerState",
     "cleanup_stale_trackers",
@@ -80,6 +77,26 @@ def _is_valid_file_entry(entry: str) -> bool:
 
 
 @dataclass
+class FileTimestamp:
+    """Per-file tracking timestamps (#3202)."""
+
+    first_seen: str  # ISO 8601 timestamp when file first appeared in tracker
+    last_seen: str  # ISO 8601 timestamp when file was last seen in tracker
+
+    def to_dict(self) -> dict:
+        """Convert to dict for JSON serialization."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> FileTimestamp:
+        """Create from dict (JSON deserialization)."""
+        return cls(
+            first_seen=data.get("first_seen", ""),
+            last_seen=data.get("last_seen", ""),
+        )
+
+
+@dataclass
 class TrackerState:
     """Persisted tracker state."""
 
@@ -88,20 +105,47 @@ class TrackerState:
     pid: int
     files: list[str] = field(default_factory=list)
     updated_at: str = ""
+    iteration: int = 0  # Current iteration number (#3202)
+    commit_count: int = 0  # Commits made this session (#3202)
+    file_timestamps: dict[str, FileTimestamp] = field(default_factory=dict)  # (#3202)
 
     def to_dict(self) -> dict:
         """Convert to dict for JSON serialization."""
-        return asdict(self)
+        d = {
+            "worker_id": self.worker_id,
+            "session_id": self.session_id,
+            "pid": self.pid,
+            "files": self.files,
+            "updated_at": self.updated_at,
+            "iteration": self.iteration,
+            "commit_count": self.commit_count,
+            "file_timestamps": {
+                k: v.to_dict() for k, v in self.file_timestamps.items()
+            },
+        }
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> TrackerState:
-        """Create from dict (JSON deserialization)."""
+        """Create from dict (JSON deserialization).
+
+        Backwards compatible: missing fields get defaults.
+        """
+        raw_ts = data.get("file_timestamps", {})
+        file_timestamps = {}
+        if isinstance(raw_ts, dict):
+            for k, v in raw_ts.items():
+                if isinstance(v, dict):
+                    file_timestamps[k] = FileTimestamp.from_dict(v)
         return cls(
             worker_id=data["worker_id"],
             session_id=data["session_id"],
             pid=data["pid"],
             files=data.get("files", []),
             updated_at=data.get("updated_at", ""),
+            iteration=data.get("iteration", 0),
+            commit_count=data.get("commit_count", 0),
+            file_timestamps=file_timestamps,
         )
 
 
@@ -205,19 +249,57 @@ class FileTracker:
             return False
         return is_process_alive(state.pid)
 
-    def save(self, files: list[str] | None = None) -> bool:
+    def _filter_other_worker_files(self, files: list[str]) -> list[str]:
+        """Filter out infrastructure files belonging to other workers (#3201).
+
+        Removes heartbeat files (.looper_heartbeat_worker_N) and tracker files
+        (.worker_N_files.json) where N != this worker's ID.
+
+        Args:
+            files: List of file paths to filter.
+
+        Returns:
+            Filtered list with only this worker's (or non-worker) files.
+        """
+        filtered = []
+        own_id = str(self.worker_id)
+        for f in files:
+            basename = f.rsplit("/", 1)[-1] if "/" in f else f
+            # Skip other workers' heartbeat files
+            if basename.startswith(".looper_heartbeat_worker_"):
+                suffix = basename[len(".looper_heartbeat_worker_"):]
+                if suffix != own_id:
+                    continue
+            # Skip other workers' tracker files
+            if basename.startswith(".worker_") and basename.endswith("_files.json"):
+                mid = basename[len(".worker_"):-len("_files.json")]
+                if mid != own_id:
+                    continue
+            filtered.append(f)
+        return filtered
+
+    def save(
+        self,
+        files: list[str] | None = None,
+        *,
+        commit_count_delta: int = 0,
+    ) -> bool:
         """Save tracker state atomically.
 
         Args:
             files: List of tracked files. If None, uses current uncommitted files.
+            commit_count_delta: Increment to apply to commit_count (#3202).
 
         ENSURES: Atomic write via temp + rename
         ENSURES: Returns True on success, False on error or conflict
         ENSURES: Display/summary strings are filtered out (#2187)
         """
-        if self._has_conflict():
-            log_warning("Warning: file tracker belongs to another active session")
-            return False
+        # Single load for both conflict check and state merge (#3202 audit)
+        prev_state = self._load_state()
+        if prev_state and prev_state.session_id != self.session_id:
+            if is_process_alive(prev_state.pid):
+                log_warning("Warning: file tracker belongs to another active session")
+                return False
 
         if files is None:
             files = get_uncommitted_files()
@@ -225,6 +307,9 @@ class FileTracker:
         # Filter out display/summary strings (#2187)
         # These can get passed in when tool output is incorrectly captured
         valid_files = [f for f in files if _is_valid_file_entry(f)]
+
+        # Filter out other workers' infrastructure files (#3201)
+        valid_files = self._filter_other_worker_files(valid_files)
         invalid_count = len(files) - len(valid_files)
         if invalid_count > 0:
             log_warning(
@@ -232,12 +317,41 @@ class FileTracker:
                 f"(display strings, not file paths)"
             )
 
+        # Merge per-file timestamps with previous state (#3202)
+        now_iso = datetime.now(UTC).isoformat()
+        prev_timestamps = prev_state.file_timestamps if prev_state else {}
+        prev_commit_count = prev_state.commit_count if prev_state else 0
+
+        file_timestamps: dict[str, FileTimestamp] = {}
+        for f in valid_files:
+            if f in prev_timestamps:
+                # Existing file: preserve first_seen, update last_seen
+                file_timestamps[f] = FileTimestamp(
+                    first_seen=prev_timestamps[f].first_seen,
+                    last_seen=now_iso,
+                )
+            else:
+                # New file: both timestamps set to now
+                file_timestamps[f] = FileTimestamp(
+                    first_seen=now_iso,
+                    last_seen=now_iso,
+                )
+
+        # Get iteration number from env var
+        iteration = 0
+        iter_str = os.environ.get("AI_ITERATION", "")
+        if iter_str.isdigit():
+            iteration = int(iter_str)
+
         state = TrackerState(
             worker_id=self.worker_id,
             session_id=self.session_id,
             pid=self._pid,
             files=sorted(set(valid_files)),
-            updated_at=datetime.now(UTC).isoformat(),
+            updated_at=now_iso,
+            iteration=iteration,
+            commit_count=prev_commit_count + commit_count_delta,
+            file_timestamps=file_timestamps,
         )
 
         try:
@@ -282,9 +396,11 @@ class FileTracker:
         """Remove committed files from tracking.
 
         Called by post-commit hook to clean up committed files.
+        Also increments commit_count (#3202).
 
         ENSURES: Only removes files that were committed
         ENSURES: Returns True on success, False on conflict
+        ENSURES: commit_count incremented by 1
         """
         if self._has_conflict():
             log_warning("Warning: file tracker belongs to another active session")
@@ -295,7 +411,7 @@ class FileTracker:
 
         committed_set = set(committed_files)
         remaining = [f for f in state.files if f not in committed_set]
-        return self.save(remaining)
+        return self.save(remaining, commit_count_delta=1)
 
     def clear(self) -> bool:
         """Clear tracker file entirely.

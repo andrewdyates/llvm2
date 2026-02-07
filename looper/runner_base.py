@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -59,7 +55,7 @@ from looper.file_tracker import (
 )
 from looper.hooks import install_hooks
 from looper.issue_manager import IssueManager
-from looper.iteration import IterationRunner
+from looper.iteration import IterationRunner, ProviderShiftState
 from looper.log import debug_swallow, log_error, log_info, log_warning
 from looper.status import StatusManager
 from ai_template_scripts.subprocess_utils import is_process_alive
@@ -159,6 +155,9 @@ class RunnerBase:
             machine=machine,
         )
 
+        # Provider shift state for automatic failover on overload errors
+        self._provider_shift = ProviderShiftState()
+
         # Working issues from main iteration (for audit context)
         self._working_issues: list[int] = []
 
@@ -248,11 +247,11 @@ class RunnerBase:
             else:
                 log_info(f"  (codex not found, claude only - prob: {codex_prob:.0%})")
 
-        json_to_text = Path("ai_template_scripts/json_to_text.py")
+        json_to_text = Path("ai_template_scripts/json_to_text/__init__.py")
         if not json_to_text.exists():
-            log_error(f"ERROR: {json_to_text} not found")
+            log_error("ERROR: ai_template_scripts/json_to_text package not found")
             sys.exit(1)
-        log_info(f"✓ Found {json_to_text}")
+        log_info("✓ Found ai_template_scripts/json_to_text")
 
         # Check git
         if not shutil.which("git"):
@@ -302,21 +301,35 @@ class RunnerBase:
 
         # Check sync staleness (warn if behind ai_template)
         commits_behind = self.check_sync_staleness()
+        cwd = Path.cwd()
+        fix_cmds = (
+            f"  Fix: ~/ai_template/ai_template_scripts/sync_repo.sh {cwd}\n"
+            f"  Or:  ./ai_template_scripts/self_sync.sh"
+        )
         if commits_behind is not None:
             if commits_behind == 0:
                 log_info("✓ ai_template sync: current")
             elif commits_behind < 50:
                 log_info(f"✓ ai_template sync: {commits_behind} commits behind")
+                log_info(fix_cmds)
             elif commits_behind < 100:
                 log_warning(f"⚠ ai_template sync: {commits_behind} behind - sync?")
+                log_warning(fix_cmds)
             else:
                 # 100+ commits behind: create flag file for health monitoring
                 msg = "sync recommended" if commits_behind < 200 else "STALE"
                 log_warning(
                     f"⚠ ai_template sync: {commits_behind} commits behind - {msg}"
                 )
+                log_warning(fix_cmds)
                 FLAGS_DIR.mkdir(exist_ok=True)
                 (FLAGS_DIR / "sync_stale").write_text(f"{commits_behind}\n")
+                # Auto-sync when severely behind
+                self._try_auto_sync()
+        elif Path(".ai_template_version").exists():
+            # Version file exists but check failed - hint about self_sync
+            log_info("  ai_template sync check inconclusive")
+            log_info(f"  To sync manually: ./ai_template_scripts/self_sync.sh")
 
         # Check for existing instance
         if self.pid_file.exists():
@@ -430,6 +443,42 @@ class RunnerBase:
 
         # Log session START event to audit log (#2369)
         self._log_session_event("START")
+
+    def _try_auto_sync(self) -> None:
+        """Attempt automatic self-sync when severely behind ai_template.
+
+        Runs self_sync.sh if available. Non-blocking: logs result and continues
+        regardless of outcome. Only called once per startup.
+        """
+        self_sync = Path("ai_template_scripts/self_sync.sh")
+        if not self_sync.exists():
+            log_info("  (self_sync.sh not available for auto-sync)")
+            return
+        if not os.access(self_sync, os.X_OK):
+            log_warning(f"⚠ {self_sync} exists but is not executable")
+            return
+
+        log_info("Auto-syncing from remote ai_template...")
+        try:
+            result = subprocess.run(
+                [str(self_sync)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode == 0:
+                log_info("✓ Auto-sync completed successfully")
+            else:
+                stderr = (result.stderr or "").strip()
+                log_warning(f"⚠ Auto-sync failed (exit {result.returncode}): {stderr}")
+                cwd = Path.cwd()
+                log_warning(
+                    f"  Manual fix: ~/ai_template/ai_template_scripts/sync_repo.sh {cwd}"
+                )
+        except subprocess.TimeoutExpired:
+            log_warning("⚠ Auto-sync timed out after 120s")
+        except Exception as e:
+            log_warning(f"⚠ Auto-sync error: {e}")
 
     def _check_and_clear_headless_violations(self) -> None:
         """Check for headless violation flags and inject correction context.

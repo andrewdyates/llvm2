@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -20,6 +16,7 @@ import re
 import warnings
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Literal
 
 from looper.log import log_warning
@@ -264,43 +261,54 @@ def get_staged_files() -> list[str]:
 
 
 def get_uncommitted_line_count() -> int:
-    """Get total lines of uncommitted changes (staged + unstaged).
+    """Get total lines of uncommitted changes (staged + unstaged + untracked).
 
     Used for mid-session commit reminders. Returns 0 on error.
 
     REQUIRES: Called from within a git repository
     ENSURES: Returns non-negative integer
     ENSURES: Returns 0 on git error or no changes
-    ENSURES: Result = insertions + deletions
+    ENSURES: Result = insertions + deletions + untracked file lines
 
     Returns:
-        Total lines added + deleted in uncommitted changes.
+        Total lines added + deleted in uncommitted changes, plus lines
+        in untracked files.
     """
-    # Get diff stat for all changes (staged + unstaged)
-    result = run_git_command(["diff", "HEAD", "--stat"], timeout=10)
-    if not result.ok or not result.value:
-        return 0
-
-    # Parse "X files changed, Y insertions(+), Z deletions(-)" line
-    # Example: "3 files changed, 150 insertions(+), 30 deletions(-)"
-    # Note: splitlines() returns [] for empty string, while split("\n") returns ['']
-    lines = result.value.strip().splitlines()
-    if not lines:
-        return 0
-
-    # Summary is last line
-    summary = lines[-1]
     total = 0
 
-    # Extract insertions
-    ins_match = re.search(r"(\d+) insertion", summary)
-    if ins_match:
-        total += int(ins_match.group(1))
+    # Get diff stat for tracked changes (staged + unstaged)
+    result = run_git_command(["diff", "HEAD", "--stat"], timeout=10)
+    if result.ok and result.value:
+        # Parse "X files changed, Y insertions(+), Z deletions(-)" line
+        lines = result.value.strip().splitlines()
+        if lines:
+            summary = lines[-1]
+            ins_match = re.search(r"(\d+) insertion", summary)
+            if ins_match:
+                total += int(ins_match.group(1))
+            del_match = re.search(r"(\d+) deletion", summary)
+            if del_match:
+                total += int(del_match.group(1))
 
-    # Extract deletions
-    del_match = re.search(r"(\d+) deletion", summary)
-    if del_match:
-        total += int(del_match.group(1))
+    # Count lines in untracked files (#3138)
+    # Skip files >1MB to avoid memory pressure from large binaries/data
+    _MAX_UNTRACKED_FILE_SIZE = 1_000_000
+    untracked = run_git_command(
+        ["ls-files", "--others", "--exclude-standard"], timeout=10
+    )
+    if untracked.ok and untracked.value:
+        for fname in untracked.value.strip().splitlines():
+            if not fname:
+                continue
+            try:
+                p = Path(fname)
+                if p.stat().st_size > _MAX_UNTRACKED_FILE_SIZE:
+                    continue
+                content = p.read_text(errors="replace")
+                if content:
+                    total += len(content.splitlines())
+            except (OSError, ValueError):
+                pass  # Skip binary/unreadable/missing files
 
     return total
 
@@ -562,6 +570,11 @@ def sync_from_main(config: SyncConfig | None = None) -> SyncResult:
     has_changes = changes_result.value or False
     if has_changes:
         if config.auto_stash:
+            # Snapshot stash depth before push to detect whether a new entry
+            # was created. This is locale-independent — no string matching on
+            # git output which breaks in non-English locales (#3140).
+            stash_count_before = _get_stash_count()
+
             # Auto-stash uncommitted changes
             stash_result = run_git_command(
                 ["stash", "push", "-m", "auto-stash before sync from main"],
@@ -573,7 +586,12 @@ def sync_from_main(config: SyncConfig | None = None) -> SyncResult:
                     branch=branch,
                     reason=f"Failed to stash: {stash_result.error}",
                 )
-            stashed = True
+            # git stash push succeeds with "No local changes to save" when
+            # only untracked files exist (since --include-untracked is not used).
+            # In that case no stash entry is created, so we must not pop later.
+            # Compare stash depth to detect this without parsing locale strings.
+            stash_count_after = _get_stash_count()
+            stashed = stash_count_after > stash_count_before
         else:
             return SyncResult(
                 status=SyncStatus.BLOCKED,
@@ -586,7 +604,18 @@ def sync_from_main(config: SyncConfig | None = None) -> SyncResult:
     # Fetch origin/main
     fetch_result = run_git_command(["fetch", "origin", "main"], timeout=60)
     if not fetch_result.ok:
-        _restore_stash(stashed)
+        stash_conflict = _restore_stash(stashed)
+        if stash_conflict:
+            return SyncResult(
+                status=SyncStatus.CONFLICT,
+                branch=branch,
+                conflict_files=get_conflict_files(),
+                strategy=config.strategy,
+                reason=(
+                    "Failed to fetch origin/main, and stash restore conflicted: "
+                    f"{fetch_result.error}"
+                ),
+            )
         return SyncResult(
             status=SyncStatus.FETCH_FAILED,
             branch=branch,
@@ -596,7 +625,17 @@ def sync_from_main(config: SyncConfig | None = None) -> SyncResult:
     # Check if we're behind
     commits_behind = get_commits_behind(branch, "origin/main")
     if commits_behind is None:
-        _restore_stash(stashed)
+        stash_conflict = _restore_stash(stashed)
+        if stash_conflict:
+            return SyncResult(
+                status=SyncStatus.CONFLICT,
+                branch=branch,
+                conflict_files=get_conflict_files(),
+                strategy=config.strategy,
+                reason=(
+                    "Failed to check commits behind origin/main, and stash restore conflicted"
+                ),
+            )
         return SyncResult(
             status=SyncStatus.ERROR,
             branch=branch,
@@ -604,7 +643,15 @@ def sync_from_main(config: SyncConfig | None = None) -> SyncResult:
         )
 
     if commits_behind == 0:
-        _restore_stash(stashed)
+        stash_conflict = _restore_stash(stashed)
+        if stash_conflict:
+            return SyncResult(
+                status=SyncStatus.CONFLICT,
+                branch=branch,
+                conflict_files=get_conflict_files(),
+                strategy=config.strategy,
+                reason="Already up to date with origin/main, but stash restore conflicted",
+            )
         return SyncResult(
             status=SyncStatus.UP_TO_DATE,
             branch=branch,
@@ -620,7 +667,18 @@ def sync_from_main(config: SyncConfig | None = None) -> SyncResult:
             conflict_files = get_conflict_files()
             # Abort rebase on failure
             run_git_command(["rebase", "--abort"], timeout=10)
-            _restore_stash(stashed)
+            stash_conflict = _restore_stash(stashed)
+            if stash_conflict:
+                return SyncResult(
+                    status=SyncStatus.CONFLICT,
+                    branch=branch,
+                    commits_behind=commits_behind,
+                    conflict_files=get_conflict_files(),
+                    strategy=config.strategy,
+                    reason=(
+                        f"Rebase conflict: {result.error}; stash restore conflicted"
+                    ),
+                )
 
             if config.conflict_action == "continue_diverged":
                 return SyncResult(
@@ -649,7 +707,18 @@ def sync_from_main(config: SyncConfig | None = None) -> SyncResult:
             conflict_files = get_conflict_files()
             # Abort merge on failure
             run_git_command(["merge", "--abort"], timeout=10)
-            _restore_stash(stashed)
+            stash_conflict = _restore_stash(stashed)
+            if stash_conflict:
+                return SyncResult(
+                    status=SyncStatus.CONFLICT,
+                    branch=branch,
+                    commits_behind=commits_behind,
+                    conflict_files=get_conflict_files(),
+                    strategy=config.strategy,
+                    reason=(
+                        f"Merge conflict: {result.error}; stash restore conflicted"
+                    ),
+                )
 
             if config.conflict_action == "continue_diverged":
                 return SyncResult(
@@ -672,15 +741,37 @@ def sync_from_main(config: SyncConfig | None = None) -> SyncResult:
     # Restore stashed changes
     stash_conflict = _restore_stash(stashed)
 
+    if stash_conflict:
+        return SyncResult(
+            status=SyncStatus.CONFLICT,
+            branch=branch,
+            commits_pulled=commits_behind,
+            commits_behind=commits_behind,
+            conflict_files=get_conflict_files(),
+            strategy=config.strategy,
+            reason=f"Synced {commits_behind} commit(s) from main, but stash restore conflicted",
+        )
     return SyncResult(
         status=SyncStatus.SYNCED,
         branch=branch,
         commits_pulled=commits_behind,
         strategy=config.strategy,
         reason=f"Synced {commits_behind} commit(s) from main"
-        + (" (stash restored)" if stashed and not stash_conflict else "")
-        + (" (stash conflict - kept in stash)" if stash_conflict else ""),
+        + (" (stash restored)" if stashed else ""),
     )
+
+
+def _get_stash_count() -> int:
+    """Return the number of stash entries.
+
+    Uses ``git stash list`` line count which is locale-independent (#3140).
+
+    ENSURES: Returns >= 0 (0 if stash is empty or command fails)
+    """
+    result = run_git_command(["stash", "list"], timeout=10)
+    if not result.ok or not result.value:
+        return 0
+    return len(result.value.strip().splitlines())
 
 
 def _restore_stash(stashed: bool) -> bool:

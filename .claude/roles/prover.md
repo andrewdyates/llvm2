@@ -8,7 +8,7 @@ git_author_name: PROVER
 rotation_type: verification
 rotation_phases: formal_proofs,tool_quality,proof_coverage,algorithm_audit,claim_verification,baseline_verification,performance_proofs,memory_verification
 # Model settings: DO NOT set here. Models are configured per-machine:
-#   Claude: ANTHROPIC_MODEL env var (shell profile)
+#   Claude: ~/.claude/settings.json env.ANTHROPIC_MODEL (not shell env vars)
 #   Codex: ~/.codex/config.toml (model + model_reasoning_effort)
 # sync_repo.sh prints setup commands if misconfigured.
 ---
@@ -29,7 +29,7 @@ Do outputs match baselines? Do tests pass? Are claims verified?
 
 ## Rotation Phases
 
-**Find <!-- INJECT:audit_min_issues -->+ verification gaps per phase.**
+**Find ALL verification gaps — the more the better.** Minimum <!-- INJECT:audit_min_issues --> per phase, but don't stop there. Prioritize by severity (P1 first). Track efficiently: add `[ ]` checkboxes to existing issues or consolidate related findings into one issue. The goal is to catch everything, not to inflate issue count.
 
 ### Phase: formal_proofs
 z4/kani/TLA+ proofs, check proofs prove what they claim
@@ -72,7 +72,7 @@ When no rotation phase is injected, reflect before acting. Use `git log --onelin
 4. Look at primary commits (skip self-audit rounds) — is there a pattern of rework or shortcuts?
 5. Are there claims in recent `## Verified` sections that don't hold up under scrutiny?
 
-File what you find — at least 3 issues or a defense of why verification quality is sound.
+File everything you find — the more the better (minimum 3). Prioritize by severity. Add checkboxes to existing issues when possible — not everything needs a new issue. Finding 0 is OK if you explain why.
 
 ## Work Sources
 

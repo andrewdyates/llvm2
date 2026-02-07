@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates
 # Licensed under the Apache License, Version 2.0
@@ -66,9 +62,13 @@ usage() {
     echo "              (Default: all sibling repos of ai_template)"
     echo ""
     echo "Options:"
-    echo "  --files      Also check file-level drift"
+    echo "  --files      Also check file-level drift (or set CHECK_FILES=1)"
     echo "  --exit-code  Exit non-zero if drift found"
+    echo "  --version    Show version information"
     echo "  -h, --help   Show this help message"
+    echo ""
+    echo "Environment variables:"
+    echo "  CHECK_FILES=1  Enable file-level drift check (same as --files)"
     echo ""
     echo "Examples:"
     echo "  $0                           # Check all sibling repos"
@@ -365,7 +365,9 @@ UNTRACKED=0
 AHEAD=0
 DIVERGED=0
 UNKNOWN=0
+ARCHIVED=0
 TOTAL=${#REPOS[@]}
+UNTRACKED_REPO_NAMES=()
 
 printf "%-30s %-10s %-10s %s\n" "REPO" "VERSION" "STATUS" "DETAILS"
 printf "%-30s %-10s %-10s %s\n" "----" "-------" "------" "-------"
@@ -376,12 +378,14 @@ for repo in "${REPOS[@]}"; do
 
     # Skip archived repos
     if is_repo_archived "$repo_name"; then
+        ((ARCHIVED++))
         continue
     fi
 
     if [[ ! -f "$version_file" ]]; then
         printf "%-30s %-10s ${YELLOW}%-10s${NC} %s\n" "$repo_name" "-" "untracked" "no .ai_template_version"
         ((UNTRACKED++))
+        UNTRACKED_REPO_NAMES+=("$repo_name")
         set_exit_status 1
         continue
     fi
@@ -460,7 +464,8 @@ except (ValueError, OSError):
 done
 
 echo ""
-echo "Summary: $UP_TO_DATE current, $BEHIND behind, $UNTRACKED untracked, $AHEAD ahead, $DIVERGED diverged, $UNKNOWN unknown (of $TOTAL repos)"
+CHECKED=$((TOTAL - ARCHIVED))
+echo "Summary: $UP_TO_DATE current, $BEHIND behind, $UNTRACKED untracked, $AHEAD ahead, $DIVERGED diverged, $UNKNOWN unknown (of $CHECKED repos, $ARCHIVED archived skipped)"
 
 NONCURRENT=$((BEHIND + UNTRACKED + AHEAD + DIVERGED + UNKNOWN))
 if [[ $NONCURRENT -gt 0 ]]; then
@@ -479,25 +484,185 @@ if [[ "${CHECK_FILES:-}" == "1" || "${CHECK_FILES:-}" == "true" ]] || [[ "$CHECK
         echo "Warning: .sync_manifest not found, skipping file check"
         set_exit_status 1
     else
-        # Collect files from manifest (skip directories, exclusions, comments)
-        declare -a SYNC_FILES
+        # Parse manifest into include entries, exclusion patterns, and dir entries
+        declare -a MANIFEST_EXACT=()
+        declare -a MANIFEST_GLOBS=()
+        declare -a MANIFEST_DIRS=()
+        declare -a MANIFEST_EXCLUDES=()
         while IFS= read -r line || [[ -n "$line" ]]; do
             line="${line%%#*}"
             line="${line%"${line##*[![:space:]]}"}"
             line="${line#"${line%%[![:space:]]*}"}"
             [[ -z "$line" ]] && continue
-            [[ "$line" == !* ]] && continue
-            [[ "$line" == */ ]] && continue   # Skip directories
-            [[ "$line" == *\** ]] && continue # Skip globs (too complex)
-            SYNC_FILES+=("$line")
+            if [[ "$line" == !* ]]; then
+                MANIFEST_EXCLUDES+=("${line#!}")
+            elif [[ "$line" == */ ]]; then
+                MANIFEST_DIRS+=("$line")
+            elif [[ "$line" == *\** ]] || [[ "$line" == *\?* ]]; then
+                MANIFEST_GLOBS+=("$line")
+            else
+                MANIFEST_EXACT+=("$line")
+            fi
         done <"$MANIFEST"
+
+        # Expand manifest into a flat list of source files (#3064)
+        declare -a SYNC_FILES=()
+
+        # 1. Exact entries (${arr[@]+...} guards empty arrays under bash 3.2 set -u)
+        for entry in ${MANIFEST_EXACT[@]+"${MANIFEST_EXACT[@]}"}; do
+            SYNC_FILES+=("$entry")
+        done
+
+        # 2. Glob entries: expand using bash globbing (respects * as non-recursive)
+        _old_nullglob=$(shopt -p nullglob 2>/dev/null || true)
+        shopt -s nullglob
+        for pattern in ${MANIFEST_GLOBS[@]+"${MANIFEST_GLOBS[@]}"}; do
+            for match in "$AI_TEMPLATE_ROOT"/$pattern; do
+                [[ -f "$match" ]] || continue
+                _rel="${match#"$AI_TEMPLATE_ROOT"/}"
+                SYNC_FILES+=("$_rel")
+            done
+        done
+        eval "$_old_nullglob"
+
+        # 3. Directory entries: enumerate source files recursively
+        for dir_entry in ${MANIFEST_DIRS[@]+"${MANIFEST_DIRS[@]}"}; do
+            _src_dir="$AI_TEMPLATE_ROOT/$dir_entry"
+            [[ ! -d "$_src_dir" ]] && continue
+            while IFS= read -r match; do
+                _rel="${match#"$AI_TEMPLATE_ROOT"/}"
+                SYNC_FILES+=("$_rel")
+            done < <(find "$_src_dir" -type f 2>/dev/null | sort)
+        done
+
+        # Filter through exclusion patterns
+        if [[ ${#MANIFEST_EXCLUDES[@]} -gt 0 && ${#SYNC_FILES[@]} -gt 0 ]]; then
+            declare -a FILTERED_FILES=()
+            for file in "${SYNC_FILES[@]}"; do
+                _excluded=false
+                for excl in "${MANIFEST_EXCLUDES[@]}"; do
+                    # Match trailing-slash exclusions as directory prefixes
+                    if [[ "$excl" == */ ]]; then
+                        [[ "$file" == "$excl"* ]] && _excluded=true && break
+                    # Match glob exclusions (e.g. **/*.pyc)
+                    elif [[ "$file" == $excl ]]; then
+                        _excluded=true && break
+                    fi
+                done
+                [[ "$_excluded" == "false" ]] && FILTERED_FILES+=("$file")
+            done
+            if [[ ${#FILTERED_FILES[@]} -gt 0 ]]; then
+                SYNC_FILES=("${FILTERED_FILES[@]}")
+            else
+                SYNC_FILES=()
+            fi
+        fi
+
+        echo "Checking ${#SYNC_FILES[@]} files from manifest (${#MANIFEST_EXACT[@]} exact, ${#MANIFEST_GLOBS[@]} globs, ${#MANIFEST_DIRS[@]} dirs)"
+
+        # Files eligible for identity substitution (must match sync_repo.sh)
+        IDENTITY_SUB_FILES=(
+            ".claude/rules/ai_template.md"
+            ".claude/roles/manager.md"
+            ".claude/roles/researcher.md"
+        )
+
+        # Check if a file needs identity-aware comparison
+        _is_identity_sub_file() {
+            local file="$1"
+            for pattern in "${IDENTITY_SUB_FILES[@]}"; do
+                [[ "$file" == "$pattern" ]] && return 0
+            done
+            return 1
+        }
+
+        # Load target identity for comparison. Sets TARGET_CHECK_* variables.
+        # Returns 0 if identity differs from source, 1 if same.
+        _load_check_identity() {
+            local target_repo="$1"
+            local target_toml="$target_repo/ait_identity.toml"
+
+            if [[ ! -f "$target_toml" ]]; then
+                return 1  # No identity config → no substitution needed
+            fi
+
+            TARGET_CHECK_OWNER_NAME="$(_ait_toml_get "$target_toml" "owner" "name" "$AIT_OWNER_NAME")"
+            TARGET_CHECK_OWNER_EMAIL="$(_ait_toml_get "$target_toml" "owner" "email" "$AIT_OWNER_EMAIL")"
+            TARGET_CHECK_OWNER_USERNAMES="$(_ait_toml_get_array "$target_toml" "owner" "usernames" "$AIT_OWNER_USERNAMES")"
+            TARGET_CHECK_GITHUB_ORG="$(_ait_toml_get "$target_toml" "org" "github_org" "$AIT_GITHUB_ORG")"
+            TARGET_CHECK_COMPANY_NAME="$(_ait_toml_get "$target_toml" "org" "company_name" "$AIT_COMPANY_NAME")"
+            TARGET_CHECK_COMPANY_ABBREV="$(_ait_toml_get "$target_toml" "org" "abbreviation" "$AIT_COMPANY_ABBREV")"
+
+            if [[ "$TARGET_CHECK_GITHUB_ORG" == "$AIT_GITHUB_ORG" && \
+                  "$TARGET_CHECK_OWNER_NAME" == "$AIT_OWNER_NAME" && \
+                  "$TARGET_CHECK_OWNER_EMAIL" == "$AIT_OWNER_EMAIL" && \
+                  "$TARGET_CHECK_COMPANY_NAME" == "$AIT_COMPANY_NAME" && \
+                  "$TARGET_CHECK_COMPANY_ABBREV" == "$AIT_COMPANY_ABBREV" && \
+                  "$TARGET_CHECK_OWNER_USERNAMES" == "$AIT_OWNER_USERNAMES" ]]; then
+                return 1  # Same identity → no substitution needed
+            fi
+            return 0
+        }
+
+        # Apply identity substitution to a temp copy of a source file for comparison.
+        # Writes the substituted content to stdout.
+        _substitute_for_compare() {
+            local src_file="$1"
+            local src_first_name target_first_name
+            src_first_name=$(echo "$AIT_OWNER_NAME" | awk '{print $1}')
+            target_first_name=$(echo "$TARGET_CHECK_OWNER_NAME" | awk '{print $1}')
+            local src_company_short target_company_short
+            src_company_short=$(echo "$AIT_COMPANY_NAME" | awk -F'[, ]' '{print $1}')
+            target_company_short=$(echo "$TARGET_CHECK_COMPANY_NAME" | awk -F'[, ]' '{print $1}')
+
+            local -a sed_args=()
+            sed_args+=(-e "s|${AIT_OWNER_NAME} <${AIT_OWNER_EMAIL}>|${TARGET_CHECK_OWNER_NAME} <${TARGET_CHECK_OWNER_EMAIL}>|g")
+            sed_args+=(-e "s|${AIT_OWNER_NAME}|${TARGET_CHECK_OWNER_NAME}|g")
+            sed_args+=(-e "s|${AIT_OWNER_EMAIL}|${TARGET_CHECK_OWNER_EMAIL}|g")
+            sed_args+=(-e "s|${AIT_GITHUB_ORG}|${TARGET_CHECK_GITHUB_ORG}|g")
+            sed_args+=(-e "s|${AIT_COMPANY_NAME}|${TARGET_CHECK_COMPANY_NAME}|g")
+            if [[ -n "$src_company_short" && "$src_company_short" != "$AIT_COMPANY_NAME" ]]; then
+                sed_args+=(-e "s|${AIT_COMPANY_ABBREV} = ${src_company_short}|${TARGET_CHECK_COMPANY_ABBREV} = ${target_company_short}|g")
+            fi
+            sed_args+=(-e "s|${AIT_COMPANY_ABBREV}|${TARGET_CHECK_COMPANY_ABBREV}|g")
+            sed_args+=(-e "s|except ${src_first_name}\.|except ${target_first_name}.|g")
+
+            local IFS='|'
+            local -a src_users=($AIT_OWNER_USERNAMES)
+            local -a target_users=($TARGET_CHECK_OWNER_USERNAMES)
+            IFS=' '
+            local i
+            for ((i = 0; i < ${#src_users[@]}; i++)); do
+                local src_user="${src_users[$i]}"
+                local target_user="${target_users[$i]:-${TARGET_CHECK_GITHUB_ORG}}"
+                if [[ "$src_user" != "$target_user" ]]; then
+                    sed_args+=(-e "s|\`${src_user}\`|\`${target_user}\`|g")
+                fi
+            done
+
+            sed "${sed_args[@]}" "$src_file"
+        }
 
         DRIFT_REPOS=()
         for repo in "${REPOS[@]}"; do
             repo_name=$(basename "$repo")
             drifted=()
 
-            for file in "${SYNC_FILES[@]}"; do
+            # Check if this repo is untracked (no .ai_template_version)
+            _is_untracked=false
+            if [[ ${#UNTRACKED_REPO_NAMES[@]} -gt 0 ]]; then
+                for uname in "${UNTRACKED_REPO_NAMES[@]}"; do
+                    [[ "$uname" == "$repo_name" ]] && _is_untracked=true && break
+                done
+            fi
+
+            # Load target identity once per repo for identity-aware comparison
+            _identity_differs=false
+            if _load_check_identity "$repo"; then
+                _identity_differs=true
+            fi
+
+            for file in ${SYNC_FILES[@]+"${SYNC_FILES[@]}"}; do
                 src="$AI_TEMPLATE_ROOT/$file"
                 dst="$repo/$file"
 
@@ -507,14 +672,26 @@ if [[ "${CHECK_FILES:-}" == "1" || "${CHECK_FILES:-}" == "true" ]] || [[ "$CHECK
                     continue
                 }
 
-                if ! diff -q "$src" "$dst" >/dev/null 2>&1; then
-                    drifted+=("$file")
+                # Identity-aware comparison for whitelisted files (#3064)
+                if [[ "$_identity_differs" == "true" ]] && _is_identity_sub_file "$file"; then
+                    _substituted=$(_substitute_for_compare "$src")
+                    if ! echo "$_substituted" | diff -q - "$dst" >/dev/null 2>&1; then
+                        drifted+=("$file")
+                    fi
+                else
+                    if ! diff -q "$src" "$dst" >/dev/null 2>&1; then
+                        drifted+=("$file")
+                    fi
                 fi
             done
 
             if [[ ${#drifted[@]} -gt 0 ]]; then
                 echo ""
-                echo -e "${YELLOW}$repo_name${NC} has ${#drifted[@]} drifted files:"
+                if [[ "$_is_untracked" == "true" ]]; then
+                    echo -e "${YELLOW}$repo_name${NC} [untracked-version] has ${#drifted[@]} drifted files:"
+                else
+                    echo -e "${YELLOW}$repo_name${NC} has ${#drifted[@]} drifted files:"
+                fi
                 for f in "${drifted[@]}"; do
                     echo "  - $f"
                 done

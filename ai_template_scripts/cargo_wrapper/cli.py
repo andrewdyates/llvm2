@@ -42,6 +42,7 @@ from .lock import (
     is_lock_stale,
     release_lock,
 )
+from .cache import check_cache, check_pulse_cache, print_cache_hit, store_cache
 from .logging import check_retry_loop, log_build, log_stderr
 from .processes import cleanup_orphans, is_ancestor_of_self
 from .timeouts import (
@@ -164,6 +165,7 @@ def _wait_for_lock(context: dict[str, object], lock_kind: str) -> bool:
     last_status = 0.0
     printed_initial = False
     stale_release_attempts = 0
+    project = str(context.get("project") or "?")
 
     while time.time() - start_wait < LOCK_ACQUIRE_TIMEOUT:
         if acquire_lock(context):
@@ -182,20 +184,24 @@ def _wait_for_lock(context: dict[str, object], lock_kind: str) -> bool:
         # Print status: verbose on first block, brief on subsequent
         if not printed_initial:
             holder = get_lock_holder_info(verbose=True)
-            log_stderr(f"[cargo] Waiting for {lock_kind} lock (held by {holder})...")
+            log_stderr(
+                f"[cargo-lock] Waiting for {lock_kind} lock on {project} (held by {holder})..."
+            )
             printed_initial = True
 
         elapsed = time.time() - start_wait
         if elapsed - last_status >= STATUS_INTERVAL:
             holder = get_lock_holder_info()
             log_stderr(
-                f"[cargo] Waiting ({lock_kind} lock, {holder}, {int(elapsed)}s)..."
+                f"[cargo-lock] Waiting for lock on {project} ({lock_kind}, {int(elapsed)}s, held by {holder})..."
             )
             last_status = elapsed
 
         time.sleep(1)
 
-    log_stderr(f"[cargo] ERROR: Lock timeout ({LOCK_ACQUIRE_TIMEOUT}s)")
+    log_stderr(
+        f"[cargo-lock] ERROR: Lock timeout on {project} ({LOCK_ACQUIRE_TIMEOUT}s)"
+    )
     return False
 
 
@@ -284,6 +290,10 @@ def _run_standard_cargo(
         exit_code = run_cargo(args, timeout)
         finished = datetime.now(UTC)
         log_build(context, ["cargo"] + args, started, finished, exit_code, timeout)
+        # Cache successful test results (#3212)
+        if exit_code == 0 and _state.LOCK_KIND == LOCK_KIND_TEST:
+            duration = (finished - started).total_seconds()
+            store_cache(args, str(context.get("commit", "")), exit_code, duration)
         return exit_code
     finally:
         release_lock()
@@ -365,6 +375,20 @@ def main() -> int:
                     "  See #928 for rationale."
                 )
                 return 1
+
+    # Test result cache check — BEFORE lock acquisition (#3212)
+    # Only cache test/bench/kani (commands that use the test lock)
+    commit = context.get("commit", "")
+    if lock_kind == LOCK_KIND_TEST and subcommand != "run":
+        cached = check_cache(args, commit)
+        if cached is None:
+            cached = check_pulse_cache(args, commit)
+            if cached is not None:
+                print_cache_hit(cached, cache_type="PULSE")
+                return 0
+        else:
+            print_cache_hit(cached)
+            return 0
 
     # Clean up orphan processes before attempting lock
     orphans_killed = cleanup_orphans()

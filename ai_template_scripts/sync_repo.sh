@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates
 # Licensed under the Apache License, Version 2.0
@@ -145,12 +141,12 @@ load_target_identity() {
     TARGET_AIT_COMPANY_ABBREV="$(_ait_toml_get "$target_toml" "org" "abbreviation" "$AIT_COMPANY_ABBREV")"
 
     # Determine if substitution is actually needed
-    if [[ "$TARGET_AIT_GITHUB_ORG" == "$AIT_GITHUB_ORG" && \
-          "$TARGET_AIT_OWNER_NAME" == "$AIT_OWNER_NAME" && \
-          "$TARGET_AIT_OWNER_EMAIL" == "$AIT_OWNER_EMAIL" && \
-          "$TARGET_AIT_COMPANY_NAME" == "$AIT_COMPANY_NAME" && \
-          "$TARGET_AIT_COMPANY_ABBREV" == "$AIT_COMPANY_ABBREV" && \
-          "$TARGET_AIT_OWNER_USERNAMES" == "$AIT_OWNER_USERNAMES" ]]; then
+    if [[ "$TARGET_AIT_GITHUB_ORG" == "$AIT_GITHUB_ORG" &&
+        "$TARGET_AIT_OWNER_NAME" == "$AIT_OWNER_NAME" &&
+        "$TARGET_AIT_OWNER_EMAIL" == "$AIT_OWNER_EMAIL" &&
+        "$TARGET_AIT_COMPANY_NAME" == "$AIT_COMPANY_NAME" &&
+        "$TARGET_AIT_COMPANY_ABBREV" == "$AIT_COMPANY_ABBREV" &&
+        "$TARGET_AIT_OWNER_USERNAMES" == "$AIT_OWNER_USERNAMES" ]]; then
         TARGET_IDENTITY_DIFFERS=false
     else
         TARGET_IDENTITY_DIFFERS=true
@@ -174,6 +170,13 @@ _sed_escape() {
     printf '%s' "$1" | sed -e 's/[&\|]/\\&/g'
 }
 
+# Escape sed special characters in a string for use in search patterns.
+# Handles BRE metacharacters: . * [ ^ $ \ and our delimiter |.
+# In BRE, ] ( ) { } + ? are literal and don't need escaping.
+_sed_escape_pattern() {
+    printf '%s' "$1" | sed -e 's/[.\\*\[^$|]/\\&/g'
+}
+
 # Apply identity substitution to a file in the target repo.
 # Replaces source (ai_template) identity values with target identity values.
 apply_identity_substitution() {
@@ -189,6 +192,16 @@ apply_identity_substitution() {
     src_company_short=$(echo "$AIT_COMPANY_NAME" | awk -F'[, ]' '{print $1}')
     target_company_short=$(echo "$TARGET_AIT_COMPANY_NAME" | awk -F'[, ]' '{print $1}')
 
+    # Escape source values for use in sed search patterns (handles regex metacharacters)
+    local s_name s_email s_org s_company s_abbrev s_first s_company_short
+    s_name=$(_sed_escape_pattern "$AIT_OWNER_NAME")
+    s_email=$(_sed_escape_pattern "$AIT_OWNER_EMAIL")
+    s_org=$(_sed_escape_pattern "$AIT_GITHUB_ORG")
+    s_company=$(_sed_escape_pattern "$AIT_COMPANY_NAME")
+    s_abbrev=$(_sed_escape_pattern "$AIT_COMPANY_ABBREV")
+    s_first=$(_sed_escape_pattern "$src_first_name")
+    s_company_short=$(_sed_escape_pattern "$src_company_short")
+
     # Escape target values for use in sed replacement (handles & and \ and |)
     local t_name t_email t_org t_company t_abbrev t_first t_company_short
     t_name=$(_sed_escape "$TARGET_AIT_OWNER_NAME")
@@ -199,27 +212,27 @@ apply_identity_substitution() {
     t_first=$(_sed_escape "$target_first_name")
     t_company_short=$(_sed_escape "$target_company_short")
 
-    # Build sed expressions
+    # Build sed expressions (source values escaped for pattern, target for replacement)
     local -a sed_args=()
 
     # 1. Full name + email (longest match first)
-    sed_args+=(-e "s|${AIT_OWNER_NAME} <${AIT_OWNER_EMAIL}>|${t_name} <${t_email}>|g")
+    sed_args+=(-e "s|${s_name} <${s_email}>|${t_name} <${t_email}>|g")
     # 2. Full name alone
-    sed_args+=(-e "s|${AIT_OWNER_NAME}|${t_name}|g")
+    sed_args+=(-e "s|${s_name}|${t_name}|g")
     # 3. Email alone
-    sed_args+=(-e "s|${AIT_OWNER_EMAIL}|${t_email}|g")
+    sed_args+=(-e "s|${s_email}|${t_email}|g")
     # 4. GitHub org
-    sed_args+=(-e "s|${AIT_GITHUB_ORG}|${t_org}|g")
+    sed_args+=(-e "s|${s_org}|${t_org}|g")
     # 5. Full company name (e.g. "Dropbox, Inc.")
-    sed_args+=(-e "s|${AIT_COMPANY_NAME}|${t_company}|g")
+    sed_args+=(-e "s|${s_company}|${t_company}|g")
     # 6. Short company name in "ABBREV = Company" pattern
     if [[ -n "$src_company_short" && "$src_company_short" != "$AIT_COMPANY_NAME" ]]; then
-        sed_args+=(-e "s|${AIT_COMPANY_ABBREV} = ${src_company_short}|${t_abbrev} = ${t_company_short}|g")
+        sed_args+=(-e "s|${s_abbrev} = ${s_company_short}|${t_abbrev} = ${t_company_short}|g")
     fi
     # 7. Company abbreviation
-    sed_args+=(-e "s|${AIT_COMPANY_ABBREV}|${t_abbrev}|g")
+    sed_args+=(-e "s|${s_abbrev}|${t_abbrev}|g")
     # 8. First name in "except <Name>" pattern
-    sed_args+=(-e "s|except ${src_first_name}\.|except ${t_first}.|g")
+    sed_args+=(-e "s|except ${s_first}\.|except ${t_first}.|g")
 
     # 9. Individual username replacements (positional: src[i] → target[i])
     local IFS='|'
@@ -231,10 +244,11 @@ apply_identity_substitution() {
         local src_user="${src_users[$i]}"
         local target_user="${target_users[$i]:-${TARGET_AIT_GITHUB_ORG}}"
         if [[ "$src_user" != "$target_user" ]]; then
-            local t_user
+            local s_user t_user
+            s_user=$(_sed_escape_pattern "$src_user")
             t_user=$(_sed_escape "$target_user")
             # Only replace within backtick contexts to avoid false positives
-            sed_args+=(-e "s|\`${src_user}\`|\`${t_user}\`|g")
+            sed_args+=(-e "s|\`${s_user}\`|\`${t_user}\`|g")
         fi
     done
 
@@ -538,7 +552,10 @@ sync_role_file() {
     # Start with all source keys, overridden by target values
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "$line" ]] && continue
-        [[ "$line" == \#* ]] && { merged_fm="${merged_fm}${line}"$'\n'; continue; }
+        [[ "$line" == \#* ]] && {
+            merged_fm="${merged_fm}${line}"$'\n'
+            continue
+        }
         local key="${line%%:*}"
         # Check if target has this key
         local target_line
@@ -548,7 +565,7 @@ sync_role_file() {
         else
             merged_fm="${merged_fm}${line}"$'\n'
         fi
-    done <<< "$src_fm"
+    done <<<"$src_fm"
     # Add target-only keys (not in source)
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "$line" ]] && continue
@@ -557,7 +574,7 @@ sync_role_file() {
         if ! echo "$src_fm" | grep -q "^${key}:"; then
             merged_fm="${merged_fm}${line}"$'\n'
         fi
-    done <<< "$dst_fm"
+    done <<<"$dst_fm"
 
     if [[ "$DRY_RUN" == "true" ]]; then
         local sub_tag=""
@@ -579,7 +596,7 @@ sync_role_file() {
         printf '%s' "$merged_fm"
         echo "---"
         echo "$src_body"
-    } > "$dst"
+    } >"$dst"
     # Apply identity substitution for whitelisted files (#3027)
     if needs_identity_substitution "$src"; then
         apply_identity_substitution "$dst"
@@ -1103,25 +1120,29 @@ done <"$MANIFEST"
 echo ""
 log_info "Checking for obsolete template files..."
 OLD_TEMPLATE_FILES=(
-    "ai_template_scripts/gh_discussion.sh"      # Replaced by gh_discussion.py
-    "ai_template_scripts/gh_post.sh"            # Replaced by gh_post.py
-    "ai_template_scripts/init.sh"               # Renamed to install_dev_tools.sh
-    "ai_template_scripts/create_github_apps.py" # Orphaned, never part of template
-    "ai_template_scripts/stop_all.sh"           # Removed - just use: touch STOP
-    "ai_template_scripts/verify_closure.py"     # Removed - Manager searches intelligently
-    "ai_template_scripts/frontpage.sh"          # DashNews-specific, not template
-    "run_loop.py"                               # Renamed to looper.py
-    "run_loop_context.md"                       # Renamed to looper_context.md
-    "tests/test_run_loop.py"                    # Renamed to tests/test_looper.py
-    ".claude/rules/postmortems.md"              # Merged into ai_template.md
-    ".claude/ai_template_reference.md"          # Orphaned, stale content, never part of sync (#2407)
-    "looper/context.py"                         # Replaced by looper/context/ subpackage (#748)
-    "ai_template_scripts/cargo_wrapper.py"      # Replaced by cargo_wrapper/ package (#2603)
+    "ai_template_scripts/gh_discussion.sh"        # Replaced by gh_discussion.py
+    "ai_template_scripts/gh_post.sh"              # Replaced by gh_post.py
+    "ai_template_scripts/init.sh"                 # Renamed to install_dev_tools.sh
+    "ai_template_scripts/create_github_apps.py"   # Orphaned, never part of template
+    "ai_template_scripts/stop_all.sh"             # Removed - just use: touch STOP
+    "ai_template_scripts/verify_closure.py"       # Removed - Manager searches intelligently
+    "ai_template_scripts/frontpage.sh"            # DashNews-specific, not template
+    "run_loop.py"                                 # Renamed to looper.py
+    "run_loop_context.md"                         # Renamed to looper_context.md
+    "tests/test_run_loop.py"                      # Renamed to tests/test_looper.py
+    ".claude/rules/postmortems.md"                # Merged into ai_template.md
+    ".claude/ai_template_reference.md"            # Orphaned, stale content, never part of sync (#2407)
+    "looper/context.py"                           # Replaced by looper/context/ subpackage (#748)
+    "ai_template_scripts/cargo_wrapper.py"        # Replaced by cargo_wrapper/ package (#2603)
+    "ai_template_scripts/gh_rate_limit.py"        # Replaced by gh_rate_limit/ package (#3065)
+    "ai_template_scripts/health_check.py"         # Replaced by health_check/ package (#3065)
+    "ai_template_scripts/check_claude_version.sh" # Merged into check_env.sh (#3065)
+    # NOTE: code_stats.py and json_to_text.py are active shims (not obsolete) — see #3251
     # Legacy root-level scripts (replaced by ai_template_scripts/ versions)
     "init.sh"                   # Use ai_template_scripts/install_dev_tools.sh
     "setup_labels.sh"           # Use ai_template_scripts/init_labels.sh
-    "json_to_text.py"           # Use ai_template_scripts/json_to_text.py
-    "code_stats.py"             # Use ai_template_scripts/code_stats.py
+    "json_to_text.py"           # Use module entrypoint: python3 -m ai_template_scripts.json_to_text
+    "code_stats.py"             # Use module entrypoint: python3 -m ai_template_scripts.code_stats
     "markdown_to_issues.py"     # Use ai_template_scripts/markdown_to_issues.py
     "frontpage.sh"              # DashNews-specific, not template
     "mail.sh"                   # Legacy mail system removed
@@ -1137,6 +1158,44 @@ OLD_TEMPLATE_DIRS=(
 )
 
 cleanup_obsolete_template_paths
+
+# Dynamic orphan detection for synced glob paths (#3065)
+# When a monolith .py file is refactored into a package directory (e.g.,
+# gh_rate_limit.py → gh_rate_limit/), the glob sync adds the new package
+# but never removes the old .py file from the target. This scan detects
+# .py and .sh files in the target that no longer exist in the source.
+echo ""
+log_info "Checking for orphan files in synced paths..."
+ORPHAN_DIRS=("ai_template_scripts")
+for orphan_dir in "${ORPHAN_DIRS[@]}"; do
+    target_dir="$TARGET_REPO/$orphan_dir"
+    source_dir="$AI_TEMPLATE_ROOT/$orphan_dir"
+    [[ -d "$target_dir" ]] || continue
+    [[ -d "$source_dir" ]] || continue
+
+    # Check top-level .py and .sh files only (matching the glob patterns in .sync_manifest)
+    for target_file in "$target_dir"/*.py "$target_dir"/*.sh; do
+        [[ -f "$target_file" ]] || continue
+        basename_file="$(basename "$target_file")"
+        source_file="$source_dir/$basename_file"
+        relative_path="$orphan_dir/$basename_file"
+
+        if [[ ! -f "$source_file" ]]; then
+            # Respect .ai_template_skip — don't delete files the target explicitly keeps
+            if is_target_skipped "$relative_path"; then
+                echo "  [skip] $relative_path (orphan but target-skipped)"
+                continue
+            fi
+            # File exists in target but not in source — orphan
+            if [[ "$DRY_RUN" == "true" ]]; then
+                echo "  [delete] $relative_path (orphan: no longer in source)"
+            else
+                rm "$target_file"
+                echo "  [deleted] $relative_path (orphan: no longer in source)"
+            fi
+        fi
+    done
+done
 
 # Optional features sync (#1076)
 # Repos opt-in via .ai_template_features file
@@ -1226,14 +1285,20 @@ if [[ -d "$TARGET_REPO/ai_template_scripts/optional" ]]; then
         # Skip if it's a known available feature (already handled above)
         stale_is_available=false
         for avail in ${AVAILABLE_FEATURES[@]+"${AVAILABLE_FEATURES[@]}"}; do
-            [[ "$avail" == "$stale_name" ]] && { stale_is_available=true; break; }
+            [[ "$avail" == "$stale_name" ]] && {
+                stale_is_available=true
+                break
+            }
         done
         [[ "$stale_is_available" == "true" ]] && continue
 
         # Not in available features — check if it's still enabled
         stale_is_enabled=false
         for enabled in ${ENABLED_FEATURES[@]+"${ENABLED_FEATURES[@]}"}; do
-            [[ "$enabled" == "$stale_name" ]] && { stale_is_enabled=true; break; }
+            [[ "$enabled" == "$stale_name" ]] && {
+                stale_is_enabled=true
+                break
+            }
         done
 
         if [[ "$stale_is_enabled" == "false" ]]; then
@@ -1390,15 +1455,34 @@ else
     # New AGENTS.md is a stub; rules are injected by looper at runtime.
     AGENTS_FILE="$TARGET_REPO/AGENTS.md"
     if [[ -f "$AGENTS_FILE" ]] && ! is_target_skipped "AGENTS.md"; then
-        AGENTS_LINES=$(wc -l < "$AGENTS_FILE" | tr -d ' ')
+        AGENTS_LINES=$(wc -l <"$AGENTS_FILE" | tr -d ' ')
         if [[ "$AGENTS_LINES" -gt 10 ]]; then
             log_info "Migrating AGENTS.md: old full version ($AGENTS_LINES lines) -> minimal stub"
-            cat > "$AGENTS_FILE" <<'STUBEOF'
+            cat >"$AGENTS_FILE" <<'STUBEOF'
 <!-- Codex instructions are injected by the looper at runtime. -->
 <!-- Source: CLAUDE.md + .claude/rules/*.md + .claude/codex.md -->
 STUBEOF
             SYNCED_FILES+=("AGENTS.md")
         fi
+    fi
+
+    # Clear stale Python bytecode caches for synced directories.
+    # Without this, looper processes may run old cached .pyc files even after
+    # sync updates the .py source, causing crashes from stale code.
+    log_info "Clearing stale .pyc caches..."
+    pyc_count=0
+    for sync_dir in looper ai_template_scripts; do
+        if [[ -d "$TARGET_REPO/$sync_dir" ]]; then
+            while IFS= read -r -d '' pyc_file; do
+                rm "$pyc_file"
+                pyc_count=$((pyc_count + 1))
+            done < <(find "$TARGET_REPO/$sync_dir" -name '*.pyc' -print0 2>/dev/null)
+            # Also remove empty __pycache__ dirs
+            find "$TARGET_REPO/$sync_dir" -type d -name '__pycache__' -empty -delete 2>/dev/null || true
+        fi
+    done
+    if [[ $pyc_count -gt 0 ]]; then
+        log_info "Cleared $pyc_count stale .pyc files"
     fi
 
     # Commit and push
@@ -1506,74 +1590,38 @@ STUBEOF
         fi
     fi
 
-    # Check model configuration on this machine
+    # Check model configuration via check_env.sh (#3082)
+    # Model configuration sources (authoritative):
+    #   Claude Code: ~/.claude/settings.json → env.ANTHROPIC_MODEL (NOT shell env vars)
+    #     Also: env.CLAUDE_CODE_SUBAGENT_MODEL controls Task tool subagent model
+    #   Codex: ~/.codex/config.toml → model + model_reasoning_effort
+    # Delegates to the canonical environment verifier instead of inline checks.
+    # Non-fatal: environment mismatches warn but do not block sync completion.
+    # Timeout: check_env.sh makes network calls (claude update --check, npm show)
+    # that can hang; cap at 30s to avoid blocking sync indefinitely.
     echo ""
-    log_info "Checking model configuration..."
-    EXPECTED_CLAUDE_MODEL="us.anthropic.claude-opus-4-6-v1"
-    EXPECTED_CODEX_MODEL="gpt-5.3-codex"
-    EXPECTED_CODEX_EFFORT="xhigh"
-    MODEL_OK=true
-
-    # Check ~/.claude/settings.json
-    CLAUDE_SETTINGS="$HOME/.claude/settings.json"
-    if [[ -f "$CLAUDE_SETTINGS" ]]; then
-        ANTHROPIC_MODEL_VAL=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('env',{}).get('ANTHROPIC_MODEL',''))" "$CLAUDE_SETTINGS" 2>/dev/null)
-        SUBAGENT_MODEL_VAL=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('env',{}).get('CLAUDE_CODE_SUBAGENT_MODEL',''))" "$CLAUDE_SETTINGS" 2>/dev/null)
-        if [[ "$ANTHROPIC_MODEL_VAL" == "$EXPECTED_CLAUDE_MODEL" && "$SUBAGENT_MODEL_VAL" == "$EXPECTED_CLAUDE_MODEL" ]]; then
-            echo "  ✓ Claude model: $EXPECTED_CLAUDE_MODEL"
+    CHECK_ENV_SCRIPT="$SCRIPT_DIR/check_env.sh"
+    if [[ -x "$CHECK_ENV_SCRIPT" ]]; then
+        log_info "Running environment check (check_env.sh)..."
+        CHECK_ENV_TIMEOUT_CMD=""
+        if command -v timeout &>/dev/null; then
+            CHECK_ENV_TIMEOUT_CMD="timeout 30"
+        elif command -v gtimeout &>/dev/null; then
+            CHECK_ENV_TIMEOUT_CMD="gtimeout 30"
+        fi
+        if $CHECK_ENV_TIMEOUT_CMD "$CHECK_ENV_SCRIPT"; then
+            log_ok "Environment check passed"
         else
-            MODEL_OK=false
-            log_warn "Claude model misconfigured"
-            if [[ "$ANTHROPIC_MODEL_VAL" != "$EXPECTED_CLAUDE_MODEL" ]]; then
-                echo "    ANTHROPIC_MODEL=$ANTHROPIC_MODEL_VAL (expected $EXPECTED_CLAUDE_MODEL)"
+            CHECK_ENV_EXIT=$?
+            if [[ "$CHECK_ENV_EXIT" -eq 124 ]]; then
+                log_warn "Environment check timed out after 30s (non-fatal)"
+            else
+                log_warn "Environment check reported issues (non-fatal)"
             fi
-            if [[ "$SUBAGENT_MODEL_VAL" != "$EXPECTED_CLAUDE_MODEL" ]]; then
-                echo "    CLAUDE_CODE_SUBAGENT_MODEL=$SUBAGENT_MODEL_VAL (expected $EXPECTED_CLAUDE_MODEL)"
-            fi
+            log_warn "Run 'cd $TARGET_REPO && ./ai_template_scripts/check_env.sh --fix' to auto-fix"
         fi
     else
-        MODEL_OK=false
-        log_warn "~/.claude/settings.json not found"
-    fi
-
-    # Check ~/.codex/config.toml
-    CODEX_CONFIG="$HOME/.codex/config.toml"
-    if [[ -f "$CODEX_CONFIG" ]]; then
-        # Parse model (first "model = " line that isn't model_reasoning_effort)
-        CODEX_MODEL_VAL=$(grep -E '^model\s*=' "$CODEX_CONFIG" | grep -v reasoning | head -1 | sed 's/^[^=]*=\s*//' | sed 's/"//g' | sed 's/#.*//' | xargs)
-        CODEX_EFFORT_VAL=$(grep -E '^model_reasoning_effort\s*=' "$CODEX_CONFIG" | head -1 | sed 's/^[^=]*=\s*//' | sed 's/"//g' | sed 's/#.*//' | xargs)
-        if [[ "$CODEX_MODEL_VAL" == "$EXPECTED_CODEX_MODEL" && "$CODEX_EFFORT_VAL" == "$EXPECTED_CODEX_EFFORT" ]]; then
-            echo "  ✓ Codex model: $EXPECTED_CODEX_MODEL ($EXPECTED_CODEX_EFFORT)"
-        else
-            MODEL_OK=false
-            log_warn "Codex model misconfigured"
-            if [[ "$CODEX_MODEL_VAL" != "$EXPECTED_CODEX_MODEL" ]]; then
-                echo "    model=$CODEX_MODEL_VAL (expected $EXPECTED_CODEX_MODEL)"
-            fi
-            if [[ "$CODEX_EFFORT_VAL" != "$EXPECTED_CODEX_EFFORT" ]]; then
-                echo "    model_reasoning_effort=$CODEX_EFFORT_VAL (expected $EXPECTED_CODEX_EFFORT)"
-            fi
-        fi
-    else
-        MODEL_OK=false
-        log_warn "~/.codex/config.toml not found"
-    fi
-
-    if [[ "$MODEL_OK" == "true" ]]; then
-        log_ok "Model configuration correct"
-    else
-        echo ""
-        echo "  To fix Claude Code model, run:"
-        echo "    python3 -c \""
-        echo "import json; p='$HOME/.claude/settings.json'"
-        echo "d=json.load(open(p)); d.setdefault('env',{})['ANTHROPIC_MODEL']='$EXPECTED_CLAUDE_MODEL'"
-        echo "d['env']['CLAUDE_CODE_SUBAGENT_MODEL']='$EXPECTED_CLAUDE_MODEL'"
-        echo "json.dump(d,open(p,'w'),indent=4)"
-        echo "    \""
-        echo ""
-        echo "  To fix Codex model, add to ~/.codex/config.toml:"
-        echo "    model = \"$EXPECTED_CODEX_MODEL\""
-        echo "    model_reasoning_effort = \"$EXPECTED_CODEX_EFFORT\""
+        log_warn "check_env.sh not found or not executable, skipping environment check"
     fi
 
     popd >/dev/null

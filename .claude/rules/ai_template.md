@@ -23,6 +23,179 @@ You exist in an all-AI org hosted at github.com/dropbox-ai-prototypes.
 - **Best code.** Concise, self-documenting, right abstraction level. "As efficient as technically possible."
 
 ---
+## Themes
+
+Themes are optional focus controls configured in `.looper_config.json`. They narrow issue selection and inject explicit focus context into prompts.
+
+### Scope & Precedence
+
+Theme resolution order is:
+1. Per-instance (`worker_1`, `worker_2`, etc.)
+2. Per-role (`worker`, `manager`, `prover`, `researcher`)
+3. Team-wide (`team_theme`)
+
+### Configuration
+
+Per-instance/per-role themes use `theme` and `theme_description`:
+
+```json
+{
+  "worker_1": {
+    "theme": "cleanup",
+    "theme_description": "P3 quality and debt reduction",
+    "issue_filter": {
+      "labels": ["P3"],
+      "exclude_labels": ["feature"],
+      "search": "cleanup OR refactor OR debt"
+    }
+  }
+}
+```
+
+Team-wide theme uses `team_theme`:
+
+```json
+{
+  "team_theme": {
+    "name": "reliability",
+    "description": "Stabilize flaky paths and close regressions first",
+    "issue_filter": {
+      "labels": ["bug"],
+      "exclude_labels": ["deferred"]
+    }
+  }
+}
+```
+
+### Issue Filter Semantics
+
+- `issue_filter.labels`: include issues with at least one matching label.
+- `issue_filter.exclude_labels`: exclude issues with any matching label.
+- `issue_filter.search`: optional GitHub search query appended to the filter.
+- `P0` emergency override: P0 issues are always preserved, even if off-theme.
+
+### Theme Setup (USER workflow)
+
+1. Create a theme label (custom labels are allowed): `gh label create "<theme-label>" --description "<desc>" --color "<hex>"`.
+2. Apply the label to matching issues: `gh issue edit <N> --add-label <theme-label>`.
+3. Add `team_theme` and/or role/instance `theme` config in `.looper_config.json`.
+4. Optionally enforce focus with `touch FEATURE_FREEZE`.
+5. Spawn or restart loops: `./ai_template_scripts/spawn_all.sh`.
+
+### Theme Removal (USER workflow)
+
+1. Remove `team_theme` and role/instance `theme` entries from `.looper_config.json`.
+2. Remove freeze when done: `rm FEATURE_FREEZE`.
+3. Restart loops so new sessions load updated context.
+
+### Behavior
+
+- Environment: looper sets `AI_THEME` from config each iteration; clears it when theme is removed.
+- Prompt injection: configured theme appears in session context (`Current Theme` section).
+- Issue filtering: theme `issue_filter` applies during issue sampling.
+- Commit metadata: `Theme: <name>` trailer is auto-added when `AI_THEME` is set.
+
+### Ownership
+
+Themes are **USER-only** to set, change, or remove.
+
+- USER: configures theme entries in `.looper_config.json`.
+- Manager: audits theme compliance and may recommend a theme or theme refresh; cannot directly change theme configuration.
+- Worker/Prover/Researcher: follow injected theme context and justify off-theme work when required by current direction.
+- USER/Manager may create new labels; Worker/Prover/Researcher should apply existing labels unless explicitly directed.
+
+---
+## Prompt Injection Points
+
+Looper replaces `<!-- INJECT:... -->` placeholders in `.claude/roles/shared.md` and role files each iteration.
+
+| Injection | Purpose |
+|-----------|---------|
+| `recovery_context` | Crash recovery state and resume guidance |
+| `theme_context` | `## Current Theme` block from active theme config |
+| `system_status` | Memory/disk/zone health snapshot |
+| `rotation_focus` | Current phase focus (or reflection mode) |
+| `git_log` | Recent commits |
+| `gh_issues` | Priority-sorted issue sample |
+| `other_feedback` | Recent commits from other roles |
+| `role_mentions` | Aggregated `@ROLE` directives |
+| `last_directive` | Last same-role directive (`## Next`) |
+| `handoff_context` | Structured handoff payload (`## Handoff`) |
+| `audit_data` | Manager-only audit metrics/context |
+| `active_issue` | Worker's current in-progress issue (full body injected) |
+| `audit_min_issues` | Per-phase minimum issue requirement (from config) |
+
+Treat injection output as runtime context. Do not hand-edit injected blocks.
+
+---
+## Looper Config
+
+Project overrides live in `.looper_config.json`.
+
+Config precedence (highest to lowest):
+1. Per-instance (`worker_1`, `manager_1`, etc.)
+2. Per-role (`worker`, `manager`, `prover`, `researcher`)
+3. Root-level project config
+4. Role file frontmatter (`.claude/roles/<role>.md`)
+5. Shared frontmatter (`.claude/roles/shared.md`)
+
+Common `.looper_config.json` keys:
+
+| Key | Purpose |
+|-----|---------|
+| `team_theme`, `<role>.theme`, `<role>_<id>.theme` | Theme configuration and filtering |
+| `issue_sampling` | How many issues per tier are injected |
+| `timeouts` | Git/GitHub/context timeout overrides |
+| `sync` | Multi-machine sync strategy/trigger |
+| `model_routing` | Per-role/per-audit model routing |
+| `git_lock_wait_sec` | Git wrapper lock wait timeout |
+| `local_mode` | Offline/local issue mode |
+
+Validate config syntax before commit: `python3 -c "import json; json.load(open('.looper_config.json'))"`.
+See `docs/looper.md` for complete key reference.
+
+### Prompt Budget
+
+Looper caps total injected content at `prompt_budget_chars` (default: 15000, range: 5000-50000). When over budget, sections are truncated lowest-priority first:
+
+1. `audit_data` (min 3000) → 2. `other_feedback` (min 1500) → 3. `role_mentions` (min 500) → 4. `git_log` (min 2000) → 5. `gh_issues` (min 1000) → 6. `handoff_context` (min 400) → 7. `active_issue` (min 1000) → 8. `last_directive` (min 500)
+
+Never truncated: `system_status`, `rotation_focus`, `audit_min_issues`, `recovery_context`, `theme_context`.
+
+Truncated sections end with `... [<section> truncated]`. If you see this marker, critical context may be missing — check the issue directly with `gh issue view`.
+
+### Role Frontmatter Keys
+
+These keys are defined in role files and can be overridden via `.looper_config.json`:
+
+| Key | Meaning |
+|-----|---------|
+| `rotation_type` | Rotation mode (`work`, `verification`, `research`, `audit`, or empty) |
+| `rotation_phases` | Phase sequence names used for rotation |
+| `phase_weights` | Relative priority per phase (`phase:weight` format) |
+| `freeform_frequency` | Every Nth iteration is freeform (`0` disables) |
+| `codex_probability` | Probability of selecting Codex for that role |
+| `gemini_probability` | Probability of selecting Gemini for that role |
+
+---
+## Flag Files
+
+| File | Meaning | Owner |
+|------|---------|-------|
+| `FEATURE_FREEZE` | Blocks new feature work outside urgent/policy exceptions | USER controls |
+| `STOP` | Stop all roles gracefully | USER controls |
+| `STOP_<ROLE>` | Stop one role class (`STOP_WORKER`, etc.) | USER controls |
+| `STOP_<ROLE><N>` | Stop one instance (`STOP_W1`, `STOP_M1`) | USER controls |
+| `.flags/blocked_issues` | Auto-generated blocked issue report | Looper-managed |
+| `.flags/large_files` | Auto-generated large file report | Looper-managed |
+| `.flags/startup_warnings` | Startup warning snapshots for Manager audits | Looper-managed |
+| `.flags/headless_violation_*` | Headless mode violation detected; correction injected next startup | Looper-managed |
+
+Instance STOP files (`STOP_W1`) are consumed after stop. Shared STOP files expire after `AIT_STOP_EXPIRY_SEC` (default 3600s). STOP file content is used as reason text.
+
+Autonomous roles may read `.flags/*` for triage. Do not manually maintain looper-generated flag files.
+
+---
 ## Operational Rules
 
 - **Document then auto-fix**: Rules + hooks/scripts auto-fix. AIs don't learn from errors.
@@ -49,10 +222,10 @@ You exist in an all-AI org hosted at github.com/dropbox-ai-prototypes.
 - **No git worktrees**: All workers operate in repo root.
 - **No feature branches**: Work on main. **Exception:** `zone/*` branches for multi-machine mode.
 - **No interactive git**: No `rebase -i`, `add -i`. These hang.
-- **Never rg search worker_logs**: Causes exponential log growth. Use `tail -100 worker_logs/*.jsonl | ./ai_template_scripts/json_to_text.py`.
+- **Never rg search worker_logs**: Causes exponential log growth. Use `tail -100 worker_logs/*.jsonl | python3 -m ai_template_scripts.json_to_text`.
 - **No cost control or budgets**: FORBIDDEN. Unlimited resources.
 - **No inline Python for issue filtering (#1987)**: Use `get_issues_structured()` or `jq`.
-- **Headless operation (#1993)**: **YOU ARE HEADLESS. THERE IS NO USER TO ASK.** No AskUserQuestion, no interactive confirmation. Make decisions, execute.
+- **Headless operation (#1993)**: **YOU ARE HEADLESS. THERE IS NO USER TO ASK.** No AskUserQuestion, no interactive confirmation. Make decisions, execute. Looper detects violations (asking "what should I do?", offering choices, waiting for input) and injects correction context on next startup via `.flags/headless_violation_{role}_*`.
 - **Always commit before session end**: Unfinished → `[INCOMPLETE]` with `## Next` handoff.
 - **Unexpected repo states**: Resolve autonomously. If blocked, file issue and continue.
 - **No git add -A or git add . (#2405)**: Stage specific files by name.
@@ -72,7 +245,7 @@ You exist in an all-AI org hosted at github.com/dropbox-ai-prototypes.
 | Branch creation | HARD BLOCK | git wrapper |
 | Worker ID in commit tag | AUTO-FIX | commit-msg hook |
 | `--no-verify` for AI roles | HARD BLOCK | git wrapper |
-| Other worker's staged files | HARD BLOCK | pre-commit hook |
+| Other worker's staged files | WARNING + escalation | pre-commit hook (#3198) |
 | `Claims #N` issue labels | AUTO-FIX | post-commit hook |
 | Commit message structure | HARD BLOCK | commit-msg hook (#2621) |
 | `Fixes` typos | AUTO-FIX | hook auto-corrects |
@@ -96,6 +269,8 @@ Repo A needs B's feature → A documents minimal API → B scopes MVP to A's act
 
 See `ai_template_scripts/README.md`. Key: `pulse.py`, `crash_analysis.py`, `gh_issues.py`. Use `--help`.
 
+- **Environment check**: `./ai_template_scripts/check_env.sh --fix` verifies CLI versions and LLM model settings.
+
 ## Parallel Exploration
 
 Spawn 2-3 Task agents (subagent_type=Explore) in parallel for complex codebase questions. All must be read-only. Consolidate before edits.
@@ -113,7 +288,7 @@ Spawn 2-3 Task agents (subagent_type=Explore) in parallel for complex codebase q
 
 **Worker** writes production code. **Manager** enforces PROCESS. **Prover** enforces CORRECTNESS. **Researcher** enforces DESIGN. Assume USER if no role given.
 
-**Rotation rule:** Each phase, find at least `audit_min_issues` (default: 3) genuine gaps or flaws. If fewer, defend why — the defense forces rigor. Self-audit rounds are not waste; adversarial follow-ups catch what the first pass misses. The goal is to be critical, not to finish fast.
+**Rotation rule:** Find and fix ALL issues — the more you find, the better. Minimum <!-- INJECT:audit_min_issues --> per phase, but don't stop at the minimum. Finding 0 is OK if you explain why — but you must always do the work of looking. Prioritize by severity (P1 findings first). **Tracking efficiently:** findings do NOT need to be separate issues — add `[ ]` checkboxes to existing issues, or consolidate related findings into one issue. The goal is to catch everything, not to create issue count. Self-audit rounds are not waste; adversarial follow-ups catch what the first pass misses.
 
 ### Role Boundaries
 
@@ -162,6 +337,7 @@ Common: `gh issue create`, `gh issue comment N`, `gh issue edit N --add-label bl
 ### Required Labels
 
 Run `./ai_template_scripts/init_labels.sh` once per repo. Key: P0-P3, `urgent`, `in-progress`+ownership, `do-audit`/`needs-review`, `blocked`/`stuck`/`environmental`, `epic`, `bug`/`feature`/`documentation`. Special closure labels: `duplicate`, `environmental`, `stale`.
+Custom labels are allowed for theme filters and internal categorization. Create via `gh label create "<name>" --description "<desc>" --color "<hex>"`. USER/Manager create labels; other roles apply existing labels unless explicitly directed.
 
 ### Issue Priorities
 
@@ -169,7 +345,7 @@ Run `./ai_template_scripts/init_labels.sh` once per repo. Key: P0-P3, `urgent`, 
 
 ### Task Lists in Issues
 
-`[ ]` checkboxes (looper auto-converts unchecked to issues). `[x]`=done, `[~]`=refused (Manager).
+`[ ]` checkboxes for tracking. `[x]`=done, `[~]`=refused (Manager). Auto-expansion to child issues is disabled (#3231).
 
 ### Dependencies & Blockers
 
@@ -259,7 +435,10 @@ USER does NOT auto-pickup work. When team running: file issues, don't code unles
 
 ### Spawning AI Teams
 
-Only USER starts teams: `./ai_template_scripts/spawn_all.sh`. Multi-worker: `spawn_session.sh --id=N worker`. Teams are separate iTerm2 tabs with looper.py — NOT subagents.
+Only USER starts teams. Primary command: `./ai_template_scripts/spawn_all.sh`.
+Useful options: `--roles`, `--workers=N`, `--provers=N`, `--researchers=N`, `--managers=N`, `--shared`, `--isolated`, `--dry-run`, `--allow-dirty`, `--push`.
+Single-session spawn: `./ai_template_scripts/spawn_session.sh --id=N worker`.
+Teams are separate iTerm2 tabs with looper.py — NOT subagents.
 
 ### AI States
 
@@ -267,10 +446,11 @@ Only USER starts teams: `./ai_template_scripts/spawn_all.sh`. Multi-worker: `spa
 |----------|---------|
 | What happened? | `git log --oneline -10` |
 | Working on? | `gh issue list --state open` |
+| Active right now? | `tail -100 worker_logs/*.jsonl \| python3 -m ai_template_scripts.json_to_text` |
 | Broken? | `ls .flags/` |
 | Metrics | `cat metrics/latest.json` |
 
-Worker logs: `worker_logs/`.
+- **Check worker_logs before judging progress**: Commits are a lagging indicator. Workers may be actively coding, debugging, or blocked by hooks without having committed. Always check `worker_logs/` for recent activity before concluding Workers are idle.
 
 ---
 ## Commits

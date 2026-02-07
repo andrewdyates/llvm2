@@ -86,7 +86,7 @@ def main() -> int:
     parser.add_argument(
         "--version",
         action="version",
-        version=get_version("code_stats.py"),
+        version=get_version("code_stats"),
     )
     parser.add_argument("path", nargs="?", default=".", help="Path to analyze")
     parser.add_argument(

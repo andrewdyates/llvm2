@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -436,9 +432,10 @@ class RunnerAuditMixin:
         # Pass mode/worker_id for per-worker isolation
         check_consecutive_abort_alert(mode=self.mode, worker_id=self.worker_id)
 
-        # Convert unchecked checkboxes to new issues (Worker only)
-        if self.mode == "worker" and session_committed:
-            self.issue_manager.process_unchecked_checkboxes()
+        # CheckboxConverter disabled (#3231): auto-expansion causes exponential
+        # issue backlog growth. Class retained for potential future reuse.
+        # if self.mode == "worker" and session_committed:
+        #     self.issue_manager.process_unchecked_checkboxes()
 
         # Increment and persist iteration
         self.iteration += 1

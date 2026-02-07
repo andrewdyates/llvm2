@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -223,26 +219,9 @@ def main() -> int:
         default=Path.cwd(),
         help="Repository root (default: current directory)",
     )
-    # Deprecated --repo flag for backwards compatibility
-    parser.add_argument(
-        "--repo",
-        type=Path,
-        dest="deprecated_repo",
-        help="DEPRECATED: Use --repo-root instead (Repository root)",
-    )
 
     args = parser.parse_args()
-
-    # Handle deprecated --repo flag with warning
-    if args.deprecated_repo:
-        print(
-            "Warning: --repo is deprecated and will be removed in V2. "
-            "Use --repo-root instead.",
-            file=sys.stderr,
-        )
-        repo_root = args.deprecated_repo
-    else:
-        repo_root = args.repo_root
+    repo_root = args.repo_root
 
     # Find repo root (look for CLAUDE.md)
     # repo_root already set above

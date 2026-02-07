@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -14,9 +10,9 @@ placeholder defaults when the config file is absent or incomplete.
 Usage:
     from ai_template_scripts.identity import get_identity
     ident = get_identity()
-    print(ident.owner_name)       # "Andrew Yates" or placeholder
-    print(ident.github_org)       # "dropbox-ai-prototypes" or placeholder
-    print(ident.copyright_holder) # "Dropbox, Inc." or placeholder
+    print(ident.owner_name)       # "Andrew Yates"
+    print(ident.github_org)       # "dropbox-ai-prototypes"
+    print(ident.copyright_holder) # "Dropbox, Inc."
 
 See: #2974 (identity extraction for public release)
 """
@@ -45,14 +41,14 @@ class Identity:
 
 
 _PLACEHOLDER = Identity(
-    owner_name="Your Name",
-    owner_email="you@example.com",
-    owner_usernames=[],
-    github_org="your-org",
-    company_name="",
-    company_abbreviation="",
+    owner_name="Andrew Yates",
+    owner_email="ayates@dropbox.com",
+    owner_usernames=["ayates", "andrewdyates", "ayates_dbx"],
+    github_org="dropbox-ai-prototypes",
+    company_name="Dropbox, Inc.",
+    company_abbreviation="DBX",
     copyright_year=2026,
-    copyright_holder="",
+    copyright_holder="Dropbox, Inc.",
     copyright_license="Apache-2.0",
 )
 

@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -173,6 +169,25 @@ class RunnerIterationMixin:
                     files.append(filename)
         return files
 
+    @staticmethod
+    def _parse_changed_files(changes: str) -> list[str]:
+        """Extract all filenames from git status --porcelain output.
+
+        Parses the XY filename format, handling renames (XY old -> new).
+        Returns list of filenames suitable for git add.
+        """
+        files = []
+        for line in changes.rstrip("\n").split("\n"):
+            if not line or len(line) < 4:
+                continue
+            # Format: XY filename or XY old -> new (for renames)
+            # Leading whitespace is significant (position 0 = index status)
+            parts = line[3:].split(" -> ")
+            filename = parts[-1].strip()
+            if filename:
+                files.append(filename)
+        return files
+
     def _has_manager_iteration_reports(self, changes: str) -> bool:
         """Check if uncommitted changes include manager iteration reports.
 
@@ -226,8 +241,25 @@ class RunnerIterationMixin:
                 timeout=30,
             )
         else:
-            # Worker role: stage all changes as before
-            add_result = run_git_command(["add", "-A"], timeout=10)
+            # Worker role: stage specific files instead of git add -A (#3118, #2405)
+            files_to_stage = self._parse_changed_files(changes)
+            if not files_to_stage:
+                log_warning("Warning: no files found to stage")
+                return False
+
+            # In multi-worker mode, filter to only this worker's tracked files
+            if hasattr(self, "file_tracker") and self.file_tracker:
+                state = self.file_tracker.load()
+                tracked = set(state.files) if state else set()
+                if tracked:
+                    files_to_stage = [f for f in files_to_stage if f in tracked]
+                    if not files_to_stage:
+                        log_info("No files to stage (all belong to other workers)")
+                        return False
+
+            add_result = run_git_command(
+                ["add"] + files_to_stage, timeout=10
+            )
             if not add_result.ok:
                 error = add_result.error or "unknown error"
                 log_warning(f"Warning: git add failed: {error}")

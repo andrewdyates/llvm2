@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -43,7 +39,7 @@ except ImportError:
 
 from looper.config import LOG_DIR, get_project_name
 from looper.log import debug_swallow, log_info, log_warning
-from looper.subprocess_utils import run_cmd, run_git_command
+from looper.subprocess_utils import is_local_mode, run_cmd, run_gh_command, run_git_command
 
 
 class RunnerGitMixin:
@@ -369,8 +365,8 @@ class RunnerGitMixin:
     def check_sync_staleness(self) -> int | None:
         """Check how many commits behind ai_template this repo is.
 
-        Looks for ai_template as sibling directory. If found, compares
-        local .ai_template_version against ai_template HEAD.
+        Tries sibling directory first (fast, local). Falls back to remote
+        GitHub API check when no local sibling exists.
 
         Returns:
             Number of commits behind, or None if check not possible.
@@ -394,20 +390,34 @@ class RunnerGitMixin:
         if not local_version:
             return None
 
-        # Check for sibling ai_template directory
+        # Try sibling first (fast, no network)
+        result = self._check_staleness_via_sibling(local_version)
+        if result is not None:
+            return result
+
+        # Fall back to remote GitHub API
+        return self._check_staleness_via_remote(local_version)
+
+    def _check_staleness_via_sibling(self, local_version: str) -> int | None:
+        """Check staleness using sibling ai_template directory.
+
+        Args:
+            local_version: Commit hash from .ai_template_version.
+
+        Returns:
+            Number of commits behind, or None if sibling not available.
+        """
         parent = Path.cwd().parent
         ait_dir = parent / "ai_template"
         if not ait_dir.is_dir() or not (ait_dir / ".git").is_dir():
-            # ai_template not found as sibling - can't check
             return None
 
         # Get ai_template HEAD
         result = run_git_command(["rev-parse", "HEAD"], timeout=5, cwd=ait_dir)
         if not result.ok:
-            return None  # Best-effort: git query failed, skip sync check
+            return None
         ait_head = (result.value or "").strip()
 
-        # If already current, no warning needed
         # Handle both full and short hashes: either could be a prefix of the other
         if (
             local_version == ait_head
@@ -426,6 +436,90 @@ class RunnerGitMixin:
             try:
                 return int(result.value.strip())
             except ValueError as e:
-                debug_swallow("check_sync_staleness_parse", e)
+                debug_swallow("check_staleness_via_sibling_parse", e)
 
         return None
+
+    def _check_staleness_via_remote(self, local_version: str) -> int | None:
+        """Check staleness using GitHub API when no local sibling exists.
+
+        Uses gh api to get remote HEAD, then compare API for commit count.
+        Falls back to git ls-remote if gh api fails.
+
+        Args:
+            local_version: Commit hash from .ai_template_version.
+
+        Returns:
+            Number of commits behind, 999 sentinel if stale but count unknown,
+            or None if check not possible.
+        """
+        if is_local_mode():
+            return None
+
+        org = self._get_ait_github_org()
+        repo = f"{org}/ai_template"
+
+        # Get remote HEAD via gh api
+        remote_head: str | None = None
+        result = run_gh_command(
+            ["api", f"repos/{repo}/commits/HEAD", "--jq", ".sha"],
+            timeout=15,
+        )
+        if result.ok and result.value:
+            remote_head = result.value.strip()
+
+        # Fallback: git ls-remote
+        if not remote_head:
+            result = run_git_command(
+                ["ls-remote", f"https://github.com/{repo}.git", "HEAD"],
+                timeout=15,
+            )
+            if result.ok and result.value:
+                # Format: "<sha>\tHEAD"
+                parts = result.value.strip().split()
+                if parts:
+                    remote_head = parts[0]
+
+        if not remote_head:
+            return None
+
+        # Check if current
+        if (
+            local_version == remote_head
+            or remote_head.startswith(local_version)
+            or local_version.startswith(remote_head)
+        ):
+            return 0
+
+        # Get commit count via compare API
+        result = run_gh_command(
+            [
+                "api",
+                f"repos/{repo}/compare/{local_version}...{remote_head}",
+                "--jq",
+                ".ahead_by",
+            ],
+            timeout=15,
+        )
+        if result.ok and result.value:
+            try:
+                return int(result.value.strip())
+            except ValueError as e:
+                debug_swallow("check_staleness_via_remote_parse", e)
+
+        # We know it's stale (hashes differ) but can't count - use sentinel
+        return 999
+
+    def _get_ait_github_org(self) -> str:
+        """Get the GitHub org for ai_template from identity config.
+
+        Returns:
+            GitHub org string, defaults to "dropbox-ai-prototypes".
+        """
+        try:
+            from ai_template_scripts.identity import get_identity
+
+            return get_identity().github_org
+        except Exception as e:
+            debug_swallow("get_ait_github_org", e)
+            return "dropbox-ai-prototypes"

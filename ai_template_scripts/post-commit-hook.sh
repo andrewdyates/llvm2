@@ -1,8 +1,4 @@
 #!/bin/bash
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # post-commit-hook.sh - Git post-commit hook for issue label management
 #
 # Copyright 2026 Dropbox, Inc.

@@ -12,8 +12,13 @@ Part of #404: pulse.py module split
 import gzip
 import json
 import random
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import ModuleType
+
+from ai_template_scripts.atomic_write import atomic_write_text
 
 from .constants import (
     MAX_METRICS_PER_DAY,
@@ -36,6 +41,12 @@ except ModuleNotFoundError:
         get_repo_name as _canonical_get_repo_name,
     )
 
+fcntl: ModuleType | None
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows/unavailable fcntl
+    fcntl = None
+
 
 def get_repo_name() -> str:
     """Get current repo name from git remote.
@@ -45,6 +56,24 @@ def get_repo_name() -> str:
     """
     result = _canonical_get_repo_name()
     return result.stdout
+
+
+@contextmanager
+def _metrics_write_lock() -> Iterator[None]:
+    """Serialize write_metrics read-modify-write to prevent lost updates."""
+    if fcntl is None:
+        yield None
+        return
+    lock_path = METRICS_DIR / ".write_metrics.lock"
+    with open(lock_path, "w", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            yield None
+        finally:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
 
 
 def _rotate_old_metrics() -> None:
@@ -95,29 +124,29 @@ def write_metrics(metrics: dict) -> None:
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     metrics_file = METRICS_DIR / f"{date_str}.json"
+    with _metrics_write_lock():
+        # Append to daily file
+        existing = []
+        if metrics_file.exists():
+            try:
+                existing = json.loads(metrics_file.read_text())
+                if not isinstance(existing, list):
+                    existing = [existing]
+            except json.JSONDecodeError:
+                existing = []
 
-    # Append to daily file
-    existing = []
-    if metrics_file.exists():
-        try:
-            existing = json.loads(metrics_file.read_text())
-            if not isinstance(existing, list):
-                existing = [existing]
-        except json.JSONDecodeError:
-            existing = []
+        existing.append(metrics)
 
-    existing.append(metrics)
+        # Trim to max entries per day (keep most recent)
+        if len(existing) > MAX_METRICS_PER_DAY:
+            existing = existing[-MAX_METRICS_PER_DAY:]
 
-    # Trim to max entries per day (keep most recent)
-    if len(existing) > MAX_METRICS_PER_DAY:
-        existing = existing[-MAX_METRICS_PER_DAY:]
+        # Use compact JSON to reduce file size (154 lines -> 1 line per entry)
+        # Atomic write prevents truncated JSON on interruption (#2963)
+        atomic_write_text(metrics_file, json.dumps(existing, separators=(",", ":")))
 
-    # Use compact JSON to reduce file size (154 lines -> 1 line per entry)
-    # Use separators to minimize whitespace
-    metrics_file.write_text(json.dumps(existing, separators=(",", ":")))
-
-    # Keep latest.json human-readable for debugging
-    (METRICS_DIR / "latest.json").write_text(json.dumps(metrics, indent=2))
+        # Keep latest.json human-readable for debugging
+        atomic_write_text(METRICS_DIR / "latest.json", json.dumps(metrics, indent=2))
 
     # Periodically rotate old files (1 in 10 calls)
     if random.random() < 0.1:
@@ -147,7 +176,7 @@ def _trim_current_metrics() -> None:
         return
 
     existing = existing[-MAX_METRICS_PER_DAY:]
-    metrics_file.write_text(json.dumps(existing, separators=(",", ":")))
+    atomic_write_text(metrics_file, json.dumps(existing, separators=(",", ":")))
     print(f"{metrics_file}: trimmed {before} -> {len(existing)} entries")
 
 
@@ -160,7 +189,7 @@ def _compact_metrics_files() -> None:
             if before_size == 0:
                 print(f"{metrics_file.name}: empty file, skipped")
                 continue
-            metrics_file.write_text(json.dumps(data, separators=(",", ":")))
+            atomic_write_text(metrics_file, json.dumps(data, separators=(",", ":")))
             after_size = metrics_file.stat().st_size
             reduction = (1 - after_size / before_size) * 100
             if reduction < 1:

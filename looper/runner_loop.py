@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -28,8 +24,8 @@ __all__ = ["RunnerLoopMixin"]
 
 from looper.config import load_role_config
 from looper.file_tracker import get_uncommitted_files
-from looper.iteration import extract_issue_numbers
-from looper.log import log_info
+from looper.iteration import detect_overload, extract_issue_numbers
+from looper.log import log_info, log_warning
 from looper.sync import warn_uncommitted_work
 
 
@@ -149,9 +145,30 @@ class RunnerLoopMixin:
                 if uncommitted_threshold > 0:
                     warn_uncommitted_work(threshold=uncommitted_threshold)
 
+                # Compute provider shift for tool selection
+                base_codex_prob = self.config.get("codex_probability", 0.0)
+                force_tool = None
+                if (
+                    self._provider_shift.shift != 0.0
+                    and 0.0 < base_codex_prob < 1.0
+                ):
+                    effective = max(
+                        0.0, min(1.0, base_codex_prob + self._provider_shift.shift)
+                    )
+                    log_info(
+                        f"Provider shift: {self._provider_shift.shift:+.2f} "
+                        f"(base={base_codex_prob:.2f}, effective={effective:.2f}, "
+                        f"consecutive={self._provider_shift.consecutive_errors})"
+                    )
+                    force_tool = self.iteration_runner.select_ai_tool(
+                        codex_prob_override=effective, skip_dasher=True
+                    )
+
                 # Run main iteration
                 log_info("Pre-iteration: building iteration context...")
-                result = self.run_iteration(audit_round=0)
+                result = self.run_iteration(
+                    audit_round=0, force_ai_tool=force_tool
+                )
                 exit_code = result.exit_code
                 start_time = result.start_time
                 ai_tool = result.ai_tool
@@ -246,6 +263,63 @@ class RunnerLoopMixin:
                     audit_committed,
                     audit_start_time,
                 )
+
+                # Update provider shift state for overload-aware tool selection
+                # Decay and overload update are mutually exclusive per iteration:
+                # - On success: decay shift toward zero (~5 iterations to recover)
+                # - On overload: add shift (no decay, so 2 consecutive errors reach max)
+                # - On non-overload failure: decay only
+                # This ensures consecutive overloads reach maximum shift (1.0) in 2
+                # errors, not 3. See #3109 for the decay-before-check ordering issue.
+                if session_committed or exit_code == 0:
+                    # Success: reset consecutive error counter, decay shift
+                    self._provider_shift.consecutive_errors = 0
+                    self._provider_shift.shift *= 0.8
+                    if abs(self._provider_shift.shift) < 0.01:
+                        self._provider_shift.shift = 0.0
+                elif (
+                    exit_code != 0
+                    and not session_committed
+                    and ai_tool in ("claude", "codex")
+                    and result.log_file
+                    and detect_overload(result.log_file)
+                ):
+                    # Overload detected: shift away from the failed provider
+                    # No decay applied — consecutive overloads accumulate fully
+                    # Only claude/codex participate in shift; dasher overloads
+                    # fall through to else (decay) since shift is 2-way (#3123)
+                    self._provider_shift.consecutive_errors += 1
+                    if ai_tool == "claude":
+                        # Shift positive = prefer codex
+                        self._provider_shift.shift = min(
+                            1.0, self._provider_shift.shift + 0.5
+                        )
+                    elif ai_tool == "codex":
+                        # Shift negative = prefer claude
+                        self._provider_shift.shift = max(
+                            -1.0, self._provider_shift.shift - 0.5
+                        )
+                    log_warning(
+                        f"Provider overload detected ({ai_tool}): "
+                        f"shift={self._provider_shift.shift:+.2f}, "
+                        f"consecutive={self._provider_shift.consecutive_errors}"
+                    )
+                    # Add extra delay for consecutive overload errors
+                    extra_delay = min(
+                        60 * self._provider_shift.consecutive_errors, 300
+                    )
+                    delay += extra_delay
+                    log_info(
+                        f"Provider shift: adding {extra_delay}s delay "
+                        f"(total delay: {delay}s)"
+                    )
+                else:
+                    # Non-overload failure: decay shift, reset consecutive counter
+                    # A non-overload failure breaks the consecutive overload streak
+                    self._provider_shift.consecutive_errors = 0
+                    self._provider_shift.shift *= 0.8
+                    if abs(self._provider_shift.shift) < 0.01:
+                        self._provider_shift.shift = 0.0
 
                 # Finalize telemetry and process checkboxes
                 self._finalize_iteration(

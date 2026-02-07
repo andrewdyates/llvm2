@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -24,13 +20,13 @@ Public API (library usage):
         get_repo_lock_dir,   # Get per-repo lock directory path
         parse_etime,         # Parse ps etime format to seconds
         run_ps,              # Get ps fields for a PID
-        format_duration,     # Format seconds as human-readable
+        format_duration_precise,  # Format seconds as human-readable
     )
 
 CLI usage:
     ./cargo_lock_info.py                 # Print build lock holder (auto-detects repo)
     ./cargo_lock_info.py --kind test     # Inspect test lock
-    ./cargo_lock_info.py --repo z4       # Inspect specific repo's lock
+    ./cargo_lock_info.py --repo-name z4  # Inspect specific repo's lock
     ./cargo_lock_info.py --json          # Emit JSON and exit
 
 Copyright 2026 Dropbox, Inc.
@@ -44,7 +40,7 @@ __all__ = [
     "STALE_LOCK_AGE_SEC",
     "parse_etime",
     "run_ps",
-    "format_duration",
+    "format_duration_precise",
     "get_repo_lock_dir",
     "main",
 ]
@@ -134,13 +130,6 @@ def parse_iso8601(ts: str) -> datetime | None:
             None  # Best-effort: timestamp parse for diagnostics, None is safe default
         )
 
-
-def format_duration(seconds: int) -> str:
-    """Format seconds as human-readable duration (e.g. 1h23m45s).
-
-    DEPRECATED: Use format_duration_precise from subprocess_utils (#2535).
-    """
-    return format_duration_precise(seconds)
 
 
 
@@ -239,12 +228,6 @@ def main() -> int:
         "--repo-name",
         help="Repository name (auto-detected from git remote if not specified)",
     )
-    # Deprecated --repo flag for backwards compatibility
-    parser.add_argument(
-        "--repo",
-        dest="deprecated_repo",
-        help="DEPRECATED: Use --repo-name instead (Repository name)",
-    )
     parser.add_argument(
         "--lock-dir",
         help="Explicit lock directory (overrides --repo-name and auto-detection)",
@@ -258,17 +241,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Handle deprecated --repo flag with warning
-    repo_name = None
-    if args.deprecated_repo:
-        print(
-            "Warning: --repo is deprecated and will be removed in V2. "
-            "Use --repo-name instead.",
-            file=sys.stderr,
-        )
-        repo_name = args.deprecated_repo
-    elif hasattr(args, 'repo_name') and args.repo_name:
-        repo_name = args.repo_name
+    repo_name = args.repo_name
 
     # Determine lock directory: explicit > --repo-name > auto-detect
     if args.lock_dir:
@@ -333,7 +306,7 @@ def main() -> int:
             log(
                 "[cargo-lock] acquired: "
                 f"{acquired_dt.isoformat(timespec='seconds')} "
-                f"(age={format_duration(lock_age_sec)})"
+                f"(age={format_duration_precise(lock_age_sec)})"
             )
         if meta:
             log(f"[cargo-lock] meta: {summarize_lock_meta(meta)}")

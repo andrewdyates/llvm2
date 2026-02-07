@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -209,6 +205,8 @@ def check_ownership(repo_root: str, worker_id: str, staged_files: list[str]) -> 
 def clear_committed(tracker_file: str, committed_files: list[str]) -> int:
     """Remove committed files from tracker.
 
+    Also increments commit_count (#3202) to track session productivity.
+
     Returns number of files removed.
     """
     if not os.path.exists(tracker_file):
@@ -229,6 +227,8 @@ def clear_committed(tracker_file: str, committed_files: list[str]) -> int:
         removed = len(original_files) - len(remaining_files)
         if removed > 0:
             data["files"] = remaining_files
+            # Increment commit_count (#3202)
+            data["commit_count"] = data.get("commit_count", 0) + 1
             atomic_write_json(Path(tracker_file), data)
 
         return removed

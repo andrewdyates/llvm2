@@ -45,6 +45,7 @@ reports/*-test-status.json
 # Pulse runtime artifacts
 metrics/
 .flags/
+.ownership_conflicts.log
 logs/
 
 # Benchmark outputs
@@ -101,3 +102,4 @@ FEATURE_FREEZE
 # Mutation testing artifacts
 mutants/
 .mutmut-cache/
+kani_status.json

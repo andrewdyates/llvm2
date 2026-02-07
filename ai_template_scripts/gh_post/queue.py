@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -451,6 +447,14 @@ def _execute_gh_with_queue(real_gh: str, args: list[str], parsed: dict) -> int:
     Returns exit code (0 = success or queued, non-zero = error).
     """
     gh_post_module = _gh_post()
+
+    # Burst rate detection — throttle rapid sequential calls (#3220)
+    try:
+        from ai_template_scripts.gh_rate_limit.burst_tracker import get_burst_tracker
+
+        get_burst_tracker().record_and_maybe_throttle()
+    except Exception:
+        debug_swallow("burst_tracker_gh_post")
 
     # Try to sync any pending changes first (opportunistic)
     gh_post_module._sync_pending_changes(real_gh)

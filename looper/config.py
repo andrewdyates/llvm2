@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -1048,7 +1044,7 @@ def build_codex_context() -> str:
         try:
             content = codex_md.read_text().strip()
             if content:
-                parts.append(f"# Codex-Specific Instructions\n\n{content}")
+                parts.append(content)
         except (OSError, UnicodeDecodeError) as e:
             log_warning(f"Warning: Could not read {codex_md}: {e}")
 

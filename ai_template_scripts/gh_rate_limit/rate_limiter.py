@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -62,6 +58,10 @@ from ai_template_scripts.gh_rate_limit.secondary_backoff import (
     is_secondary_rate_limit_error,
     reset_backoff_state,
 )
+from ai_template_scripts.gh_rate_limit.burst_tracker import (
+    BurstTracker,
+    get_burst_tracker,
+)
 from ai_template_scripts.gh_rate_limit.serialize import (
     SerializedFetcher,
     cleanup_stale_locks,
@@ -117,6 +117,8 @@ class RateLimiter:
         )
         # ChangeLog for pending issue integration (#1854)
         self._change_log = ChangeLog(cache_dir=self.cache_dir)
+        # Burst rate tracker (#3220)
+        self._burst_tracker = BurstTracker(cache_dir=self.cache_dir)
 
         # Throttle stale lock cleanup to once per hour
         self._last_lock_cleanup: float = 0
@@ -1382,6 +1384,9 @@ class RateLimiter:
         Orchestrates: pending views, rate limits, caching, REST fallback,
         subprocess execution, and post-execution handling.
         """
+        # Burst rate detection — throttle rapid sequential calls (#3220)
+        self._burst_tracker.record_and_maybe_throttle()
+
         # Opportunistic lock cleanup, throttled to once per hour (#1605)
         self._maybe_cleanup_stale_locks()
 

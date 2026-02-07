@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -24,8 +20,8 @@ Public API (stable):
                EXIT_NOT_INITIALIZED, EXIT_SILENCE, EXIT_TIMEOUT
 
 Internal Helpers (may change):
-    build_codex_context, inject_content, select_phase_by_priority, show_prompt,
-    parse_frontmatter, parse_phase_blocks, validate_config
+    assemble_full_prompt, build_codex_context, inject_content, select_phase_by_priority,
+    show_prompt, parse_frontmatter, parse_phase_blocks, validate_config
 
 These internal functions are exported for testing and debugging but should not be
 relied upon by external code. They may be moved to private modules in future versions.
@@ -116,6 +112,7 @@ from looper.runner import (
     main,
     show_prompt,
 )
+from looper.runner_prompt import assemble_full_prompt
 from looper.status import StatusManager
 from looper.sync import (
     SyncConfig,
@@ -184,6 +181,7 @@ __all__ = [
     "build_codex_context",
     "install_hooks",
     "show_prompt",
+    "assemble_full_prompt",
     "check_concurrent_sessions",
     "get_project_name",
     "validate_config",

@@ -27,6 +27,18 @@ Looper sets these environment variables at session start (via `setup_git_identit
 | `CODEX_CLI_VERSION` | Codex CLI version (set when `AI_CODER=codex`) | `0.1.2504111205` |
 | `DASHER_VERSION` | Dasher CLI version (set when `AI_CODER=dasher`) | `0.5.1` |
 
+### Per-Iteration Variables
+
+Looper manages these environment variables per iteration (via `_run_iteration()`):
+
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `AI_PHASE` | Current rotation phase name, or `freeform` when no phase is selected, or `none` for USER mode | `high_priority`, `freeform` |
+| `AI_INPUT_ISSUES` | Comma-separated issue numbers included in the current prompt | `3251,3220,3216` |
+| `AI_THEME` | Active theme name from `.looper_config.json` (unset when no theme configured) | `reliability` |
+
+`AI_PHASE` is set every iteration. `AI_INPUT_ISSUES` is set on main iterations only (retains its value during audit rounds). `AI_THEME` is only set when a theme is active and is cleared when the theme is removed from config.
+
 ### Optional Configuration Variables
 
 Looper also reads these environment variables when set (they are not set by looper itself):

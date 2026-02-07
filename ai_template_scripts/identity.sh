@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -12,8 +8,8 @@
 #
 # Usage:
 #   source "$(dirname "$0")/identity.sh"
-#   echo "$AIT_OWNER_NAME"    # "Andrew Yates" or "Your Name"
-#   echo "$AIT_GITHUB_ORG"    # "dropbox-ai-prototypes" or "your-org"
+#   echo "$AIT_OWNER_NAME"    # "Andrew Yates"
+#   echo "$AIT_GITHUB_ORG"    # "dropbox-ai-prototypes"
 #
 # See: #2974 (identity extraction for public release)
 
@@ -65,7 +61,7 @@ _ait_toml_get() {
             echo "$value"
             return
         fi
-    done < "$file"
+    done <"$file"
 
     echo "$default"
 }
@@ -106,7 +102,7 @@ _ait_toml_get_array() {
             echo "$raw"
             return
         fi
-    done < "$file"
+    done <"$file"
 
     echo "$default"
 }
@@ -137,15 +133,15 @@ _ait_find_identity_toml() {
 
 _AIT_IDENTITY_TOML="$(_ait_find_identity_toml 2>/dev/null || true)"
 
-# Placeholders match Python identity.py _PLACEHOLDER defaults
-AIT_OWNER_NAME="$(_ait_toml_get "$_AIT_IDENTITY_TOML" "owner" "name" "Your Name")"
-AIT_OWNER_EMAIL="$(_ait_toml_get "$_AIT_IDENTITY_TOML" "owner" "email" "you@example.com")"
-AIT_OWNER_USERNAMES="$(_ait_toml_get_array "$_AIT_IDENTITY_TOML" "owner" "usernames" "")"
-AIT_GITHUB_ORG="$(_ait_toml_get "$_AIT_IDENTITY_TOML" "org" "github_org" "your-org")"
-AIT_COMPANY_NAME="$(_ait_toml_get "$_AIT_IDENTITY_TOML" "org" "company_name" "")"
-AIT_COMPANY_ABBREV="$(_ait_toml_get "$_AIT_IDENTITY_TOML" "org" "abbreviation" "")"
+# Defaults match Python identity.py _PLACEHOLDER defaults
+AIT_OWNER_NAME="$(_ait_toml_get "$_AIT_IDENTITY_TOML" "owner" "name" "Andrew Yates")"
+AIT_OWNER_EMAIL="$(_ait_toml_get "$_AIT_IDENTITY_TOML" "owner" "email" "ayates@dropbox.com")"
+AIT_OWNER_USERNAMES="$(_ait_toml_get_array "$_AIT_IDENTITY_TOML" "owner" "usernames" "ayates|andrewdyates|ayates_dbx")"
+AIT_GITHUB_ORG="$(_ait_toml_get "$_AIT_IDENTITY_TOML" "org" "github_org" "dropbox-ai-prototypes")"
+AIT_COMPANY_NAME="$(_ait_toml_get "$_AIT_IDENTITY_TOML" "org" "company_name" "Dropbox, Inc.")"
+AIT_COMPANY_ABBREV="$(_ait_toml_get "$_AIT_IDENTITY_TOML" "org" "abbreviation" "DBX")"
 AIT_COPYRIGHT_YEAR="$(_ait_toml_get "$_AIT_IDENTITY_TOML" "copyright" "year" "2026")"
-AIT_COPYRIGHT_HOLDER="$(_ait_toml_get "$_AIT_IDENTITY_TOML" "copyright" "holder" "")"
+AIT_COPYRIGHT_HOLDER="$(_ait_toml_get "$_AIT_IDENTITY_TOML" "copyright" "holder" "Dropbox, Inc.")"
 AIT_COPYRIGHT_LICENSE="$(_ait_toml_get "$_AIT_IDENTITY_TOML" "copyright" "license" "Apache-2.0")"
 
 # Build derived values for grep patterns

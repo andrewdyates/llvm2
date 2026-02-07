@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -394,7 +390,14 @@ def run_harness(
             # Check timeout
             if time.monotonic() >= deadline:
                 process.kill()
-                process.wait()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    print(
+                        "WARNING: Kani process did not exit after SIGKILL "
+                        "(uninterruptible?), abandoning wait",
+                        file=sys.stderr,
+                    )
                 _drain_stdout(process, output_lines)
                 duration = time.monotonic() - start_time
                 return HarnessResult(

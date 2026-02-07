@@ -10,7 +10,7 @@ rotation_phases: high_priority,normal_work,quality
 phase_weights: high_priority:3,normal_work:2,quality:1
 freeform_frequency: 4
 # Model settings: DO NOT set here. Models are configured per-machine:
-#   Claude: ANTHROPIC_MODEL env var (shell profile)
+#   Claude: ~/.claude/settings.json env.ANTHROPIC_MODEL (not shell env vars)
 #   Codex: ~/.codex/config.toml (model + model_reasoning_effort)
 # sync_repo.sh prints setup commands if misconfigured.
 ---

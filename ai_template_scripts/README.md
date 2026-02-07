@@ -33,26 +33,22 @@ For V1 readiness, scripts marked "Stable" in API.md maintain backward-compatible
 
 ## Wrapper vs Package Pattern
 
-Some modules exist as both a **wrapper script** (`foo.py`) and a **package** (`foo/`):
+Some modules exist as both a **wrapper script** (`foo.py`) and a **package** (`foo/`).
+Others have been fully migrated to packages with no wrapper script remaining.
 
 | Component | Purpose | When to Use |
 |-----------|---------|-------------|
-| `code_stats.py` | CLI wrapper script | `./ai_template_scripts/code_stats.py --help` |
-| `code_stats/` | Package with complexity analysis | `from ai_template_scripts.code_stats import analyze_complexity` |
+| `code_stats/` | Package with complexity analysis | `python3 -m ai_template_scripts.code_stats --help` |
 | `crash_analysis.py` | CLI wrapper script | `./ai_template_scripts/crash_analysis.py --help` |
 | `crash_analysis/` | Package with log analysis | `from ai_template_scripts.crash_analysis import analyze_crashes` |
 | `pulse.py` | CLI wrapper script | `./ai_template_scripts/pulse.py --help` |
 | `pulse/` | Package with internal modules | `from ai_template_scripts.pulse import get_issue_counts` |
-| `json_to_text.py` | CLI wrapper (stdin → formatted output) | `cat log.jsonl \| ./ai_template_scripts/json_to_text.py` |
-| `json_to_text/` | Package with formatters | `from ai_template_scripts.json_to_text import format_entry` |
+| `json_to_text/` | JSON log formatter package (stdin → formatted output) | `python3 -m ai_template_scripts.json_to_text` |
 
 **Guidelines:**
-- **CLI usage**: Run the wrapper script directly (`./script.py` or `python3 script.py`)
+- **CLI usage (wrapper exists)**: Run the wrapper script directly (`./script.py` or `python3 script.py`)
+- **CLI usage (package only)**: Run via module entrypoint (`python3 -m ai_template_scripts.<package>`)
 - **Programmatic imports**: Import from the package (`from ai_template_scripts.package import func`)
-- Wrappers delegate to packages internally - they're entry points, not separate implementations
-
-The wrapper exists for backwards compatibility and CLI convenience. The package provides
-the actual implementation and public API for programmatic use.
 
 ## Scripts
 
@@ -67,6 +63,7 @@ Entries are listed alphabetically by script name (LC_ALL=C / ASCII byte order).
 | `cargo_lock_info.py` | Inspect serialized cargo lock status | AI, human |
 | `cargo_wrapper/` | Serialize cargo builds org-wide to prevent OOM | `bin/cargo` wrapper |
 | `check_deps.py` | Check project dependencies and verification tools | MANAGER, init |
+| `check_env.sh` | Verify CLI versions and LLM model settings | Human, sync_repo.sh |
 | `check_doc_claims.py` | Verify documentation claims match code reality | MANAGER, pulse.py |
 | `check_path_order.sh` | Verify ai_template wrappers have PATH precedence | Codex, human |
 | `check_regression.py` | Regression checker for benchmark evals | PROVER, human |
@@ -75,8 +72,7 @@ Entries are listed alphabetically by script name (LC_ALL=C / ASCII byte order).
 | `clean_artifacts.sh` | Safe cleanup of Rust build artifacts (target/) | AI, human |
 | `cleanup_old_reports.py` | Remove old ephemeral reports to prevent repo bloat | AI, human |
 | `cleanup_tla_states.sh` | Remove TLA+ state files to prevent disk bloat | AI, human |
-| `code_stats.py` | Code complexity analysis | MANAGER, human |
-| `code_stats/` | Package with complexity analysis modules | `code_stats.py` |
+| `code_stats/` | Code complexity analysis package | MANAGER, human (`python3 -m ai_template_scripts.code_stats`) |
 | `commit-msg-hook.sh` | Git hook for structured commits | Git |
 | `crash_analysis.py` | Crash log analysis, system health | MANAGER, human |
 | `crash_analysis/` | Package with log analysis modules | `crash_analysis.py` |
@@ -109,7 +105,7 @@ Entries are listed alphabetically by script name (LC_ALL=C / ASCII byte order).
 | `install_hooks.sh` | Install pre-commit framework and git hooks | Human (one-time) |
 | `install_tla_tools.sh` | Install TLA+ tools (TLC) and configure env | Human, `check_deps.py --fix` |
 | `integration_audit.py` | Detect orphan modules not reachable from entry points | MANAGER, human |
-| `json_to_text.py` | Format Claude/Codex JSON output for terminal | `looper.py` |
+| `json_to_text/` | Format Claude/Codex JSON output for terminal | `looper.py` |
 | `kani_runner.py` | Run Kani proofs with timeout management and status tracking | PROVER, AI |
 | `labels.py` | Shared label constants for GitHub issue management | Import only |
 | `lint_applescript.sh` | Validate AppleScript syntax in shell scripts | AI, human |
@@ -193,8 +189,8 @@ Usage:
 ./ai_template_scripts/find_tla_tools.sh --timeout
 ```
 
-### json_to_text.py
-Converts Claude/Codex streaming JSON output to readable terminal text. Critical for `looper.py` - all AI output is piped through this.
+### json_to_text/ (package)
+Converts Claude/Codex streaming JSON output to readable terminal text. Critical for `looper.py` - all AI output is piped through this. Invoke via `python3 -m ai_template_scripts.json_to_text`.
 
 ### kani_runner.py
 Runs Kani proofs with configurable timeouts, tracks results to `kani_status.json`, and integrates with the looper 60s progress requirement.
@@ -244,8 +240,8 @@ python3 -m ai_template_scripts.tla_runner --dry-run
 
 **Spec discovery:** Finds `.tla` files in `specs/` and `tla/` directories. Excludes `*_MC.tla` (model config) files.
 
-### code_stats.py
-Analyzes cyclomatic/cognitive complexity across multiple languages (Python, Rust, Go, C++, etc). Uses best-in-class tools per language (radon for Python, gocyclo for Go, etc).
+### code_stats/ (package)
+Analyzes cyclomatic/cognitive complexity across multiple languages (Python, Rust, Go, C++, etc). Uses best-in-class tools per language (radon for Python, gocyclo for Go, etc). Invoke via `python3 -m ai_template_scripts.code_stats`.
 
 ### crash_analysis.py
 Parses `worker_logs/failures.log` (fallback `worker_logs/crashes.log`) to calculate failure rates and system health status. Used by MANAGER for auditing.
@@ -1321,6 +1317,8 @@ grep "pattern" file    # → passes directly to real grep
 **How it works:**
 - Intercepts `branch`, `checkout -b`, `switch -c` and blocks branch creation
 - Intercepts `git commit` and acquires a per-repo lock inside `.git/`
+- In multi-worker mode (`AI_WORKER_ID`), auto-uses per-worker index files (`.git/index.worker_<id>`)
+- Refreshes stale worker indexes after HEAD moves; commit requires restage if stale staged files exist
 - Releases the lock after the commit finishes
 - Other git commands pass through unchanged
 
@@ -1329,6 +1327,7 @@ grep "pattern" file    # → passes directly to real grep
 **Config:**
 - `AIT_GIT_LOCK_WAIT_S` - Seconds to wait for lock (default: 300)
 - `AIT_GIT_LOCK_DISABLE=1` - Disable commit locking entirely
+- `GIT_INDEX_FILE` - Optional override; when unset and `AI_WORKER_ID` is set, wrapper assigns worker index automatically
 
 ```bash
 git branch feature  # → ERROR: Branch creation blocked

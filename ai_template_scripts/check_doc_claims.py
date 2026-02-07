@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates
 # Licensed under the Apache License, Version 2.0
@@ -67,7 +63,7 @@ __all__ = [
     "load_keywords",
     "extract_doc_keywords",
     "check_keyword_in_code",
-    "check_keywords_in_code_batch",  # Batch version for O(n*m) complexity (#1699)
+    "check_keywords_in_code_batch",  # Batch version for O(n*m*d) with early termination (#1699)
     "check_heuristic_drift",
     "HeuristicResult",
 ]
@@ -393,7 +389,7 @@ def _should_skip_path(path: Path) -> bool:
 
 
 def check_keywords_in_code_batch(base_dir: Path, keywords: set[str]) -> set[str]:
-    """Batch-check which keywords appear in codebase (O(n*m) instead of O(d*k*n*m)).
+    """Batch-check which keywords appear in codebase (O(n*m*d) instead of O(n*m*d*k)).
 
     Single-pass optimization (#1699): Traverses filesystem once and checks all
     keywords per file, rather than traversing once per keyword.
@@ -465,7 +461,7 @@ def check_keyword_in_code(base_dir: Path, keyword: str) -> bool:
     Excludes DOC_FILES to avoid matching claims in docs themselves.
 
     Note: For multiple keywords, use check_keywords_in_code_batch() instead
-    to avoid O(d*n*m) complexity (#1699).
+    to avoid O(n*m*d*k) complexity (#1699).
 
     REQUIRES: base_dir is a Path to existing directory
     REQUIRES: keyword is non-empty string
@@ -513,7 +509,7 @@ def check_heuristic_drift(
     doc_words = extract_doc_keywords(base_dir)
     doc_keywords = doc_words & all_keywords
 
-    # Check which doc keywords have code backing (batch for O(n*m) vs O(d*n*m))
+    # Check which doc keywords have code backing (batch O(n*m*d) vs O(n*m*d*k))
     code_keywords = check_keywords_in_code_batch(base_dir, doc_keywords)
     drift_keywords = doc_keywords - code_keywords
 

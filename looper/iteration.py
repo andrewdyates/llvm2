@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -70,6 +66,68 @@ from looper.telemetry import (
 
 
 @dataclass
+class ProviderShiftState:
+    """Tracks automatic provider shifting on overload errors.
+
+    When a provider returns an overload error (rate limit, too many connections),
+    the shift value moves away from that provider. The shift decays each iteration
+    so the system eventually returns to the configured baseline.
+    """
+
+    shift: float = 0.0
+    """Shift amount: positive = prefer codex, negative = prefer claude."""
+
+    consecutive_errors: int = 0
+    """Number of consecutive overload errors (resets on success)."""
+
+
+# Overload error patterns from provider error messages
+# Patterns must include enough context to avoid false positives on numeric
+# log content (line numbers, ports, byte counts). See #3107.
+_OVERLOAD_PATTERNS = (
+    "too many connections",
+    "rate limit",
+    "rate_limit",
+    "overloaded",
+    "at capacity",
+    "insufficient capacity",
+    "http 429",
+    "status 429",
+    "http 503",
+    "status 503",
+    "service unavailable",
+    "server_error",
+    "too many requests",
+)
+
+
+def detect_overload(log_file: Path) -> bool:
+    """Check if a log file contains provider overload error indicators.
+
+    Reads the last 32KB of the log file and searches for overload-related
+    strings. This is a best-effort heuristic — false negatives are acceptable
+    since the shift will just not trigger.
+
+    REQUIRES: log_file is a Path (may not exist)
+    ENSURES: Returns True if overload patterns found, False otherwise
+    """
+    try:
+        if not log_file.exists():
+            return False
+        file_size = log_file.stat().st_size
+        if file_size == 0:
+            return False
+        read_size = min(file_size, 32 * 1024)
+        with log_file.open("r", errors="replace") as f:
+            if file_size > read_size:
+                f.seek(file_size - read_size)
+            tail = f.read().lower()
+        return any(pattern in tail for pattern in _OVERLOAD_PATTERNS)
+    except OSError:
+        return False
+
+
+@dataclass
 class IterationResult:
     """Result of a single iteration execution.
 
@@ -91,11 +149,16 @@ class IterationResult:
     codex_model: str | None
     """Selected Codex model name, if applicable."""
 
+    log_file: Path | None = None
+    """Path to the iteration log file, if created."""
+
 
 # Re-export public API from submodules for backwards compatibility
 __all__ = [
     "IterationRunner",
     "IterationResult",
+    "ProviderShiftState",
+    "detect_overload",
     "build_audit_prompt",
     "extract_issue_numbers",
     "EXIT_NOT_INITIALIZED",  # Re-exported from looper.constants
@@ -240,30 +303,47 @@ class IterationRunner:
         """
         return self._tool_tracker.get_stats()
 
-    def select_ai_tool(self) -> str:
+    def select_ai_tool(
+        self,
+        codex_prob_override: float | None = None,
+        skip_dasher: bool = False,
+    ) -> str:
         """Select which AI tool to use for this iteration.
 
         Selection priority: dasher > codex > claude (based on probabilities).
         Each tool is selected with its configured probability, falling through
         to the next tool if not selected or unavailable.
 
+        Args:
+            codex_prob_override: If provided, use this instead of config for
+                codex selection probability. Used by provider shift logic to
+                temporarily adjust selection away from overloaded providers.
+            skip_dasher: If True, skip dasher selection. Used by provider shift
+                to ensure the shifted selection only considers claude/codex (#3108).
+
         REQUIRES: self.config is valid configuration dict
         REQUIRES: self.codex_available and self.dasher_available reflect actual availability
         ENSURES: result in ("claude", "codex", "dasher")
-        ENSURES: result == "dasher" only if self.dasher_available and probability > 0
+        ENSURES: result == "dasher" only if self.dasher_available and probability > 0 and not skip_dasher
         ENSURES: result == "codex" only if self.codex_available and probability > 0
         ENSURES: result == "claude" as fallback
         """
         # Check dasher first (highest priority when available)
-        dasher_prob = self.config.get("dasher_probability", 0.0)
-        if self.dasher_available and dasher_prob > 0:
-            if dasher_prob >= 1.0:
-                return "dasher"
-            if random.random() < dasher_prob:
-                return "dasher"
+        # Skip when called from provider shift path — shift is claude/codex only (#3108)
+        if not skip_dasher:
+            dasher_prob = self.config.get("dasher_probability", 0.0)
+            if self.dasher_available and dasher_prob > 0:
+                if dasher_prob >= 1.0:
+                    return "dasher"
+                if random.random() < dasher_prob:
+                    return "dasher"
 
-        # Then check codex
-        codex_prob = self.config.get("codex_probability", 0.0)
+        # Then check codex (with optional override from provider shift)
+        codex_prob = (
+            codex_prob_override
+            if codex_prob_override is not None
+            else self.config.get("codex_probability", 0.0)
+        )
         if self.codex_available and codex_prob > 0:
             if codex_prob >= 1.0:
                 return "codex"
@@ -873,4 +953,5 @@ class IterationRunner:
             ai_tool=ai_tool,
             session_id=session_id,
             codex_model=codex_model,
+            log_file=log_file,
         )

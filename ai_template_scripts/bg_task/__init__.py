@@ -46,7 +46,6 @@ from ai_template_scripts.bg_task.api import (
 from ai_template_scripts.bg_task.cli import (
     CLIArgs,
     build_parser,
-    format_duration,
     handle_cleanup,
     handle_kill,
     handle_list,
@@ -93,7 +92,6 @@ __all__ = [
     # Internal - re-exported for test compatibility
     "CLIArgs",
     "build_parser",
-    "format_duration",
     "namespace_to_cli_args",
     "print_task_table",
     "tail_follow",

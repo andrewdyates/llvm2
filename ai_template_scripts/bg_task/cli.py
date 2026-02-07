@@ -1,7 +1,3 @@
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # Copyright 2026 Dropbox, Inc.
 # Author: Andrew Yates <ayates@dropbox.com>
 # Licensed under the Apache License, Version 2.0
@@ -13,7 +9,7 @@ Contains:
 - Command handlers (handle_start, handle_list, etc.)
 - Argument parser builder
 - Main entry point
-- Formatting utilities (format_duration, print_task_table)
+- Formatting utilities (print_task_table)
 """
 
 from __future__ import annotations
@@ -21,7 +17,6 @@ from __future__ import annotations
 __all__ = [
     "CLIArgs",
     "main",
-    "format_duration",
     "print_task_table",
 ]
 
@@ -52,7 +47,6 @@ from ai_template_scripts.bg_task.process import (
 )
 from ai_template_scripts.bg_task.storage import get_task_dir
 from ai_template_scripts.bg_task.types import DEFAULT_TIMEOUT, TaskMeta
-from ai_template_scripts.subprocess_utils import format_duration_compact
 from ai_template_scripts.version import get_version  # noqa: E402
 
 
@@ -77,14 +71,6 @@ class CLIArgs:
     # cleanup command
     days: int = 7
     force: bool = False
-
-
-def format_duration(seconds: float) -> str:
-    """Format duration in human-readable form.
-
-    DEPRECATED: Use format_duration_compact from subprocess_utils (#2535).
-    """
-    return format_duration_compact(seconds)
 
 
 def print_task_table(tasks: list[TaskMeta]) -> None:

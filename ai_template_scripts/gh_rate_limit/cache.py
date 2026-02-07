@@ -24,6 +24,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from ai_template_scripts.atomic_write import atomic_write_text
 from ai_template_scripts.gh_rate_limit.limiter import debug_log
 
 # Cache TTLs (seconds) - short TTLs for freshness, we have credits
@@ -42,6 +43,10 @@ CACHE_TTLS = {
 # per parent issue, so short TTL provides little reuse while exhausting quota.
 SEARCH_CACHE_TTL = 300  # 5 min
 
+# GraphQL query cache TTL (#3072) - cache read queries, skip mutations.
+# Discussions list/get change infrequently; 3 min matches repo/label TTL.
+GRAPHQL_CACHE_TTL = 180  # 3 min
+
 # Write commands that invalidate TTL cache
 # Note: edit/close/reopen also invalidate historical cache (see historical.py)
 INVALIDATES = {
@@ -54,6 +59,19 @@ INVALIDATES = {
     ("pr", "create"): [("pr", "list")],
     ("pr", "merge"): [("pr", "list")],
 }
+
+
+def _is_graphql_mutation(args: list[str]) -> bool:
+    """Check if a GraphQL command is a mutation (write) vs query (read).
+
+    Inspects the query= argument for the GraphQL 'mutation' keyword.
+    Args format: ["api", "graphql", "-f", "query=mutation { ... }"]
+    """
+    for arg in args:
+        if arg.startswith("query="):
+            query_text = arg[len("query="):].lstrip()
+            return query_text.startswith("mutation")
+    return False
 
 
 class TtlCache:
@@ -97,6 +115,13 @@ class TtlCache:
             if api_path.startswith("/search/") or api_path.startswith("search/"):
                 return SEARCH_CACHE_TTL
 
+        # GraphQL query caching (#3072) - cache reads, skip mutations.
+        # Args: ["api", "graphql", "-f", "query=..."]
+        if args[0] == "api" and len(args) > 1 and args[1] == "graphql":
+            if _is_graphql_mutation(args):
+                return None
+            return GRAPHQL_CACHE_TTL
+
         # gh issue list --search uses issue list TTL (already cached)
         # The --search flag doesn't change the caching behavior for issue list
         if len(args) < 2:
@@ -107,13 +132,21 @@ class TtlCache:
         """Check if command is a write operation."""
         if len(args) < 2:
             return False
-        return (args[0], args[1]) in INVALIDATES
+        if (args[0], args[1]) in INVALIDATES:
+            return True
+        # GraphQL mutations are writes (#3072)
+        if args[0] == "api" and args[1] == "graphql":
+            return _is_graphql_mutation(args)
+        return False
 
     def get_invalidates(self, args: list[str]) -> list[tuple[str, str]]:
         """Get list of command types to invalidate for a write operation."""
         if len(args) < 2:
             return []
         cmd = (args[0], args[1])
+        # GraphQL mutations invalidate cached GraphQL queries (#3072)
+        if cmd == ("api", "graphql") and _is_graphql_mutation(args):
+            return [("api", "graphql")]
         return INVALIDATES.get(cmd, [])
 
     def get_cached(self, args: list[str]) -> str | None:
@@ -179,7 +212,7 @@ class TtlCache:
             }
             if etag:
                 data["etag"] = etag
-            cache_file.write_text(json.dumps(data))
+            atomic_write_text(cache_file, json.dumps(data))
         except Exception as e:
             debug_log(f"set_cached write failed for {key}: {e}")
 
@@ -219,7 +252,7 @@ class TtlCache:
         try:
             data = json.loads(cache_file.read_text())
             data["created_at"] = time.time()
-            cache_file.write_text(json.dumps(data))
+            atomic_write_text(cache_file, json.dumps(data))
             return True
         except Exception as e:
             debug_log(f"extend_cache_ttl failed for {key}: {e}")
@@ -242,7 +275,7 @@ class TtlCache:
         if len(args) < 2:
             return
         cmd = (args[0], args[1])
-        to_invalidate = INVALIDATES.get(cmd, [])
+        to_invalidate = self.get_invalidates(args)
         for inv_cmd in to_invalidate:
             # Find and delete matching cache files for this repo + command type
             for cache_file in self.cache_dir.glob("*.json"):

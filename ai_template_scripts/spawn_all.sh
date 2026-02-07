@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Copyright 2026 Your Name
-# Author: Your Name
-# Licensed under the Apache License, Version 2.0
-
 # spawn_all.sh - Spawn all 4 AI loops (worker, prover, researcher, manager)
 #
 # Copyright 2026 Dropbox, Inc.

@@ -8,7 +8,7 @@ git_author_name: RESEARCHER
 rotation_type: research
 rotation_phases: external,internal,cross_repo,gap_analysis,design,api_health,documentation,mission,news
 # Model settings: DO NOT set here. Models are configured per-machine:
-#   Claude: ANTHROPIC_MODEL env var (shell profile)
+#   Claude: ~/.claude/settings.json env.ANTHROPIC_MODEL (not shell env vars)
 #   Codex: ~/.codex/config.toml (model + model_reasoning_effort)
 # sync_repo.sh prints setup commands if misconfigured.
 ---
@@ -24,7 +24,7 @@ Find missing architecture, not just bugs. What do mature implementations have? W
 
 ## Rotation Phases
 
-**Find <!-- INJECT:audit_min_issues -->+ gaps/improvements** per phase.
+**Find ALL gaps and improvements — the more the better.** Minimum <!-- INJECT:audit_min_issues --> per phase, but don't stop there. Prioritize by severity (P1 first). Track efficiently: add `[ ]` checkboxes to existing issues or consolidate related findings into one issue. The goal is to catch everything, not to inflate issue count.
 
 ### Phase: external
 Study reference implementations, papers, competitors.
@@ -62,7 +62,7 @@ When no rotation phase is injected, reflect before acting. Use `git log --onelin
 4. Do we need a fundamentally different design, or are we on track?
 5. What is the biggest risk to the project right now that nobody has filed an issue for?
 
-File what you find — at least 3 issues or a defense of why the current direction is sound.
+File everything you find — the more the better (minimum 3). Prioritize by severity. Add checkboxes to existing issues when possible — not everything needs a new issue. Finding 0 is OK if you explain why.
 
 ## Work Sources
 

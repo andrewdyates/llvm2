@@ -22,7 +22,6 @@ This document tracks deprecated items scheduled for removal.
 | Module | Replacement | Notes |
 |--------|-------------|-------|
 | `ai_template_scripts/pulse_monolith.py` | `pulse.py` | Legacy pulse implementation |
-| `ai_template_scripts/code_stats.py` | `ai_template_scripts.code_stats` package | Backward compatibility shim |
 | `ai_template_scripts/crash_analysis.py` | `ai_template_scripts.crash_analysis` package | Backward compatibility shim |
 | `ai_template_scripts/bg_task.py` | `ai_template_scripts.bg_task` package | Backward compatibility shim |
 
@@ -39,5 +38,5 @@ This document tracks deprecated items scheduled for removal.
 | ~~`looper/config_validation.py:30`~~ | ~~`check_unknown_keys()`~~ | ~~`get_unknown_keys()`~~ | Fixed in #2467 |
 
 ---
-*Last updated: 2026-02-05*
+*Last updated: 2026-02-07*
 *Created from #2434*

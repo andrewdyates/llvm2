@@ -47,6 +47,10 @@ from ai_template_scripts.gh_rate_limit.batch import (
     batch_issue_timelines,
     batch_issue_view,
 )
+from ai_template_scripts.gh_rate_limit.burst_tracker import (
+    BurstTracker,
+    get_burst_tracker,
+)
 from ai_template_scripts.gh_rate_limit.cache import (
     CACHE_TTLS,
     INVALIDATES,
@@ -121,6 +125,7 @@ __all__ = [
     "RateLimitInfo",
     "UsageStats",
     # Component classes (Phase 1 & 2 extractions)
+    "BurstTracker",
     "RepoContext",
     "RateState",
     "TtlCache",
@@ -131,6 +136,7 @@ __all__ = [
     "Change",
     "ChangeLog",
     # Singletons and accessors
+    "get_burst_tracker",
     "get_limiter",
     "get_rate_limits",
     "get_usage_stats",
