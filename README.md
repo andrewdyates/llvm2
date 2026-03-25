@@ -1,62 +1,120 @@
-# tCrane
+# LLVM2 — Verified Compiler Backend
 
-Trusted Cranelift - verified compiler backend in Rust.
+**Author:** Andrew Yates
+**Copyright:** 2026 Dropbox, Inc.
+**License:** Apache 2.0
 
-## Motivation
+Verified codegen from tMIR to machine code. Every instruction lowering is mathematically proven to preserve semantics via z4 SMT.
 
-Compiler bugs cause silent miscompilation: code that compiles but behaves incorrectly. Traditional testing can miss these bugs because they often appear only with specific input patterns or optimization levels.
-
-tCrane eliminates this class of bugs through formal verification. Every instruction lowering is mathematically proven to preserve semantics.
-
-## Goal
-
-A formally verified compiler backend compatible with Cranelift IR (CLIF format) where:
-- Every lowering rule has an SMT proof of correctness
-- Optimizations are verified to preserve semantics
-- Generated machine code is provably equivalent to the IR
-
-## Architecture
+LLVM2 is the final stage of the t\* verified compilation pipeline. Not a fork of LLVM or Cranelift — a purpose-built backend designed for proof-carrying IR.
 
 ```
-CLIF IR --> tcrane-ir --> tcrane-codegen --> Machine Code
-                |              |
-                v              v
-           tcrane-verify <-- z4 (SMT)
+Verified source (tRust/tSwift/tC)
+         |
+         v
+       tMIR (proof-carrying IR)
+         |
+         v
++-------------------------------------+
+|              LLVM2                   |
+|                                      |
+|  tMIR -> LIR -> Machine Code        |
+|         |           |                |
+|         +-----+-----+               |
+|               v                      |
+|        z4 proves each                |
+|        lowering correct              |
++-------------------------------------+
+         |
+         v
+   Verified Binary + Certificate
 ```
+
+## Why Not LLVM?
+
+| Problem | Impact |
+|---------|--------|
+| 20M+ LOC unverified C++ | Too large to verify |
+| General-purpose | Bloat for our use case |
+| No proof awareness | Can't leverage tMIR proofs |
+| Optimizations unverified | "Trust us" for correctness |
+
+## Why Not Cranelift?
+
+| Problem | Impact |
+|---------|--------|
+| Verification-unaware | Doesn't preserve proofs |
+| Different goals | Fast compilation, not verified compilation |
+| Extensive modification needed | Easier to build purpose-built |
+
+## Verification Approach
+
+Every lowering `tMIR_instruction -> MachineCode` is verified:
+
+1. **Encode semantics** — tMIR instruction as SMT formula
+2. **Encode result** — machine instruction as SMT formula
+3. **Prove equivalence** — z4 proves the two are semantically identical for all inputs
+
+This follows Alive2 and CompCert approaches, applied systematically to the entire backend.
 
 ## Crates
 
 | Crate | Description |
 |-------|-------------|
-| `tcrane-ir` | Cranelift IR types and semantics |
-| `tcrane-verify` | SMT encoding and verification |
-| `tcrane-codegen` | Verified code generation |
-| `tcrane-frontend` | CLIF parser and builder |
+| `llvm2-lower` | Lowering from tMIR to low-level IR |
+| `llvm2-opt` | Verified optimizations |
+| `llvm2-verify` | SMT encoding and semantic equivalence proofs |
+| `llvm2-codegen` | Machine code generation (x86-64, AArch64, RISC-V) |
 
-## Setup
+## Quick Start
 
 ```bash
-git clone https://github.com/ayates_dbx/tCrane
-cd tCrane
+git clone git@github.com:dropbox-ai-prototypes/LLVM2.git
+cd LLVM2
 cargo build
+cargo test
 ```
 
-## Usage
+## Status
 
-```rust
-use tcrane_frontend::FunctionBuilder;
-use tcrane_ir::function::Signature;
-use tcrane_ir::types::Type;
+**WIP** — Core lowering and verification infrastructure implemented. Active development.
 
-// Build a simple function
-let sig = Signature {
-    params: vec![Type::I64, Type::I64],
-    returns: vec![Type::I64],
-};
-let mut builder = FunctionBuilder::new("add", sig);
-let func = builder.build();
+## The t\* Stack
+
 ```
++-------------------------------------------------------------+
+|                    Source Languages                           |
++-------------------------------------------------------------+
+|  tRust           tSwift              tC                       |
+|     |               |                   |                     |
+|     +---------------+-------------------+                     |
+|                         |                                     |
+|                         v                                     |
+|                      tMIR                                     |
+|          (universal proof-carrying IR)                        |
+|                         |                                     |
+|            +------------+------------+                        |
+|            v                         v                        |
+|     +-------------+          +-------------+                  |
+|     |  tla2 + z4  |          |    LLVM2    |  <-- this repo   |
+|     |  (verify)   |          |  (codegen)  |                  |
+|     +-------------+          +-------------+                  |
+|                                     |                         |
+|                                     v                         |
+|                       Verified Machine Code                   |
++-------------------------------------------------------------+
+```
+
+## Related Projects
+
+| Project | Role |
+|---------|------|
+| [tMIR](https://github.com/dropbox-ai-prototypes/tMIR) | Input IR (proof-carrying) |
+| [tRust](https://github.com/dropbox-ai-prototypes/tRust) | Rust frontend |
+| [tSwift](https://github.com/dropbox-ai-prototypes/tSwift) | Swift frontend |
+| [tC](https://github.com/dropbox-ai-prototypes/tC) | C verification |
+| [z4](https://github.com/dropbox-ai-prototypes/z4) | SMT solver backend |
 
 ## License
 
-Apache-2.0
+Apache 2.0 — see [LICENSE](LICENSE).
