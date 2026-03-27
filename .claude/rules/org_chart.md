@@ -1,6 +1,6 @@
 # AI Org Chart
 
-Leader: Andrew Yates, Creator and USER
+Leader: (configure in ait_identity.toml), Creator and USER
 
 ---
 
@@ -9,20 +9,20 @@ Leader: Andrew Yates, Creator and USER
 | Director | Repos | Key Projects |
 |----------|-------|--------------|
 | MATH | 8 | z4, tla2, gamma-crown, lean5, dashprove, zksolve, proverif-rs, galg |
-| ML | 2 | model_mlx_migration, voice |
-| LANG | 10 | tRust, tSwift, tMIR, zani, sunder, certus, LLVM2, tC, rustc-index-verified, mly |
-| TOOL | 13 | dasher, dashterm2, dterm, dterm-alacritty, dashnews, dashmap, codex_dashflow, gemini_cli_rs, dashflow-integrations, shared-infra, ai_template, leadership, dOS |
-| KNOW | 5 | sg, chunker, video_audio_extracts, dashextract, pdfium_fast |
-| RS | 3 | kafka2, claude_code_rs, win-all-software-proof-competitions |
-| APP | 1 | dashpresent |
-| DBX | 2 | dbx_datacenter, dbx_unitq |
-| TPM | 0 | (process owner, uses ai_template) |
+| ML | 10 | dashvoice, model_mlx_migration, dashvoice-archive, voice, voice-data, voice-engine, voice-stt, voice-translate, voice-tts, pytorch-to-mlx |
+| LANG | 12 | zani, sunder, certus, tRust, dllm, mly, LLVM2, tC, tMIR, tSwift, rustc-index-verified, aeneas2 |
+| TOOL | 21+22 | dasher, dterm, d, dashboard, dasher-loop, dasher-codex, dashterm2, dterm-alacritty, dbrowse, th2 (+22 crate forks), looper, kafka2, dashnews, dashmap, codex_dashflow, gemini_cli_rs, dashflow-integrations, shared-infra, dOS, ai_template, leadership |
+| KNOW | 7 | dpdf, docling_rs, sg, chunker, video_audio_extracts, dashextract, pdfium_fast |
+| RS | 4 | claude_code_rs, win-all-software-proof-competitions, claude-code-research, inky |
+| APP | 3 | photo-dedup-mvp, dashpresent, app-shell-exploration |
+| DBX | 9 | droplake, dbx-nexus, dbx-research, dbx-albatross, dlp, internal-glossary-service, dbx_datacenter, dfeedback, dbx_unitq |
 
 ## Key Dependencies
 
-- gamma-crown: voice, mly (NN verification)
-- z4: zani, tRust, sunder, certus (SMT solving)
+- z4: tRust, zani, sunder, certus, gamma-crown, dllm (SAT/SMT solver)
 - tMIR: tRust, tSwift, tC (universal IR)
-- lean5: mathematical proofs
-
-Source: `leadership/CLAUDE.md` - do not edit directly
+- LLVM2: tMIR (compiler backend)
+- gamma-crown: mly, dllm, dashvoice (NN verification)
+- mly: dllm (verified ML framework)
+- tla2: droplake, kafka2 (formal specs)
+- ai_template: all repos (template sync)
