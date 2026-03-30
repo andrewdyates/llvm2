@@ -77,7 +77,7 @@ cargo test
 
 ## Status
 
-**WIP** — Core lowering and verification infrastructure implemented. Active development.
+**Preview** — Core lowering and verification infrastructure implemented. Active development.
 
 ## The t\* Stack
 
