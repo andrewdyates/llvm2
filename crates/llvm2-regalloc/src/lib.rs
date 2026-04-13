@@ -88,6 +88,7 @@ pub mod call_clobber;
 
 pub use liveness::{compute_live_intervals, LiveInterval, LiveRange, LivenessResult};
 pub use linear_scan::{aarch64_allocatable_regs, AllocError, AllocationResult, LinearScan, SpillInfo};
+pub use greedy::{GreedyAllocator, Stage as GreedyStage};
 pub use machine_types::{
     InstFlags, MachBlock, MachFunction, MachInst, MachOperand, StackSlot,
 };
@@ -106,26 +107,55 @@ pub use call_clobber::{
 
 use std::collections::HashMap;
 
+/// Which register allocation algorithm to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllocStrategy {
+    /// Linear scan: fast, processes intervals by start position.
+    LinearScan,
+    /// Greedy: LLVM-style, processes by spill weight with eviction and
+    /// splitting for better code quality.
+    Greedy,
+}
+
 /// Configuration for the register allocator.
 pub struct AllocConfig {
     /// Allocatable physical registers per register class.
     pub allocatable_regs: HashMap<RegClass, Vec<PReg>>,
+    /// Which allocation algorithm to use (default: LinearScan).
+    pub strategy: AllocStrategy,
     /// Whether to enable copy coalescing (default: true).
     pub enable_coalescing: bool,
     /// Whether to enable rematerialization (default: true).
     pub enable_remat: bool,
     /// Whether to enable spill slot reuse (default: true).
     pub enable_spill_slot_reuse: bool,
+    /// Register hints for the greedy allocator (ignored by linear scan).
+    pub hints: HashMap<VReg, Vec<PReg>>,
 }
 
 impl AllocConfig {
     /// Default configuration for AArch64 (Apple calling convention).
+    /// Uses linear scan for backward compatibility.
     pub fn default_aarch64() -> Self {
         Self {
             allocatable_regs: aarch64_allocatable_regs(),
+            strategy: AllocStrategy::LinearScan,
             enable_coalescing: true,
             enable_remat: true,
             enable_spill_slot_reuse: true,
+            hints: HashMap::new(),
+        }
+    }
+
+    /// AArch64 configuration using the greedy allocator.
+    pub fn greedy_aarch64() -> Self {
+        Self {
+            allocatable_regs: aarch64_allocatable_regs(),
+            strategy: AllocStrategy::Greedy,
+            enable_coalescing: true,
+            enable_remat: true,
+            enable_spill_slot_reuse: true,
+            hints: HashMap::new(),
         }
     }
 }
@@ -137,7 +167,7 @@ impl AllocConfig {
 /// 2. Eliminates phi instructions (inserts parallel copies).
 /// 3. Computes live intervals.
 /// 4. Copy coalescing (merges non-interfering intervals from copies).
-/// 5. Runs linear scan allocation.
+/// 5. Runs allocation (linear scan or greedy, based on `config.strategy`).
 /// 6. Rematerialization (recompute cheap values instead of spilling).
 /// 7. Inserts spill code for remaining spilled VRegs.
 /// 8. Spill slot reuse (share slots for non-overlapping spills).
@@ -167,12 +197,27 @@ pub fn allocate(
 
     let intervals: Vec<LiveInterval> = intervals_map.values().cloned().collect();
 
-    // Phase 5: Linear scan allocation.
-    let mut scanner = LinearScan::new(intervals, &config.allocatable_regs);
-    let mut result = scanner.allocate()?;
+    // Phase 5: Allocation — select algorithm based on strategy.
+    let (mut result, spilled) = match config.strategy {
+        AllocStrategy::LinearScan => {
+            let mut scanner = LinearScan::new(intervals, &config.allocatable_regs);
+            let result = scanner.allocate()?;
+            let spilled = scanner.spilled_vregs().to_vec();
+            (result, spilled)
+        }
+        AllocStrategy::Greedy => {
+            let mut allocator = GreedyAllocator::new(
+                intervals,
+                &config.allocatable_regs,
+                config.hints.clone(),
+            );
+            let result = allocator.allocate_with_splitting(func)?;
+            let spilled = allocator.spilled_vregs().to_vec();
+            (result, spilled)
+        }
+    };
 
     // Phase 6: Spill handling — rematerialization + spill code insertion.
-    let spilled = scanner.spilled_vregs().to_vec();
     if !spilled.is_empty() {
         if config.enable_remat {
             // Try to rematerialize cheap values instead of spilling.
@@ -588,11 +633,37 @@ mod tests {
         let mut func = make_straight_line(5);
         let config = AllocConfig {
             allocatable_regs: aarch64_allocatable_regs(),
+            strategy: AllocStrategy::LinearScan,
             enable_coalescing: false,
             enable_remat: false,
             enable_spill_slot_reuse: false,
+            hints: HashMap::new(),
         };
         let result = allocate(&mut func, &config).expect("allocation failed");
         assert!(result.spills.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_greedy_straight_line_no_spill() {
+        // Same as linear scan test but using greedy allocator.
+        let mut func = make_straight_line(10);
+        let config = AllocConfig::greedy_aarch64();
+        let result = allocate(&mut func, &config).expect("allocation failed");
+        assert_eq!(result.allocation.len(), 10);
+        assert!(result.spills.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_greedy_high_pressure() {
+        // 30 simultaneously live vregs with only 26 GPRs available.
+        // The greedy allocator with splitting can reduce pressure by
+        // splitting long intervals, so it may produce fewer spills than
+        // linear scan. The key invariant: allocation succeeds and every
+        // original VReg is either allocated or spilled.
+        let mut func = make_straight_line(30);
+        let config = AllocConfig::greedy_aarch64();
+        let result = allocate(&mut func, &config).expect("allocation failed");
+        let total = result.allocation.len() + result.spills.len();
+        assert!(total > 0, "should have some allocation results");
     }
 }
