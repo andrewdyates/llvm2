@@ -79,14 +79,19 @@ tmir-* ──> llvm2-lower (instruction selection, ABI lowering)
 ```
 
 **Crates:**
-- `llvm2-ir` - Shared machine model (MachInst, registers, operands, stack slots)
-- `llvm2-lower` - tMIR to MachIR instruction selection and ABI lowering
-- `llvm2-opt` - Optimization passes (DCE, peephole, address-mode formation, etc.)
-- `llvm2-regalloc` - Liveness analysis and register allocation
-- `llvm2-verify` - SMT encoding and proof generation (optional, z4)
-- `llvm2-codegen` - AArch64 encoding + Mach-O object file emission
+- `llvm2-ir` - Shared machine model: MachInst, registers (GPR/FPR/SIMD), operands, stack slots, calling conventions, AArch64 physical register definitions
+- `llvm2-lower` - tMIR-to-MachIR instruction selection (SSA tree-pattern matching), Apple AArch64 ABI lowering, legalization
+- `llvm2-opt` - 11 optimization passes: DCE, constant folding, copy propagation, peephole, CSE, LICM, dominator tree, loop analysis, memory-effects model, pass manager, pipeline
+- `llvm2-regalloc` - Linear scan register allocation, liveness analysis, interval splitting, spill generation, phi elimination, copy coalescing, rematerialization, call-clobber handling, spill-slot reuse
+- `llvm2-verify` - SMT encoding framework, lowering proof structure, tMIR and AArch64 semantic encoders (optional, z4)
+- `llvm2-codegen` - AArch64 binary encoding (integer/memory/FP), Mach-O writer (headers, sections, symbols, relocations, fixups), frame lowering, compact unwind, branch relaxation, code layout
 
-**Design doc:** `designs/2026-04-12-aarch64-backend.md`
+**tMIR stubs (in-tree):** `tmir-types`, `tmir-instrs`, `tmir-func`, `tmir-semantics` -- development stubs until real tMIR repo is integrated.
+
+**Design docs:**
+- `designs/2026-04-12-aarch64-backend.md` - Main backend design (codex-reviewed)
+- `designs/2026-04-13-tmir-integration.md` - tMIR adapter layer design
+- `designs/2026-04-13-verification-architecture.md` - z4 verification architecture
 
 ## LLVM Source Reference
 

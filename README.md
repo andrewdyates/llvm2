@@ -3,6 +3,7 @@
 **Author:** Andrew Yates
 **Copyright:** 2026 Dropbox, Inc.
 **License:** Apache 2.0
+**Status:** Preview (active development)
 
 Verified codegen from tMIR to machine code. Every instruction lowering is mathematically proven to preserve semantics via z4 SMT.
 
@@ -18,12 +19,12 @@ Verified source (tRust/tSwift/tC)
 +-------------------------------------+
 |              LLVM2                   |
 |                                      |
-|  tMIR -> LIR -> Machine Code        |
-|         |           |                |
-|         +-----+-----+               |
-|               v                      |
-|        z4 proves each                |
-|        lowering correct              |
+|  tMIR -> MachIR -> Machine Code     |
+|         |            |               |
+|         +------+-----+              |
+|                v                     |
+|         z4 proves each               |
+|         lowering correct             |
 +-------------------------------------+
          |
          v
@@ -57,16 +58,41 @@ Every lowering `tMIR_instruction -> MachineCode` is verified:
 
 This follows Alive2 and CompCert approaches, applied systematically to the entire backend.
 
+## Current Capabilities
+
+LLVM2 is in active development targeting AArch64 macOS (Apple Silicon) as the primary backend.
+
+**What works today:**
+- Full AArch64 instruction encoding (integer, memory, FP/SIMD formats)
+- Mach-O object file emission with relocations, symbols, fixups, and compact unwind
+- Instruction selection from tMIR covering arithmetic, comparisons, branches, calls, memory ops
+- Apple AArch64 ABI lowering (integer/FP arg classification, callee-saved registers)
+- Linear scan register allocation with interval splitting, spill generation, and rematerialization
+- Frame lowering with prologue/epilogue emission and branch relaxation
+- 11 optimization passes: DCE, constant folding, copy propagation, peephole, CSE, LICM, dominator analysis, loop detection, side-effect modeling
+- Phi elimination with parallel-copy resolution and copy coalescing
+- SMT verification framework (lowering proofs, tMIR/AArch64 semantic encodings)
+
+**Not yet implemented:**
+- End-to-end tMIR-to-binary pipeline (adapter layer in progress)
+- x86-64 and RISC-V targets
+- DWARF debug info (compact unwind only)
+- Greedy register allocator (Phase 2 RA)
+- Proof-consuming optimizations (NoOverflow, InBounds, NotNull)
+- Benchmark suite vs clang -O2
+
 ## Crates
 
-| Crate | Description |
-|-------|-------------|
-| `llvm2-ir` | Shared machine model (MachInst, registers, operands, stack slots) |
-| `llvm2-lower` | tMIR to MachIR instruction selection and ABI lowering |
-| `llvm2-opt` | Optimization passes (DCE, peephole, address-mode formation, etc.) |
-| `llvm2-regalloc` | Liveness analysis and register allocation |
-| `llvm2-verify` | SMT encoding and semantic equivalence proofs (optional, z4) |
-| `llvm2-codegen` | AArch64 encoding + Mach-O object file emission |
+| Crate | Lines | Tests | Description |
+|-------|------:|------:|-------------|
+| `llvm2-ir` | 2,493 | 16 | Shared machine model: MachInst, registers (GPR/FPR/SIMD), operands, stack slots, calling conventions |
+| `llvm2-lower` | 3,536 | 54 | tMIR-to-MachIR instruction selection, Apple AArch64 ABI lowering, legalization |
+| `llvm2-opt` | 4,377 | 82 | 11 optimization passes: DCE, constant folding, copy propagation, peephole, CSE, LICM, dominator tree, loop analysis, memory-effects model |
+| `llvm2-regalloc` | 3,941 | 41 | Linear scan RA, liveness analysis, interval splitting, spill generation, phi elimination, copy coalescing, rematerialization, call-clobber handling |
+| `llvm2-codegen` | 9,700 | 234 | AArch64 binary encoding (integer/memory/FP), Mach-O writer (headers, sections, symbols, relocations, fixups), frame lowering, compact unwind, branch relaxation |
+| `llvm2-verify` | 1,496 | 31 | SMT encoding framework, lowering proof structure, tMIR and AArch64 semantic encoders |
+
+**Totals:** ~28,500 lines of Rust, 587 tests across 72 source files. Plus 4 tMIR stub crates (~665 lines) for development.
 
 ## Quick Start
 
@@ -79,7 +105,7 @@ cargo test
 
 ## Status
 
-**Active Development** — Building AArch64 macOS backend. See `designs/2026-04-12-aarch64-backend.md` for full design (codex-reviewed).
+**Preview** -- AArch64 macOS backend under active development. 4 design documents in `designs/`. See `designs/2026-04-12-aarch64-backend.md` for full design (codex-reviewed).
 
 ## The t\* Stack
 
