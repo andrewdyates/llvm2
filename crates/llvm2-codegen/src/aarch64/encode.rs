@@ -168,6 +168,71 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
                 | rd)
         }
 
+        // MSUB Rd, Rn, Rm, Ra — multiply-subtract: Rd = Ra - Rn * Rm
+        // ARM ARM: Data-processing (3 source), o0=1
+        // 31 30:29 28:24 23:21 20:16 15 14:10 9:5 4:0
+        // sf 00    11011 000   Rm    1  Ra     Rn  Rd
+        // When Ra=XZR (31), this is MNEG Rd, Rn, Rm.
+        // Operands: [Rd, Rn, Rm, Ra] — 4 operands. If only 3, Ra defaults to XZR (MNEG).
+        AArch64Opcode::Msub => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let rm = preg_hw(inst, 2);
+            let ra = if inst.operands.len() > 3 { preg_hw(inst, 3) } else { 31 };
+            Ok((sf << 31)
+                | (0b00 << 29)
+                | (0b11011 << 24)
+                | (0b000 << 21)
+                | (rm << 16)
+                | (1 << 15) // o0 = 1 for MSUB
+                | (ra << 10)
+                | (rn << 5)
+                | rd)
+        }
+
+        // SMULL Xd, Wn, Wm — signed multiply long (alias for SMADDL Xd, Wn, Wm, XZR)
+        // ARM ARM: Data-processing (3 source)
+        // 31 30:29 28:24 23:21 20:16 15 14:10 9:5 4:0
+        //  1  00    11011 001   Rm    0  Ra     Rn  Rd
+        // sf=1 (always 64-bit result), U=0 (signed), o0=0 (add), Ra=XZR(31)
+        AArch64Opcode::Smull => {
+            let rd = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let rm = preg_hw(inst, 2);
+            let ra = 31u32; // XZR for SMULL alias
+            Ok((1u32 << 31) // sf = 1 (64-bit result)
+                | (0b00 << 29)
+                | (0b11011 << 24)
+                | (0b001 << 21) // op54=00, op31=1 (long multiply)
+                | (rm << 16)
+                | (0 << 15) // o0 = 0 (SMADDL)
+                | (ra << 10)
+                | (rn << 5)
+                | rd)
+        }
+
+        // UMULL Xd, Wn, Wm — unsigned multiply long (alias for UMADDL Xd, Wn, Wm, XZR)
+        // ARM ARM: Data-processing (3 source)
+        // 31 30:29 28:24 23:21 20:16 15 14:10 9:5 4:0
+        //  1  00    11011 101   Rm    0  Ra     Rn  Rd
+        // sf=1 (always 64-bit result), U=1 (unsigned), o0=0 (add), Ra=XZR(31)
+        AArch64Opcode::Umull => {
+            let rd = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let rm = preg_hw(inst, 2);
+            let ra = 31u32; // XZR for UMULL alias
+            Ok((1u32 << 31) // sf = 1 (64-bit result)
+                | (0b00 << 29)
+                | (0b11011 << 24)
+                | (0b101 << 21) // op54=00, op31=1, U=1 (unsigned long multiply)
+                | (rm << 16)
+                | (0 << 15) // o0 = 0 (UMADDL)
+                | (ra << 10)
+                | (rn << 5)
+                | rd)
+        }
+
         // SDIV Rd, Rn, Rm — Data-processing (2 source)
         // 31 30 28:21      20:16 15:10  9:5  4:0
         // sf  0 0011010110  Rm   000011  Rn   Rd
@@ -728,16 +793,10 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
         }
 
         // =================================================================
-        // Pseudo-instructions — emit NOP as safe fallback
+        // Checked arithmetic (flag-setting variants)
         // =================================================================
 
-        AArch64Opcode::Phi | AArch64Opcode::StackAlloc | AArch64Opcode::Nop => Ok(NOP),
-
-        // =================================================================
-        // Flag-setting arithmetic (ADDS/SUBS) — proof-carrying opcodes
-        // =================================================================
-
-        // ADDS Rd, Rn, Rm (shifted register, sets NZCV)
+        // ADDS Rd, Rn, Rm (shifted register, flag-setting)
         AArch64Opcode::AddsRR => {
             let sf = sf_from_operand(inst, 0);
             Ok(encoding::encode_add_sub_shifted_reg(
@@ -745,7 +804,7 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             ))
         }
 
-        // ADDS Rd, Rn, #imm12 (sets NZCV)
+        // ADDS Rd, Rn, #imm12 (flag-setting)
         AArch64Opcode::AddsRI => {
             let sf = sf_from_operand(inst, 0);
             let imm = imm_val(inst, 2) as u32 & 0xFFF;
@@ -754,7 +813,7 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             ))
         }
 
-        // SUBS Rd, Rn, Rm (shifted register, sets NZCV)
+        // SUBS Rd, Rn, Rm (shifted register, flag-setting)
         AArch64Opcode::SubsRR => {
             let sf = sf_from_operand(inst, 0);
             Ok(encoding::encode_add_sub_shifted_reg(
@@ -762,7 +821,7 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             ))
         }
 
-        // SUBS Rd, Rn, #imm12 (sets NZCV)
+        // SUBS Rd, Rn, #imm12 (flag-setting)
         AArch64Opcode::SubsRI => {
             let sf = sf_from_operand(inst, 0);
             let imm = imm_val(inst, 2) as u32 & 0xFFF;
@@ -771,18 +830,22 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             ))
         }
 
-        // Trap pseudo-instructions and runtime calls — expanded before encoding.
-        // If they reach the encoder, emit BRK #1 (debug breakpoint).
+        // =================================================================
+        // Pseudo-instructions — emit NOP as safe fallback
+        // =================================================================
+
+        // Trap pseudo-instructions — emit BRK #1 (debug breakpoint).
         AArch64Opcode::TrapOverflow
         | AArch64Opcode::TrapBoundsCheck
         | AArch64Opcode::TrapNull => {
-            // BRK #1: 1101_0100_001 imm16=1 000_00
-            Ok(0xD4200020)
+            Ok(0xD4200020) // BRK #1
         }
 
-        // Retain/Release are runtime calls — expanded before encoding.
-        // Emit NOP as safe fallback.
-        AArch64Opcode::Retain | AArch64Opcode::Release => Ok(NOP),
+        AArch64Opcode::Phi
+        | AArch64Opcode::StackAlloc
+        | AArch64Opcode::Nop
+        | AArch64Opcode::Retain
+        | AArch64Opcode::Release => Ok(NOP),
     }
 }
 
@@ -818,7 +881,7 @@ mod tests {
     use super::*;
     use llvm2_ir::inst::{AArch64Opcode, MachInst};
     use llvm2_ir::operand::MachOperand;
-    use llvm2_ir::regs::{PReg, SpecialReg, X0, X1, X2, X30, V0, V1, V2};
+    use llvm2_ir::regs::{PReg, SpecialReg, X0, X1, X2, X9, X30, V0, V1, V2};
 
     /// Helper to build a MachInst with given opcode and operands.
     fn mk(opcode: AArch64Opcode, ops: Vec<MachOperand>) -> MachInst {
@@ -881,6 +944,101 @@ mod tests {
         // Expected: sf=1, 00 11011 000 Rm=2 0 Ra=31 Rn=1 Rd=0
         let expected = (1u32 << 31) | (0b11011 << 24) | (2 << 16) | (31 << 10) | (1 << 5) | 0;
         assert_eq!(enc, expected, "MUL X0, X1, X2 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_msub() {
+        // MSUB X0, X1, X2, X9 — Rd = X9 - X1 * X2
+        // ARM ARM: sf=1 00 11011 000 Rm=2 1 Ra=9 Rn=1 Rd=0
+        let inst = mk(
+            AArch64Opcode::Msub,
+            vec![preg(X0), preg(X1), preg(X2), preg(X9)],
+        );
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b11011 << 24)
+            | (2 << 16)
+            | (1 << 15) // o0 = 1 for MSUB
+            | (9 << 10) // Ra = X9
+            | (1 << 5)
+            | 0;
+        assert_eq!(enc, expected, "MSUB X0, X1, X2, X9 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_msub_mneg_alias() {
+        // MNEG X0, X1, X2 = MSUB X0, X1, X2, XZR (3 operands, Ra defaults to XZR)
+        let inst = mk(
+            AArch64Opcode::Msub,
+            vec![preg(X0), preg(X1), preg(X2)],
+        );
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b11011 << 24)
+            | (2 << 16)
+            | (1 << 15) // o0 = 1 for MSUB
+            | (31 << 10) // Ra = XZR (31)
+            | (1 << 5)
+            | 0;
+        assert_eq!(enc, expected, "MNEG X0, X1, X2 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_smull() {
+        // SMULL X0, W1, W2 = SMADDL X0, W1, W2, XZR
+        // ARM ARM: sf=1 00 11011 001 Rm=2 0 Ra=31 Rn=1 Rd=0
+        let inst = mk(
+            AArch64Opcode::Smull,
+            vec![preg(X0), preg(X1), preg(X2)],
+        );
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b11011 << 24)
+            | (0b001 << 21) // signed long multiply
+            | (2 << 16)
+            | (0 << 15) // o0 = 0
+            | (31 << 10) // Ra = XZR
+            | (1 << 5)
+            | 0;
+        assert_eq!(enc, expected, "SMULL X0, W1, W2 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_umull() {
+        // UMULL X0, W1, W2 = UMADDL X0, W1, W2, XZR
+        // ARM ARM: sf=1 00 11011 101 Rm=2 0 Ra=31 Rn=1 Rd=0
+        let inst = mk(
+            AArch64Opcode::Umull,
+            vec![preg(X0), preg(X1), preg(X2)],
+        );
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b11011 << 24)
+            | (0b101 << 21) // unsigned long multiply
+            | (2 << 16)
+            | (0 << 15) // o0 = 0
+            | (31 << 10) // Ra = XZR
+            | (1 << 5)
+            | 0;
+        assert_eq!(enc, expected, "UMULL X0, W1, W2 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_adds_rr() {
+        // ADDS X0, X1, X2
+        let inst = mk(AArch64Opcode::AddsRR, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_add_sub_shifted_reg(1, 0, 1, 0, 2, 0, 1, 0);
+        assert_eq!(enc, direct, "ADDS X0, X1, X2: unified={enc:#010X}, direct={direct:#010X}");
+    }
+
+    #[test]
+    fn test_subs_rr() {
+        // SUBS X0, X1, X2
+        let inst = mk(AArch64Opcode::SubsRR, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_add_sub_shifted_reg(1, 1, 1, 0, 2, 0, 1, 0);
+        assert_eq!(enc, direct, "SUBS X0, X1, X2: unified={enc:#010X}, direct={direct:#010X}");
     }
 
     #[test]
@@ -1216,6 +1374,9 @@ mod tests {
             (AArch64Opcode::SubRR, vec![preg(X0), preg(X1), preg(X2)]),
             (AArch64Opcode::SubRI, vec![preg(X0), preg(X1), imm(0)]),
             (AArch64Opcode::MulRR, vec![preg(X0), preg(X1), preg(X2)]),
+            (AArch64Opcode::Msub, vec![preg(X0), preg(X1), preg(X2), preg(X9)]),
+            (AArch64Opcode::Smull, vec![preg(X0), preg(X1), preg(X2)]),
+            (AArch64Opcode::Umull, vec![preg(X0), preg(X1), preg(X2)]),
             (AArch64Opcode::SDiv, vec![preg(X0), preg(X1), preg(X2)]),
             (AArch64Opcode::UDiv, vec![preg(X0), preg(X1), preg(X2)]),
             (AArch64Opcode::Neg, vec![preg(X0), preg(X1)]),
@@ -1263,6 +1424,15 @@ mod tests {
             (AArch64Opcode::ScvtfRR, vec![preg(V0), preg(X1)]),
             (AArch64Opcode::Adrp, vec![preg(X0), imm(0)]),
             (AArch64Opcode::AddPCRel, vec![preg(X0), preg(X1), imm(0)]),
+            (AArch64Opcode::AddsRR, vec![preg(X0), preg(X1), preg(X2)]),
+            (AArch64Opcode::AddsRI, vec![preg(X0), preg(X1), imm(0)]),
+            (AArch64Opcode::SubsRR, vec![preg(X0), preg(X1), preg(X2)]),
+            (AArch64Opcode::SubsRI, vec![preg(X0), preg(X1), imm(0)]),
+            (AArch64Opcode::TrapOverflow, vec![]),
+            (AArch64Opcode::TrapBoundsCheck, vec![]),
+            (AArch64Opcode::TrapNull, vec![]),
+            (AArch64Opcode::Retain, vec![]),
+            (AArch64Opcode::Release, vec![]),
             (AArch64Opcode::Phi, vec![]),
             (AArch64Opcode::StackAlloc, vec![]),
             (AArch64Opcode::Nop, vec![]),

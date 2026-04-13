@@ -77,6 +77,7 @@
 pub mod machine_types;
 pub mod liveness;
 pub mod linear_scan;
+pub mod greedy;
 pub mod spill;
 pub mod phi_elim;
 pub mod coalesce;

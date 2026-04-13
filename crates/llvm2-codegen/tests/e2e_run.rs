@@ -294,11 +294,8 @@ fn build_max_function() -> MachFunction {
 ///   MOV X0, X9
 ///   RET
 ///
-/// Note: MUL encoding is not yet implemented in encode_ir_inst (falls through
-/// to NOP). This test documents that MUL support is needed for factorial.
-///
-/// TODO: Implement MUL encoding in pipeline.rs encode_ir_inst to make
-/// this test pass.
+/// MUL is encoded as MADD Xd, Xn, Xm, XZR per ARM ARM "Data-processing
+/// (3 source)" encoding class.
 fn build_factorial_function() -> MachFunction {
     let sig = Signature::new(vec![Type::I32], vec![Type::I32]);
     let mut func = MachFunction::new("factorial".to_string(), sig);
@@ -358,7 +355,6 @@ fn build_factorial_function() -> MachFunction {
     func.append_inst(bb_loop, ble_done_id);
 
     // MUL X9, X9, X8  (result *= i)
-    // TODO: MUL is not encoded yet (emits NOP). See encode_ir_inst in pipeline.rs.
     let mul = MachInst::new(
         AArch64Opcode::MulRR,
         vec![
@@ -594,20 +590,13 @@ int main(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: factorial — iterative loop (blocked on MUL encoding)
+// Test: factorial — iterative loop with MUL (MADD encoding)
 // ---------------------------------------------------------------------------
 
-// TODO: MUL (MADD) encoding is not yet implemented in encode_ir_inst.
-// The MulRR opcode falls through to the default NOP case. Once MUL encoding
-// is added, this test should pass.
-//
-// MUL Xd, Xn, Xm is encoded as MADD Xd, Xn, Xm, XZR:
-//   sf=1, 0011011000, Rm, 0, Ra=11111(XZR), Rn, Rd
-//   = (sf<<31) | (0b00011011000<<21) | (Rm<<16) | (0<<15) | (31<<10) | (Rn<<5) | Rd
-//
-// See ARM ARM: "Data-processing (3 source)" encoding class.
+// MUL (MADD) encoding is implemented. MUL Xd, Xn, Xm is encoded as
+// MADD Xd, Xn, Xm, XZR per ARM ARM "Data-processing (3 source)".
 #[test]
-fn test_e2e_factorial_blocked_on_mul() {
+fn test_e2e_factorial() {
     if !is_aarch64() || !has_cc() {
         eprintln!("Skipping e2e test: not AArch64 or cc not available");
         return;
@@ -617,52 +606,62 @@ fn test_e2e_factorial_blocked_on_mul() {
 
     let func = build_factorial_function();
 
-    // Verify the function encodes without errors (MUL becomes NOP).
-    let code = encode_function(&func).expect("encoding should succeed (MUL -> NOP)");
+    // Verify the function encodes without errors.
+    let code = encode_function(&func).expect("encoding should succeed");
     assert!(
-        code.len() > 0,
+        !code.is_empty(),
         "Factorial function should produce non-empty code"
     );
 
-    // Verify MUL is currently encoded as NOP (documenting the gap).
+    // Verify MUL is encoded as MADD (not NOP).
     // The MUL instruction is at index 2 in the loop block (bb1).
     // In the linear layout: bb0 has 2 instrs (MOV, MOVZ), bb1 has 5 instrs
     // (CMP, B.LE, MUL, SUB, B). MUL is at instruction index 4 overall.
     // Each instruction is 4 bytes, so MUL is at byte offset 16.
     if code.len() >= 20 {
         let mul_word = u32::from_le_bytes([code[16], code[17], code[18], code[19]]);
-        // NOP = 0xD503201F
+        // MUL X9, X9, X8 = MADD X9, X9, X8, XZR
+        // sf=1 | 00 11011 000 | Rm=X8(8) | 0 | Ra=XZR(31) | Rn=X9(9) | Rd=X9(9)
+        let expected_madd = (1u32 << 31)
+            | (0b11011 << 24)
+            | (8 << 16) // Rm = X8
+            | (0 << 15) // o0 = 0
+            | (31 << 10) // Ra = XZR
+            | (9 << 5) // Rn = X9
+            | 9; // Rd = X9
         assert_eq!(
-            mul_word, 0xD503201F,
-            "MUL should currently be encoded as NOP (0xD503201F), got 0x{:08X}. \
-             If this assertion fails, MUL encoding has been implemented — update this test!",
-            mul_word
+            mul_word, expected_madd,
+            "MUL X9, X9, X8 should encode as MADD 0x{:08X}, got 0x{:08X}",
+            expected_madd, mul_word
         );
     }
 
-    // We intentionally do NOT link and run the factorial binary, because
-    // the MUL instruction is encoded as NOP, which would produce wrong results.
-    // Once MUL encoding is implemented, uncomment the link-and-run test below.
-
-    /*
-    // TODO: Uncomment when MUL encoding is implemented.
+    // Link and run the factorial binary.
     let obj_bytes = encode_naked_to_macho(&func);
     let obj_path = write_object_file(&dir, "factorial.o", &obj_bytes);
     let driver_src = r#"
 #include <stdio.h>
 extern int factorial(int n);
 int main(void) {
-    int result = factorial(5);
-    printf("factorial(5) = %d\n", result);
-    return (result == 120) ? 0 : 1;
+    int r1 = factorial(5);
+    int r2 = factorial(1);
+    int r3 = factorial(0);
+    printf("factorial(5)=%d factorial(1)=%d factorial(0)=%d\n", r1, r2, r3);
+    if (r1 != 120) return 1;
+    if (r2 != 1) return 2;
+    if (r3 != 1) return 3;
+    return 0;
 }
 "#;
     let driver_path = write_c_driver(&dir, "driver.c", driver_src);
     let binary = link_with_cc(&dir, &driver_path, &obj_path, "test_factorial");
     let (exit_code, stdout) = run_binary_with_output(&binary);
-    assert_eq!(exit_code, 0,
-        "factorial(5) should return 120. stdout: {}", stdout);
-    */
+    eprintln!("test_e2e_factorial stdout: {}", stdout);
+    assert_eq!(
+        exit_code, 0,
+        "factorial test failed with exit code {} (1=f(5)!=120, 2=f(1)!=1, 3=f(0)!=1). stdout: {}",
+        exit_code, stdout
+    );
 
     cleanup(&dir);
 }

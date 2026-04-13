@@ -762,6 +762,48 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 | rd)
         }
 
+        // --- Data-processing (3 source): MSUB, SMULL, UMULL ---
+        AArch64Opcode::Msub => {
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let rm = preg_hw(2)?;
+            let ra = if inst.operands.len() > 3 { preg_hw(3)? } else { 31 };
+            Ok((sf << 31)
+                | (0b0011011u32 << 24)
+                | (rm << 16)
+                | (1 << 15) // o0=1 for MSUB
+                | (ra << 10)
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::Smull => {
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let rm = preg_hw(2)?;
+            Ok((1u32 << 31)
+                | (0b0011011u32 << 24)
+                | (0b001 << 21)
+                | (rm << 16)
+                | (0 << 15)
+                | (31 << 10) // Ra = XZR
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::Umull => {
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let rm = preg_hw(2)?;
+            Ok((1u32 << 31)
+                | (0b0011011u32 << 24)
+                | (0b101 << 21)
+                | (rm << 16)
+                | (0 << 15)
+                | (31 << 10) // Ra = XZR
+                | (rn << 5)
+                | rd)
+        }
+
         // --- Flag-setting arithmetic (ADDS/SUBS) ---
         AArch64Opcode::AddsRR => {
             let sf = if is_64bit(0) { 1 } else { 0 };
