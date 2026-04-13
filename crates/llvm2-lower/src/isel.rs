@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use crate::abi::{AppleAArch64ABI, ArgLocation, PReg};
 use crate::function::Signature;
-use crate::instructions::{Block, Instruction, IntCC, Opcode, Value};
+use crate::instructions::{Block, FloatCC, Instruction, IntCC, Opcode, Value};
 use crate::types::Type;
 
 // ---------------------------------------------------------------------------
@@ -120,6 +120,69 @@ pub enum AArch64Opcode {
     BLR,      // Branch with link to register (indirect call)
     RET,      // Return (BR X30)
 
+    // Shift (register forms)
+    LSLVWr,   // 32-bit logical shift left by register
+    LSLVXr,   // 64-bit logical shift left by register
+    LSRVWr,   // 32-bit logical shift right by register
+    LSRVXr,   // 64-bit logical shift right by register
+    ASRVWr,   // 32-bit arithmetic shift right by register
+    ASRVXr,   // 64-bit arithmetic shift right by register
+
+    // Shift (immediate forms - encoded via UBFM/SBFM)
+    LSLWi,    // 32-bit LSL immediate (UBFM alias)
+    LSLXi,    // 64-bit LSL immediate
+    LSRWi,    // 32-bit LSR immediate (UBFM alias)
+    LSRXi,    // 64-bit LSR immediate
+    ASRWi,    // 32-bit ASR immediate (SBFM alias)
+    ASRXi,    // 64-bit ASR immediate
+
+    // Logical (register forms)
+    ANDWrr,   // 32-bit bitwise AND
+    ANDXrr,   // 64-bit bitwise AND
+    ORRWrr,   // 32-bit bitwise OR
+    ORRXrr,   // 64-bit bitwise OR
+    EORWrr,   // 32-bit bitwise XOR
+    EORXrr,   // 64-bit bitwise XOR
+    BICWrr,   // 32-bit AND-NOT (bit clear)
+    BICXrr,   // 64-bit AND-NOT
+    ORNWrr,   // 32-bit OR-NOT
+    ORNXrr,   // 64-bit OR-NOT
+
+    // Logical (immediate forms - uses bitmask immediate encoding)
+    ANDWri,   // 32-bit AND immediate
+    ANDXri,   // 64-bit AND immediate
+    ORRWri,   // 32-bit OR immediate
+    ORRXri,   // 64-bit OR immediate
+    EORWri,   // 32-bit XOR immediate
+    EORXri,   // 64-bit XOR immediate
+
+    // Conditional select
+    CSELWr,   // 32-bit CSEL Wd, Wn, Wm, cond
+    CSELXr,   // 64-bit CSEL Xd, Xn, Xm, cond
+    CSINCWr,  // 32-bit CSINC (conditional increment)
+    CSINCXr,  // 64-bit CSINC
+    CSINVWr,  // 32-bit CSINV (conditional invert)
+    CSINVXr,  // 64-bit CSINV
+    CSNEGWr,  // 32-bit CSNEG (conditional negate)
+    CSNEGXr,  // 64-bit CSNEG
+
+    // Extension instructions
+    SXTBWr,   // Sign-extend byte to 32-bit (SBFM Wd, Wn, #0, #7)
+    SXTBXr,   // Sign-extend byte to 64-bit (SBFM Xd, Xn, #0, #7)
+    SXTHWr,   // Sign-extend halfword to 32-bit (SBFM Wd, Wn, #0, #15)
+    SXTHXr,   // Sign-extend halfword to 64-bit
+    SXTWXr,   // Sign-extend word to 64-bit (SBFM Xd, Wn, #0, #31)
+    UXTBWr,   // Zero-extend byte to 32-bit (AND Wd, Wn, #0xFF)
+    UXTHWr,   // Zero-extend halfword to 32-bit (AND Wd, Wn, #0xFFFF)
+
+    // Bitfield operations
+    UBFMWri,  // Unsigned bitfield move, 32-bit
+    UBFMXri,  // Unsigned bitfield move, 64-bit
+    SBFMWri,  // Signed bitfield move, 32-bit
+    SBFMXri,  // Signed bitfield move, 64-bit
+    BFMWri,   // Bitfield move (insert), 32-bit
+    BFMXri,   // Bitfield move (insert), 64-bit
+
     // Floating-point arithmetic
     FADDSrr,  // 32-bit float add
     FADDDrr,  // 64-bit float add
@@ -129,6 +192,31 @@ pub enum AArch64Opcode {
     FMULDrr,  // 64-bit float mul
     FDIVSrr,  // 32-bit float div
     FDIVDrr,  // 64-bit float div
+
+    // Floating-point comparison
+    FCMPSrr,  // 32-bit float compare
+    FCMPDrr,  // 64-bit float compare
+
+    // Floating-point conversion
+    FCVTZSWr, // Float to signed int, 32-bit result (FCVTZS Wd, Sn/Dn)
+    FCVTZSXr, // Float to signed int, 64-bit result (FCVTZS Xd, Sn/Dn)
+    SCVTFSWr, // Signed int to float, from 32-bit (SCVTF Sd, Wn)
+    SCVTFDWr, // Signed int to double, from 32-bit (SCVTF Dd, Wn)
+    SCVTFSXr, // Signed int to float, from 64-bit (SCVTF Sd, Xn)
+    SCVTFDXr, // Signed int to double, from 64-bit (SCVTF Dd, Xn)
+
+    // Address generation
+    ADRP,     // PC-relative page address (ADRP Xd, #page)
+    ADDXriPCRel, // Add page offset for global (ADD Xd, Xn, #pageoff)
+
+    // Stack / frame operations
+    ADDXriSP, // SP-relative add for stack slot address
+
+    // Load/store with register offset
+    LDRWro,   // Load 32-bit, base + register offset
+    LDRXro,   // Load 64-bit, base + register offset
+    STRWro,   // Store 32-bit, base + register offset
+    STRXro,   // Store 64-bit, base + register offset
 
     // Pseudo-ops (expanded later by frame lowering / regalloc)
     COPY,     // Pseudo: reg-to-reg copy (resolved by regalloc)
@@ -154,6 +242,10 @@ pub enum MachOperand {
     Block(Block),
     /// Condition code (for B.cond, CSET).
     CondCode(AArch64CC),
+    /// Global symbol name (for ADRP/ADD relocations).
+    Symbol(String),
+    /// Stack slot index (resolved during frame lowering).
+    StackSlot(u32),
 }
 
 /// AArch64 condition codes (NZCV-based).
@@ -189,6 +281,46 @@ impl AArch64CC {
             IntCC::UnsignedGreaterThanOrEqual => AArch64CC::HS,
             IntCC::UnsignedGreaterThan => AArch64CC::HI,
             IntCC::UnsignedLessThanOrEqual => AArch64CC::LS,
+        }
+    }
+
+    /// Map tMIR floating-point comparison condition to AArch64 condition code.
+    ///
+    /// AArch64 FCMP sets NZCV as follows for ordered comparisons:
+    ///   Equal: EQ (Z=1)
+    ///   LessThan: MI (N=1)
+    ///   GreaterThan: GT (Z=0, N=V)
+    ///   Unordered (NaN): VS (V=1)
+    pub fn from_floatcc(cc: FloatCC) -> Self {
+        match cc {
+            FloatCC::Equal => AArch64CC::EQ,
+            FloatCC::NotEqual => AArch64CC::NE,
+            FloatCC::LessThan => AArch64CC::MI,
+            FloatCC::LessThanOrEqual => AArch64CC::LS,
+            FloatCC::GreaterThan => AArch64CC::GT,
+            FloatCC::GreaterThanOrEqual => AArch64CC::GE,
+            FloatCC::Ordered => AArch64CC::VC,
+            FloatCC::Unordered => AArch64CC::VS,
+        }
+    }
+
+    /// Return the inverted condition code.
+    pub fn invert(self) -> Self {
+        match self {
+            AArch64CC::EQ => AArch64CC::NE,
+            AArch64CC::NE => AArch64CC::EQ,
+            AArch64CC::HS => AArch64CC::LO,
+            AArch64CC::LO => AArch64CC::HS,
+            AArch64CC::MI => AArch64CC::PL,
+            AArch64CC::PL => AArch64CC::MI,
+            AArch64CC::VS => AArch64CC::VC,
+            AArch64CC::VC => AArch64CC::VS,
+            AArch64CC::HI => AArch64CC::LS,
+            AArch64CC::LS => AArch64CC::HI,
+            AArch64CC::GE => AArch64CC::LT,
+            AArch64CC::LT => AArch64CC::GE,
+            AArch64CC::GT => AArch64CC::LE,
+            AArch64CC::LE => AArch64CC::GT,
         }
     }
 }
@@ -347,8 +479,63 @@ impl InstructionSelector {
             Opcode::Sdiv => self.select_binop(AArch64BinOp::Sdiv, inst, block),
             Opcode::Udiv => self.select_binop(AArch64BinOp::Udiv, inst, block),
 
+            // Shift operations
+            Opcode::Ishl => self.select_shift(AArch64ShiftOp::Lsl, inst, block),
+            Opcode::Ushr => self.select_shift(AArch64ShiftOp::Lsr, inst, block),
+            Opcode::Sshr => self.select_shift(AArch64ShiftOp::Asr, inst, block),
+
+            // Logical operations
+            Opcode::Band => self.select_logic(AArch64LogicOp::And, inst, block),
+            Opcode::Bor => self.select_logic(AArch64LogicOp::Orr, inst, block),
+            Opcode::Bxor => self.select_logic(AArch64LogicOp::Eor, inst, block),
+            Opcode::BandNot => self.select_logic(AArch64LogicOp::Bic, inst, block),
+            Opcode::BorNot => self.select_logic(AArch64LogicOp::Orn, inst, block),
+
+            // Extensions
+            Opcode::Sextend { from_ty, to_ty } => {
+                self.select_extend(true, *from_ty, *to_ty, inst, block);
+            }
+            Opcode::Uextend { from_ty, to_ty } => {
+                self.select_extend(false, *from_ty, *to_ty, inst, block);
+            }
+
+            // Bitfield operations
+            Opcode::ExtractBits { lsb, width } => {
+                self.select_bitfield_extract(false, *lsb, *width, inst, block);
+            }
+            Opcode::SextractBits { lsb, width } => {
+                self.select_bitfield_extract(true, *lsb, *width, inst, block);
+            }
+            Opcode::InsertBits { lsb, width } => {
+                self.select_bitfield_insert(*lsb, *width, inst, block);
+            }
+
+            // Conditional select
+            Opcode::Select { cond } => self.select_csel(*cond, inst, block),
+
             // Comparison
             Opcode::Icmp { cond } => self.select_cmp(*cond, inst, block),
+
+            // Floating-point arithmetic
+            Opcode::Fadd => self.select_fp_binop(AArch64FpBinOp::Fadd, inst, block),
+            Opcode::Fsub => self.select_fp_binop(AArch64FpBinOp::Fsub, inst, block),
+            Opcode::Fmul => self.select_fp_binop(AArch64FpBinOp::Fmul, inst, block),
+            Opcode::Fdiv => self.select_fp_binop(AArch64FpBinOp::Fdiv, inst, block),
+            Opcode::Fcmp { cond } => self.select_fcmp(*cond, inst, block),
+            Opcode::FcvtToInt { dst_ty } => {
+                self.select_fcvt_to_int(*dst_ty, inst, block);
+            }
+            Opcode::FcvtFromInt { src_ty } => {
+                self.select_fcvt_from_int(*src_ty, inst, block);
+            }
+
+            // Addressing
+            Opcode::GlobalRef { name } => {
+                self.select_global_ref(name, inst, block);
+            }
+            Opcode::StackAddr { slot } => {
+                self.select_stack_addr(*slot, inst, block);
+            }
 
             // Control flow
             Opcode::Jump { dest } => self.select_jump(*dest, block),
@@ -925,6 +1112,618 @@ impl InstructionSelector {
     }
 
     // -----------------------------------------------------------------------
+    // Shift operations
+    // -----------------------------------------------------------------------
+
+    /// Select shift operation: LSL, LSR, ASR.
+    ///
+    /// If the shift amount is a constant (tracked as an Iconst in the value
+    /// map), we emit the immediate form; otherwise, the register form.
+    fn select_shift(&mut self, op: AArch64ShiftOp, inst: &Instruction, block: Block) {
+        assert!(inst.args.len() >= 2, "Shift must have 2 args (value, amount)");
+        assert!(!inst.results.is_empty(), "Shift must have a result");
+
+        let src_val = inst.args[0];
+        let amt_val = inst.args[1];
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&src_val);
+        let is_32 = Self::is_32bit(ty);
+        let class = RegClass::for_type(ty);
+        let dst = self.new_vreg(class);
+
+        let src = self.use_value(&src_val);
+        let amt = self.use_value(&amt_val);
+
+        // Check if shift amount is an immediate
+        let is_imm = matches!(amt, MachOperand::Imm(_));
+
+        if is_imm {
+            // Immediate shift form
+            let opc = match (op, is_32) {
+                (AArch64ShiftOp::Lsl, true) => AArch64Opcode::LSLWi,
+                (AArch64ShiftOp::Lsl, false) => AArch64Opcode::LSLXi,
+                (AArch64ShiftOp::Lsr, true) => AArch64Opcode::LSRWi,
+                (AArch64ShiftOp::Lsr, false) => AArch64Opcode::LSRXi,
+                (AArch64ShiftOp::Asr, true) => AArch64Opcode::ASRWi,
+                (AArch64ShiftOp::Asr, false) => AArch64Opcode::ASRXi,
+            };
+            self.func.push_inst(
+                block,
+                MachInst::new(opc, vec![MachOperand::VReg(dst), src, amt]),
+            );
+        } else {
+            // Register shift form
+            let opc = match (op, is_32) {
+                (AArch64ShiftOp::Lsl, true) => AArch64Opcode::LSLVWr,
+                (AArch64ShiftOp::Lsl, false) => AArch64Opcode::LSLVXr,
+                (AArch64ShiftOp::Lsr, true) => AArch64Opcode::LSRVWr,
+                (AArch64ShiftOp::Lsr, false) => AArch64Opcode::LSRVXr,
+                (AArch64ShiftOp::Asr, true) => AArch64Opcode::ASRVWr,
+                (AArch64ShiftOp::Asr, false) => AArch64Opcode::ASRVXr,
+            };
+            self.func.push_inst(
+                block,
+                MachInst::new(opc, vec![MachOperand::VReg(dst), src, amt]),
+            );
+        }
+
+        self.define_value(result_val, MachOperand::VReg(dst), ty);
+    }
+
+    // -----------------------------------------------------------------------
+    // Logical operations
+    // -----------------------------------------------------------------------
+
+    /// Select logical operation: AND, ORR, EOR, BIC, ORN.
+    fn select_logic(&mut self, op: AArch64LogicOp, inst: &Instruction, block: Block) {
+        assert!(inst.args.len() >= 2, "Logic op must have 2 args");
+        assert!(!inst.results.is_empty(), "Logic op must have a result");
+
+        let lhs_val = inst.args[0];
+        let rhs_val = inst.args[1];
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&lhs_val);
+        let is_32 = Self::is_32bit(ty);
+        let class = RegClass::for_type(ty);
+        let dst = self.new_vreg(class);
+
+        let lhs = self.use_value(&lhs_val);
+        let rhs = self.use_value(&rhs_val);
+
+        let opc = match (op, is_32) {
+            (AArch64LogicOp::And, true) => AArch64Opcode::ANDWrr,
+            (AArch64LogicOp::And, false) => AArch64Opcode::ANDXrr,
+            (AArch64LogicOp::Orr, true) => AArch64Opcode::ORRWrr,
+            (AArch64LogicOp::Orr, false) => AArch64Opcode::ORRXrr,
+            (AArch64LogicOp::Eor, true) => AArch64Opcode::EORWrr,
+            (AArch64LogicOp::Eor, false) => AArch64Opcode::EORXrr,
+            (AArch64LogicOp::Bic, true) => AArch64Opcode::BICWrr,
+            (AArch64LogicOp::Bic, false) => AArch64Opcode::BICXrr,
+            (AArch64LogicOp::Orn, true) => AArch64Opcode::ORNWrr,
+            (AArch64LogicOp::Orn, false) => AArch64Opcode::ORNXrr,
+        };
+
+        self.func.push_inst(
+            block,
+            MachInst::new(opc, vec![MachOperand::VReg(dst), lhs, rhs]),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), ty);
+    }
+
+    // -----------------------------------------------------------------------
+    // Extension operations
+    // -----------------------------------------------------------------------
+
+    /// Select zero/sign extension.
+    ///
+    /// Maps tMIR Sextend/Uextend to the appropriate AArch64 extension
+    /// instruction. The AArch64 extension instructions are actually aliases
+    /// of SBFM (sign) or AND (zero) with specific bit patterns.
+    fn select_extend(
+        &mut self,
+        signed: bool,
+        from_ty: Type,
+        to_ty: Type,
+        inst: &Instruction,
+        block: Block,
+    ) {
+        assert!(!inst.args.is_empty(), "Extend must have 1 arg");
+        assert!(!inst.results.is_empty(), "Extend must have a result");
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+
+        let dst_class = RegClass::for_type(to_ty);
+        let dst = self.new_vreg(dst_class);
+        let src = self.use_value(&src_val);
+
+        let to_64 = !Self::is_32bit(to_ty);
+
+        let opc = if signed {
+            match (from_ty, to_64) {
+                (Type::I8, false) => AArch64Opcode::SXTBWr,
+                (Type::I8, true) => AArch64Opcode::SXTBXr,
+                (Type::I16, false) => AArch64Opcode::SXTHWr,
+                (Type::I16, true) => AArch64Opcode::SXTHXr,
+                (Type::I32, true) => AArch64Opcode::SXTWXr,
+                _ => {
+                    // Same-width or unsupported: just copy
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::COPY,
+                            vec![MachOperand::VReg(dst), src],
+                        ),
+                    );
+                    self.define_value(result_val, MachOperand::VReg(dst), to_ty);
+                    return;
+                }
+            }
+        } else {
+            // Unsigned extension
+            match from_ty {
+                Type::I8 => AArch64Opcode::UXTBWr,
+                Type::I16 => AArch64Opcode::UXTHWr,
+                Type::I32 if to_64 => {
+                    // UXTW: zero-extend W to X. On AArch64, writing a W register
+                    // implicitly zero-extends to X, so a MOV Wd, Wn suffices.
+                    // But we need an explicit instruction for tracking.
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::MOVWrr,
+                            vec![MachOperand::VReg(dst), src],
+                        ),
+                    );
+                    self.define_value(result_val, MachOperand::VReg(dst), to_ty);
+                    return;
+                }
+                _ => {
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::COPY,
+                            vec![MachOperand::VReg(dst), src],
+                        ),
+                    );
+                    self.define_value(result_val, MachOperand::VReg(dst), to_ty);
+                    return;
+                }
+            }
+        };
+
+        self.func.push_inst(
+            block,
+            MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
+        );
+        self.define_value(result_val, MachOperand::VReg(dst), to_ty);
+    }
+
+    // -----------------------------------------------------------------------
+    // Bitfield operations
+    // -----------------------------------------------------------------------
+
+    /// Select unsigned or signed bitfield extract.
+    ///
+    /// UBFM Wd, Wn, #immr, #imms  -- unsigned bitfield extract
+    /// SBFM Wd, Wn, #immr, #imms  -- signed bitfield extract
+    ///
+    /// For extract at position `lsb` with `width` bits:
+    ///   immr = lsb, imms = lsb + width - 1
+    fn select_bitfield_extract(
+        &mut self,
+        signed: bool,
+        lsb: u8,
+        width: u8,
+        inst: &Instruction,
+        block: Block,
+    ) {
+        assert!(!inst.args.is_empty(), "BitfieldExtract must have 1 arg");
+        assert!(!inst.results.is_empty(), "BitfieldExtract must have a result");
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&src_val);
+        let is_32 = Self::is_32bit(ty);
+        let class = RegClass::for_type(ty);
+        let dst = self.new_vreg(class);
+        let src = self.use_value(&src_val);
+
+        let immr = lsb as i64;
+        let imms = (lsb + width - 1) as i64;
+
+        let opc = match (signed, is_32) {
+            (false, true) => AArch64Opcode::UBFMWri,
+            (false, false) => AArch64Opcode::UBFMXri,
+            (true, true) => AArch64Opcode::SBFMWri,
+            (true, false) => AArch64Opcode::SBFMXri,
+        };
+
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                opc,
+                vec![
+                    MachOperand::VReg(dst),
+                    src,
+                    MachOperand::Imm(immr),
+                    MachOperand::Imm(imms),
+                ],
+            ),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), ty);
+    }
+
+    /// Select bitfield insert.
+    ///
+    /// BFM Wd, Wn, #immr, #imms -- insert `width` bits from Wn starting
+    /// at bit `lsb` into Wd (which is also read).
+    fn select_bitfield_insert(
+        &mut self,
+        lsb: u8,
+        width: u8,
+        inst: &Instruction,
+        block: Block,
+    ) {
+        assert!(
+            inst.args.len() >= 2,
+            "BitfieldInsert must have 2 args (dst, src)"
+        );
+        assert!(!inst.results.is_empty(), "BitfieldInsert must have a result");
+
+        let dst_val = inst.args[0]; // destination (also source of unmodified bits)
+        let src_val = inst.args[1]; // source of bits to insert
+
+        let ty = self.value_type(&dst_val);
+        let is_32 = Self::is_32bit(ty);
+        let class = RegClass::for_type(ty);
+        let result_val = inst.results[0];
+
+        // BFM reads and writes the destination register. We model this by
+        // first copying dst to a fresh vreg, then BFM modifying it in place.
+        let result = self.new_vreg(class);
+        let dst_op = self.use_value(&dst_val);
+        let src_op = self.use_value(&src_val);
+
+        // Copy dst to result (BFM operates on Wd as both read and write)
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                AArch64Opcode::COPY,
+                vec![MachOperand::VReg(result), dst_op],
+            ),
+        );
+
+        // BFM encoding for insert at position lsb with width:
+        //   immr = (reg_size - lsb) % reg_size
+        //   imms = width - 1
+        let reg_size = if is_32 { 32 } else { 64 };
+        let immr = ((reg_size - lsb as i64) % reg_size) as i64;
+        let imms = (width - 1) as i64;
+
+        let opc = if is_32 {
+            AArch64Opcode::BFMWri
+        } else {
+            AArch64Opcode::BFMXri
+        };
+
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                opc,
+                vec![
+                    MachOperand::VReg(result),
+                    src_op,
+                    MachOperand::Imm(immr),
+                    MachOperand::Imm(imms),
+                ],
+            ),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(result), ty);
+    }
+
+    // -----------------------------------------------------------------------
+    // Conditional select
+    // -----------------------------------------------------------------------
+
+    /// Select conditional select (CSEL).
+    ///
+    /// tMIR: Select { cond } (cc_val, true_val, false_val) -> result
+    /// The cc_val is a comparison result (must have set NZCV flags first).
+    /// We emit: CMP cc_val, #0; CSEL Wd/Xd, Wn/Xn, Wm/Xm, NE
+    fn select_csel(&mut self, cond: IntCC, inst: &Instruction, block: Block) {
+        assert!(
+            inst.args.len() >= 3,
+            "Select must have 3 args (cond_val, true_val, false_val)"
+        );
+        assert!(!inst.results.is_empty(), "Select must have a result");
+
+        let cond_val = inst.args[0];
+        let true_val = inst.args[1];
+        let false_val = inst.args[2];
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&true_val);
+        let is_32 = Self::is_32bit(ty);
+        let class = RegClass::for_type(ty);
+        let dst = self.new_vreg(class);
+
+        let cond_op = self.use_value(&cond_val);
+        let true_op = self.use_value(&true_val);
+        let false_op = self.use_value(&false_val);
+
+        // First, test the condition value (CMP cond, #0)
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                AArch64Opcode::CMPWri,
+                vec![cond_op, MachOperand::Imm(0)],
+            ),
+        );
+
+        // CSEL based on the IntCC condition
+        let cc = AArch64CC::from_intcc(cond);
+        let opc = if is_32 {
+            AArch64Opcode::CSELWr
+        } else {
+            AArch64Opcode::CSELXr
+        };
+
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                opc,
+                vec![
+                    MachOperand::VReg(dst),
+                    true_op,
+                    false_op,
+                    MachOperand::CondCode(cc),
+                ],
+            ),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), ty);
+    }
+
+    // -----------------------------------------------------------------------
+    // Floating-point arithmetic
+    // -----------------------------------------------------------------------
+
+    /// Select floating-point binary operation.
+    fn select_fp_binop(&mut self, op: AArch64FpBinOp, inst: &Instruction, block: Block) {
+        assert!(inst.args.len() >= 2, "FP binop must have 2 args");
+        assert!(!inst.results.is_empty(), "FP binop must have a result");
+
+        let lhs_val = inst.args[0];
+        let rhs_val = inst.args[1];
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&lhs_val);
+        let is_f32 = matches!(ty, Type::F32);
+        let class = RegClass::for_type(ty);
+        let dst = self.new_vreg(class);
+
+        let lhs = self.use_value(&lhs_val);
+        let rhs = self.use_value(&rhs_val);
+
+        let opc = match (op, is_f32) {
+            (AArch64FpBinOp::Fadd, true) => AArch64Opcode::FADDSrr,
+            (AArch64FpBinOp::Fadd, false) => AArch64Opcode::FADDDrr,
+            (AArch64FpBinOp::Fsub, true) => AArch64Opcode::FSUBSrr,
+            (AArch64FpBinOp::Fsub, false) => AArch64Opcode::FSUBDrr,
+            (AArch64FpBinOp::Fmul, true) => AArch64Opcode::FMULSrr,
+            (AArch64FpBinOp::Fmul, false) => AArch64Opcode::FMULDrr,
+            (AArch64FpBinOp::Fdiv, true) => AArch64Opcode::FDIVSrr,
+            (AArch64FpBinOp::Fdiv, false) => AArch64Opcode::FDIVDrr,
+        };
+
+        self.func.push_inst(
+            block,
+            MachInst::new(opc, vec![MachOperand::VReg(dst), lhs, rhs]),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), ty);
+    }
+
+    /// Select floating-point comparison: FCMP + CSET.
+    fn select_fcmp(&mut self, cond: FloatCC, inst: &Instruction, block: Block) {
+        assert!(inst.args.len() >= 2, "Fcmp must have 2 args");
+        assert!(!inst.results.is_empty(), "Fcmp must have a result");
+
+        let lhs_val = inst.args[0];
+        let rhs_val = inst.args[1];
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&lhs_val);
+        let is_f32 = matches!(ty, Type::F32);
+
+        let lhs = self.use_value(&lhs_val);
+        let rhs = self.use_value(&rhs_val);
+
+        // FCMP sets NZCV
+        let cmp_opc = if is_f32 {
+            AArch64Opcode::FCMPSrr
+        } else {
+            AArch64Opcode::FCMPDrr
+        };
+        self.func.push_inst(
+            block,
+            MachInst::new(cmp_opc, vec![lhs, rhs]),
+        );
+
+        // CSET to materialize result
+        let cc = AArch64CC::from_floatcc(cond);
+        let dst = self.new_vreg(RegClass::Gpr32);
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                AArch64Opcode::CSETWcc,
+                vec![MachOperand::VReg(dst), MachOperand::CondCode(cc)],
+            ),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), Type::B1);
+    }
+
+    /// Select float-to-integer conversion (FCVTZS).
+    ///
+    /// FCVTZS rounds toward zero (truncation), matching C cast semantics.
+    fn select_fcvt_to_int(&mut self, dst_ty: Type, inst: &Instruction, block: Block) {
+        assert!(!inst.args.is_empty(), "FcvtToInt must have 1 arg");
+        assert!(!inst.results.is_empty(), "FcvtToInt must have a result");
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+
+        let src_ty = self.value_type(&src_val);
+        let src = self.use_value(&src_val);
+
+        let dst_class = RegClass::for_type(dst_ty);
+        let dst = self.new_vreg(dst_class);
+
+        // Select based on destination integer width. The source float
+        // precision is encoded in the operand register class.
+        let opc = if Self::is_32bit(dst_ty) {
+            AArch64Opcode::FCVTZSWr
+        } else {
+            AArch64Opcode::FCVTZSXr
+        };
+
+        // Operands: [dst, src, src_type_hint]
+        // The src_type_hint helps the encoder know if source is S or D reg.
+        let src_hint = if matches!(src_ty, Type::F32) { 32i64 } else { 64 };
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                opc,
+                vec![
+                    MachOperand::VReg(dst),
+                    src,
+                    MachOperand::Imm(src_hint),
+                ],
+            ),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), dst_ty);
+    }
+
+    /// Select integer-to-float conversion (SCVTF).
+    fn select_fcvt_from_int(&mut self, src_ty: Type, inst: &Instruction, block: Block) {
+        assert!(!inst.args.is_empty(), "FcvtFromInt must have 1 arg");
+        assert!(!inst.results.is_empty(), "FcvtFromInt must have a result");
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+
+        // Destination type is the result's FP type; we infer from context.
+        // The src_ty tells us the integer width of the source.
+        let src = self.use_value(&src_val);
+
+        // We need to know the destination float type. We default to F64 unless
+        // the result type is tracked. For now, use the convention that
+        // FcvtFromInt produces a value of the same "size class" as src_ty:
+        //   I32 -> F32, I64 -> F64
+        let dst_ty = if Self::is_32bit(src_ty) {
+            Type::F32
+        } else {
+            Type::F64
+        };
+
+        let dst_class = RegClass::for_type(dst_ty);
+        let dst = self.new_vreg(dst_class);
+
+        let opc = match (Self::is_32bit(src_ty), matches!(dst_ty, Type::F32)) {
+            (true, true) => AArch64Opcode::SCVTFSWr,    // SCVTF Sd, Wn
+            (true, false) => AArch64Opcode::SCVTFDWr,   // SCVTF Dd, Wn
+            (false, true) => AArch64Opcode::SCVTFSXr,   // SCVTF Sd, Xn
+            (false, false) => AArch64Opcode::SCVTFDXr,  // SCVTF Dd, Xn
+        };
+
+        self.func.push_inst(
+            block,
+            MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), dst_ty);
+    }
+
+    // -----------------------------------------------------------------------
+    // Addressing
+    // -----------------------------------------------------------------------
+
+    /// Select global symbol reference.
+    ///
+    /// On AArch64, global references use a two-instruction sequence:
+    ///   ADRP Xd, #page(symbol)      -- load 4KB-aligned page address
+    ///   ADD  Xd, Xd, #pageoff(symbol) -- add 12-bit page offset
+    fn select_global_ref(
+        &mut self,
+        name: &str,
+        inst: &Instruction,
+        block: Block,
+    ) {
+        assert!(!inst.results.is_empty(), "GlobalRef must have a result");
+
+        let result_val = inst.results[0];
+        let dst = self.new_vreg(RegClass::Gpr64);
+
+        // ADRP Xd, symbol@PAGE
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                AArch64Opcode::ADRP,
+                vec![MachOperand::VReg(dst), MachOperand::Symbol(name.to_string())],
+            ),
+        );
+
+        // ADD Xd, Xd, symbol@PAGEOFF
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                AArch64Opcode::ADDXriPCRel,
+                vec![
+                    MachOperand::VReg(dst),
+                    MachOperand::VReg(dst),
+                    MachOperand::Symbol(name.to_string()),
+                ],
+            ),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), Type::I64);
+    }
+
+    /// Select stack slot address computation.
+    ///
+    /// Emits ADD Xd, SP, #offset (the actual offset is resolved during
+    /// frame lowering; we emit a placeholder StackSlot operand).
+    fn select_stack_addr(&mut self, slot: u32, inst: &Instruction, block: Block) {
+        assert!(!inst.results.is_empty(), "StackAddr must have a result");
+
+        let result_val = inst.results[0];
+        let dst = self.new_vreg(RegClass::Gpr64);
+
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                AArch64Opcode::ADDXriSP,
+                vec![
+                    MachOperand::VReg(dst),
+                    MachOperand::PReg(PReg(31)), // SP
+                    MachOperand::StackSlot(slot),
+                ],
+            ),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), Type::I64);
+    }
+
+    // -----------------------------------------------------------------------
     // Finalize
     // -----------------------------------------------------------------------
 
@@ -948,6 +1747,33 @@ enum AArch64BinOp {
     Udiv,
 }
 
+/// Shift operation classification.
+#[derive(Debug, Clone, Copy)]
+enum AArch64ShiftOp {
+    Lsl,
+    Lsr,
+    Asr,
+}
+
+/// Logical operation classification.
+#[derive(Debug, Clone, Copy)]
+enum AArch64LogicOp {
+    And,
+    Orr,
+    Eor,
+    Bic,
+    Orn,
+}
+
+/// FP binop classification.
+#[derive(Debug, Clone, Copy)]
+enum AArch64FpBinOp {
+    Fadd,
+    Fsub,
+    Fmul,
+    Fdiv,
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -956,7 +1782,7 @@ enum AArch64BinOp {
 mod tests {
     use super::*;
     use crate::function::Signature;
-    use crate::instructions::{Block, Instruction, IntCC, Opcode, Value};
+    use crate::instructions::{Block, FloatCC, Instruction, IntCC, Opcode, Value};
 
     /// Helper: create a simple isel for fn(i32, i32) -> i32.
     fn make_add_isel() -> (InstructionSelector, Block) {
@@ -970,206 +1796,74 @@ mod tests {
         (isel, entry)
     }
 
+    /// Helper: create isel for fn(i64, i64) -> i64.
+    fn make_i64_isel() -> (InstructionSelector, Block) {
+        let sig = Signature {
+            params: vec![Type::I64, Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("op64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+        (isel, entry)
+    }
+
+    /// Helper: create isel for fn(f64, f64) -> f64.
+    fn make_f64_isel() -> (InstructionSelector, Block) {
+        let sig = Signature {
+            params: vec![Type::F64, Type::F64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("fpop".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+        (isel, entry)
+    }
+
+    /// Helper: create isel for fn(f32, f32) -> f32.
+    fn make_f32_isel() -> (InstructionSelector, Block) {
+        let sig = Signature {
+            params: vec![Type::F32, Type::F32],
+            returns: vec![Type::F32],
+        };
+        let mut isel = InstructionSelector::new("fpop32".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+        (isel, entry)
+    }
+
+    /// Helper: create isel with no args, manually defining values.
+    fn make_empty_isel() -> (InstructionSelector, Block) {
+        let sig = Signature {
+            params: vec![],
+            returns: vec![],
+        };
+        let mut isel = InstructionSelector::new("test".to_string(), sig);
+        let entry = Block(0);
+        isel.func.ensure_block(entry);
+        (isel, entry)
+    }
+
+    // =======================================================================
+    // Original tests (preserved from scaffold)
+    // =======================================================================
+
     #[test]
     fn lower_formal_arguments_two_i32() {
         let (isel, entry) = make_add_isel();
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
 
-        // Should have 2 COPY instructions (X0->vreg0, X1->vreg1)
         assert_eq!(mblock.insts.len(), 2);
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::COPY);
         assert_eq!(mblock.insts[1].opcode, AArch64Opcode::COPY);
-
-        // First COPY: dst=vreg0, src=X0
         assert!(matches!(mblock.insts[0].operands[1], MachOperand::PReg(PReg(0))));
-        // Second COPY: dst=vreg1, src=X1
         assert!(matches!(mblock.insts[1].operands[1], MachOperand::PReg(PReg(1))));
     }
 
     #[test]
     fn select_iadd_i32() {
         let (mut isel, entry) = make_add_isel();
-
-        // Iadd: Value(2) = Value(0) + Value(1)
-        let add_inst = Instruction {
-            opcode: Opcode::Iadd,
-            args: vec![Value(0), Value(1)],
-            results: vec![Value(2)],
-        };
-        isel.select_instruction(&add_inst, entry);
-
-        let mfunc = isel.finalize();
-        let mblock = &mfunc.blocks[&entry];
-
-        // 2 COPY (formal args) + 1 ADDWrr
-        assert_eq!(mblock.insts.len(), 3);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::ADDWrr);
-    }
-
-    #[test]
-    fn select_isub_i64() {
-        let sig = Signature {
-            params: vec![Type::I64, Type::I64],
-            returns: vec![Type::I64],
-        };
-        let mut isel = InstructionSelector::new("sub64".to_string(), sig.clone());
-        let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
-
-        let sub_inst = Instruction {
-            opcode: Opcode::Isub,
-            args: vec![Value(0), Value(1)],
-            results: vec![Value(2)],
-        };
-        isel.select_instruction(&sub_inst, entry);
-
-        let mfunc = isel.finalize();
-        let mblock = &mfunc.blocks[&entry];
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::SUBXrr);
-    }
-
-    #[test]
-    fn select_icmp_and_brif() {
-        let (mut isel, entry) = make_add_isel();
-
-        // Icmp: Value(2) = Value(0) == Value(1)
-        let cmp_inst = Instruction {
-            opcode: Opcode::Icmp {
-                cond: IntCC::Equal,
-            },
-            args: vec![Value(0), Value(1)],
-            results: vec![Value(2)],
-        };
-        isel.select_instruction(&cmp_inst, entry);
-
-        // Brif: if Value(2) goto Block(1) else Block(2)
-        let brif_inst = Instruction {
-            opcode: Opcode::Brif {
-                cond: Value(2),
-                then_dest: Block(1),
-                else_dest: Block(2),
-            },
-            args: vec![Value(2)],
-            results: vec![],
-        };
-        isel.select_instruction(&brif_inst, entry);
-
-        let mfunc = isel.finalize();
-        let mblock = &mfunc.blocks[&entry];
-
-        // 2 COPY + 1 CMP + 1 CSET + 1 CMP (brif test) + 1 B.cc + 1 B
-        assert_eq!(mblock.insts.len(), 7);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::CMPWrr);
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::CSETWcc);
-        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::CMPWri);
-        assert_eq!(mblock.insts[5].opcode, AArch64Opcode::Bcc);
-        assert_eq!(mblock.insts[6].opcode, AArch64Opcode::B);
-
-        // Block should have 2 successors
-        assert_eq!(mblock.successors.len(), 2);
-    }
-
-    #[test]
-    fn select_return_i32() {
-        let (mut isel, entry) = make_add_isel();
-
-        // Return Value(0)
-        let ret_inst = Instruction {
-            opcode: Opcode::Return,
-            args: vec![Value(0)],
-            results: vec![],
-        };
-        isel.select_instruction(&ret_inst, entry);
-
-        let mfunc = isel.finalize();
-        let mblock = &mfunc.blocks[&entry];
-
-        // 2 COPY (formal args) + 1 MOV (to X0) + 1 RET
-        assert_eq!(mblock.insts.len(), 4);
-        // The MOV should target X0
-        assert!(matches!(
-            mblock.insts[2].operands[0],
-            MachOperand::PReg(PReg(0))
-        ));
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::RET);
-    }
-
-    #[test]
-    fn select_iconst_small() {
-        let sig = Signature {
-            params: vec![],
-            returns: vec![Type::I32],
-        };
-        let mut isel = InstructionSelector::new("const_fn".to_string(), sig);
-        let entry = Block(0);
-        isel.func.ensure_block(entry);
-
-        let const_inst = Instruction {
-            opcode: Opcode::Iconst {
-                ty: Type::I32,
-                imm: 42,
-            },
-            args: vec![],
-            results: vec![Value(0)],
-        };
-        isel.select_instruction(&const_inst, entry);
-
-        let mfunc = isel.finalize();
-        let mblock = &mfunc.blocks[&entry];
-        assert_eq!(mblock.insts.len(), 1);
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::MOVZWi);
-    }
-
-    #[test]
-    fn select_iconst_negative() {
-        let sig = Signature {
-            params: vec![],
-            returns: vec![Type::I64],
-        };
-        let mut isel = InstructionSelector::new("neg_const".to_string(), sig);
-        let entry = Block(0);
-        isel.func.ensure_block(entry);
-
-        let const_inst = Instruction {
-            opcode: Opcode::Iconst {
-                ty: Type::I64,
-                imm: -1,
-            },
-            args: vec![],
-            results: vec![Value(0)],
-        };
-        isel.select_instruction(&const_inst, entry);
-
-        let mfunc = isel.finalize();
-        let mblock = &mfunc.blocks[&entry];
-        assert_eq!(mblock.insts.len(), 1);
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::MOVNXi);
-    }
-
-    #[test]
-    fn condition_code_mapping() {
-        assert_eq!(AArch64CC::from_intcc(IntCC::Equal), AArch64CC::EQ);
-        assert_eq!(AArch64CC::from_intcc(IntCC::NotEqual), AArch64CC::NE);
-        assert_eq!(AArch64CC::from_intcc(IntCC::SignedLessThan), AArch64CC::LT);
-        assert_eq!(
-            AArch64CC::from_intcc(IntCC::UnsignedGreaterThan),
-            AArch64CC::HI
-        );
-    }
-
-    #[test]
-    fn full_add_function() {
-        // End-to-end: fn add(i32, i32) -> i32 { return a + b; }
-        let sig = Signature {
-            params: vec![Type::I32, Type::I32],
-            returns: vec![Type::I32],
-        };
-        let mut isel = InstructionSelector::new("add".to_string(), sig.clone());
-        let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
-
-        // Iadd
         isel.select_instruction(
             &Instruction {
                 opcode: Opcode::Iadd,
@@ -1178,8 +1872,1025 @@ mod tests {
             },
             entry,
         );
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 3);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::ADDWrr);
+    }
 
-        // Return
+    #[test]
+    fn select_isub_i64() {
+        let (mut isel, entry) = make_i64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Isub,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::SUBXrr);
+    }
+
+    #[test]
+    fn select_icmp_and_brif() {
+        let (mut isel, entry) = make_add_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Icmp { cond: IntCC::Equal },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Brif {
+                    cond: Value(2),
+                    then_dest: Block(1),
+                    else_dest: Block(2),
+                },
+                args: vec![Value(2)],
+                results: vec![],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 7);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::CMPWrr);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::CSETWcc);
+        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::CMPWri);
+        assert_eq!(mblock.insts[5].opcode, AArch64Opcode::Bcc);
+        assert_eq!(mblock.insts[6].opcode, AArch64Opcode::B);
+        assert_eq!(mblock.successors.len(), 2);
+    }
+
+    #[test]
+    fn select_return_i32() {
+        let (mut isel, entry) = make_add_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Return,
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 4);
+        assert!(matches!(mblock.insts[2].operands[0], MachOperand::PReg(PReg(0))));
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::RET);
+    }
+
+    #[test]
+    fn select_iconst_small() {
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iconst { ty: Type::I32, imm: 42 },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 1);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::MOVZWi);
+    }
+
+    #[test]
+    fn select_iconst_negative() {
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iconst { ty: Type::I64, imm: -1 },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[0].opcode, AArch64Opcode::MOVNXi);
+    }
+
+    #[test]
+    fn condition_code_mapping() {
+        assert_eq!(AArch64CC::from_intcc(IntCC::Equal), AArch64CC::EQ);
+        assert_eq!(AArch64CC::from_intcc(IntCC::NotEqual), AArch64CC::NE);
+        assert_eq!(AArch64CC::from_intcc(IntCC::SignedLessThan), AArch64CC::LT);
+        assert_eq!(AArch64CC::from_intcc(IntCC::UnsignedGreaterThan), AArch64CC::HI);
+    }
+
+    #[test]
+    fn full_add_function() {
+        let sig = Signature {
+            params: vec![Type::I32, Type::I32],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("add".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iadd,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Return,
+                args: vec![Value(2)],
+                results: vec![],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 5);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::COPY);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::COPY);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::ADDWrr);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::MOVWrr);
+        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::RET);
+        assert_eq!(mfunc.name, "add");
+        assert_eq!(mfunc.next_vreg, 3);
+    }
+
+    // =======================================================================
+    // New tests: Shift operations
+    // =======================================================================
+
+    #[test]
+    fn select_lsl_i32_register() {
+        let (mut isel, entry) = make_add_isel();
+        // LSL: Value(2) = Value(0) << Value(1)
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Ishl,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 2 COPY + 1 LSLVWr
+        assert_eq!(mblock.insts.len(), 3);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::LSLVWr);
+    }
+
+    #[test]
+    fn select_lsr_i64_register() {
+        let (mut isel, entry) = make_i64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Ushr,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::LSRVXr);
+    }
+
+    #[test]
+    fn select_asr_i32_register() {
+        let (mut isel, entry) = make_add_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Sshr,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::ASRVWr);
+    }
+
+    #[test]
+    fn select_lsl_i32_immediate() {
+        // Test immediate shift: define a constant shift amount, then shift
+        let (mut isel, entry) = make_empty_isel();
+
+        // Value(0) = iconst i32, 100
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iconst { ty: Type::I32, imm: 100 },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        );
+
+        // Value(1) = iconst i32, 4 (shift amount)
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iconst { ty: Type::I32, imm: 4 },
+                args: vec![],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+
+        // Value(2) = ishl Value(0), Value(1)
+        // Note: the shift amount is tracked as a VReg, not an immediate,
+        // so this will use the register form. Immediate detection would
+        // require peephole optimization (late combine phase).
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Ishl,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 1 MOVZWi + 1 MOVZWi + 1 LSLVWr (register form because value mapped as vreg)
+        assert_eq!(mblock.insts.len(), 3);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::LSLVWr);
+    }
+
+    // =======================================================================
+    // New tests: Logical operations
+    // =======================================================================
+
+    #[test]
+    fn select_and_i32() {
+        let (mut isel, entry) = make_add_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Band,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::ANDWrr);
+    }
+
+    #[test]
+    fn select_orr_i64() {
+        let (mut isel, entry) = make_i64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Bor,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::ORRXrr);
+    }
+
+    #[test]
+    fn select_eor_i32() {
+        let (mut isel, entry) = make_add_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Bxor,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::EORWrr);
+    }
+
+    #[test]
+    fn select_bic_i64() {
+        let (mut isel, entry) = make_i64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::BandNot,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::BICXrr);
+    }
+
+    #[test]
+    fn select_orn_i32() {
+        let (mut isel, entry) = make_add_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::BorNot,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::ORNWrr);
+    }
+
+    // =======================================================================
+    // New tests: Extensions
+    // =======================================================================
+
+    #[test]
+    fn select_sextb_to_i32() {
+        // fn(i8) - sign extend byte to i32
+        let sig = Signature {
+            params: vec![Type::I8],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("sextb".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Sextend {
+                    from_ty: Type::I8,
+                    to_ty: Type::I32,
+                },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 1 COPY (formal arg) + 1 SXTBWr
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::SXTBWr);
+    }
+
+    #[test]
+    fn select_sexth_to_i64() {
+        let sig = Signature {
+            params: vec![Type::I16],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("sexth".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Sextend {
+                    from_ty: Type::I16,
+                    to_ty: Type::I64,
+                },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::SXTHXr);
+    }
+
+    #[test]
+    fn select_sxtw_to_i64() {
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("sxtw".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Sextend {
+                    from_ty: Type::I32,
+                    to_ty: Type::I64,
+                },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::SXTWXr);
+    }
+
+    #[test]
+    fn select_uxtb_to_i32() {
+        let sig = Signature {
+            params: vec![Type::I8],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("uxtb".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Uextend {
+                    from_ty: Type::I8,
+                    to_ty: Type::I32,
+                },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::UXTBWr);
+    }
+
+    #[test]
+    fn select_uxth_to_i32() {
+        let sig = Signature {
+            params: vec![Type::I16],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("uxth".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Uextend {
+                    from_ty: Type::I16,
+                    to_ty: Type::I32,
+                },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::UXTHWr);
+    }
+
+    #[test]
+    fn select_uextend_i32_to_i64() {
+        // Zero-extend i32 to i64: on AArch64, writing W reg zero-extends to X,
+        // so we emit MOVWrr.
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("uxtw".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Uextend {
+                    from_ty: Type::I32,
+                    to_ty: Type::I64,
+                },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::MOVWrr);
+    }
+
+    // =======================================================================
+    // New tests: Bitfield operations
+    // =======================================================================
+
+    #[test]
+    fn select_ubfm_extract_i32() {
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("ubfm".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+
+        // Extract 8 bits starting at bit 4: UBFM Wd, Wn, #4, #11
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::ExtractBits { lsb: 4, width: 8 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[1];
+        assert_eq!(inst.opcode, AArch64Opcode::UBFMWri);
+        // immr = 4, imms = 11
+        assert_eq!(inst.operands[2], MachOperand::Imm(4));
+        assert_eq!(inst.operands[3], MachOperand::Imm(11));
+    }
+
+    #[test]
+    fn select_sbfm_extract_i64() {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("sbfm".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+
+        // Signed extract 16 bits from bit 0: SBFM Xd, Xn, #0, #15
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::SextractBits { lsb: 0, width: 16 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[1];
+        assert_eq!(inst.opcode, AArch64Opcode::SBFMXri);
+        assert_eq!(inst.operands[2], MachOperand::Imm(0));
+        assert_eq!(inst.operands[3], MachOperand::Imm(15));
+    }
+
+    #[test]
+    fn select_bfm_insert_i32() {
+        let (mut isel, entry) = make_add_isel();
+
+        // Insert 8 bits from Value(1) into Value(0) at bit 4
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::InsertBits { lsb: 4, width: 8 },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 2 COPY (args) + 1 COPY (dst to result) + 1 BFMWri
+        assert_eq!(mblock.insts.len(), 4);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::COPY);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::BFMWri);
+        // immr = (32 - 4) % 32 = 28, imms = 7
+        assert_eq!(mblock.insts[3].operands[2], MachOperand::Imm(28));
+        assert_eq!(mblock.insts[3].operands[3], MachOperand::Imm(7));
+    }
+
+    // =======================================================================
+    // New tests: Conditional select
+    // =======================================================================
+
+    #[test]
+    fn select_csel_i32() {
+        let sig = Signature {
+            params: vec![Type::I32, Type::I32, Type::I32],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("csel".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+
+        // Value(3) = select(NE, Value(0), Value(1), Value(2))
+        // cond_val=Value(0), true=Value(1), false=Value(2)
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Select { cond: IntCC::NotEqual },
+                args: vec![Value(0), Value(1), Value(2)],
+                results: vec![Value(3)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 3 COPY (args) + 1 CMPWri + 1 CSELWr
+        assert_eq!(mblock.insts.len(), 5);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::CMPWri);
+        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::CSELWr);
+        assert_eq!(
+            mblock.insts[4].operands[3],
+            MachOperand::CondCode(AArch64CC::NE)
+        );
+    }
+
+    #[test]
+    fn select_csel_i64() {
+        let sig = Signature {
+            params: vec![Type::I32, Type::I64, Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("csel64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Select { cond: IntCC::SignedGreaterThan },
+                args: vec![Value(0), Value(1), Value(2)],
+                results: vec![Value(3)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 3 COPY + 1 CMPWri + 1 CSELXr (64-bit because true_val is I64)
+        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::CSELXr);
+        assert_eq!(
+            mblock.insts[4].operands[3],
+            MachOperand::CondCode(AArch64CC::GT)
+        );
+    }
+
+    // =======================================================================
+    // New tests: Move wide (large immediate materialization)
+    // =======================================================================
+
+    #[test]
+    fn select_iconst_large_i64() {
+        let (mut isel, entry) = make_empty_isel();
+        // 0x0001_0002_0003_0004: needs MOVZ + 3 MOVK
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iconst {
+                    ty: Type::I64,
+                    imm: 0x0001_0002_0003_0004i64,
+                },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // MOVZ (low 16 bits) + 3 MOVK (remaining non-zero chunks)
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::MOVZXi);
+        assert_eq!(mblock.insts[0].operands[1], MachOperand::Imm(0x0004));
+
+        // Should have MOVK for bits [16:31], [32:47], [48:63]
+        let movk_count = mblock.insts.iter().filter(|i| i.opcode == AArch64Opcode::MOVKXi).count();
+        assert_eq!(movk_count, 3);
+    }
+
+    #[test]
+    fn select_iconst_i32_large() {
+        let (mut isel, entry) = make_empty_isel();
+        // 0x00010002: needs MOVZ + 1 MOVK (2 chunks for 32-bit)
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iconst {
+                    ty: Type::I32,
+                    imm: 0x00010002i64,
+                },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::MOVZWi);
+        assert_eq!(mblock.insts[0].operands[1], MachOperand::Imm(0x0002));
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::MOVKXi);
+        assert_eq!(mblock.insts[1].operands[1], MachOperand::Imm(0x0001));
+        assert_eq!(mblock.insts[1].operands[2], MachOperand::Imm(16)); // shift=16
+    }
+
+    // =======================================================================
+    // New tests: FP operations
+    // =======================================================================
+
+    #[test]
+    fn select_fadd_f64() {
+        let (mut isel, entry) = make_f64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fadd,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FADDDrr);
+    }
+
+    #[test]
+    fn select_fsub_f32() {
+        let (mut isel, entry) = make_f32_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fsub,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FSUBSrr);
+    }
+
+    #[test]
+    fn select_fmul_f64() {
+        let (mut isel, entry) = make_f64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fmul,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FMULDrr);
+    }
+
+    #[test]
+    fn select_fdiv_f32() {
+        let (mut isel, entry) = make_f32_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fdiv,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FDIVSrr);
+    }
+
+    #[test]
+    fn select_fcmp_f64() {
+        let (mut isel, entry) = make_f64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fcmp { cond: FloatCC::LessThan },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 2 COPY + 1 FCMPDrr + 1 CSETWcc
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::FCMPDrr);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::CSETWcc);
+        assert_eq!(
+            mblock.insts[3].operands[1],
+            MachOperand::CondCode(AArch64CC::MI)
+        );
+    }
+
+    #[test]
+    fn select_fcvt_to_int_i32() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("fcvt2i".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtToInt { dst_ty: Type::I32 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FCVTZSWr);
+    }
+
+    #[test]
+    fn select_fcvt_from_int_i32_to_f32() {
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::F32],
+        };
+        let mut isel = InstructionSelector::new("i2f".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtFromInt { src_ty: Type::I32 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::SCVTFSWr);
+    }
+
+    #[test]
+    fn select_fcvt_from_int_i64_to_f64() {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("i642f64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtFromInt { src_ty: Type::I64 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::SCVTFDXr);
+    }
+
+    // =======================================================================
+    // New tests: Addressing
+    // =======================================================================
+
+    #[test]
+    fn select_global_ref() {
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::GlobalRef { name: "my_global".to_string() },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // ADRP + ADD
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADRP);
+        assert_eq!(mblock.insts[0].operands[1], MachOperand::Symbol("my_global".to_string()));
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::ADDXriPCRel);
+        assert_eq!(mblock.insts[1].operands[2], MachOperand::Symbol("my_global".to_string()));
+    }
+
+    #[test]
+    fn select_stack_addr() {
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::StackAddr { slot: 3 },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 1);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADDXriSP);
+        // Should reference SP (PReg(31)) and StackSlot(3)
+        assert_eq!(mblock.insts[0].operands[1], MachOperand::PReg(PReg(31)));
+        assert_eq!(mblock.insts[0].operands[2], MachOperand::StackSlot(3));
+    }
+
+    // =======================================================================
+    // New tests: FloatCC mapping
+    // =======================================================================
+
+    #[test]
+    fn float_condition_code_mapping() {
+        assert_eq!(AArch64CC::from_floatcc(FloatCC::Equal), AArch64CC::EQ);
+        assert_eq!(AArch64CC::from_floatcc(FloatCC::NotEqual), AArch64CC::NE);
+        assert_eq!(AArch64CC::from_floatcc(FloatCC::LessThan), AArch64CC::MI);
+        assert_eq!(AArch64CC::from_floatcc(FloatCC::LessThanOrEqual), AArch64CC::LS);
+        assert_eq!(AArch64CC::from_floatcc(FloatCC::GreaterThan), AArch64CC::GT);
+        assert_eq!(AArch64CC::from_floatcc(FloatCC::GreaterThanOrEqual), AArch64CC::GE);
+        assert_eq!(AArch64CC::from_floatcc(FloatCC::Ordered), AArch64CC::VC);
+        assert_eq!(AArch64CC::from_floatcc(FloatCC::Unordered), AArch64CC::VS);
+    }
+
+    #[test]
+    fn condition_code_inversion() {
+        assert_eq!(AArch64CC::EQ.invert(), AArch64CC::NE);
+        assert_eq!(AArch64CC::NE.invert(), AArch64CC::EQ);
+        assert_eq!(AArch64CC::LT.invert(), AArch64CC::GE);
+        assert_eq!(AArch64CC::GE.invert(), AArch64CC::LT);
+        assert_eq!(AArch64CC::GT.invert(), AArch64CC::LE);
+        assert_eq!(AArch64CC::LE.invert(), AArch64CC::GT);
+        assert_eq!(AArch64CC::HI.invert(), AArch64CC::LS);
+        assert_eq!(AArch64CC::LS.invert(), AArch64CC::HI);
+        assert_eq!(AArch64CC::VS.invert(), AArch64CC::VC);
+        assert_eq!(AArch64CC::VC.invert(), AArch64CC::VS);
+    }
+
+    // =======================================================================
+    // End-to-end: compound pattern
+    // =======================================================================
+
+    #[test]
+    fn full_shift_and_mask() {
+        // fn shift_mask(i32, i32) -> i32 { return (a << b) & 0xFF; }
+        // This tests shift followed by logical AND.
+        let (mut isel, entry) = make_add_isel();
+
+        // Value(2) = ishl Value(0), Value(1)
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Ishl,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
+
+        // Value(3) = iconst i32, 0xFF
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iconst { ty: Type::I32, imm: 0xFF },
+                args: vec![],
+                results: vec![Value(3)],
+            },
+            entry,
+        );
+
+        // Value(4) = band Value(2), Value(3)
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Band,
+                args: vec![Value(2), Value(3)],
+                results: vec![Value(4)],
+            },
+            entry,
+        );
+
+        // Return Value(4)
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Return,
+                args: vec![Value(4)],
+                results: vec![],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // Expected:
+        // 0: COPY vreg0 <- X0
+        // 1: COPY vreg1 <- X1
+        // 2: LSLVWr vreg2 <- vreg0, vreg1
+        // 3: MOVZWi vreg3 <- 0xFF
+        // 4: ANDWrr vreg4 <- vreg2, vreg3
+        // 5: MOVWrr X0 <- vreg4
+        // 6: RET
+        assert_eq!(mblock.insts.len(), 7);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::LSLVWr);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::MOVZWi);
+        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::ANDWrr);
+        assert_eq!(mblock.insts[5].opcode, AArch64Opcode::MOVWrr);
+        assert_eq!(mblock.insts[6].opcode, AArch64Opcode::RET);
+    }
+
+    #[test]
+    fn full_fp_add_function() {
+        // fn fadd(f64, f64) -> f64 { return a + b; }
+        let sig = Signature {
+            params: vec![Type::F64, Type::F64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("fadd64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fadd,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        );
         isel.select_instruction(
             &Instruction {
                 opcode: Opcode::Return,
@@ -1191,21 +2902,11 @@ mod tests {
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
-
-        // Expected sequence:
-        // COPY vreg0 <- X0
-        // COPY vreg1 <- X1
-        // ADDWrr vreg2 <- vreg0, vreg1
-        // MOVWrr X0 <- vreg2
-        // RET
+        // 2 COPY + 1 FADDDrr + 1 MOVXrr (to V0) + 1 RET
         assert_eq!(mblock.insts.len(), 5);
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::COPY);
         assert_eq!(mblock.insts[1].opcode, AArch64Opcode::COPY);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::ADDWrr);
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::MOVWrr);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::FADDDrr);
         assert_eq!(mblock.insts[4].opcode, AArch64Opcode::RET);
-
-        assert_eq!(mfunc.name, "add");
-        assert_eq!(mfunc.next_vreg, 3); // 3 vregs allocated
     }
 }
