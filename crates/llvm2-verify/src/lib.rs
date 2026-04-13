@@ -46,6 +46,7 @@ pub mod aarch64_semantics;
 pub mod nzcv;
 pub mod lowering_proof;
 pub mod peephole_proofs;
+pub mod memory_model;
 pub mod verify;
 
 pub use verify::{VerificationResult, Verifier};
