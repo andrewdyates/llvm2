@@ -129,7 +129,11 @@ fn reg_class_size(class: RegClass) -> u32 {
     match class {
         RegClass::Gpr32 | RegClass::Fpr32 => 4,
         RegClass::Gpr64 | RegClass::Fpr64 => 8,
-        RegClass::Vec128 => 16,
+        RegClass::Fpr128 => 16,
+        // Smaller FPR classes: use their natural size
+        RegClass::Fpr16 => 2,
+        RegClass::Fpr8 => 1,
+        RegClass::System => 4,
     }
 }
 
@@ -167,6 +171,9 @@ mod tests {
         assert_eq!(reg_class_size(RegClass::Gpr64), 8);
         assert_eq!(reg_class_size(RegClass::Fpr32), 4);
         assert_eq!(reg_class_size(RegClass::Fpr64), 8);
-        assert_eq!(reg_class_size(RegClass::Vec128), 16);
+        assert_eq!(reg_class_size(RegClass::Fpr128), 16);
+        assert_eq!(reg_class_size(RegClass::Fpr16), 2);
+        assert_eq!(reg_class_size(RegClass::Fpr8), 1);
+        assert_eq!(reg_class_size(RegClass::System), 4);
     }
 }

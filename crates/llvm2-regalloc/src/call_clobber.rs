@@ -43,12 +43,12 @@ pub struct CallCrossing {
 pub fn aarch64_caller_saved_regs() -> HashSet<PReg> {
     let mut regs = HashSet::new();
     // GPR caller-saved: X0-X15 (skip X16-X17 scratch, X18 reserved).
-    for i in 0..=15 {
-        regs.insert(PReg(i));
+    for i in 0u16..=15 {
+        regs.insert(PReg::new(i));
     }
-    // FPR caller-saved: V0-V7 (encoded as 32-39).
-    for i in 32..=39 {
-        regs.insert(PReg(i));
+    // FPR caller-saved: V0-V7 (encoded as 64-71 in the unified PReg scheme).
+    for i in 64u16..=71 {
+        regs.insert(PReg::new(i));
     }
     regs
 }
@@ -58,12 +58,12 @@ pub fn aarch64_caller_saved_regs() -> HashSet<PReg> {
 pub fn aarch64_callee_saved_regs() -> HashSet<PReg> {
     let mut regs = HashSet::new();
     // GPR callee-saved: X19-X28.
-    for i in 19..=28 {
-        regs.insert(PReg(i));
+    for i in 19u16..=28 {
+        regs.insert(PReg::new(i));
     }
-    // FPR callee-saved: V8-V15 (encoded as 40-47).
-    for i in 40..=47 {
-        regs.insert(PReg(i));
+    // FPR callee-saved: V8-V15 (encoded as 72-79 in the unified PReg scheme).
+    for i in 72u16..=79 {
+        regs.insert(PReg::new(i));
     }
     regs
 }
@@ -250,7 +250,11 @@ fn reg_class_size(class: RegClass) -> u32 {
     match class {
         RegClass::Gpr32 | RegClass::Fpr32 => 4,
         RegClass::Gpr64 | RegClass::Fpr64 => 8,
-        RegClass::Vec128 => 16,
+        RegClass::Fpr128 => 16,
+        // Smaller FPR classes: use their natural size
+        RegClass::Fpr16 => 2,
+        RegClass::Fpr8 => 1,
+        RegClass::System => 4,
     }
 }
 
@@ -280,22 +284,22 @@ mod tests {
     #[test]
     fn test_aarch64_caller_saved() {
         let cs = aarch64_caller_saved_regs();
-        assert!(cs.contains(&PReg(0)));  // X0
-        assert!(cs.contains(&PReg(15))); // X15
-        assert!(!cs.contains(&PReg(19))); // X19 is callee-saved
-        assert!(cs.contains(&PReg(32))); // V0
-        assert!(cs.contains(&PReg(39))); // V7
-        assert!(!cs.contains(&PReg(40))); // V8 is callee-saved
+        assert!(cs.contains(&PReg::new(0)));   // X0
+        assert!(cs.contains(&PReg::new(15)));  // X15
+        assert!(!cs.contains(&PReg::new(19))); // X19 is callee-saved
+        assert!(cs.contains(&PReg::new(64)));  // V0
+        assert!(cs.contains(&PReg::new(71)));  // V7
+        assert!(!cs.contains(&PReg::new(72))); // V8 is callee-saved
     }
 
     #[test]
     fn test_aarch64_callee_saved() {
         let cs = aarch64_callee_saved_regs();
-        assert!(!cs.contains(&PReg(0)));  // X0 is caller-saved
-        assert!(cs.contains(&PReg(19))); // X19
-        assert!(cs.contains(&PReg(28))); // X28
-        assert!(cs.contains(&PReg(40))); // V8
-        assert!(cs.contains(&PReg(47))); // V15
+        assert!(!cs.contains(&PReg::new(0)));  // X0 is caller-saved
+        assert!(cs.contains(&PReg::new(19)));  // X19
+        assert!(cs.contains(&PReg::new(28)));  // X28
+        assert!(cs.contains(&PReg::new(72)));  // V8
+        assert!(cs.contains(&PReg::new(79)));  // V15
     }
 
     #[test]
@@ -373,7 +377,7 @@ mod tests {
 
         let callee_saved = aarch64_callee_saved_regs();
         let mut allocatable = HashMap::new();
-        let gpr: Vec<PReg> = (0..=15).chain(19..=28).map(PReg).collect();
+        let gpr: Vec<PReg> = (0u16..=15).chain(19u16..=28).map(PReg::new).collect();
         allocatable.insert(RegClass::Gpr64, gpr);
 
         let hints = compute_call_crossing_hints(&crossings, &callee_saved, &allocatable);

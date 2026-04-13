@@ -3,73 +3,15 @@
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! AArch64 condition codes and operand sizes.
+//!
+//! The canonical condition code type is [`CondCode`] from `aarch64_regs`.
+//! `AArch64CC` is a type alias for backward compatibility.
 
-/// AArch64 condition codes (4-bit encoding, ARM ARM C1.2.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum AArch64CC {
-    /// Equal (Z == 1)
-    EQ = 0b0000,
-    /// Not equal (Z == 0)
-    NE = 0b0001,
-    /// Carry set / unsigned higher or same (C == 1)
-    HS = 0b0010,
-    /// Carry clear / unsigned lower (C == 0)
-    LO = 0b0011,
-    /// Minus / negative (N == 1)
-    MI = 0b0100,
-    /// Plus / positive or zero (N == 0)
-    PL = 0b0101,
-    /// Overflow (V == 1)
-    VS = 0b0110,
-    /// No overflow (V == 0)
-    VC = 0b0111,
-    /// Unsigned higher (C == 1 && Z == 0)
-    HI = 0b1000,
-    /// Unsigned lower or same (C == 0 || Z == 1)
-    LS = 0b1001,
-    /// Signed greater or equal (N == V)
-    GE = 0b1010,
-    /// Signed less than (N != V)
-    LT = 0b1011,
-    /// Signed greater than (Z == 0 && N == V)
-    GT = 0b1100,
-    /// Signed less or equal (Z == 1 || N != V)
-    LE = 0b1101,
-    /// Always (unconditional)
-    AL = 0b1110,
-    /// Never (reserved, behaves as always)
-    NV = 0b1111,
-}
-
-impl AArch64CC {
-    /// Returns the inverted condition code.
-    pub fn invert(self) -> Self {
-        match self {
-            Self::EQ => Self::NE,
-            Self::NE => Self::EQ,
-            Self::HS => Self::LO,
-            Self::LO => Self::HS,
-            Self::MI => Self::PL,
-            Self::PL => Self::MI,
-            Self::VS => Self::VC,
-            Self::VC => Self::VS,
-            Self::HI => Self::LS,
-            Self::LS => Self::HI,
-            Self::GE => Self::LT,
-            Self::LT => Self::GE,
-            Self::GT => Self::LE,
-            Self::LE => Self::GT,
-            Self::AL => Self::NV,
-            Self::NV => Self::AL,
-        }
-    }
-
-    /// Returns the 4-bit encoding for this condition code.
-    pub fn encoding(self) -> u8 {
-        self as u8
-    }
-}
+/// AArch64 condition codes — type alias for [`crate::aarch64_regs::CondCode`].
+///
+/// Use `CondCode` directly for new code. This alias exists for backward
+/// compatibility with code that imported `llvm2_ir::AArch64CC`.
+pub type AArch64CC = crate::aarch64_regs::CondCode;
 
 /// Integer operand size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

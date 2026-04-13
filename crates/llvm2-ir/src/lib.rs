@@ -21,6 +21,22 @@
 //!       v       v       v             v
 //!  llvm2-opt  regalloc  llvm2-codegen  llvm2-verify
 //! ```
+//!
+//! # Type Authority
+//!
+//! This crate is the SINGLE SOURCE OF TRUTH for all machine IR types.
+//! Other crates (llvm2-lower, llvm2-regalloc, llvm2-opt, llvm2-codegen)
+//! must import types from here rather than defining their own.
+//!
+//! | Type | Module |
+//! |------|--------|
+//! | PReg, RegClass, VReg | `regs` (delegates to `aarch64_regs`) |
+//! | CondCode, ShiftType, ExtendType | `regs` (delegates to `aarch64_regs`) |
+//! | MachInst, AArch64Opcode, InstFlags | `inst` |
+//! | MachOperand | `operand` |
+//! | MachBlock, MachFunction, Signature, StackSlot, Type | `function` |
+//! | BlockId, InstId, VRegId, StackSlotId, FrameIdx | `types` |
+//! | AArch64CC, OperandSize, FloatSize | `cc` |
 
 pub mod aarch64_regs;
 pub mod cc;
@@ -35,5 +51,5 @@ pub use cc::{AArch64CC, FloatSize, OperandSize};
 pub use function::{MachBlock, MachFunction, Signature, StackSlot, Type};
 pub use inst::{AArch64Opcode, InstFlags, MachInst};
 pub use operand::MachOperand;
-pub use regs::{PReg, RegClass, SpecialReg, VReg};
+pub use regs::{CondCode, PReg, RegClass, SpecialReg, VReg};
 pub use types::{BlockId, FrameIdx, InstId, StackSlotId, VRegId};

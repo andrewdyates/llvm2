@@ -476,7 +476,7 @@ fn encode_ir_inst(inst: &IrMachInst) -> Result<u32, PipelineError> {
     // Determine if the instruction is 64-bit based on register class.
     let is_64bit = |idx: usize| -> bool {
         match &inst.operands.get(idx) {
-            Some(IrOperand::PReg(p)) => p.is_gpr() && p.0 < 32, // All GPRs default to 64-bit
+            Some(IrOperand::PReg(p)) => p.is_gpr() && p.encoding() < 32, // All GPRs default to 64-bit
             _ => true,
         }
     };

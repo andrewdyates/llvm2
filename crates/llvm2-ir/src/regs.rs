@@ -2,12 +2,59 @@
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
-//! AArch64 register model.
+//! Register types — unified re-exports from the comprehensive `aarch64_regs` module.
 //!
-//! PReg encoding: 0-30 = GPR (X0-X30), 32-63 = FPR (V0-V31).
-//! Apple AArch64 calling convention register allocation rules are
-//! encoded via the ALLOCATABLE_GPRS, CALLEE_SAVED_GPRS, and
-//! ALLOCATABLE_FPRS arrays.
+//! **This module is the public API for register types.** All register definitions
+//! (PReg, RegClass, CondCode, ShiftType, ExtendType) live in `aarch64_regs`
+//! and are re-exported here for backward compatibility.
+//!
+//! PReg encoding: see [`crate::aarch64_regs`] for the full encoding scheme.
+//! GPR64: 0-30 = X0-X30, 31 = SP. GPR32: 32-62 = W0-W30, 63 = WSP.
+//! FPR128: 64-95 = V0-V31. FPR64: 96-127 = D0-D31. FPR32: 128-159 = S0-S31.
+
+// Re-export canonical types from aarch64_regs.
+pub use crate::aarch64_regs::{
+    // Core types
+    PReg, RegClass, CondCode, ShiftType, ExtendType,
+    // GPR64 constants (X registers)
+    X0, X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15,
+    X16, X17, X18, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30,
+    SP, FP, LR,
+    // GPR32 constants (W registers)
+    W0, W1, W2, W3, W4, W5, W6, W7, W8, W9, W10, W11, W12, W13, W14, W15,
+    W16, W17, W18, W19, W20, W21, W22, W23, W24, W25, W26, W27, W28, W29, W30,
+    WSP,
+    // FPR128 constants (V registers)
+    V0, V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15,
+    V16, V17, V18, V19, V20, V21, V22, V23, V24, V25, V26, V27, V28, V29, V30, V31,
+    // FPR64 constants (D registers)
+    D0, D1, D2, D3, D4, D5, D6, D7, D8, D9, D10, D11, D12, D13, D14, D15,
+    D16, D17, D18, D19, D20, D21, D22, D23, D24, D25, D26, D27, D28, D29, D30, D31,
+    // FPR32 constants (S registers)
+    S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15,
+    S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31,
+    // FPR16 constants (H registers)
+    H0, H1, H2, H3, H4, H5, H6, H7, H8, H9, H10, H11, H12, H13, H14, H15,
+    H16, H17, H18, H19, H20, H21, H22, H23, H24, H25, H26, H27, H28, H29, H30, H31,
+    // FPR8 constants (B registers)
+    B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12, B13, B14, B15,
+    B16, B17, B18, B19, B20, B21, B22, B23, B24, B25, B26, B27, B28, B29, B30, B31,
+    // Special registers
+    XZR, WZR, NZCV, FPCR, FPSR,
+    // Register class arrays
+    ALL_GPRS, ALLOCATABLE_GPRS, CALLEE_SAVED_GPRS, CALLER_SAVED_GPRS,
+    CALL_CLOBBER_GPRS, ARG_GPRS, RET_GPRS, TEMP_GPRS,
+    ALL_FPRS, ALLOCATABLE_FPRS, CALLEE_SAVED_FPRS, CALLER_SAVED_FPRS,
+    ARG_FPRS, RET_FPRS,
+    // Helper functions
+    preg_name, preg_class, hw_encoding, is_callee_saved, is_caller_saved,
+    gpr64_to_gpr32, gpr32_to_gpr64,
+    fpr128_to_fpr64, fpr128_to_fpr32, fpr128_to_fpr16, fpr128_to_fpr8,
+    fpr64_to_fpr128, fpr32_to_fpr128,
+    reg_number, regs_overlap,
+    // CondCode aliases
+    CC, CS,
+};
 
 /// Virtual register — SSA value before register allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,136 +75,6 @@ impl core::fmt::Display for VReg {
     }
 }
 
-/// Physical register — AArch64 hardware register.
-///
-/// Encoding: 0-30 = GPR (X0-X30), 32-63 = FPR (V0-V31).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PReg(pub u8);
-
-impl PReg {
-    /// Returns true if this is a general-purpose register (X0-X30).
-    pub fn is_gpr(&self) -> bool {
-        self.0 < 32
-    }
-
-    /// Returns true if this is a floating-point/SIMD register (V0-V31).
-    pub fn is_fpr(&self) -> bool {
-        self.0 >= 32 && self.0 < 64
-    }
-
-    /// Returns the hardware register number (0-30 for GPR, 0-31 for FPR).
-    pub fn hw_enc(&self) -> u8 {
-        if self.is_gpr() {
-            self.0
-        } else {
-            self.0 - 32
-        }
-    }
-
-    /// Alias for `hw_enc()` — returns the register number within its class.
-    pub fn hw_index(&self) -> u8 {
-        self.hw_enc()
-    }
-}
-
-impl core::fmt::Display for PReg {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        if self.is_gpr() {
-            match self.0 {
-                29 => write!(f, "fp"),
-                30 => write!(f, "lr"),
-                n => write!(f, "x{n}"),
-            }
-        } else if self.is_fpr() {
-            write!(f, "v{}", self.0 - 32)
-        } else {
-            write!(f, "?{}", self.0)
-        }
-    }
-}
-
-// GPR constants (X0-X30)
-pub const X0: PReg = PReg(0);
-pub const X1: PReg = PReg(1);
-pub const X2: PReg = PReg(2);
-pub const X3: PReg = PReg(3);
-pub const X4: PReg = PReg(4);
-pub const X5: PReg = PReg(5);
-pub const X6: PReg = PReg(6);
-pub const X7: PReg = PReg(7);
-pub const X8: PReg = PReg(8);
-pub const X9: PReg = PReg(9);
-pub const X10: PReg = PReg(10);
-pub const X11: PReg = PReg(11);
-pub const X12: PReg = PReg(12);
-pub const X13: PReg = PReg(13);
-pub const X14: PReg = PReg(14);
-pub const X15: PReg = PReg(15);
-pub const X16: PReg = PReg(16);
-pub const X17: PReg = PReg(17);
-pub const X18: PReg = PReg(18);
-pub const X19: PReg = PReg(19);
-pub const X20: PReg = PReg(20);
-pub const X21: PReg = PReg(21);
-pub const X22: PReg = PReg(22);
-pub const X23: PReg = PReg(23);
-pub const X24: PReg = PReg(24);
-pub const X25: PReg = PReg(25);
-pub const X26: PReg = PReg(26);
-pub const X27: PReg = PReg(27);
-pub const X28: PReg = PReg(28);
-pub const X29: PReg = PReg(29);
-pub const X30: PReg = PReg(30);
-
-// FPR/SIMD constants (V0-V31)
-pub const V0: PReg = PReg(32);
-pub const V1: PReg = PReg(33);
-pub const V2: PReg = PReg(34);
-pub const V3: PReg = PReg(35);
-pub const V4: PReg = PReg(36);
-pub const V5: PReg = PReg(37);
-pub const V6: PReg = PReg(38);
-pub const V7: PReg = PReg(39);
-pub const V8: PReg = PReg(40);
-pub const V9: PReg = PReg(41);
-pub const V10: PReg = PReg(42);
-pub const V11: PReg = PReg(43);
-pub const V12: PReg = PReg(44);
-pub const V13: PReg = PReg(45);
-pub const V14: PReg = PReg(46);
-pub const V15: PReg = PReg(47);
-pub const V16: PReg = PReg(48);
-pub const V17: PReg = PReg(49);
-pub const V18: PReg = PReg(50);
-pub const V19: PReg = PReg(51);
-pub const V20: PReg = PReg(52);
-pub const V21: PReg = PReg(53);
-pub const V22: PReg = PReg(54);
-pub const V23: PReg = PReg(55);
-pub const V24: PReg = PReg(56);
-pub const V25: PReg = PReg(57);
-pub const V26: PReg = PReg(58);
-pub const V27: PReg = PReg(59);
-pub const V28: PReg = PReg(60);
-pub const V29: PReg = PReg(61);
-pub const V30: PReg = PReg(62);
-pub const V31: PReg = PReg(63);
-
-/// Register class — determines which physical register file a value lives in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RegClass {
-    /// 32-bit general-purpose (W0-W30)
-    Gpr32,
-    /// 64-bit general-purpose (X0-X30)
-    Gpr64,
-    /// 32-bit floating-point (S0-S31)
-    Fpr32,
-    /// 64-bit floating-point (D0-D31)
-    Fpr64,
-    /// 128-bit SIMD vector (V0-V31)
-    Vec128,
-}
-
 impl RegClass {
     /// Select the register class for a given IR type.
     pub fn for_type(ty: crate::function::Type) -> Self {
@@ -172,6 +89,10 @@ impl RegClass {
 }
 
 /// Special AArch64 registers that are not allocatable.
+///
+/// This enum provides a way to reference SP/XZR/WZR as operands.
+/// For the physical register constants themselves, use the PReg constants
+/// directly (e.g., `regs::SP`, `regs::XZR`, `regs::WZR`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpecialReg {
     /// Stack pointer (encoded as register 31 in some instructions).
@@ -181,28 +102,3 @@ pub enum SpecialReg {
     /// 32-bit zero register.
     WZR,
 }
-
-/// Allocatable GPRs: X0-X15, X19-X28.
-///
-/// Excludes: X16-X17 (IP scratch, reserved by linker), X18 (reserved on Apple),
-/// X29 (frame pointer, mandatory on Darwin), X30 (link register).
-pub const ALLOCATABLE_GPRS: &[PReg] = &[
-    X0, X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15,
-    X19, X20, X21, X22, X23, X24, X25, X26, X27, X28,
-];
-
-/// Callee-saved GPRs: X19-X28.
-pub const CALLEE_SAVED_GPRS: &[PReg] = &[
-    X19, X20, X21, X22, X23, X24, X25, X26, X27, X28,
-];
-
-/// All FPR/SIMD registers are allocatable: V0-V31.
-pub const ALLOCATABLE_FPRS: &[PReg] = &[
-    V0, V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15,
-    V16, V17, V18, V19, V20, V21, V22, V23, V24, V25, V26, V27, V28, V29, V30, V31,
-];
-
-/// Callee-saved FPRs: V8-V15 (lower 64 bits only on Apple AArch64).
-pub const CALLEE_SAVED_FPRS: &[PReg] = &[
-    V8, V9, V10, V11, V12, V13, V14, V15,
-];

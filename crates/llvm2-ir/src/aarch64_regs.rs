@@ -48,6 +48,33 @@ impl PReg {
     pub const fn encoding(self) -> u16 {
         self.0
     }
+
+    /// Returns true if this is a 64-bit general-purpose register (X0-X30 or SP).
+    #[inline]
+    pub const fn is_gpr(self) -> bool {
+        self.0 <= 31
+    }
+
+    /// Returns true if this is a floating-point/SIMD register (any FPR class).
+    #[inline]
+    pub const fn is_fpr(self) -> bool {
+        self.0 >= 64 && self.0 <= 228
+    }
+
+    /// Returns the 5-bit hardware encoding for this register.
+    ///
+    /// Alias for the free function [`hw_encoding`]. Provided as a method
+    /// for backward compatibility.
+    #[inline]
+    pub fn hw_enc(self) -> u8 {
+        hw_encoding(self)
+    }
+
+    /// Alias for `hw_enc()`.
+    #[inline]
+    pub fn hw_index(self) -> u8 {
+        self.hw_enc()
+    }
 }
 
 impl core::fmt::Debug for PReg {

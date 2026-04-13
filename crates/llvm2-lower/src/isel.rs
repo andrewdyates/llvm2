@@ -25,7 +25,7 @@ use crate::instructions::{Block, FloatCC, Instruction, IntCC, Opcode, Value};
 use crate::types::Type;
 
 // Import canonical register types from llvm2-ir.
-use llvm2_ir::regs::{RegClass, VReg};
+use llvm2_ir::regs::{RegClass, VReg, SP};
 
 // ---------------------------------------------------------------------------
 // Register model helpers
@@ -891,7 +891,7 @@ impl InstructionSelector {
                         block,
                         MachInst::new(
                             opc,
-                            vec![src, MachOperand::PReg(PReg(31)), MachOperand::Imm(*offset)],
+                            vec![src, MachOperand::PReg(SP), MachOperand::Imm(*offset)],
                         ),
                     );
                 }
@@ -1069,7 +1069,7 @@ impl InstructionSelector {
                             opc,
                             vec![
                                 MachOperand::VReg(vreg),
-                                MachOperand::PReg(PReg(31)),
+                                MachOperand::PReg(SP),
                                 MachOperand::Imm(*offset),
                             ],
                         ),
@@ -1695,7 +1695,7 @@ impl InstructionSelector {
                 AArch64Opcode::ADDXriSP,
                 vec![
                     MachOperand::VReg(dst),
-                    MachOperand::PReg(PReg(31)), // SP
+                    MachOperand::PReg(SP), // SP
                     MachOperand::StackSlot(slot),
                 ],
             ),
@@ -1838,8 +1838,8 @@ mod tests {
         assert_eq!(mblock.insts.len(), 2);
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::COPY);
         assert_eq!(mblock.insts[1].opcode, AArch64Opcode::COPY);
-        assert!(matches!(mblock.insts[0].operands[1], MachOperand::PReg(PReg(0))));
-        assert!(matches!(mblock.insts[1].operands[1], MachOperand::PReg(PReg(1))));
+        assert_eq!(mblock.insts[0].operands[1], MachOperand::PReg(PReg::new(0))); // X0
+        assert_eq!(mblock.insts[1].operands[1], MachOperand::PReg(PReg::new(1))); // X1
     }
 
     #[test]
@@ -1922,7 +1922,7 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 4);
-        assert!(matches!(mblock.insts[2].operands[0], MachOperand::PReg(PReg(0))));
+        assert_eq!(mblock.insts[2].operands[0], MachOperand::PReg(PReg::new(0))); // X0
         assert_eq!(mblock.insts[3].opcode, AArch64Opcode::RET);
     }
 
@@ -2750,7 +2750,7 @@ mod tests {
         assert_eq!(mblock.insts.len(), 1);
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADDXriSP);
         // Should reference SP (PReg(31)) and StackSlot(3)
-        assert_eq!(mblock.insts[0].operands[1], MachOperand::PReg(PReg(31)));
+        assert_eq!(mblock.insts[0].operands[1], MachOperand::PReg(SP));
         assert_eq!(mblock.insts[0].operands[2], MachOperand::StackSlot(3));
     }
 

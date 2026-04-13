@@ -87,8 +87,11 @@ fn test_compact_unwind_section_present() {
     );
 
     // Verify section has correct size (32 bytes for one entry)
+    // otool may use 32-bit or 64-bit hex format depending on platform/version
     assert!(
-        otool_out.contains("size 0x00000020") || otool_out.contains("size 32"),
+        otool_out.contains("size 0x00000020")
+            || otool_out.contains("size 0x0000000000000020")
+            || otool_out.contains("size 32"),
         "Expected compact unwind section size of 32 bytes.\notool:\n{}",
         otool_out
     );
@@ -157,8 +160,11 @@ fn test_compact_unwind_multiple_functions() {
     );
 
     // 2 entries * 32 bytes = 64 = 0x40
+    // otool may use 32-bit or 64-bit hex format depending on platform/version
     assert!(
-        otool_out.contains("size 0x00000040") || otool_out.contains("size 64"),
+        otool_out.contains("size 0x00000040")
+            || otool_out.contains("size 0x0000000000000040")
+            || otool_out.contains("size 64"),
         "Expected compact unwind section size of 64 bytes for 2 entries.\notool:\n{}",
         otool_out
     );
