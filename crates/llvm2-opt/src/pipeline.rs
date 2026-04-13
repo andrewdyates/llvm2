@@ -22,6 +22,7 @@
 
 use llvm2_ir::MachFunction;
 
+use crate::cfg_simplify::CfgSimplify;
 use crate::const_fold::ConstantFolding;
 use crate::copy_prop::CopyPropagation;
 use crate::cse::CommonSubexprElim;
@@ -73,7 +74,8 @@ impl OptimizationPipeline {
             OptLevel::O2 | OptLevel::Os => {
                 // Standard: full pipeline with proof-consuming opts + CSE and LICM.
                 // Proof opts run first: they eliminate checks that DCE/peephole
-                // can then clean up further.
+                // can then clean up further. CFG simplification runs last to
+                // clean up branches left dead by prior passes.
                 PassManager::new()
                     .with_pass(Box::new(ProofOptimization::new()))
                     .with_pass(Box::new(ConstantFolding))
@@ -82,6 +84,7 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(LoopInvariantCodeMotion))
                     .with_pass(Box::new(Peephole))
                     .with_pass(Box::new(DeadCodeElimination))
+                    .with_pass(Box::new(CfgSimplify))
             }
             OptLevel::O3 => {
                 // Aggressive: full pipeline with proof-consuming opts (will be iterated).
@@ -93,6 +96,7 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(LoopInvariantCodeMotion))
                     .with_pass(Box::new(Peephole))
                     .with_pass(Box::new(DeadCodeElimination))
+                    .with_pass(Box::new(CfgSimplify))
             }
         }
     }
@@ -199,7 +203,7 @@ mod tests {
     fn test_o3_iterates() {
         let pipeline = OptimizationPipeline::new(OptLevel::O3);
         let pm = pipeline.build_pass_manager();
-        // 7 passes: proof-opts + const-fold + copy-prop + cse + licm + peephole + dce
-        assert_eq!(pm.num_passes(), 7);
+        // 8 passes: proof-opts + const-fold + copy-prop + cse + licm + peephole + dce + cfg-simplify
+        assert_eq!(pm.num_passes(), 8);
     }
 }
