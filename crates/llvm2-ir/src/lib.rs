@@ -45,6 +45,8 @@ pub mod inst;
 pub mod operand;
 pub mod regs;
 pub mod types;
+pub mod x86_64_ops;
+pub mod x86_64_regs;
 
 // Re-export the most commonly used types at crate root.
 pub use cc::{AArch64CC, FloatSize, OperandSize};
@@ -53,3 +55,5 @@ pub use inst::{AArch64Opcode, InstFlags, MachInst, ProofAnnotation};
 pub use operand::MachOperand;
 pub use regs::{CondCode, PReg, RegClass, SpecialReg, VReg};
 pub use types::{BlockId, FrameIdx, InstId, StackSlotId, VRegId};
+pub use x86_64_ops::{X86CondCode, X86Opcode};
+pub use x86_64_regs::{X86PReg, X86RegClass};
