@@ -72,8 +72,16 @@ pub enum Opcode {
     Fmul,
     Fdiv,
     Fcmp { cond: FloatCC },
-    FcvtToInt { dst_ty: Type },    // Float -> Int conversion
-    FcvtFromInt { src_ty: Type },  // Int -> Float conversion
+    FcvtToInt { dst_ty: Type },    // Float -> signed Int conversion (FCVTZS)
+    FcvtToUint { dst_ty: Type },   // Float -> unsigned Int conversion (FCVTZU)
+    FcvtFromInt { src_ty: Type },  // Signed Int -> Float conversion (SCVTF)
+    FcvtFromUint { src_ty: Type }, // Unsigned Int -> Float conversion (UCVTF)
+    FPExt,                         // Float precision widen (f32 -> f64)
+    FPTrunc,                       // Float precision narrow (f64 -> f32)
+
+    // Type conversions
+    Trunc { to_ty: Type },         // Integer truncation (narrow: i64->i32, etc.)
+    Bitcast { to_ty: Type },       // Reinterpret bits between same-size types
 
     // Addressing
     GlobalRef { name: String },     // Reference to a global symbol (ADRP + ADD)

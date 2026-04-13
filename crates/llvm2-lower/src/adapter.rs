@@ -668,27 +668,13 @@ impl<'a> TmirAdapter<'a> {
                 from_ty: from,
                 to_ty: to,
             },
-            CastOp::Trunc => {
-                // Truncation: use Uextend with swapped semantics
-                // (the ISel will emit AND with a mask or MOV W-reg).
-                // For now, emit as Uextend from larger to smaller, which
-                // the ISel can pattern-match. The to_ty is smaller.
-                Opcode::Uextend {
-                    from_ty: from,
-                    to_ty: to,
-                }
-            }
+            CastOp::Trunc => Opcode::Trunc { to_ty: to },
             CastOp::FPToSI => Opcode::FcvtToInt { dst_ty: to },
-            CastOp::FPToUI => {
-                // Unsigned float-to-int: use FcvtToInt (ISel needs to emit FCVTZU).
-                Opcode::FcvtToInt { dst_ty: to }
-            }
-            CastOp::SIToFP | CastOp::UIToFP => Opcode::FcvtFromInt { src_ty: from },
-            CastOp::FPExt | CastOp::FPTrunc => {
-                // Float precision conversion: map to FcvtFromInt/FcvtToInt pattern.
-                // This is a simplification; a dedicated opcode would be better.
-                Opcode::FcvtFromInt { src_ty: from }
-            }
+            CastOp::FPToUI => Opcode::FcvtToUint { dst_ty: to },
+            CastOp::SIToFP => Opcode::FcvtFromInt { src_ty: from },
+            CastOp::UIToFP => Opcode::FcvtFromUint { src_ty: from },
+            CastOp::FPExt => Opcode::FPExt,
+            CastOp::FPTrunc => Opcode::FPTrunc,
             CastOp::PtrToInt | CastOp::IntToPtr => {
                 // No-op: pointers are already I64.
                 // Emit a simple copy (add 0).
@@ -708,24 +694,7 @@ impl<'a> TmirAdapter<'a> {
                 };
                 return Ok(vec![zero_inst, add_inst]);
             }
-            CastOp::Bitcast => {
-                // Same-size reinterpret cast. For now emit as identity.
-                let zero = self.fresh_value();
-                let zero_inst = Instruction {
-                    opcode: Opcode::Iconst {
-                        ty: to,
-                        imm: 0,
-                    },
-                    args: vec![],
-                    results: vec![zero],
-                };
-                let add_inst = Instruction {
-                    opcode: Opcode::Iadd,
-                    args: vec![src, zero],
-                    results: vec![dst],
-                };
-                return Ok(vec![zero_inst, add_inst]);
-            }
+            CastOp::Bitcast => Opcode::Bitcast { to_ty: to },
         };
 
         Ok(vec![Instruction {

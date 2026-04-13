@@ -607,6 +607,22 @@ impl InstructionSelector {
                 self.select_call_from_lir(name, inst, block)?;
             }
 
+            // Type conversions (added by TYPE-CONVERT agent, ISel methods TODO)
+            Opcode::FcvtToUint { dst_ty } => {
+                self.select_fcvt_to_int(dst_ty.clone(), inst, block)?;
+            }
+            Opcode::FcvtFromUint { src_ty } => {
+                self.select_fcvt_from_int(src_ty.clone(), inst, block)?;
+            }
+            Opcode::FPExt | Opcode::FPTrunc => {
+                // TODO: select_fp_ext / select_fp_trunc
+                return Err(ISelError::UnsupportedFconstType(Type::F64));
+            }
+            Opcode::Trunc { .. } | Opcode::Bitcast { .. } => {
+                // TODO: select_trunc / select_bitcast
+                return Err(ISelError::UnsupportedFconstType(Type::I64));
+            }
+
             // Memory
             Opcode::Load { ty } => self.select_load(ty.clone(), inst, block)?,
             Opcode::Store => self.select_store(inst, block)?,
