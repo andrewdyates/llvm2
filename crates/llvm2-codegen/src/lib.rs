@@ -13,9 +13,11 @@
 
 pub mod aarch64;
 pub mod frame;
+pub mod layout;
 pub mod lower;
 pub mod macho;
 pub mod pipeline;
+pub mod relax;
 pub mod target;
 pub mod unwind;
 
