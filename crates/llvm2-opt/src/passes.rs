@@ -10,5 +10,7 @@
 
 pub use crate::const_fold::ConstantFolding;
 pub use crate::copy_prop::CopyPropagation;
+pub use crate::cse::CommonSubexprElim;
 pub use crate::dce::DeadCodeElimination;
+pub use crate::licm::LoopInvariantCodeMotion;
 pub use crate::peephole::Peephole;

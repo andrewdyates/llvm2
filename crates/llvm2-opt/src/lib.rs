@@ -10,7 +10,7 @@
 //! # Architecture
 //!
 //! ```text
-//! PassManager { passes: [ConstFold, CopyProp, Peephole, DCE] }
+//! PassManager { passes: [ConstFold, CopyProp, CSE, LICM, Peephole, DCE] }
 //!     │
 //!     ├── run_once(func)              → single pass
 //!     └── run_to_fixpoint(func, max)  → iterate until stable
@@ -24,11 +24,13 @@
 //! | [`ConstantFolding`] | Evaluate constant expressions at compile time |
 //! | [`CopyPropagation`] | Replace uses of `mov dst, src` with `src` |
 //! | [`Peephole`] | AArch64-specific instruction simplification |
+//! | [`CommonSubexprElim`] | Eliminate redundant computations (dominator-based) |
+//! | [`LoopInvariantCodeMotion`] | Hoist loop-invariant computations to preheader |
 //!
 //! # Memory Effects Model
 //!
 //! The [`effects`] module classifies each opcode as Pure, Load, Store,
-//! or Call. This is used by DCE and will be used by future CSE/LICM passes.
+//! or Call. This is used by DCE, CSE, and LICM to ensure safety.
 //!
 //! # Usage
 //!
@@ -43,8 +45,12 @@
 
 pub mod const_fold;
 pub mod copy_prop;
+pub mod cse;
 pub mod dce;
+pub mod dom;
 pub mod effects;
+pub mod licm;
+pub mod loops;
 pub mod pass_manager;
 pub mod passes;
 pub mod peephole;
