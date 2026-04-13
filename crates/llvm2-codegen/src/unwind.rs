@@ -106,6 +106,11 @@ impl CompactUnwindEntry {
     }
 
     /// Create a compact unwind entry from a FrameLayout and function metadata.
+    ///
+    /// If the frame layout requires DWARF CFI fallback (dynamic alloc,
+    /// frameless, etc.), the compact encoding will be `UNWIND_ARM64_MODE_DWARF`.
+    /// The linker processes this by looking up the corresponding FDE in
+    /// `__eh_frame` for the function's address range.
     pub fn from_layout(
         layout: &FrameLayout,
         function_offset: u64,
@@ -119,6 +124,16 @@ impl CompactUnwindEntry {
             encoding.encoding,
             symbol_index,
         )
+    }
+
+    /// Returns true if this entry uses DWARF CFI fallback instead of
+    /// inline compact unwind encoding.
+    ///
+    /// When true, the unwinder will look for a matching FDE in `__eh_frame`
+    /// rather than using the compact_encoding bits directly.
+    pub fn needs_dwarf_fallback(&self) -> bool {
+        use crate::frame::UNWIND_ARM64_MODE_DWARF;
+        (self.compact_encoding & 0x0F00_0000) == UNWIND_ARM64_MODE_DWARF
     }
 
     /// Serialize this entry to 32 bytes (little-endian).
@@ -308,8 +323,12 @@ pub fn add_compact_unwind_to_writer(
 mod tests {
     use super::*;
     use crate::frame::{
-        UNWIND_ARM64_FRAME_D8_D9_PAIR, UNWIND_ARM64_FRAME_X19_X20_PAIR, UNWIND_ARM64_MODE_DWARF,
-        UNWIND_ARM64_MODE_FRAME, UNWIND_ARM64_MODE_FRAMELESS,
+        UNWIND_ARM64_FRAME_D8_D9_PAIR, UNWIND_ARM64_FRAME_D10_D11_PAIR,
+        UNWIND_ARM64_FRAME_D12_D13_PAIR, UNWIND_ARM64_FRAME_D14_D15_PAIR,
+        UNWIND_ARM64_FRAME_X19_X20_PAIR, UNWIND_ARM64_FRAME_X21_X22_PAIR,
+        UNWIND_ARM64_FRAME_X23_X24_PAIR, UNWIND_ARM64_FRAME_X25_X26_PAIR,
+        UNWIND_ARM64_FRAME_X27_X28_PAIR,
+        UNWIND_ARM64_MODE_DWARF, UNWIND_ARM64_MODE_FRAME, UNWIND_ARM64_MODE_FRAMELESS,
     };
 
     #[test]
@@ -596,5 +615,160 @@ mod tests {
     fn test_default_trait() {
         let section = CompactUnwindSection::default();
         assert!(section.is_empty());
+    }
+
+    // --- DWARF fallback tests ---
+
+    #[test]
+    fn test_entry_needs_dwarf_fallback_frame_mode() {
+        let entry = CompactUnwindEntry::new(0, 32, UNWIND_ARM64_MODE_FRAME, 0);
+        assert!(!entry.needs_dwarf_fallback());
+    }
+
+    #[test]
+    fn test_entry_needs_dwarf_fallback_dwarf_mode() {
+        let entry = CompactUnwindEntry::new(0, 32, UNWIND_ARM64_MODE_DWARF, 0);
+        assert!(entry.needs_dwarf_fallback());
+    }
+
+    #[test]
+    fn test_entry_needs_dwarf_fallback_frameless_mode() {
+        let entry = CompactUnwindEntry::new(0, 32, UNWIND_ARM64_MODE_FRAMELESS, 0);
+        assert!(!entry.needs_dwarf_fallback());
+    }
+
+    #[test]
+    fn test_entry_needs_dwarf_with_register_flags() {
+        // DWARF mode with register flags set (should still be DWARF)
+        let encoding = UNWIND_ARM64_MODE_DWARF | UNWIND_ARM64_FRAME_X19_X20_PAIR;
+        let entry = CompactUnwindEntry::new(0, 32, encoding, 0);
+        assert!(entry.needs_dwarf_fallback());
+    }
+
+    #[test]
+    fn test_from_layout_standard_frame() {
+        use crate::frame::{CalleeSavedPair, FrameLayout};
+        use llvm2_ir::regs::{X19, X20, X29, X30};
+
+        let layout = FrameLayout {
+            callee_saved_pairs: vec![
+                CalleeSavedPair { reg1: X29, reg2: X30, fp_offset: 0, is_fpr: false },
+                CalleeSavedPair { reg1: X19, reg2: X20, fp_offset: -16, is_fpr: false },
+            ],
+            callee_saved_area_size: 32,
+            spill_area_size: 0,
+            local_area_size: 0,
+            outgoing_arg_area_size: 0,
+            total_frame_size: 32,
+            uses_frame_pointer: true,
+            is_leaf: true,
+            uses_red_zone: false,
+            fp_to_spill_offset: -32,
+            has_dynamic_alloc: false,
+        };
+
+        let entry = CompactUnwindEntry::from_layout(&layout, 0x1000, 64, 0);
+        assert!(!entry.needs_dwarf_fallback());
+        let expected = UNWIND_ARM64_MODE_FRAME | UNWIND_ARM64_FRAME_X19_X20_PAIR;
+        assert_eq!(entry.compact_encoding, expected);
+        assert_eq!(entry.function_offset, 0x1000);
+        assert_eq!(entry.function_length, 64);
+    }
+
+    #[test]
+    fn test_from_layout_dynamic_alloc_falls_back_to_dwarf() {
+        use crate::frame::{CalleeSavedPair, FrameLayout};
+        use llvm2_ir::regs::{X29, X30};
+
+        let layout = FrameLayout {
+            callee_saved_pairs: vec![
+                CalleeSavedPair { reg1: X29, reg2: X30, fp_offset: 0, is_fpr: false },
+            ],
+            callee_saved_area_size: 16,
+            spill_area_size: 0,
+            local_area_size: 0,
+            outgoing_arg_area_size: 0,
+            total_frame_size: 16,
+            uses_frame_pointer: true,
+            is_leaf: false,
+            uses_red_zone: false,
+            fp_to_spill_offset: -16,
+            has_dynamic_alloc: true,
+        };
+
+        let entry = CompactUnwindEntry::from_layout(&layout, 0x2000, 128, 1);
+        assert!(entry.needs_dwarf_fallback());
+        assert_eq!(entry.compact_encoding, UNWIND_ARM64_MODE_DWARF);
+    }
+
+    #[test]
+    fn test_from_layout_encoding_bits_all_callee_saved() {
+        use crate::frame::{CalleeSavedPair, FrameLayout};
+        use llvm2_ir::regs::{X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, V8, V9, V10, V11, V12, V13, V14, V15};
+
+        let layout = FrameLayout {
+            callee_saved_pairs: vec![
+                CalleeSavedPair { reg1: X29, reg2: X30, fp_offset: 0, is_fpr: false },
+                CalleeSavedPair { reg1: X19, reg2: X20, fp_offset: -16, is_fpr: false },
+                CalleeSavedPair { reg1: X21, reg2: X22, fp_offset: -32, is_fpr: false },
+                CalleeSavedPair { reg1: X23, reg2: X24, fp_offset: -48, is_fpr: false },
+                CalleeSavedPair { reg1: X25, reg2: X26, fp_offset: -64, is_fpr: false },
+                CalleeSavedPair { reg1: X27, reg2: X28, fp_offset: -80, is_fpr: false },
+                CalleeSavedPair { reg1: V8, reg2: V9, fp_offset: -96, is_fpr: true },
+                CalleeSavedPair { reg1: V10, reg2: V11, fp_offset: -112, is_fpr: true },
+                CalleeSavedPair { reg1: V12, reg2: V13, fp_offset: -128, is_fpr: true },
+                CalleeSavedPair { reg1: V14, reg2: V15, fp_offset: -144, is_fpr: true },
+            ],
+            callee_saved_area_size: 160,
+            spill_area_size: 0,
+            local_area_size: 0,
+            outgoing_arg_area_size: 0,
+            total_frame_size: 160,
+            uses_frame_pointer: true,
+            is_leaf: false,
+            uses_red_zone: false,
+            fp_to_spill_offset: -160,
+            has_dynamic_alloc: false,
+        };
+
+        let entry = CompactUnwindEntry::from_layout(&layout, 0, 256, 0);
+        assert!(!entry.needs_dwarf_fallback());
+
+        // Verify all register pair flags are set
+        let enc = entry.compact_encoding;
+        assert_ne!(enc & UNWIND_ARM64_FRAME_X19_X20_PAIR, 0);
+        assert_ne!(enc & UNWIND_ARM64_FRAME_X21_X22_PAIR, 0);
+        assert_ne!(enc & UNWIND_ARM64_FRAME_X23_X24_PAIR, 0);
+        assert_ne!(enc & UNWIND_ARM64_FRAME_X25_X26_PAIR, 0);
+        assert_ne!(enc & UNWIND_ARM64_FRAME_X27_X28_PAIR, 0);
+        assert_ne!(enc & UNWIND_ARM64_FRAME_D8_D9_PAIR, 0);
+        assert_ne!(enc & UNWIND_ARM64_FRAME_D10_D11_PAIR, 0);
+        assert_ne!(enc & UNWIND_ARM64_FRAME_D12_D13_PAIR, 0);
+        assert_ne!(enc & UNWIND_ARM64_FRAME_D14_D15_PAIR, 0);
+    }
+
+    #[test]
+    fn test_section_mixed_frame_and_dwarf_entries() {
+        let mut section = CompactUnwindSection::new();
+        section.add_entry(CompactUnwindEntry::new(0, 32, UNWIND_ARM64_MODE_FRAME, 0));
+        section.add_entry(CompactUnwindEntry::new(32, 64, UNWIND_ARM64_MODE_DWARF, 1));
+        section.add_entry(CompactUnwindEntry::new(96, 48, UNWIND_ARM64_MODE_FRAME | UNWIND_ARM64_FRAME_X19_X20_PAIR, 2));
+
+        assert_eq!(section.entry_count(), 3);
+
+        let bytes = section.to_bytes();
+        assert_eq!(bytes.len(), 96);
+
+        // Entry 0: FRAME
+        let enc0 = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        assert_eq!(enc0, UNWIND_ARM64_MODE_FRAME);
+
+        // Entry 1: DWARF
+        let enc1 = u32::from_le_bytes(bytes[44..48].try_into().unwrap());
+        assert_eq!(enc1, UNWIND_ARM64_MODE_DWARF);
+
+        // Entry 2: FRAME + X19/X20
+        let enc2 = u32::from_le_bytes(bytes[76..80].try_into().unwrap());
+        assert_eq!(enc2, UNWIND_ARM64_MODE_FRAME | UNWIND_ARM64_FRAME_X19_X20_PAIR);
     }
 }

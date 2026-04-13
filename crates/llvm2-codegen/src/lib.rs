@@ -12,6 +12,7 @@
 //! x86-64 and RISC-V are future targets.
 
 pub mod aarch64;
+pub mod dwarf_cfi;
 pub mod frame;
 pub mod layout;
 pub mod lower;
