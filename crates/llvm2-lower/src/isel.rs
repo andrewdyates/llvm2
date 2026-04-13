@@ -42,12 +42,29 @@ fn reg_class_for_type(ty: Type) -> RegClass {
 }
 
 // ---------------------------------------------------------------------------
-// AArch64 opcode enumeration (subset for scaffold)
+// ISel-level AArch64 opcode enumeration
+// ---------------------------------------------------------------------------
+//
+// NOTE: These ISel-level types (AArch64Opcode, MachOperand, AArch64CC,
+// MachInst, MachBlock, MachFunction) intentionally shadow the types in
+// `llvm2-ir`. The ISel types represent the *instruction selection* output
+// with LLVM-style per-width opcode naming (ADDWrr, ADDXrr) and HashMap-
+// based block storage, while `llvm2-ir` types represent the canonical
+// machine IR with abstract opcodes (AddRR) and arena-indexed storage.
+//
+// The pipeline flow is:
+//   tMIR -> isel::MachFunction (this module)
+//        -> llvm2_ir::MachFunction (canonical IR for opt/regalloc/codegen)
+//
+// A translation pass (not yet implemented) will lower isel output to the
+// canonical llvm2-ir representation. See issue #37 for unification tracking.
 // ---------------------------------------------------------------------------
 
-/// AArch64 machine opcodes. This is a scaffold subset; the full set will be
-/// expanded by other techleads to cover all ~25 tMIR instructions plus
-/// pseudo-ops.
+/// AArch64 machine opcodes for instruction selection output.
+///
+/// Uses LLVM-style per-width naming (ADDWrr = 32-bit ADD, ADDXrr = 64-bit ADD)
+/// to distinguish width variants at ISel time. These are separate from
+/// `llvm2_ir::AArch64Opcode` which uses abstract names (AddRR, AddRI).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AArch64Opcode {
     // Arithmetic (register forms)
@@ -208,7 +225,11 @@ pub enum AArch64Opcode {
 // Machine operand
 // ---------------------------------------------------------------------------
 
-/// Operand of a machine instruction (post-isel, pre-regalloc).
+/// Operand of an ISel-output machine instruction (post-isel, pre-regalloc).
+///
+/// Separate from `llvm2_ir::MachOperand`: includes ISel-specific variants
+/// (CondCode, Symbol) not present in the canonical IR, and uses `Block`
+/// (LIR block ID) instead of `BlockId` (MachIR block ID).
 #[derive(Debug, Clone, PartialEq)]
 pub enum MachOperand {
     /// Virtual register.
@@ -229,7 +250,12 @@ pub enum MachOperand {
     StackSlot(u32),
 }
 
-/// AArch64 condition codes (NZCV-based).
+/// AArch64 condition codes (NZCV-based) for ISel output.
+///
+/// Separate from `llvm2_ir::cc::AArch64CC` (which aliases `CondCode`):
+/// this version includes `from_intcc`/`from_floatcc` conversion methods
+/// for tMIR comparison conditions. The canonical `CondCode` in llvm2-ir
+/// is the hardware-level encoding without tMIR conversion logic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AArch64CC {
     EQ,  // Equal (Z=1)
@@ -307,10 +333,13 @@ impl AArch64CC {
 }
 
 // ---------------------------------------------------------------------------
-// Machine instruction
+// ISel-level machine instruction
 // ---------------------------------------------------------------------------
 
-/// A single machine instruction (pre-regalloc).
+/// A single ISel-output machine instruction (pre-regalloc).
+///
+/// Simpler than `llvm2_ir::MachInst`: no flags, no implicit defs/uses, no
+/// proof annotations. Those are added during the ISel-to-MachIR translation.
 #[derive(Debug, Clone)]
 pub struct MachInst {
     pub opcode: AArch64Opcode,
@@ -324,10 +353,15 @@ impl MachInst {
 }
 
 // ---------------------------------------------------------------------------
-// Machine basic block
+// ISel-level machine basic block
 // ---------------------------------------------------------------------------
 
-/// A basic block of machine instructions.
+/// An ISel-output basic block of machine instructions.
+///
+/// Uses `Vec<MachInst>` inline (not arena-indexed), and `successors` (not
+/// `succs`/`preds`). This is the ISel output format; the canonical
+/// `llvm2_ir::MachBlock` uses arena-indexed `Vec<InstId>` and explicit
+/// predecessor tracking.
 #[derive(Debug, Clone, Default)]
 pub struct MachBlock {
     pub insts: Vec<MachInst>,
@@ -335,10 +369,14 @@ pub struct MachBlock {
 }
 
 // ---------------------------------------------------------------------------
-// Machine function
+// ISel-level machine function
 // ---------------------------------------------------------------------------
 
-/// A function after instruction selection, containing MachInsts with VRegs.
+/// An ISel-output function containing MachInsts with VRegs.
+///
+/// Uses `HashMap<Block, MachBlock>` for blocks (convenient for ISel
+/// construction), while `llvm2_ir::MachFunction` uses `Vec<MachBlock>`
+/// indexed by `BlockId` (cache-friendly for optimization passes).
 #[derive(Debug, Clone)]
 pub struct MachFunction {
     pub name: String,

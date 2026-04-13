@@ -3,11 +3,30 @@
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
-//! Type system for LLVM2 Low-level IR.
+//! Type system for LLVM2 Low-level IR (input-level types).
+//!
+//! ## Why this is NOT a re-export of `llvm2_ir::function::Type`
+//!
+//! This `Type` enum represents tMIR/LIR input-level scalar types, while
+//! `llvm2_ir::function::Type` represents machine-level types used by the
+//! backend after instruction selection. The key differences:
+//!
+//! | Aspect | `llvm2_lower::Type` | `llvm2_ir::Type` |
+//! |--------|---------------------|------------------|
+//! | Purpose | tMIR input types | MachIR types |
+//! | `Ptr` variant | No (pointers are I64 at LIR level) | Yes |
+//! | `serde` derives | Yes (for tMIR serialization) | No (zero-dep core) |
+//! | `bits()` method | Yes | No |
+//!
+//! Once tMIR integration matures, this enum will align with tmir-types.
+//! See issue #37 for tracking type unification.
 
 use serde::{Deserialize, Serialize};
 
-/// Scalar types in LIR.
+/// Scalar types in LIR (input-level, pre-instruction-selection).
+///
+/// This is intentionally separate from `llvm2_ir::function::Type` — see
+/// module-level docs for rationale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Type {
     /// 8-bit integer

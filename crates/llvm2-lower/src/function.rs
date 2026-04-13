@@ -26,7 +26,12 @@ pub struct Function {
     pub entry_block: Block,
 }
 
-/// Function signature.
+/// LIR function signature (input-level, uses `llvm2_lower::Type`).
+///
+/// Separate from `llvm2_ir::function::Signature` which uses
+/// `llvm2_ir::function::Type` (includes `Ptr`, no serde). This signature
+/// is used by the instruction selector and ABI classifier before
+/// lowering to the canonical MachIR representation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Signature {
     pub params: Vec<Type>,

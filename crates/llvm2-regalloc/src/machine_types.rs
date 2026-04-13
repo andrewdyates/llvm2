@@ -5,14 +5,30 @@
 
 //! Machine-level type definitions used by the register allocator.
 //!
-//! Primitive types (VReg, PReg, RegClass, BlockId, InstId, StackSlotId) are
+//! ## Primitive types (re-exported from `llvm2-ir`)
+//!
+//! `VReg`, `PReg`, `RegClass`, `BlockId`, `InstId`, `StackSlotId` are
 //! imported from `llvm2-ir`, the canonical source of truth for machine IR types.
 //!
-//! The compound types (MachInst, MachBlock, MachFunction, MachOperand) have
-//! regalloc-specific structure: MachInst separates defs from uses for
-//! efficient liveness computation, and MachFunction uses arena-based storage
-//! with stack slot tracking. These are intentionally different from the
-//! llvm2-ir versions and will be unified in a future phase.
+//! ## Compound types (regalloc-specific, intentionally separate)
+//!
+//! The compound types (`MachInst`, `MachBlock`, `MachFunction`, `MachOperand`,
+//! `InstFlags`, `StackSlot`) are regalloc-specific versions that shadow the
+//! `llvm2-ir` types by name. They are NOT stale stubs -- they have structural
+//! differences required for register allocation:
+//!
+//! | Type | Why separate |
+//! |------|--------------|
+//! | `MachInst` | Separates defs/uses for liveness; opcode is `u16` not enum |
+//! | `MachOperand` | Subset of variants (no MemOp/FrameIndex/Special) |
+//! | `InstFlags` | Same encoding, different API (`pub u16` vs typed constants) |
+//! | `MachBlock` | Adds `loop_depth` for spill weight computation |
+//! | `StackSlot` | No alignment assertion |
+//! | `MachFunction` | `HashMap` stack slots, `next_stack_slot` counter |
+//!
+//! These will be unified with the `llvm2-ir` versions in a future phase,
+//! likely by enriching `llvm2_ir::MachInst` with def/use classification.
+//! See issue #37 for tracking.
 //!
 //! Reference: `~/llvm-project-ref/llvm/include/llvm/CodeGen/MachineInstr.h`
 
@@ -22,7 +38,11 @@ use std::collections::HashMap;
 pub use llvm2_ir::regs::{PReg, RegClass, VReg};
 pub use llvm2_ir::types::{BlockId, InstId, StackSlotId};
 
-/// Operand of a machine instruction.
+/// Operand of a regalloc-level machine instruction.
+///
+/// Subset of `llvm2_ir::MachOperand` — omits `MemOp`, `FrameIndex`, and
+/// `Special` variants which are not needed for register allocation.
+/// Will be unified with `llvm2_ir::MachOperand` in a future phase. (#37)
 #[derive(Debug, Clone, PartialEq)]
 pub enum MachOperand {
     VReg(VReg),
@@ -53,8 +73,12 @@ impl MachOperand {
 
 /// Instruction flags describing side effects and control flow.
 ///
-/// Uses the same flag encoding as `llvm2_ir::InstFlags` with additional
-/// regalloc-specific flags (IS_PHI).
+/// Duplicates `llvm2_ir::InstFlags` with the same bit encoding but a
+/// different API: exposes constants as `u16` values (not `Self` constants)
+/// and uses `pub` inner field to allow direct construction via bitwise OR
+/// (e.g., `InstFlags(IS_CALL | IS_BRANCH)`). The `llvm2_ir::InstFlags`
+/// version uses `const fn union()` and typed constants instead.
+/// Will be unified with `llvm2_ir::InstFlags` in a future phase. (#37)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct InstFlags(pub u16);
 
@@ -122,7 +146,10 @@ impl MachInst {
     }
 }
 
-/// A machine basic block.
+/// A regalloc-level machine basic block.
+///
+/// Extends `llvm2_ir::MachBlock` with `loop_depth` for spill weight
+/// computation. Will be unified in a future phase. (#37)
 #[derive(Debug, Clone)]
 pub struct MachBlock {
     /// Instructions in this block, in order.
@@ -136,16 +163,22 @@ pub struct MachBlock {
 }
 
 /// A stack slot for spilled values.
+///
+/// Same fields as `llvm2_ir::function::StackSlot` but without the
+/// `debug_assert` alignment check. Will be unified. (#37)
 #[derive(Debug, Clone)]
 pub struct StackSlot {
     pub size: u32,
     pub align: u32,
 }
 
-/// A machine function -- the unit of register allocation.
+/// A regalloc-level machine function -- the unit of register allocation.
 ///
-/// Arena-based storage: instructions are stored in a flat Vec indexed by
-/// InstId, blocks in a Vec indexed by BlockId.
+/// Differs from `llvm2_ir::MachFunction` in several ways:
+/// - Uses regalloc-specific `MachInst` with separated defs/uses
+/// - Uses `HashMap<StackSlotId, StackSlot>` instead of `Vec<StackSlot>`
+/// - Includes `next_stack_slot` counter for spill allocation
+/// Will be unified in a future phase. (#37)
 #[derive(Debug, Clone)]
 pub struct MachFunction {
     pub name: String,
