@@ -28,6 +28,7 @@
 //! | [`LoopInvariantCodeMotion`] | Hoist loop-invariant computations to preheader |
 //! | [`ProofOptimization`] | Consume tMIR proof annotations to eliminate runtime checks |
 //! | [`AddrModeFormation`] | Fold ADD+LDR/STR into rich AArch64 addressing modes |
+//! | [`CmpSelectCombine`] | Diamond CFG to CSEL/CSET conditional select formation |
 //! | [`CfgSimplify`] | Simplify CFG: branch folding, empty block elim, unreachable removal |
 //!
 //! # Memory Effects Model
@@ -48,6 +49,7 @@
 
 pub mod addr_mode;
 pub mod cfg_simplify;
+pub mod cmp_select;
 pub mod const_fold;
 pub mod copy_prop;
 pub mod cse;

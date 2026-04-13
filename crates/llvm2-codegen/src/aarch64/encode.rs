@@ -877,6 +877,56 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
         }
 
         // =================================================================
+        // Conditional select / set
+        // =================================================================
+
+        // CSEL Xd, Xn, Xm, cond
+        // ARM ARM: C6.2.76  Conditional Select
+        // 31 30 29 28:21    20:16 15:12 11 10 9:5  4:0
+        // sf  0  0  11010100 Rm    cond   0  0  Rn   Rd
+        // Operands: [dst, true_src, false_src, Imm(cond_code_encoding)]
+        AArch64Opcode::Csel => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let rm = preg_hw(inst, 2);
+            let cond = imm_val(inst, 3) as u32 & 0xF;
+            Ok((sf << 31)
+                | (0b00 << 29)
+                | (0b11010100 << 21)
+                | (rm << 16)
+                | (cond << 12)
+                | (0b00 << 10)
+                | (rn << 5)
+                | rd)
+        }
+
+        // CSET Xd, cond  — encoded as CSINC Xd, XZR, XZR, invert(cond)
+        // ARM ARM: C6.2.78  CSINC (alias CSET when Rn=Rm=XZR)
+        // 31 30 29 28:21    20:16 15:12 11 10 9:5  4:0
+        // sf  0  0  11010100 Rm    cond   0  1  Rn   Rd
+        // Operands: [dst, Imm(cond_code_encoding)]
+        // The condition stored is the ORIGINAL condition; we invert it for the
+        // CSINC encoding (CSINC Xd, XZR, XZR, inv(cond) = CSET Xd, cond).
+        AArch64Opcode::Cset => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0);
+            let cond = imm_val(inst, 1) as u32 & 0xF;
+            // Invert condition for CSINC encoding: flip bit 0.
+            let inv_cond = cond ^ 1;
+            let rn = 31u32; // XZR
+            let rm = 31u32; // XZR
+            Ok((sf << 31)
+                | (0b00 << 29)
+                | (0b11010100 << 21)
+                | (rm << 16)
+                | (inv_cond << 12)
+                | (0b01 << 10) // o2=0, op=1 → CSINC
+                | (rn << 5)
+                | rd)
+        }
+
+        // =================================================================
         // Pseudo-instructions — emit NOP as safe fallback
         // =================================================================
 

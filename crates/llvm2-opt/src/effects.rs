@@ -100,6 +100,9 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         // MemoryEffect. For memory-effect purposes, these are pure.
         CmpRR | CmpRI | Tst | Fcmp => MemoryEffect::Pure,
 
+        // Conditional select/set: pure computation, no memory access.
+        Csel | Cset => MemoryEffect::Pure,
+
         // Move
         MovR | MovI | Movz | Movk => MemoryEffect::Pure,
 
