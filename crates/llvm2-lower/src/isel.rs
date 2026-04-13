@@ -672,8 +672,14 @@ impl InstructionSelector {
             Opcode::Call { name } => {
                 self.select_call_from_lir(name, inst, block)?;
             }
+            Opcode::CallIndirect => {
+                self.select_call_indirect_from_lir(inst, block)?;
+            }
             Opcode::CallVariadic { name, fixed_args } => {
                 self.select_variadic_call_from_lir(name, *fixed_args, inst, block)?;
+            }
+            Opcode::Switch { cases, default } => {
+                self.select_switch(cases, *default, inst, block)?;
             }
 
             // Type conversions (unsigned FP <-> int)
@@ -1498,6 +1504,288 @@ impl InstructionSelector {
             &result_types,
             block,
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Indirect call (CallIndirect)
+    // -----------------------------------------------------------------------
+
+    /// Select an indirect function call (BLR).
+    ///
+    /// `CallIndirect` is like `Call` but the target is a register (function
+    /// pointer) instead of a symbol name.
+    ///
+    /// args[0] = function pointer (I64)
+    /// args[1..] = call arguments (classified per ABI)
+    /// results = return values
+    ///
+    /// Lowering:
+    /// 1. Move call arguments to ABI registers/stack (same as direct call)
+    /// 2. MOV function pointer to a scratch register (X16, intra-procedure-call
+    ///    scratch per AArch64 ABI)
+    /// 3. BLR scratch_reg
+    /// 4. Copy return values from ABI registers to vregs
+    pub fn select_call_indirect(
+        &mut self,
+        fn_ptr_val: &Value,
+        arg_vals: &[Value],
+        result_vals: &[Value],
+        result_types: &[Type],
+        block: Block,
+    ) -> Result<(), ISelError> {
+        // Classify argument locations (excluding the function pointer)
+        let arg_types: Vec<Type> = arg_vals.iter().map(|v| self.value_type(v)).collect();
+        let arg_locs = AppleAArch64ABI::classify_params(&arg_types);
+
+        // Move arguments to ABI locations (same as direct call)
+        for (i, (val, loc)) in arg_vals.iter().zip(arg_locs.iter()).enumerate() {
+            let src = self.use_value(val)?;
+            let ty = arg_types[i].clone();
+
+            if ty.is_aggregate() {
+                self.select_aggregate_arg(src, &ty, loc, block)?;
+                continue;
+            }
+
+            match loc {
+                ArgLocation::Reg(preg) => {
+                    let opc = if Self::is_32bit(&ty) {
+                        AArch64Opcode::MOVWrr
+                    } else {
+                        AArch64Opcode::MOVXrr
+                    };
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(opc, vec![MachOperand::PReg(*preg), src]),
+                    );
+                }
+                ArgLocation::Stack { offset, size: _ } => {
+                    let opc = if Self::is_32bit(&ty) {
+                        AArch64Opcode::STRWui
+                    } else {
+                        AArch64Opcode::STRXui
+                    };
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            opc,
+                            vec![src, MachOperand::PReg(SP), MachOperand::Imm(*offset)],
+                        ),
+                    );
+                }
+                ArgLocation::Indirect { ptr_reg } => {
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::MOVXrr,
+                            vec![MachOperand::PReg(*ptr_reg), src],
+                        ),
+                    );
+                }
+            }
+        }
+
+        // Move function pointer to X16 (intra-procedure-call scratch register).
+        // X16/X17 are designated as IP0/IP1 in AArch64 ABI — used by linker
+        // veneers and safe to clobber across calls.
+        let fn_ptr = self.use_value(fn_ptr_val)?;
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                AArch64Opcode::MOVXrr,
+                vec![MachOperand::PReg(gpr::X16), fn_ptr],
+            ),
+        );
+
+        // Emit BLR X16 (indirect call via register)
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                AArch64Opcode::BLR,
+                vec![MachOperand::PReg(gpr::X16)],
+            ),
+        );
+
+        // Copy results from ABI return registers to vregs
+        let ret_locs = AppleAArch64ABI::classify_returns(result_types);
+        for (i, (val, loc)) in result_vals.iter().zip(ret_locs.iter()).enumerate() {
+            match loc {
+                ArgLocation::Reg(preg) => {
+                    let ty = result_types[i].clone();
+                    let class = reg_class_for_type(&ty);
+                    let dst = self.new_vreg(class);
+                    let opc = if Self::is_32bit(&ty) {
+                        AArch64Opcode::MOVWrr
+                    } else {
+                        AArch64Opcode::MOVXrr
+                    };
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(opc, vec![MachOperand::VReg(dst), MachOperand::PReg(*preg)]),
+                    );
+                    self.define_value(*val, MachOperand::VReg(dst), ty);
+                }
+                ArgLocation::Indirect { ptr_reg } => {
+                    let ty = result_types[i].clone();
+                    let dst = self.new_vreg(RegClass::Gpr64);
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::MOVXrr,
+                            vec![MachOperand::VReg(dst), MachOperand::PReg(*ptr_reg)],
+                        ),
+                    );
+                    self.define_value(*val, MachOperand::VReg(dst), ty);
+                }
+                ArgLocation::Stack { .. } => {
+                    return Err(ISelError::UnsupportedReturnLocation);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Select a `CallIndirect` from LIR.
+    ///
+    /// `inst.args[0]` is the function pointer, `inst.args[1..]` are call args.
+    fn select_call_indirect_from_lir(&mut self, inst: &Instruction, block: Block) -> Result<(), ISelError> {
+        Self::require_args(inst, 1, "CallIndirect")?;
+
+        let fn_ptr_val = inst.args[0];
+        let call_args = &inst.args[1..];
+        let result_types: Vec<Type> = inst
+            .results
+            .iter()
+            .map(|v| self.value_type(v))
+            .collect();
+        self.select_call_indirect(
+            &fn_ptr_val,
+            call_args,
+            &inst.results,
+            &result_types,
+            block,
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Switch (cascading CMP+B.EQ chain)
+    // -----------------------------------------------------------------------
+
+    /// Select a switch statement as a cascading CMP+B.EQ chain.
+    ///
+    /// For each case `(value, target_block)`:
+    ///   CMP selector, #value
+    ///   B.EQ target_block
+    /// After all cases:
+    ///   B default_block
+    ///
+    /// This is the simplest lowering strategy (linear scan). Jump tables
+    /// can be added later for dense switch ranges.
+    fn select_switch(
+        &mut self,
+        cases: &[(i64, Block)],
+        default: Block,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        Self::require_args(inst, 1, "Switch")?;
+
+        let selector_val = inst.args[0];
+        let selector = self.use_value(&selector_val)?;
+        let sel_ty = self.value_type(&selector_val);
+        let is_32 = Self::is_32bit(&sel_ty);
+
+        // For each case: CMP selector, #case_val then B.EQ target
+        for (case_val, target) in cases {
+            // Materialize the case value as an immediate comparison.
+            // AArch64 CMP immediate (CMPri) supports 12-bit unsigned values.
+            // For values outside that range, materialize into a register first.
+            let case_fits_imm12 = *case_val >= 0 && *case_val <= 0xFFF;
+
+            if case_fits_imm12 {
+                let cmp_opc = if is_32 {
+                    AArch64Opcode::CMPWri
+                } else {
+                    AArch64Opcode::CMPXri
+                };
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        cmp_opc,
+                        vec![selector.clone(), MachOperand::Imm(*case_val)],
+                    ),
+                );
+            } else {
+                // Materialize case value into a register, then CMP reg, reg.
+                let class = if is_32 { RegClass::Gpr32 } else { RegClass::Gpr64 };
+                let case_vreg = self.new_vreg(class);
+                let mov_opc = if is_32 {
+                    AArch64Opcode::MOVZWi
+                } else {
+                    AArch64Opcode::MOVZXi
+                };
+                // For simplicity, use MOVZi for non-negative values that fit
+                // in 16 bits, and the full materialization sequence for larger.
+                // TODO: Full 64-bit materialization for very large constants.
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        mov_opc,
+                        vec![
+                            MachOperand::VReg(case_vreg),
+                            MachOperand::Imm(*case_val),
+                        ],
+                    ),
+                );
+
+                let cmp_opc = if is_32 {
+                    AArch64Opcode::CMPWrr
+                } else {
+                    AArch64Opcode::CMPXrr
+                };
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        cmp_opc,
+                        vec![selector.clone(), MachOperand::VReg(case_vreg)],
+                    ),
+                );
+            }
+
+            // B.EQ target_block
+            self.func.push_inst(
+                block,
+                MachInst::new(
+                    AArch64Opcode::Bcc,
+                    vec![
+                        MachOperand::CondCode(AArch64CC::EQ),
+                        MachOperand::Block(*target),
+                    ],
+                ),
+            );
+
+            // Record successor
+            self.func
+                .blocks
+                .entry(block)
+                .or_default()
+                .successors
+                .push(*target);
+        }
+
+        // Fall through to default block
+        self.func.push_inst(
+            block,
+            MachInst::new(AArch64Opcode::B, vec![MachOperand::Block(default)]),
+        );
+        self.func
+            .blocks
+            .entry(block)
+            .or_default()
+            .successors
+            .push(default);
+
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -5910,5 +6198,314 @@ mod tests {
                     | AArch64Opcode::STRSui | AArch64Opcode::STRDui)
         });
         assert!(!str_sp, "No stack stores when no varargs passed");
+    }
+
+    // =======================================================================
+    // CallIndirect (indirect call via function pointer)
+    // =======================================================================
+
+    #[test]
+    fn select_call_indirect_basic() {
+        // Test: call_indirect(fn_ptr, arg) -> result
+        // fn_ptr is I64, arg is I32, returns I32
+        let (mut isel, entry) = make_empty_isel();
+
+        // Define the function pointer value
+        let fp_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(fp_vreg), Type::I64);
+
+        // Define an argument value
+        let arg_vreg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(1), MachOperand::VReg(arg_vreg), Type::I32);
+
+        // Select CallIndirect: args[0]=fn_ptr, args[1]=arg, results=[retval]
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::CallIndirect,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // Should contain: MOV (arg to X0), MOV (fn_ptr to X16), BLR X16, MOV (X0 to result)
+        // Find the BLR instruction
+        let blr_inst = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::BLR);
+        assert!(blr_inst.is_some(), "Expected BLR instruction for indirect call");
+        let blr = blr_inst.unwrap();
+        assert_eq!(
+            blr.operands[0],
+            MachOperand::PReg(gpr::X16),
+            "BLR should target X16 (IP0 scratch register)"
+        );
+
+        // Verify arg was moved to X0
+        let mov_x0 = mblock.insts.iter().find(|i| {
+            i.opcode == AArch64Opcode::MOVWrr
+                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+        });
+        assert!(mov_x0.is_some(), "Arg should be moved to X0");
+
+        // Verify fn_ptr was moved to X16
+        let mov_x16 = mblock.insts.iter().find(|i| {
+            i.opcode == AArch64Opcode::MOVXrr
+                && i.operands.first() == Some(&MachOperand::PReg(gpr::X16))
+        });
+        assert!(mov_x16.is_some(), "Function pointer should be moved to X16");
+    }
+
+    #[test]
+    fn select_call_indirect_no_args_no_results() {
+        // Test: call_indirect(fn_ptr) with no args and no return
+        let (mut isel, entry) = make_empty_isel();
+
+        let fp_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(fp_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::CallIndirect,
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // Should have: MOV fn_ptr -> X16, BLR X16
+        assert!(mblock.insts.len() >= 2, "At least MOV + BLR");
+
+        let blr_inst = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::BLR);
+        assert!(blr_inst.is_some(), "Expected BLR for indirect call");
+    }
+
+    #[test]
+    fn select_call_indirect_multiple_args() {
+        // Test: call_indirect(fn_ptr, a, b, c) -> result
+        let (mut isel, entry) = make_empty_isel();
+
+        let fp_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(fp_vreg), Type::I64);
+
+        let a_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), MachOperand::VReg(a_vreg), Type::I64);
+        let b_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(2), MachOperand::VReg(b_vreg), Type::I64);
+        let c_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(3), MachOperand::VReg(c_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::CallIndirect,
+                args: vec![Value(0), Value(1), Value(2), Value(3)],
+                results: vec![Value(4)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // Verify args go to X0, X1, X2
+        let mov_x0 = mblock.insts.iter().any(|i| {
+            i.opcode == AArch64Opcode::MOVXrr
+                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+        });
+        let mov_x1 = mblock.insts.iter().any(|i| {
+            i.opcode == AArch64Opcode::MOVXrr
+                && i.operands.first() == Some(&MachOperand::PReg(gpr::X1))
+        });
+        let mov_x2 = mblock.insts.iter().any(|i| {
+            i.opcode == AArch64Opcode::MOVXrr
+                && i.operands.first() == Some(&MachOperand::PReg(gpr::X2))
+        });
+        assert!(mov_x0, "First arg should go to X0");
+        assert!(mov_x1, "Second arg should go to X1");
+        assert!(mov_x2, "Third arg should go to X2");
+
+        // BLR should be present
+        let blr = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::BLR);
+        assert!(blr.is_some(), "Expected BLR");
+    }
+
+    // =======================================================================
+    // Switch (cascading CMP+B.EQ chain)
+    // =======================================================================
+
+    #[test]
+    fn select_switch_two_cases() {
+        // switch(selector) { 0 => block1, 1 => block2, default => block3 }
+        let (mut isel, entry) = make_empty_isel();
+
+        let sel_vreg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(0), MachOperand::VReg(sel_vreg), Type::I32);
+
+        let block1 = Block(1);
+        let block2 = Block(2);
+        let block3 = Block(3);
+        isel.func.ensure_block(block1);
+        isel.func.ensure_block(block2);
+        isel.func.ensure_block(block3);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Switch {
+                    cases: vec![(0, block1), (1, block2)],
+                    default: block3,
+                },
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // Expected pattern:
+        //   CMP sel, #0; B.EQ block1
+        //   CMP sel, #1; B.EQ block2
+        //   B block3 (default)
+        //
+        // That's 2*(CMP+B.cond) + 1*B = 5 instructions
+
+        // Count B.cond instructions
+        let bcc_count = mblock.insts.iter()
+            .filter(|i| i.opcode == AArch64Opcode::Bcc)
+            .count();
+        assert_eq!(bcc_count, 2, "Should have 2 conditional branches (one per case)");
+
+        // Each B.cond should use EQ condition
+        for bcc in mblock.insts.iter().filter(|i| i.opcode == AArch64Opcode::Bcc) {
+            assert_eq!(
+                bcc.operands[0],
+                MachOperand::CondCode(AArch64CC::EQ),
+                "Switch cases use B.EQ"
+            );
+        }
+
+        // The last instruction should be unconditional B to default
+        let last = mblock.insts.last().unwrap();
+        assert_eq!(last.opcode, AArch64Opcode::B, "Last inst should be B (default fallthrough)");
+        assert_eq!(last.operands[0], MachOperand::Block(block3), "Default should be block3");
+
+        // Verify successors
+        let succs = &mfunc.blocks[&entry].successors;
+        assert!(succs.contains(&block1), "block1 should be a successor");
+        assert!(succs.contains(&block2), "block2 should be a successor");
+        assert!(succs.contains(&block3), "block3 (default) should be a successor");
+    }
+
+    #[test]
+    fn select_switch_large_case_value() {
+        // Test case value > 4095 (doesn't fit in CMP immediate)
+        let (mut isel, entry) = make_empty_isel();
+
+        let sel_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(sel_vreg), Type::I64);
+
+        let block1 = Block(1);
+        let block2 = Block(2);
+        isel.func.ensure_block(block1);
+        isel.func.ensure_block(block2);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Switch {
+                    cases: vec![(0x10000, block1)],
+                    default: block2,
+                },
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // For large case value: MOVZ + CMP reg,reg + B.EQ + B
+        // MOVZ materializes the constant, then CMP is register-register
+        let movz_inst = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::MOVZXi);
+        assert!(movz_inst.is_some(), "Large case value should be materialized via MOVZXi");
+
+        let cmp_rr = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::CMPXrr);
+        assert!(cmp_rr.is_some(), "Large case value should use CMP reg,reg");
+    }
+
+    #[test]
+    fn select_switch_single_case() {
+        // Degenerate switch with one case
+        let (mut isel, entry) = make_empty_isel();
+
+        let sel_vreg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(0), MachOperand::VReg(sel_vreg), Type::I32);
+
+        let block1 = Block(1);
+        let block_default = Block(2);
+        isel.func.ensure_block(block1);
+        isel.func.ensure_block(block_default);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Switch {
+                    cases: vec![(42, block1)],
+                    default: block_default,
+                },
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // CMP + B.EQ + B = 3 instructions
+        let bcc_count = mblock.insts.iter()
+            .filter(|i| i.opcode == AArch64Opcode::Bcc)
+            .count();
+        assert_eq!(bcc_count, 1, "Single case should produce 1 B.EQ");
+
+        let last = mblock.insts.last().unwrap();
+        assert_eq!(last.opcode, AArch64Opcode::B);
+        assert_eq!(last.operands[0], MachOperand::Block(block_default));
+    }
+
+    #[test]
+    fn select_switch_zero_cases() {
+        // Switch with no cases = just jump to default
+        let (mut isel, entry) = make_empty_isel();
+
+        let sel_vreg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(0), MachOperand::VReg(sel_vreg), Type::I32);
+
+        let block_default = Block(1);
+        isel.func.ensure_block(block_default);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Switch {
+                    cases: vec![],
+                    default: block_default,
+                },
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // Just one B to default
+        assert_eq!(mblock.insts.len(), 1, "Empty switch = just B to default");
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::B);
+        assert_eq!(mblock.insts[0].operands[0], MachOperand::Block(block_default));
     }
 }
