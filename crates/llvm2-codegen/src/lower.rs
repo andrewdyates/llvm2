@@ -607,6 +607,37 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 preg_hw(0)?,
             ))
         }
+        // Byte/halfword extending loads and truncating stores
+        AArch64Opcode::LdrbRI => {
+            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
+            let scaled = offset as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b00, 0, 0b01, scaled, preg_hw(1)?, preg_hw(0)?))
+        }
+        AArch64Opcode::LdrhRI => {
+            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
+            let scaled = (offset / 2) as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b01, 0, 0b01, scaled, preg_hw(1)?, preg_hw(0)?))
+        }
+        AArch64Opcode::LdrsbRI => {
+            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
+            let scaled = offset as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b00, 0, 0b11, scaled, preg_hw(1)?, preg_hw(0)?))
+        }
+        AArch64Opcode::LdrshRI => {
+            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
+            let scaled = (offset / 2) as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b01, 0, 0b11, scaled, preg_hw(1)?, preg_hw(0)?))
+        }
+        AArch64Opcode::StrbRI => {
+            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
+            let scaled = offset as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b00, 0, 0b00, scaled, preg_hw(1)?, preg_hw(0)?))
+        }
+        AArch64Opcode::StrhRI => {
+            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
+            let scaled = (offset / 2) as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b01, 0, 0b00, scaled, preg_hw(1)?, preg_hw(0)?))
+        }
         AArch64Opcode::StpRI => {
             // STP Rt, Rt2, [Rn, #offset] (signed offset)
             let offset = if inst.operands.len() > 3 { imm_val(3) } else { 0 };

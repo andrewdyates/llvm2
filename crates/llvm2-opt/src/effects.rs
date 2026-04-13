@@ -73,10 +73,10 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
     use AArch64Opcode::*;
     match opcode {
         // -- Loads: read memory --
-        LdrRI | LdrLiteral | LdpRI | LdpPostIndex => MemoryEffect::Load,
+        LdrRI | LdrbRI | LdrhRI | LdrsbRI | LdrshRI | LdrLiteral | LdpRI | LdpPostIndex => MemoryEffect::Load,
 
         // -- Stores: write memory --
-        StrRI | StpRI | StpPreIndex => MemoryEffect::Store,
+        StrRI | StrbRI | StrhRI | StpRI | StpPreIndex => MemoryEffect::Store,
 
         // -- Calls: full barrier --
         Bl | Blr => MemoryEffect::Call,
@@ -181,12 +181,20 @@ mod tests {
         assert_eq!(opcode_effect(AArch64Opcode::LdrRI), MemoryEffect::Load);
         assert_eq!(opcode_effect(AArch64Opcode::LdpRI), MemoryEffect::Load);
         assert_eq!(opcode_effect(AArch64Opcode::LdrLiteral), MemoryEffect::Load);
+        // Byte/halfword extending loads
+        assert_eq!(opcode_effect(AArch64Opcode::LdrbRI), MemoryEffect::Load);
+        assert_eq!(opcode_effect(AArch64Opcode::LdrhRI), MemoryEffect::Load);
+        assert_eq!(opcode_effect(AArch64Opcode::LdrsbRI), MemoryEffect::Load);
+        assert_eq!(opcode_effect(AArch64Opcode::LdrshRI), MemoryEffect::Load);
     }
 
     #[test]
     fn test_stores_are_store() {
         assert_eq!(opcode_effect(AArch64Opcode::StrRI), MemoryEffect::Store);
         assert_eq!(opcode_effect(AArch64Opcode::StpRI), MemoryEffect::Store);
+        // Byte/halfword truncating stores
+        assert_eq!(opcode_effect(AArch64Opcode::StrbRI), MemoryEffect::Store);
+        assert_eq!(opcode_effect(AArch64Opcode::StrhRI), MemoryEffect::Store);
     }
 
     #[test]

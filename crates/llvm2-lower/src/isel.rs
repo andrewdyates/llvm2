@@ -134,10 +134,16 @@ pub enum AArch64Opcode {
     LDRXui,   // Load 64-bit, unsigned offset
     LDRSui,   // Load 32-bit float, unsigned offset
     LDRDui,   // Load 64-bit float, unsigned offset
+    LDRBui,   // Load byte (zero-extend to 32-bit), unsigned offset
+    LDRHui,   // Load halfword (zero-extend to 32-bit), unsigned offset
+    LDRSBui,  // Load byte (sign-extend to 32-bit), unsigned offset
+    LDRSHui,  // Load halfword (sign-extend to 32-bit), unsigned offset
     STRWui,   // Store 32-bit, unsigned offset
     STRXui,   // Store 64-bit, unsigned offset
     STRSui,   // Store 32-bit float, unsigned offset
     STRDui,   // Store 64-bit float, unsigned offset
+    STRBui,   // Store byte (truncating), unsigned offset
+    STRHui,   // Store halfword (truncating), unsigned offset
 
     // Branch
     B,        // Unconditional branch
@@ -1330,13 +1336,17 @@ impl InstructionSelector {
         let class = reg_class_for_type(&ty);
         let dst = self.new_vreg(class);
 
+        // Select opcode based on load type. For I8/I16, we default to
+        // zero-extending loads (LDRB/LDRH). Sign-extending loads (LDRSB/LDRSH)
+        // would be selected when the load feeds into an Sextend, but that
+        // optimization is deferred to late combines (Phase 2).
         let opc = match ty {
+            Type::I8 => AArch64Opcode::LDRBui,
+            Type::I16 => AArch64Opcode::LDRHui,
             Type::I32 => AArch64Opcode::LDRWui,
             Type::I64 => AArch64Opcode::LDRXui,
             Type::F32 => AArch64Opcode::LDRSui,
             Type::F64 => AArch64Opcode::LDRDui,
-            // Smaller types need zero/sign-extending loads (LDRB, LDRH, LDRSB, etc.)
-            // TODO: Implement extending loads
             _ => AArch64Opcode::LDRXui,
         };
 
@@ -1364,11 +1374,12 @@ impl InstructionSelector {
         let ty = self.value_type(&value_val);
 
         let opc = match ty {
+            Type::I8 => AArch64Opcode::STRBui,
+            Type::I16 => AArch64Opcode::STRHui,
             Type::I32 => AArch64Opcode::STRWui,
             Type::I64 => AArch64Opcode::STRXui,
             Type::F32 => AArch64Opcode::STRSui,
             Type::F64 => AArch64Opcode::STRDui,
-            // TODO: Implement truncating stores (STRB, STRH)
             _ => AArch64Opcode::STRXui,
         };
 
@@ -4433,5 +4444,162 @@ mod tests {
 
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[0].opcode, AArch64Opcode::MOVWrr);
+    }
+
+    // =======================================================================
+    // Extending loads and truncating stores (byte/halfword)
+    // =======================================================================
+
+    #[test]
+    fn select_load_i8_emits_ldrb() {
+        let (mut isel, entry) = make_empty_isel();
+        // Create an i64 address value
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Load { ty: Type::I8 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::LDRBui,
+            "Load I8 should emit LDRBui (zero-extending byte load)");
+    }
+
+    #[test]
+    fn select_load_i16_emits_ldrh() {
+        let (mut isel, entry) = make_empty_isel();
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Load { ty: Type::I16 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::LDRHui,
+            "Load I16 should emit LDRHui (zero-extending halfword load)");
+    }
+
+    #[test]
+    fn select_store_i8_emits_strb() {
+        let (mut isel, entry) = make_empty_isel();
+        // Create an i8 value and an address
+        let val_vreg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(0), MachOperand::VReg(val_vreg), Type::I8);
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), MachOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Store,
+                args: vec![Value(0), Value(1)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::STRBui,
+            "Store I8 should emit STRBui (truncating byte store)");
+    }
+
+    #[test]
+    fn select_store_i16_emits_strh() {
+        let (mut isel, entry) = make_empty_isel();
+        let val_vreg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(0), MachOperand::VReg(val_vreg), Type::I16);
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), MachOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Store,
+                args: vec![Value(0), Value(1)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::STRHui,
+            "Store I16 should emit STRHui (truncating halfword store)");
+    }
+
+    #[test]
+    fn select_load_i8_add_store_i8_roundtrip() {
+        // Load a byte, add two loaded bytes, store result — tests byte load+arith+store
+        let (mut isel, entry) = make_empty_isel();
+
+        // Define two addresses
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(addr_vreg), Type::I64);
+        let addr_vreg2 = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), MachOperand::VReg(addr_vreg2), Type::I64);
+
+        // Load byte from first address
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Load { ty: Type::I8 },
+                args: vec![Value(0)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+
+        // Load byte from second address
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Load { ty: Type::I8 },
+                args: vec![Value(1)],
+                results: vec![Value(3)],
+            },
+            entry,
+        ).unwrap();
+
+        // Add two loaded bytes
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iadd,
+                args: vec![Value(2), Value(3)],
+                results: vec![Value(4)],
+            },
+            entry,
+        ).unwrap();
+
+        // Store byte result
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Store,
+                args: vec![Value(4), Value(0)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        assert_eq!(insts[0].opcode, AArch64Opcode::LDRBui,
+            "First instruction should be byte load");
+        assert_eq!(insts[1].opcode, AArch64Opcode::LDRBui,
+            "Second instruction should be byte load");
+        assert_eq!(insts[2].opcode, AArch64Opcode::ADDWrr,
+            "Third instruction should be 32-bit add (I8 uses Gpr32)");
+        assert_eq!(insts[3].opcode, AArch64Opcode::STRBui,
+            "Fourth instruction should be byte store");
     }
 }

@@ -554,6 +554,54 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             }
         }
 
+        // LDRB Wt, [Xn, #offset] — load byte, zero-extend to 32-bit
+        // size=00, V=0, opc=01. Offset scaled by 1 byte.
+        AArch64Opcode::LdrbRI => {
+            let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
+            let scaled = offset as u32 & 0xFFF; // byte-scaled (scale=1)
+            Ok(encoding::encode_load_store_ui(0b00, 0, 0b01, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
+        }
+
+        // LDRH Wt, [Xn, #offset] — load halfword, zero-extend to 32-bit
+        // size=01, V=0, opc=01. Offset scaled by 2 bytes.
+        AArch64Opcode::LdrhRI => {
+            let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
+            let scaled = (offset / 2) as u32 & 0xFFF; // halfword-scaled (scale=2)
+            Ok(encoding::encode_load_store_ui(0b01, 0, 0b01, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
+        }
+
+        // LDRSB Wt, [Xn, #offset] — load byte, sign-extend to 32-bit
+        // size=00, V=0, opc=11 (sign-extend to 32-bit). Offset scaled by 1.
+        AArch64Opcode::LdrsbRI => {
+            let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
+            let scaled = offset as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b00, 0, 0b11, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
+        }
+
+        // LDRSH Wt, [Xn, #offset] — load halfword, sign-extend to 32-bit
+        // size=01, V=0, opc=11 (sign-extend to 32-bit). Offset scaled by 2.
+        AArch64Opcode::LdrshRI => {
+            let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
+            let scaled = (offset / 2) as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b01, 0, 0b11, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
+        }
+
+        // STRB Wt, [Xn, #offset] — store byte (truncating)
+        // size=00, V=0, opc=00. Offset scaled by 1.
+        AArch64Opcode::StrbRI => {
+            let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
+            let scaled = offset as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b00, 0, 0b00, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
+        }
+
+        // STRH Wt, [Xn, #offset] — store halfword (truncating)
+        // size=01, V=0, opc=00. Offset scaled by 2.
+        AArch64Opcode::StrhRI => {
+            let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
+            let scaled = (offset / 2) as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b01, 0, 0b00, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
+        }
+
         // LDR literal (PC-relative) — uses the same base encoding but with the
         // literal addressing mode. For now encode as LDR unsigned offset with
         // an immediate operand interpreted as the literal pool offset.
@@ -1626,6 +1674,12 @@ mod tests {
             (AArch64Opcode::Movk, vec![preg(X0), imm(0)]),
             (AArch64Opcode::LdrRI, vec![preg(X0), preg(X1)]),
             (AArch64Opcode::StrRI, vec![preg(X0), preg(X1)]),
+            (AArch64Opcode::LdrbRI, vec![preg(W0), preg(X1)]),
+            (AArch64Opcode::LdrhRI, vec![preg(W0), preg(X1)]),
+            (AArch64Opcode::LdrsbRI, vec![preg(W0), preg(X1)]),
+            (AArch64Opcode::LdrshRI, vec![preg(W0), preg(X1)]),
+            (AArch64Opcode::StrbRI, vec![preg(W0), preg(X1)]),
+            (AArch64Opcode::StrhRI, vec![preg(W0), preg(X1)]),
             (AArch64Opcode::LdrLiteral, vec![preg(X0), imm(0)]),
             (AArch64Opcode::LdpRI, vec![sp(), preg(X0), preg(X1)]),
             (AArch64Opcode::StpRI, vec![sp(), preg(X0), preg(X1)]),
@@ -1920,5 +1974,113 @@ mod tests {
         let enc = encode_instruction(&inst).unwrap();
         let direct = encoding_fp::encode_fp_arith(FpSize::Single, FpArithOp::Add, 2, 1, 0).unwrap();
         assert_eq!(enc, direct, "FADD S0, S1, S2 should use Single precision");
+    }
+
+    // =========================================================================
+    // Byte/halfword load/store encoding tests
+    // =========================================================================
+
+    #[test]
+    fn test_ldrb_ri() {
+        // LDRB W0, [X1, #0] — size=00, V=0, opc=01
+        let inst = mk(AArch64Opcode::LdrbRI, vec![preg(W0), preg(X1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_load_store_ui(0b00, 0, 0b01, 0, 1, 0);
+        assert_eq!(enc, direct, "LDRB W0, [X1] = {enc:#010X}");
+        // Verify size field (bits 31:30) = 00
+        assert_eq!((enc >> 30) & 0b11, 0b00, "LDRB must have size=00");
+        // Verify opc field (bits 23:22) = 01 (load)
+        assert_eq!((enc >> 22) & 0b11, 0b01, "LDRB must have opc=01");
+    }
+
+    #[test]
+    fn test_ldrb_ri_with_offset() {
+        // LDRB W0, [X1, #5] — byte-aligned offset, no scaling needed
+        let inst = mk(AArch64Opcode::LdrbRI, vec![preg(W0), preg(X1), imm(5)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_load_store_ui(0b00, 0, 0b01, 5, 1, 0);
+        assert_eq!(enc, direct, "LDRB W0, [X1, #5] = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_ldrh_ri() {
+        // LDRH W0, [X1, #0] — size=01, V=0, opc=01
+        let inst = mk(AArch64Opcode::LdrhRI, vec![preg(W0), preg(X1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_load_store_ui(0b01, 0, 0b01, 0, 1, 0);
+        assert_eq!(enc, direct, "LDRH W0, [X1] = {enc:#010X}");
+        assert_eq!((enc >> 30) & 0b11, 0b01, "LDRH must have size=01");
+        assert_eq!((enc >> 22) & 0b11, 0b01, "LDRH must have opc=01");
+    }
+
+    #[test]
+    fn test_ldrh_ri_with_offset() {
+        // LDRH W0, [X1, #4] — halfword offset 4 / 2 = 2 (scaled)
+        let inst = mk(AArch64Opcode::LdrhRI, vec![preg(W0), preg(X1), imm(4)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_load_store_ui(0b01, 0, 0b01, 2, 1, 0);
+        assert_eq!(enc, direct, "LDRH W0, [X1, #4] = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_ldrsb_ri() {
+        // LDRSB W0, [X1, #0] — size=00, V=0, opc=11 (sign-extend to 32-bit)
+        let inst = mk(AArch64Opcode::LdrsbRI, vec![preg(W0), preg(X1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_load_store_ui(0b00, 0, 0b11, 0, 1, 0);
+        assert_eq!(enc, direct, "LDRSB W0, [X1] = {enc:#010X}");
+        assert_eq!((enc >> 30) & 0b11, 0b00, "LDRSB must have size=00");
+        assert_eq!((enc >> 22) & 0b11, 0b11, "LDRSB to W must have opc=11");
+    }
+
+    #[test]
+    fn test_ldrsh_ri() {
+        // LDRSH W0, [X1, #0] — size=01, V=0, opc=11 (sign-extend to 32-bit)
+        let inst = mk(AArch64Opcode::LdrshRI, vec![preg(W0), preg(X1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_load_store_ui(0b01, 0, 0b11, 0, 1, 0);
+        assert_eq!(enc, direct, "LDRSH W0, [X1] = {enc:#010X}");
+        assert_eq!((enc >> 30) & 0b11, 0b01, "LDRSH must have size=01");
+        assert_eq!((enc >> 22) & 0b11, 0b11, "LDRSH to W must have opc=11");
+    }
+
+    #[test]
+    fn test_strb_ri() {
+        // STRB W0, [X1, #0] — size=00, V=0, opc=00
+        let inst = mk(AArch64Opcode::StrbRI, vec![preg(W0), preg(X1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_load_store_ui(0b00, 0, 0b00, 0, 1, 0);
+        assert_eq!(enc, direct, "STRB W0, [X1] = {enc:#010X}");
+        assert_eq!((enc >> 30) & 0b11, 0b00, "STRB must have size=00");
+        assert_eq!((enc >> 22) & 0b11, 0b00, "STRB must have opc=00");
+    }
+
+    #[test]
+    fn test_strb_ri_with_offset() {
+        // STRB W0, [X1, #3] — byte-aligned offset
+        let inst = mk(AArch64Opcode::StrbRI, vec![preg(W0), preg(X1), imm(3)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_load_store_ui(0b00, 0, 0b00, 3, 1, 0);
+        assert_eq!(enc, direct, "STRB W0, [X1, #3] = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_strh_ri() {
+        // STRH W0, [X1, #0] — size=01, V=0, opc=00
+        let inst = mk(AArch64Opcode::StrhRI, vec![preg(W0), preg(X1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_load_store_ui(0b01, 0, 0b00, 0, 1, 0);
+        assert_eq!(enc, direct, "STRH W0, [X1] = {enc:#010X}");
+        assert_eq!((enc >> 30) & 0b11, 0b01, "STRH must have size=01");
+        assert_eq!((enc >> 22) & 0b11, 0b00, "STRH must have opc=00");
+    }
+
+    #[test]
+    fn test_strh_ri_with_offset() {
+        // STRH W0, [X1, #6] — halfword offset 6 / 2 = 3 (scaled)
+        let inst = mk(AArch64Opcode::StrhRI, vec![preg(W0), preg(X1), imm(6)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_load_store_ui(0b01, 0, 0b00, 3, 1, 0);
+        assert_eq!(enc, direct, "STRH W0, [X1, #6] = {enc:#010X}");
     }
 }

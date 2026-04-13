@@ -70,6 +70,24 @@ pub enum AArch64Opcode {
     // -- Memory --
     LdrRI,
     StrRI,
+    /// LDRB (unsigned offset): load byte, zero-extend to 32-bit.
+    /// Operands: [PReg(Rt), PReg(Rn)|Special(SP), Imm(offset)]
+    LdrbRI,
+    /// LDRH (unsigned offset): load halfword, zero-extend to 32-bit.
+    /// Operands: [PReg(Rt), PReg(Rn)|Special(SP), Imm(offset)]
+    LdrhRI,
+    /// LDRSB (unsigned offset): load byte, sign-extend to 32-bit.
+    /// Operands: [PReg(Rt), PReg(Rn)|Special(SP), Imm(offset)]
+    LdrsbRI,
+    /// LDRSH (unsigned offset): load halfword, sign-extend to 32-bit.
+    /// Operands: [PReg(Rt), PReg(Rn)|Special(SP), Imm(offset)]
+    LdrshRI,
+    /// STRB (unsigned offset): store byte (truncating).
+    /// Operands: [PReg(Rt), PReg(Rn)|Special(SP), Imm(offset)]
+    StrbRI,
+    /// STRH (unsigned offset): store halfword (truncating).
+    /// Operands: [PReg(Rt), PReg(Rn)|Special(SP), Imm(offset)]
+    StrhRI,
     LdrLiteral,
     LdpRI,
     StpRI,
@@ -194,12 +212,12 @@ impl AArch64Opcode {
             Ret => InstFlags::IS_RETURN.union(InstFlags::IS_TERMINATOR),
 
             // Memory loads
-            LdrRI => InstFlags::READS_MEMORY,
+            LdrRI | LdrbRI | LdrhRI | LdrsbRI | LdrshRI => InstFlags::READS_MEMORY,
             LdrLiteral => InstFlags::READS_MEMORY,
             LdpRI | LdpPostIndex => InstFlags::READS_MEMORY,
 
             // Memory stores
-            StrRI => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
+            StrRI | StrbRI | StrhRI => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
             StpRI | StpPreIndex => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Pseudo-instructions
