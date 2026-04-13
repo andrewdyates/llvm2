@@ -94,12 +94,25 @@ pub enum Opcode {
     Brif { cond: Value, then_dest: Block, else_dest: Block },
     Return,
     Call { name: String },          // Direct function call by symbol name
+    /// Indirect function call via a register-held function pointer.
+    ///
+    /// `args[0]` is the function pointer (I64 address).
+    /// `args[1..]` are the call arguments, classified per ABI.
+    /// Lowered to BLR on AArch64.
+    CallIndirect,
     /// Variadic function call (e.g., printf, NSLog).
     ///
     /// Apple AArch64 ABI: fixed args use normal register/stack classification,
     /// ALL variadic args are placed on the stack (8-byte aligned).
     /// `fixed_args` is the count of non-variadic parameters.
     CallVariadic { name: String, fixed_args: u32 },
+    /// Multi-way branch (switch statement).
+    ///
+    /// `args[0]` is the selector value (integer).
+    /// `cases` maps integer values to target blocks.
+    /// `default` is the fallthrough block when no case matches.
+    /// Lowered as a cascading CMP+B.EQ chain with default fallthrough.
+    Switch { cases: Vec<(i64, Block)>, default: Block },
 
     // Memory
     Load { ty: Type },
