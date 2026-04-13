@@ -73,10 +73,11 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
     use AArch64Opcode::*;
     match opcode {
         // -- Loads: read memory --
-        LdrRI | LdrbRI | LdrhRI | LdrsbRI | LdrshRI | LdrLiteral | LdpRI | LdpPostIndex => MemoryEffect::Load,
+        LdrRI | LdrbRI | LdrhRI | LdrsbRI | LdrshRI | LdrLiteral | LdpRI | LdpPostIndex
+        | LdrRO | LdrGot | LdrTlvp => MemoryEffect::Load,
 
         // -- Stores: write memory --
-        StrRI | StrbRI | StrhRI | StpRI | StpPreIndex => MemoryEffect::Store,
+        StrRI | StrbRI | StrhRI | StpRI | StpPreIndex | StrRO => MemoryEffect::Store,
 
         // -- Calls: full barrier --
         Bl | Blr => MemoryEffect::Call,
@@ -89,7 +90,7 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         AddRR | AddRI | SubRR | SubRI | MulRR | Msub | Smull | Umull | SDiv | UDiv | Neg => MemoryEffect::Pure,
 
         // Logical
-        AndRR | OrrRR | EorRR => MemoryEffect::Pure,
+        AndRR | AndRI | OrrRR | OrrRI | EorRR | EorRI | BicRR => MemoryEffect::Pure,
 
         // Shifts
         LslRR | LsrRR | AsrRR | LslRI | LsrRI | AsrRI => MemoryEffect::Pure,
@@ -101,13 +102,16 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         CmpRR | CmpRI | Tst | Fcmp => MemoryEffect::Pure,
 
         // Conditional select/set: pure computation, no memory access.
-        Csel | Cset | CSet => MemoryEffect::Pure,
+        Csel | Cset | CSet | Csinc | Csinv | Csneg => MemoryEffect::Pure,
 
         // Move
-        MovR | MovI | Movz | Movk => MemoryEffect::Pure,
+        MovR | MovI | Movz | Movn | Movk | FmovImm => MemoryEffect::Pure,
 
         // Extension
         Sxtw | Uxtw | Sxtb | Sxth => MemoryEffect::Pure,
+
+        // Bitfield operations
+        Ubfm | Sbfm | Bfm => MemoryEffect::Pure,
 
         // Logical (OR-NOT)
         OrnRR => MemoryEffect::Pure,
@@ -141,6 +145,7 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
 
         // Pseudo-instructions
         Phi => MemoryEffect::Pure,
+        Copy => MemoryEffect::Pure,
         Nop => MemoryEffect::Pure,
     }
 }

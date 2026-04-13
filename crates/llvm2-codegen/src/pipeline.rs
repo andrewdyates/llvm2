@@ -15,9 +15,10 @@
 //!
 //! ```text
 //! Phase 1: ISel (llvm2-lower)
-//!   llvm2_lower::Function -> llvm2_lower::isel::MachFunction (VRegs, ISel opcodes)
+//!   llvm2_lower::Function -> llvm2_lower::isel::MachFunction
+//!   (VRegs, canonical llvm2_ir::AArch64Opcode — unified in issue #73)
 //!
-//! Phase 2: Adapt ISel -> IR
+//! Phase 2: Adapt ISel -> IR (structural only — opcodes are already unified)
 //!   llvm2_lower::isel::MachFunction -> llvm2_ir::MachFunction
 //!
 //! Phase 3: Optimization (llvm2-opt)
@@ -42,11 +43,12 @@
 //!   Vec<u8> -> Mach-O .o file bytes
 //! ```
 //!
-//! # Type mismatches
+//! # Type adapters
 //!
-//! Each crate has its own MachFunction/MachInst types. The adapter functions
-//! in this module convert between them. TODO: Unify these types in a future
-//! phase so adapters are unnecessary.
+//! Opcodes are unified: ISel uses `llvm2_ir::AArch64Opcode` directly (issue #73).
+//! However, each crate still has its own MachFunction/MachInst/MachOperand types.
+//! The adapter functions in this module convert the structural wrappers between
+//! crates. TODO(#73): Unify MachInst types so structural adapters are unnecessary.
 
 use std::collections::HashMap;
 use thiserror::Error;
@@ -140,74 +142,12 @@ impl CompilationUnit {
 // Adapter: llvm2_lower::isel::MachFunction -> llvm2_ir::MachFunction
 // ---------------------------------------------------------------------------
 
-/// Map ISel opcodes to llvm2-ir opcodes.
-///
-/// The ISel has its own fine-grained opcode enum (e.g., ADDWrr, ADDXrr).
-/// We map these to the coarser llvm2-ir opcodes which are what the encoder
-/// and optimizer understand.
-///
-/// TODO: Unify opcode enums across crates so this mapping is unnecessary.
-fn map_isel_opcode(isel_op: &llvm2_lower::isel::AArch64Opcode) -> IrOpcode {
-    use llvm2_lower::isel::AArch64Opcode as IsOp;
-    match isel_op {
-        IsOp::ADDWrr | IsOp::ADDXrr => IrOpcode::AddRR,
-        IsOp::ADDWri | IsOp::ADDXri => IrOpcode::AddRI,
-        IsOp::SUBWrr | IsOp::SUBXrr => IrOpcode::SubRR,
-        IsOp::SUBWri | IsOp::SUBXri => IrOpcode::SubRI,
-        IsOp::MULWrrr | IsOp::MULXrrr => IrOpcode::MulRR,
-        IsOp::SDIVWrr | IsOp::SDIVXrr => IrOpcode::SDiv,
-        IsOp::UDIVWrr | IsOp::UDIVXrr => IrOpcode::UDiv,
-        IsOp::CMPWrr | IsOp::CMPXrr => IrOpcode::CmpRR,
-        IsOp::CMPWri | IsOp::CMPXri => IrOpcode::CmpRI,
-        IsOp::CSETWcc => IrOpcode::CSet, // CSET Wd, <cond>
-        IsOp::MOVWrr | IsOp::MOVXrr => IrOpcode::MovR,
-        IsOp::MOVZWi | IsOp::MOVZXi => IrOpcode::Movz,
-        IsOp::MOVNWi | IsOp::MOVNXi => IrOpcode::MovI, // MOVN is a variant
-        IsOp::MOVKXi => IrOpcode::Movk,
-        IsOp::FMOVSri | IsOp::FMOVDri => IrOpcode::MovI,
-        IsOp::LDRWui | IsOp::LDRXui | IsOp::LDRSui | IsOp::LDRDui => IrOpcode::LdrRI,
-        IsOp::LDRBui => IrOpcode::LdrbRI,
-        IsOp::LDRHui => IrOpcode::LdrhRI,
-        IsOp::LDRSBui => IrOpcode::LdrsbRI,
-        IsOp::LDRSHui => IrOpcode::LdrshRI,
-        IsOp::STRWui | IsOp::STRXui | IsOp::STRSui | IsOp::STRDui => IrOpcode::StrRI,
-        IsOp::STRBui => IrOpcode::StrbRI,
-        IsOp::STRHui => IrOpcode::StrhRI,
-        IsOp::B => IrOpcode::B,
-        IsOp::Bcc => IrOpcode::BCond,
-        IsOp::BL => IrOpcode::Bl,
-        IsOp::BLR => IrOpcode::Blr,
-        IsOp::RET => IrOpcode::Ret,
-        IsOp::ANDWrr | IsOp::ANDXrr | IsOp::ANDWri | IsOp::ANDXri => IrOpcode::AndRR,
-        IsOp::ORRWrr | IsOp::ORRXrr | IsOp::ORRWri | IsOp::ORRXri => IrOpcode::OrrRR,
-        IsOp::EORWrr | IsOp::EORXrr | IsOp::EORWri | IsOp::EORXri => IrOpcode::EorRR,
-        IsOp::LSLVWr | IsOp::LSLVXr | IsOp::LSLWi | IsOp::LSLXi => IrOpcode::LslRR,
-        IsOp::LSRVWr | IsOp::LSRVXr | IsOp::LSRWi | IsOp::LSRXi => IrOpcode::LsrRR,
-        IsOp::ASRVWr | IsOp::ASRVXr | IsOp::ASRWi | IsOp::ASRXi => IrOpcode::AsrRR,
-        IsOp::ADRP => IrOpcode::Adrp,
-        IsOp::ADDXriPCRel | IsOp::ADDXriSP => IrOpcode::AddPCRel,
-        IsOp::FADDSrr | IsOp::FADDDrr => IrOpcode::FaddRR,
-        IsOp::FSUBSrr | IsOp::FSUBDrr => IrOpcode::FsubRR,
-        IsOp::FMULSrr | IsOp::FMULDrr => IrOpcode::FmulRR,
-        IsOp::FDIVSrr | IsOp::FDIVDrr => IrOpcode::FdivRR,
-        IsOp::FCMPSrr | IsOp::FCMPDrr => IrOpcode::Fcmp,
-        IsOp::FCVTZSWr | IsOp::FCVTZSXr => IrOpcode::FcvtzsRR,
-        IsOp::FCVTZUWr | IsOp::FCVTZUXr => IrOpcode::FcvtzuRR,
-        IsOp::SCVTFSWr | IsOp::SCVTFDWr | IsOp::SCVTFSXr | IsOp::SCVTFDXr => IrOpcode::ScvtfRR,
-        IsOp::UCVTFSWr | IsOp::UCVTFDWr | IsOp::UCVTFSXr | IsOp::UCVTFDXr => IrOpcode::UcvtfRR,
-        IsOp::FCVTDSr => IrOpcode::FcvtSD,
-        IsOp::FCVTSDr => IrOpcode::FcvtDS,
-        IsOp::FMOVSWr | IsOp::FMOVDXr => IrOpcode::FmovGprFpr,
-        IsOp::FMOVWSr | IsOp::FMOVXDr => IrOpcode::FmovFprGpr,
-        IsOp::SXTBWr | IsOp::SXTBXr | IsOp::SXTHWr | IsOp::SXTHXr | IsOp::SXTWXr => IrOpcode::Sxtw,
-        IsOp::UXTBWr | IsOp::UXTHWr => IrOpcode::Uxtw,
-        IsOp::COPY => IrOpcode::MovR,
-        IsOp::PHI => IrOpcode::Phi,
-        // Bitfield ops, conditional selects, BIC/ORN, etc. map to Nop as placeholder
-        // TODO: Add proper IR opcodes for these
-        _ => IrOpcode::Nop,
-    }
-}
+// NOTE: `map_isel_opcode()` has been ELIMINATED as of issue #73.
+//
+// The ISel now uses `llvm2_ir::AArch64Opcode` directly (re-exported via
+// `llvm2_lower::isel::AArch64Opcode`). There is no longer a separate ISel
+// opcode enum, so no mapping is needed. The `isel_to_ir` adapter below
+// uses `isel_inst.opcode` directly as an `IrOpcode`.
 
 /// Convert an ISel MachOperand to an IR MachOperand.
 fn convert_isel_operand(op: &llvm2_lower::isel::MachOperand) -> IrOperand {
@@ -287,13 +227,14 @@ pub fn isel_to_ir(
         let block_id = BlockId(block_ref.0);
         if let Some(isel_block) = isel_func.blocks.get(&block_ref) {
             for isel_inst in &isel_block.insts {
-                let ir_opcode = map_isel_opcode(&isel_inst.opcode);
+                // ISel now uses canonical llvm2_ir::AArch64Opcode directly
+                // (issue #73 unification). No opcode mapping needed.
                 let ir_operands: Vec<IrOperand> = isel_inst
                     .operands
                     .iter()
                     .map(convert_isel_operand)
                     .collect();
-                let ir_inst = IrMachInst::new(ir_opcode, ir_operands);
+                let ir_inst = IrMachInst::new(isel_inst.opcode, ir_operands);
                 let inst_id = ir_func.push_inst(ir_inst);
                 ir_func.append_inst(block_id, inst_id);
             }
