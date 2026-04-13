@@ -1,0 +1,18 @@
+# llvm2-regalloc - Register allocation for LLVM2
+#
+# Author: Andrew Yates <ayates@dropbox.com>
+# Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+
+[package]
+name = "llvm2-regalloc"
+description = "Liveness analysis and register allocation for LLVM2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# TODO: Add llvm2-ir = { workspace = true } when the shared machine model
+# crate lands. Currently machine_types are defined locally in this crate.
+thiserror = { workspace = true }
