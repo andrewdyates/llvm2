@@ -706,7 +706,7 @@ impl InstructionSelector {
     /// Select integer constant materialization.
     /// Small values (0..65535): MOVZ
     /// Negative small values: MOVN
-    /// Large values: MOVZ + MOVK sequence (TODO: full sequence)
+    /// Large values: MOVZ + MOVK sequence (up to 4 chunks for 64-bit)
     fn select_iconst(&mut self, ty: Type, imm: i64, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         Self::require_result(inst, "Iconst")?;
         let class = reg_class_for_type(&ty);
@@ -1594,6 +1594,60 @@ impl InstructionSelector {
                         ],
                     ),
                 );
+                offset += 4;
+            }
+            // Handle trailing 2-byte chunk
+            if offset + 2 <= size {
+                let tmp = self.new_vreg(RegClass::Gpr32);
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        AArch64Opcode::LDRHui,
+                        vec![
+                            MachOperand::VReg(tmp),
+                            src.clone(),
+                            MachOperand::Imm(offset as i64),
+                        ],
+                    ),
+                );
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        AArch64Opcode::STRHui,
+                        vec![
+                            MachOperand::VReg(tmp),
+                            MachOperand::PReg(gpr::X8),
+                            MachOperand::Imm(offset as i64),
+                        ],
+                    ),
+                );
+                offset += 2;
+            }
+            // Handle trailing 1-byte chunk
+            if offset < size {
+                let tmp = self.new_vreg(RegClass::Gpr32);
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        AArch64Opcode::LDRBui,
+                        vec![
+                            MachOperand::VReg(tmp),
+                            src.clone(),
+                            MachOperand::Imm(offset as i64),
+                        ],
+                    ),
+                );
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        AArch64Opcode::STRBui,
+                        vec![
+                            MachOperand::VReg(tmp),
+                            MachOperand::PReg(gpr::X8),
+                            MachOperand::Imm(offset as i64),
+                        ],
+                    ),
+                );
             }
         }
 
@@ -1718,6 +1772,60 @@ impl InstructionSelector {
                         block,
                         MachInst::new(
                             AArch64Opcode::STRWui,
+                            vec![
+                                MachOperand::VReg(tmp),
+                                MachOperand::PReg(SP),
+                                MachOperand::Imm(*offset + byte_offset as i64),
+                            ],
+                        ),
+                    );
+                    byte_offset += 4;
+                }
+                // Handle trailing 2-byte chunk
+                if byte_offset + 2 <= *slot_size {
+                    let tmp = self.new_vreg(RegClass::Gpr32);
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::LDRHui,
+                            vec![
+                                MachOperand::VReg(tmp),
+                                src.clone(),
+                                MachOperand::Imm(byte_offset as i64),
+                            ],
+                        ),
+                    );
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::STRHui,
+                            vec![
+                                MachOperand::VReg(tmp),
+                                MachOperand::PReg(SP),
+                                MachOperand::Imm(*offset + byte_offset as i64),
+                            ],
+                        ),
+                    );
+                    byte_offset += 2;
+                }
+                // Handle trailing 1-byte chunk
+                if byte_offset < *slot_size {
+                    let tmp = self.new_vreg(RegClass::Gpr32);
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::LDRBui,
+                            vec![
+                                MachOperand::VReg(tmp),
+                                src.clone(),
+                                MachOperand::Imm(byte_offset as i64),
+                            ],
+                        ),
+                    );
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::STRBui,
                             vec![
                                 MachOperand::VReg(tmp),
                                 MachOperand::PReg(SP),
@@ -5305,5 +5413,165 @@ mod tests {
             "Third instruction should be 32-bit add (I8 uses Gpr32)");
         assert_eq!(insts[3].opcode, AArch64Opcode::STRBui,
             "Fourth instruction should be byte store");
+    }
+
+    #[test]
+    fn select_large_struct_return_with_trailing_bytes() {
+        // Return a struct with 17 I8 fields (17 bytes, align 1).
+        // sret path: 2x 8-byte LDR/STR + 1x 1-byte LDRB/STRB tail.
+        let struct_ty = Type::Struct(vec![Type::I8; 17]);
+        assert_eq!(struct_ty.bytes(), 17);
+
+        let sig = Signature {
+            params: vec![],
+            returns: vec![struct_ty.clone()],
+        };
+        let mut isel = InstructionSelector::new("ret_tail".to_string(), sig);
+        let entry = Block(0);
+        isel.func.ensure_block(entry);
+
+        let vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Return,
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        let insts = &mblock.insts;
+
+        // Count stores to X8
+        let str_to_x8: Vec<_> = insts.iter().filter(|i| {
+            (i.opcode == AArch64Opcode::STRXui || i.opcode == AArch64Opcode::STRBui)
+                && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
+        }).collect();
+        // 2x STRXui (8-byte each) + 1x STRBui (1-byte tail) = 3 stores
+        assert_eq!(str_to_x8.len(), 3, "Expected 3 stores for 17-byte struct sret: 2x8 + 1x1");
+
+        // Verify the tail store is a byte store
+        let tail_store = str_to_x8.last().unwrap();
+        assert_eq!(tail_store.opcode, AArch64Opcode::STRBui,
+            "Trailing byte should use STRB");
+        assert_eq!(tail_store.operands.get(2), Some(&MachOperand::Imm(16)),
+            "Trailing byte store should be at offset 16");
+
+        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::RET);
+    }
+
+    #[test]
+    fn select_large_struct_return_with_trailing_halfword() {
+        // Return a struct with a trailing 2-byte field: 3x I64 + 1x I16 = 26 bytes
+        // (padded to 32 by align_to(26, 8) = 32).
+        // sret: 4x 8-byte = 32 bytes copied. No tails needed.
+        //
+        // Better: 9x I16 = 18 bytes, align 2, align_to(18, 2) = 18.
+        let struct_ty = Type::Struct(vec![Type::I16; 9]);
+        assert_eq!(struct_ty.bytes(), 18);
+
+        let sig = Signature {
+            params: vec![],
+            returns: vec![struct_ty.clone()],
+        };
+        let mut isel = InstructionSelector::new("ret_hw_tail".to_string(), sig);
+        let entry = Block(0);
+        isel.func.ensure_block(entry);
+
+        let vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Return,
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        let insts = &mblock.insts;
+
+        // 18 bytes: 2x 8-byte STRXui (16), then 1x 2-byte STRHui (18)
+        // No 4-byte or 1-byte tails.
+        let str_to_x8: Vec<_> = insts.iter().filter(|i| {
+            (i.opcode == AArch64Opcode::STRXui
+                || i.opcode == AArch64Opcode::STRHui)
+                && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
+        }).collect();
+        assert_eq!(str_to_x8.len(), 3, "Expected 3 stores for 18-byte struct: 2x8 + 1x2");
+
+        let tail_store = str_to_x8.last().unwrap();
+        assert_eq!(tail_store.opcode, AArch64Opcode::STRHui,
+            "Trailing halfword should use STRH");
+        assert_eq!(tail_store.operands.get(2), Some(&MachOperand::Imm(16)),
+            "Trailing halfword store should be at offset 16");
+
+        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::RET);
+    }
+
+    #[test]
+    fn select_large_struct_return_with_4_2_1_tail() {
+        // 23 bytes: 2x 8-byte (16) + 1x 4-byte (20) + 1x 2-byte (22) + 1x 1-byte (23)
+        // Use 23x I8 -> bytes=23, align=1
+        let struct_ty = Type::Struct(vec![Type::I8; 23]);
+        assert_eq!(struct_ty.bytes(), 23);
+
+        let sig = Signature {
+            params: vec![],
+            returns: vec![struct_ty.clone()],
+        };
+        let mut isel = InstructionSelector::new("ret_421_tail".to_string(), sig);
+        let entry = Block(0);
+        isel.func.ensure_block(entry);
+
+        let vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Return,
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        let insts = &mblock.insts;
+
+        // Count all stores to X8
+        let str_to_x8: Vec<_> = insts.iter().filter(|i| {
+            matches!(i.opcode,
+                AArch64Opcode::STRXui | AArch64Opcode::STRWui
+                | AArch64Opcode::STRHui | AArch64Opcode::STRBui)
+                && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
+        }).collect();
+        // 2x STRXui + 1x STRWui + 1x STRHui + 1x STRBui = 5 stores
+        assert_eq!(str_to_x8.len(), 5,
+            "Expected 5 stores for 23-byte struct: 2x8 + 1x4 + 1x2 + 1x1");
+
+        // Verify tail opcodes in order
+        assert_eq!(str_to_x8[0].opcode, AArch64Opcode::STRXui);
+        assert_eq!(str_to_x8[1].opcode, AArch64Opcode::STRXui);
+        assert_eq!(str_to_x8[2].opcode, AArch64Opcode::STRWui);
+        assert_eq!(str_to_x8[3].opcode, AArch64Opcode::STRHui);
+        assert_eq!(str_to_x8[4].opcode, AArch64Opcode::STRBui);
+
+        // Verify offsets
+        assert_eq!(str_to_x8[0].operands.get(2), Some(&MachOperand::Imm(0)));
+        assert_eq!(str_to_x8[1].operands.get(2), Some(&MachOperand::Imm(8)));
+        assert_eq!(str_to_x8[2].operands.get(2), Some(&MachOperand::Imm(16)));
+        assert_eq!(str_to_x8[3].operands.get(2), Some(&MachOperand::Imm(20)));
+        assert_eq!(str_to_x8[4].operands.get(2), Some(&MachOperand::Imm(22)));
+
+        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::RET);
     }
 }
