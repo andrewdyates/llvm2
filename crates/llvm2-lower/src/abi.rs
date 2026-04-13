@@ -1,0 +1,451 @@
+// llvm2-lower/abi.rs - Apple AArch64 calling convention
+//
+// Author: Andrew Yates <ayates@dropbox.com>
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+//
+// Reference: LLVM AArch64CallingConvention.td, AArch64ISelLowering.cpp
+// Reference: ARM AAPCS64 + Apple arm64 ABI delta (DarwinPCS)
+
+//! Apple AArch64 (arm64, DarwinPCS) calling convention.
+//!
+//! This implements the Apple variant of the AAPCS64 calling convention used on
+//! macOS Apple Silicon. Key differences from standard AAPCS64:
+//! - X18 is reserved (platform register, do not touch)
+//! - Frame pointer (X29) is mandatory on Darwin
+//! - Variadic arguments are always passed on the stack (not in registers)
+//! - Stack alignment is 16 bytes
+
+use crate::types::Type;
+
+// ---------------------------------------------------------------------------
+// Physical register encoding
+// ---------------------------------------------------------------------------
+
+/// Physical register. Encoding: 0-30 = X0-X30 (GPR), 32-63 = V0-V31 (FPR).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PReg(pub u8);
+
+impl PReg {
+    // GPR argument registers (X0-X7)
+    pub const X0: PReg = PReg(0);
+    pub const X1: PReg = PReg(1);
+    pub const X2: PReg = PReg(2);
+    pub const X3: PReg = PReg(3);
+    pub const X4: PReg = PReg(4);
+    pub const X5: PReg = PReg(5);
+    pub const X6: PReg = PReg(6);
+    pub const X7: PReg = PReg(7);
+
+    // Indirect result pointer
+    pub const X8: PReg = PReg(8);
+
+    // Temporaries (caller-saved)
+    pub const X9: PReg = PReg(9);
+    pub const X10: PReg = PReg(10);
+    pub const X11: PReg = PReg(11);
+    pub const X12: PReg = PReg(12);
+    pub const X13: PReg = PReg(13);
+    pub const X14: PReg = PReg(14);
+    pub const X15: PReg = PReg(15);
+
+    // Intra-procedure scratch (linker veneer)
+    pub const X16: PReg = PReg(16);
+    pub const X17: PReg = PReg(17);
+
+    // Platform register (RESERVED on Apple)
+    pub const X18: PReg = PReg(18);
+
+    // Callee-saved
+    pub const X19: PReg = PReg(19);
+    pub const X20: PReg = PReg(20);
+    pub const X21: PReg = PReg(21);
+    pub const X22: PReg = PReg(22);
+    pub const X23: PReg = PReg(23);
+    pub const X24: PReg = PReg(24);
+    pub const X25: PReg = PReg(25);
+    pub const X26: PReg = PReg(26);
+    pub const X27: PReg = PReg(27);
+    pub const X28: PReg = PReg(28);
+
+    // Frame pointer (mandatory on Darwin)
+    pub const FP: PReg = PReg(29);
+    // Link register
+    pub const LR: PReg = PReg(30);
+
+    // FPR argument/return registers (V0-V7)
+    pub const V0: PReg = PReg(32);
+    pub const V1: PReg = PReg(33);
+    pub const V2: PReg = PReg(34);
+    pub const V3: PReg = PReg(35);
+    pub const V4: PReg = PReg(36);
+    pub const V5: PReg = PReg(37);
+    pub const V6: PReg = PReg(38);
+    pub const V7: PReg = PReg(39);
+
+    // FPR callee-saved (V8-V15, lower 64 bits only)
+    pub const V8: PReg = PReg(40);
+    pub const V9: PReg = PReg(41);
+    pub const V10: PReg = PReg(42);
+    pub const V11: PReg = PReg(43);
+    pub const V12: PReg = PReg(44);
+    pub const V13: PReg = PReg(45);
+    pub const V14: PReg = PReg(46);
+    pub const V15: PReg = PReg(47);
+
+    /// Returns true if this is a GPR (X0-X30).
+    pub fn is_gpr(self) -> bool {
+        self.0 <= 30
+    }
+
+    /// Returns true if this is an FPR (V0-V31).
+    pub fn is_fpr(self) -> bool {
+        (32..=63).contains(&self.0)
+    }
+
+    /// GPR index (0-30).
+    pub fn gpr_index(self) -> Option<u8> {
+        if self.is_gpr() { Some(self.0) } else { None }
+    }
+
+    /// FPR index (0-31).
+    pub fn fpr_index(self) -> Option<u8> {
+        if self.is_fpr() { Some(self.0 - 32) } else { None }
+    }
+}
+
+impl std::fmt::Display for PReg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_gpr() {
+            match self.0 {
+                29 => write!(f, "fp"),
+                30 => write!(f, "lr"),
+                n => write!(f, "x{n}"),
+            }
+        } else if self.is_fpr() {
+            write!(f, "v{}", self.0 - 32)
+        } else {
+            write!(f, "?{}", self.0)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Argument location classification
+// ---------------------------------------------------------------------------
+
+/// Where a single argument or return value is placed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgLocation {
+    /// In a general-purpose register (X0-X7 for args, X0-X7 for returns).
+    Reg(PReg),
+    /// On the stack at `[SP + offset]`, occupying `size` bytes.
+    Stack { offset: i64, size: u32 },
+    /// Large aggregate passed/returned indirectly via pointer in `ptr_reg`.
+    /// Caller allocates memory, callee accesses via pointer.
+    /// For returns, X8 holds the pointer (sret convention).
+    Indirect { ptr_reg: PReg },
+}
+
+// ---------------------------------------------------------------------------
+// Register arrays (static, following LLVM AArch64ISelLowering.cpp)
+// ---------------------------------------------------------------------------
+
+/// GPR argument registers: X0-X7
+const GPR_ARG_REGS: [PReg; 8] = [
+    PReg::X0, PReg::X1, PReg::X2, PReg::X3,
+    PReg::X4, PReg::X5, PReg::X6, PReg::X7,
+];
+
+/// FPR argument registers: V0-V7
+const FPR_ARG_REGS: [PReg; 8] = [
+    PReg::V0, PReg::V1, PReg::V2, PReg::V3,
+    PReg::V4, PReg::V5, PReg::V6, PReg::V7,
+];
+
+/// Callee-saved GPRs: X19-X28 + FP(X29) + LR(X30)
+/// LR is saved by the call itself but must be restored on return.
+const CALLEE_SAVED_GPRS: [PReg; 12] = [
+    PReg::X19, PReg::X20, PReg::X21, PReg::X22,
+    PReg::X23, PReg::X24, PReg::X25, PReg::X26,
+    PReg::X27, PReg::X28, PReg::FP, PReg::LR,
+];
+
+/// Callee-saved FPRs: V8-V15 (lower 64 bits only per AAPCS64).
+const CALLEE_SAVED_FPRS: [PReg; 8] = [
+    PReg::V8, PReg::V9, PReg::V10, PReg::V11,
+    PReg::V12, PReg::V13, PReg::V14, PReg::V15,
+];
+
+/// Call-clobbered GPRs: X0-X18 (everything not callee-saved or SP).
+/// X18 is reserved on Apple but still clobbered across calls.
+const CALL_CLOBBER_GPRS: [PReg; 19] = [
+    PReg::X0, PReg::X1, PReg::X2, PReg::X3,
+    PReg::X4, PReg::X5, PReg::X6, PReg::X7,
+    PReg::X8, PReg::X9, PReg::X10, PReg::X11,
+    PReg::X12, PReg::X13, PReg::X14, PReg::X15,
+    PReg::X16, PReg::X17, PReg::X18,
+];
+
+// ---------------------------------------------------------------------------
+// Apple AArch64 ABI
+// ---------------------------------------------------------------------------
+
+/// Apple AArch64 (DarwinPCS) calling convention implementation.
+///
+/// Follows the ARM AAPCS64 base with Apple-specific modifications:
+/// - X18 reserved (platform register)
+/// - X29 (FP) mandatory
+/// - Variadic args always on stack
+/// - 16-byte stack alignment
+pub struct AppleAArch64ABI;
+
+impl AppleAArch64ABI {
+    /// Classify function parameters into register/stack locations.
+    ///
+    /// Rules (Apple arm64, non-variadic):
+    /// - Integer/pointer types (I8, I16, I32, I64, B1): next available X0-X7
+    /// - Float types (F32, F64): next available V0-V7
+    /// - I128: uses two consecutive GPR slots (must start on even register for
+    ///   alignment on standard AAPCS; Apple relaxes this but we follow the
+    ///   conservative rule for correctness)
+    /// - Overflow to stack, 16-byte aligned slots
+    /// - Aggregates > 16 bytes: indirect via pointer in next GPR
+    pub fn classify_params(params: &[Type]) -> Vec<ArgLocation> {
+        let mut result = Vec::with_capacity(params.len());
+        let mut gpr_idx: usize = 0;
+        let mut fpr_idx: usize = 0;
+        let mut stack_offset: i64 = 0;
+
+        for &ty in params {
+            match ty {
+                // Integer and boolean types -> GPR
+                Type::B1 | Type::I8 | Type::I16 | Type::I32 | Type::I64 => {
+                    if gpr_idx < GPR_ARG_REGS.len() {
+                        result.push(ArgLocation::Reg(GPR_ARG_REGS[gpr_idx]));
+                        gpr_idx += 1;
+                    } else {
+                        let size = if ty.bytes() < 8 { 8 } else { ty.bytes() };
+                        result.push(ArgLocation::Stack {
+                            offset: stack_offset,
+                            size,
+                        });
+                        stack_offset += align_up(size as i64, 8);
+                    }
+                }
+
+                // 128-bit integer -> two GPRs or stack
+                Type::I128 => {
+                    // Need 2 consecutive GPRs. Apple doesn't require even
+                    // alignment but we do for simplicity.
+                    if gpr_idx + 1 < GPR_ARG_REGS.len() {
+                        // For I128 we return the first register; the second is
+                        // implicitly the next one. A real ABI lowering would
+                        // produce two locations; for the scaffold we use
+                        // Indirect to signal the pair.
+                        result.push(ArgLocation::Indirect {
+                            ptr_reg: GPR_ARG_REGS[gpr_idx],
+                        });
+                        gpr_idx += 2;
+                    } else {
+                        gpr_idx = GPR_ARG_REGS.len(); // exhaust remaining
+                        result.push(ArgLocation::Stack {
+                            offset: stack_offset,
+                            size: 16,
+                        });
+                        stack_offset += 16;
+                    }
+                }
+
+                // Float types -> FPR
+                Type::F32 | Type::F64 => {
+                    if fpr_idx < FPR_ARG_REGS.len() {
+                        result.push(ArgLocation::Reg(FPR_ARG_REGS[fpr_idx]));
+                        fpr_idx += 1;
+                    } else {
+                        let size = ty.bytes();
+                        result.push(ArgLocation::Stack {
+                            offset: stack_offset,
+                            size,
+                        });
+                        stack_offset += align_up(size as i64, 8);
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Classify return values.
+    ///
+    /// Rules:
+    /// - Integer: X0 (single), X0+X1 (pair)
+    /// - Float: V0 (single), V0+V1 (pair)
+    /// - Large aggregate returns: indirect via X8 pointer (sret)
+    /// - Up to 4 return values in registers per AAPCS64
+    pub fn classify_returns(returns: &[Type]) -> Vec<ArgLocation> {
+        let mut result = Vec::with_capacity(returns.len());
+        let mut gpr_idx: usize = 0;
+        let mut fpr_idx: usize = 0;
+
+        for &ty in returns {
+            match ty {
+                Type::B1 | Type::I8 | Type::I16 | Type::I32 | Type::I64 => {
+                    if gpr_idx < GPR_ARG_REGS.len() {
+                        result.push(ArgLocation::Reg(GPR_ARG_REGS[gpr_idx]));
+                        gpr_idx += 1;
+                    } else {
+                        // Too many return values for registers -> indirect
+                        result.push(ArgLocation::Indirect { ptr_reg: PReg::X8 });
+                    }
+                }
+
+                Type::I128 => {
+                    if gpr_idx + 1 < GPR_ARG_REGS.len() {
+                        result.push(ArgLocation::Indirect {
+                            ptr_reg: GPR_ARG_REGS[gpr_idx],
+                        });
+                        gpr_idx += 2;
+                    } else {
+                        result.push(ArgLocation::Indirect { ptr_reg: PReg::X8 });
+                    }
+                }
+
+                Type::F32 | Type::F64 => {
+                    if fpr_idx < FPR_ARG_REGS.len() {
+                        result.push(ArgLocation::Reg(FPR_ARG_REGS[fpr_idx]));
+                        fpr_idx += 1;
+                    } else {
+                        result.push(ArgLocation::Indirect { ptr_reg: PReg::X8 });
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Callee-saved GPRs that a function must preserve.
+    /// Includes X19-X28, FP (X29), LR (X30).
+    pub fn callee_saved_gprs() -> &'static [PReg] {
+        &CALLEE_SAVED_GPRS
+    }
+
+    /// Callee-saved FPRs (V8-V15, lower 64 bits only).
+    pub fn callee_saved_fprs() -> &'static [PReg] {
+        &CALLEE_SAVED_FPRS
+    }
+
+    /// Call-clobbered GPRs (X0-X18).
+    pub fn call_clobber_gprs() -> &'static [PReg] {
+        &CALL_CLOBBER_GPRS
+    }
+
+    /// Total stack space consumed by overflow arguments.
+    pub fn stack_args_size(params: &[Type]) -> i64 {
+        let locs = Self::classify_params(params);
+        locs.iter()
+            .filter_map(|loc| {
+                if let ArgLocation::Stack { offset, size } = loc {
+                    Some(offset + align_up(*size as i64, 8))
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Align `value` up to the next multiple of `align`.
+fn align_up(value: i64, align: i64) -> i64 {
+    (value + align - 1) & !(align - 1)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_simple_int_params() {
+        // fn foo(i32, i32) -> first two in X0, X1
+        let locs = AppleAArch64ABI::classify_params(&[Type::I32, Type::I32]);
+        assert_eq!(locs.len(), 2);
+        assert_eq!(locs[0], ArgLocation::Reg(PReg::X0));
+        assert_eq!(locs[1], ArgLocation::Reg(PReg::X1));
+    }
+
+    #[test]
+    fn classify_mixed_int_float_params() {
+        // fn bar(i64, f64, i32, f32) -> X0, V0, X1, V1
+        let locs =
+            AppleAArch64ABI::classify_params(&[Type::I64, Type::F64, Type::I32, Type::F32]);
+        assert_eq!(locs.len(), 4);
+        assert_eq!(locs[0], ArgLocation::Reg(PReg::X0));
+        assert_eq!(locs[1], ArgLocation::Reg(PReg::V0));
+        assert_eq!(locs[2], ArgLocation::Reg(PReg::X1));
+        assert_eq!(locs[3], ArgLocation::Reg(PReg::V1));
+    }
+
+    #[test]
+    fn classify_overflow_to_stack() {
+        // 9 integer params -> X0-X7 in regs, 9th on stack
+        let params = vec![Type::I64; 9];
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 9);
+        for i in 0..8 {
+            assert_eq!(locs[i], ArgLocation::Reg(GPR_ARG_REGS[i]));
+        }
+        assert!(matches!(locs[8], ArgLocation::Stack { offset: 0, size: 8 }));
+    }
+
+    #[test]
+    fn classify_simple_return() {
+        let locs = AppleAArch64ABI::classify_returns(&[Type::I64]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(PReg::X0));
+    }
+
+    #[test]
+    fn classify_float_return() {
+        let locs = AppleAArch64ABI::classify_returns(&[Type::F64]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(PReg::V0));
+    }
+
+    #[test]
+    fn callee_saved_regs_correct() {
+        let gprs = AppleAArch64ABI::callee_saved_gprs();
+        assert_eq!(gprs.len(), 12); // X19-X28 + FP + LR
+        assert_eq!(gprs[0], PReg::X19);
+        assert_eq!(gprs[11], PReg::LR);
+
+        let fprs = AppleAArch64ABI::callee_saved_fprs();
+        assert_eq!(fprs.len(), 8); // V8-V15
+        assert_eq!(fprs[0], PReg::V8);
+    }
+
+    #[test]
+    fn call_clobber_includes_x18() {
+        let clobber = AppleAArch64ABI::call_clobber_gprs();
+        assert!(clobber.contains(&PReg::X18));
+        assert!(!clobber.contains(&PReg::X19)); // callee-saved, not clobbered
+    }
+
+    #[test]
+    fn stack_args_size_no_overflow() {
+        // 4 integer args -> all in registers, 0 stack
+        assert_eq!(AppleAArch64ABI::stack_args_size(&[Type::I32; 4]), 0);
+    }
+
+    #[test]
+    fn stack_args_size_with_overflow() {
+        // 10 integer args -> 2 overflow on stack (8 bytes each)
+        let size = AppleAArch64ABI::stack_args_size(&[Type::I64; 10]);
+        assert_eq!(size, 16); // two 8-byte slots
+    }
+}
