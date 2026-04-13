@@ -369,6 +369,9 @@ fn classify_def_use(
                  special registers must be lowered to PReg before register allocation",
                 s
             ))),
+            // Symbol operands are pure metadata (relocation targets) — no register involvement.
+            // Map to Imm(0) since regalloc doesn't need to track them.
+            IrOperand::Symbol(_) => Ok(RaOp::Imm(0)),
         }
     };
 
