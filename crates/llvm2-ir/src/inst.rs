@@ -226,6 +226,38 @@ pub enum AArch64Opcode {
     /// Release (decrement reference count). Operands: [ptr].
     Release,
 
+    // -- LLVM-style typed aliases (used by llvm2-lower isel) --
+    /// MOV Wd, Wn — 32-bit register move.
+    MOVWrr,
+    /// MOV Xd, Xn — 64-bit register move.
+    MOVXrr,
+    /// STR Wt, [Xn, #imm] — store 32-bit integer, unsigned immediate offset.
+    STRWui,
+    /// STR Xt, [Xn, #imm] — store 64-bit integer, unsigned immediate offset.
+    STRXui,
+    /// STR St, [Xn, #imm] — store 32-bit FP, unsigned immediate offset.
+    STRSui,
+    /// STR Dt, [Xn, #imm] — store 64-bit FP, unsigned immediate offset.
+    STRDui,
+    /// BL label — branch with link (LLVM-style alias for Bl).
+    BL,
+    /// BLR Xn — branch with link to register (LLVM-style alias for Blr).
+    BLR,
+    /// CMP Wn, Wm — 32-bit compare register.
+    CMPWrr,
+    /// CMP Xn, Xm — 64-bit compare register.
+    CMPXrr,
+    /// CMP Wn, #imm — 32-bit compare immediate.
+    CMPWri,
+    /// CMP Xn, #imm — 64-bit compare immediate.
+    CMPXri,
+    /// MOVZ Wd, #imm — 32-bit move zero immediate.
+    MOVZWi,
+    /// MOVZ Xd, #imm — 64-bit move zero immediate.
+    MOVZXi,
+    /// B.cond label — conditional branch (LLVM-style alias for BCond).
+    Bcc,
+
     // -- Pseudo-instructions (no hardware encoding) --
     Phi,
     StackAlloc,
@@ -248,9 +280,12 @@ impl AArch64Opcode {
             Tbnz => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
             Br => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
 
+            // Conditional branch aliases
+            Bcc => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+
             // Calls
-            Bl => InstFlags::IS_CALL.union(InstFlags::HAS_SIDE_EFFECTS),
-            Blr => InstFlags::IS_CALL.union(InstFlags::HAS_SIDE_EFFECTS),
+            Bl | BL => InstFlags::IS_CALL.union(InstFlags::HAS_SIDE_EFFECTS),
+            Blr | BLR => InstFlags::IS_CALL.union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Return
             Ret => InstFlags::IS_RETURN.union(InstFlags::IS_TERMINATOR),
@@ -262,6 +297,7 @@ impl AArch64Opcode {
 
             // Memory stores
             StrRI | StrbRI | StrhRI | StrRO => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
+            STRWui | STRXui | STRSui | STRDui => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
             StpRI | StpPreIndex => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Pseudo-instructions
@@ -271,7 +307,7 @@ impl AArch64Opcode {
             Nop => InstFlags::IS_PSEUDO,
 
             // Compare/test (set condition flags = side effect)
-            CmpRR | CmpRI | Tst | Fcmp => InstFlags::HAS_SIDE_EFFECTS,
+            CmpRR | CmpRI | CMPWrr | CMPXrr | CMPWri | CMPXri | Tst | Fcmp => InstFlags::HAS_SIDE_EFFECTS,
 
             // Checked arithmetic: produce a result AND set flags (side effect)
             AddsRR | AddsRI | SubsRR | SubsRI => InstFlags::HAS_SIDE_EFFECTS,

@@ -77,10 +77,11 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         | LdrRO | LdrGot | LdrTlvp => MemoryEffect::Load,
 
         // -- Stores: write memory --
-        StrRI | StrbRI | StrhRI | StpRI | StpPreIndex | StrRO => MemoryEffect::Store,
+        StrRI | StrbRI | StrhRI | StpRI | StpPreIndex | StrRO
+        | STRWui | STRXui | STRSui | STRDui => MemoryEffect::Store,
 
         // -- Calls: full barrier --
-        Bl | Blr => MemoryEffect::Call,
+        Bl | Blr | BL | BLR => MemoryEffect::Call,
 
         // -- Stack allocation: side effect (modifies SP) --
         StackAlloc => MemoryEffect::Store,
@@ -99,13 +100,14 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         // Note: CMP/TST have HAS_SIDE_EFFECTS in InstFlags because they
         // write condition flags. DCE handles this via InstFlags, not
         // MemoryEffect. For memory-effect purposes, these are pure.
-        CmpRR | CmpRI | Tst | Fcmp => MemoryEffect::Pure,
+        CmpRR | CmpRI | CMPWrr | CMPXrr | CMPWri | CMPXri | Tst | Fcmp => MemoryEffect::Pure,
 
         // Conditional select/set: pure computation, no memory access.
         Csel | Cset | CSet | Csinc | Csinv | Csneg => MemoryEffect::Pure,
 
-        // Move
-        MovR | MovI | Movz | Movn | Movk | FmovImm => MemoryEffect::Pure,
+        // Move (including LLVM-style typed aliases)
+        MovR | MovI | Movz | Movn | Movk | FmovImm
+        | MOVWrr | MOVXrr | MOVZWi | MOVZXi => MemoryEffect::Pure,
 
         // Extension
         Sxtw | Uxtw | Sxtb | Sxth => MemoryEffect::Pure,
@@ -141,7 +143,7 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         Retain | Release => MemoryEffect::Store,
 
         // Branches: not memory ops. DCE handles branches via InstFlags.
-        B | BCond | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => MemoryEffect::Pure,
+        B | BCond | Bcc | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => MemoryEffect::Pure,
 
         // Pseudo-instructions
         Phi => MemoryEffect::Pure,
