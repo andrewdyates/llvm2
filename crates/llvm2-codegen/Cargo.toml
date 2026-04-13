@@ -28,3 +28,7 @@ tmir-func = { workspace = true }
 [[bench]]
 name = "compile_bench"
 harness = false
+
+[[bench]]
+name = "compare_clang"
+harness = false
