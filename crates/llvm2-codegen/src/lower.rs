@@ -206,6 +206,8 @@ pub fn expand_pseudos(func: &mut IrMachFunction) {
 /// be encoded.
 fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
     // Helper: extract physical register hardware encoding from operand.
+    // Returns an error for non-register operands instead of silently
+    // defaulting to XZR (reg 31), which would produce wrong code (#98).
     let preg_hw = |idx: usize| -> Result<u32, LowerError> {
         if idx >= inst.operands.len() {
             return Err(LowerError::MissingOperand {
@@ -218,7 +220,10 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             MachOperand::Special(s) => match s {
                 SpecialReg::SP | SpecialReg::XZR | SpecialReg::WZR => Ok(31),
             },
-            _ => Ok(31), // Default to XZR/SP for safety
+            other => Err(LowerError::EncodingFailed(format!(
+                "expected register operand at index {} for {:?}, got {:?}",
+                idx, inst.opcode, other
+            ))),
         }
     };
 
@@ -241,6 +246,35 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
         match inst.operands.get(idx) {
             Some(MachOperand::PReg(p)) => p.is_gpr() && p.encoding() < 32,
             _ => true,
+        }
+    };
+
+    // Helper: determine AArch64 ftype field from an FPR operand's register class.
+    // Returns 0b00 for single (S-regs), 0b01 for double (D-regs).
+    // Returns an error if the operand is not an FPR, instead of silently
+    // defaulting to Double precision which masks encoding bugs (#105).
+    let fp_size = |idx: usize| -> Result<u32, LowerError> {
+        match inst.operands.get(idx) {
+            Some(MachOperand::PReg(p)) => {
+                let class = llvm2_ir::regs::preg_class(*p);
+                match class {
+                    llvm2_ir::regs::RegClass::Fpr32 => Ok(0b00),  // single
+                    llvm2_ir::regs::RegClass::Fpr64 => Ok(0b01),  // double
+                    llvm2_ir::regs::RegClass::Fpr128 => Ok(0b01), // treat as double for data-processing
+                    _ => Err(LowerError::EncodingFailed(format!(
+                        "expected FPR operand at index {} for {:?}, got GPR/other class {:?}",
+                        idx, inst.opcode, class
+                    ))),
+                }
+            }
+            Some(other) => Err(LowerError::EncodingFailed(format!(
+                "expected FPR register operand at index {} for {:?}, got {:?}",
+                idx, inst.opcode, other
+            ))),
+            None => Err(LowerError::MissingOperand {
+                opcode: inst.opcode,
+                index: idx,
+            }),
         }
     };
 
@@ -816,7 +850,7 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
         | AArch64Opcode::FdivRR => {
             // FP data-processing 2-source:
             // 0 | 0 | 0 | 11110 | ftype(2) | 1 | Rm | opcode(4) | 10 | Rn | Rd
-            let ftype = 0b01u32; // double precision
+            let ftype = fp_size(0)?; // derive precision from destination FPR (#105)
             let fp_op = match inst.opcode {
                 AArch64Opcode::FaddRR => 0b0010u32,
                 AArch64Opcode::FsubRR => 0b0011u32,
@@ -840,7 +874,7 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
         AArch64Opcode::FnegRR => {
             // FNEG Dd, Dn — FP 1-source data-processing
             // 0 | 00 | 11110 | ftype(2) | 1 | 0000 | opcode(2) | 10000 | Rn | Rd
-            let ftype = 0b01u32; // double precision
+            let ftype = fp_size(0)?; // derive precision from destination FPR (#105)
             let fp_op = 0b10u32; // FNEG opcode
             let rd = preg_hw(0)?;
             let rn = preg_hw(1)?;
@@ -856,7 +890,7 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
         AArch64Opcode::Fcmp => {
             // FCMP Rn, Rm
             // 0 | 0 | 0 | 11110 | ftype | 1 | Rm | 00 | 1000 | Rn | 00000
-            let ftype = 0b01u32;
+            let ftype = fp_size(0)?; // derive precision from first source FPR (#105)
             let rn = preg_hw(0)?;
             let rm = preg_hw(1)?;
             Ok((0b00011110u32 << 24)
@@ -869,10 +903,10 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 | 0b00000u32)
         }
         AArch64Opcode::FcvtzsRR => {
-            // FCVTZS Wd/Xd, Dn
+            // FCVTZS Wd/Xd, Dn/Sn — FPR source determines precision
             // sf | 0 | 0 | 11110 | ftype | 1 | 11 | 000 | 000000 | Rn | Rd
             let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let ftype = 0b01u32; // double
+            let ftype = fp_size(1)?; // derive precision from FPR source (#105)
             let rd = preg_hw(0)?;
             let rn = preg_hw(1)?;
             Ok((sf << 31)
@@ -886,10 +920,10 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 | rd)
         }
         AArch64Opcode::ScvtfRR => {
-            // SCVTF Dd, Wn/Xn
+            // SCVTF Dd/Sd, Wn/Xn — FPR destination determines precision
             // sf | 0 | 0 | 11110 | ftype | 1 | 00 | 010 | 000000 | Rn | Rd
             let sf = if is_64bit(1) { 1u32 } else { 0u32 };
-            let ftype = 0b01u32; // double
+            let ftype = fp_size(0)?; // derive precision from FPR destination (#105)
             let rd = preg_hw(0)?;
             let rn = preg_hw(1)?;
             Ok((sf << 31)
@@ -903,10 +937,10 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 | rd)
         }
         AArch64Opcode::FcvtzuRR => {
-            // FCVTZU Wd/Xd, Dn (unsigned variant)
+            // FCVTZU Wd/Xd, Dn/Sn (unsigned variant) — FPR source determines precision
             // sf | 0 | 0 | 11110 | ftype | 1 | 11 | 001 | 000000 | Rn | Rd
             let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let ftype = 0b01u32; // double
+            let ftype = fp_size(1)?; // derive precision from FPR source (#105)
             let rd = preg_hw(0)?;
             let rn = preg_hw(1)?;
             Ok((sf << 31)
@@ -920,10 +954,10 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 | rd)
         }
         AArch64Opcode::UcvtfRR => {
-            // UCVTF Dd, Wn/Xn (unsigned variant)
+            // UCVTF Dd/Sd, Wn/Xn (unsigned variant) — FPR destination determines precision
             // sf | 0 | 0 | 11110 | ftype | 1 | 00 | 011 | 000000 | Rn | Rd
             let sf = if is_64bit(1) { 1u32 } else { 0u32 };
-            let ftype = 0b01u32; // double
+            let ftype = fp_size(0)?; // derive precision from FPR destination (#105)
             let rd = preg_hw(0)?;
             let rn = preg_hw(1)?;
             Ok((sf << 31)
@@ -1870,7 +1904,6 @@ mod tests {
 
     #[test]
     fn test_extract_symbol_from_adrp() {
-        // ADRP Xd, symbol — operands: [PReg(dst), Symbol(name)]
         let inst = MachInst::new(
             AArch64Opcode::Adrp,
             vec![
@@ -1883,7 +1916,6 @@ mod tests {
 
     #[test]
     fn test_extract_symbol_from_add_pcrel() {
-        // ADD Xd, Xn, #pageoff — operands: [PReg(dst), PReg(src), Symbol(name)]
         let inst = MachInst::new(
             AArch64Opcode::AddPCRel,
             vec![
@@ -1973,7 +2005,6 @@ mod tests {
 
     #[test]
     fn test_collect_relocations_adrp_add_pair() {
-        // Typical global access pattern: ADRP + ADD
         let instructions = vec![
             MachInst::new(
                 AArch64Opcode::Adrp,
@@ -1993,11 +2024,9 @@ mod tests {
         ];
         let relocs = collect_relocations(&instructions);
         assert_eq!(relocs.len(), 2);
-        // First: ADRP at offset 0
         assert_eq!(relocs[0].offset, 0);
         assert_eq!(relocs[0].kind, RelocKind::AdrpPage21);
         assert_eq!(relocs[0].symbol, "_data");
-        // Second: ADD at offset 4
         assert_eq!(relocs[1].offset, 4);
         assert_eq!(relocs[1].kind, RelocKind::AddPageOff12);
         assert_eq!(relocs[1].symbol, "_data");
@@ -2005,7 +2034,6 @@ mod tests {
 
     #[test]
     fn test_collect_relocations_mixed_with_no_symbol_instrs() {
-        // ADD X0, X0, X1 (no symbol), then BL _callee (with symbol)
         let instructions = vec![
             MachInst::new(
                 AArch64Opcode::AddRR,
@@ -2023,7 +2051,6 @@ mod tests {
         ];
         let relocs = collect_relocations(&instructions);
         assert_eq!(relocs.len(), 1);
-        // BL is the second instruction, so offset = 4
         assert_eq!(relocs[0].offset, 4);
         assert_eq!(relocs[0].kind, RelocKind::Branch26);
         assert_eq!(relocs[0].symbol, "_callee");
@@ -2048,12 +2075,165 @@ mod tests {
 
     #[test]
     fn test_collect_relocations_bl_without_symbol_no_reloc() {
-        // BL with a numeric offset (resolved branch) should produce no relocation.
         let inst = MachInst::new(
             AArch64Opcode::Bl,
             vec![MachOperand::Imm(42)],
         );
         let relocs = collect_relocations(&[inst]);
         assert!(relocs.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug #98: preg_hw returns error for non-register operands
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_preg_hw_rejects_imm_operand() {
+        let inst = MachInst::new(
+            AArch64Opcode::AddRR,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X0),
+                MachOperand::Imm(42),
+            ],
+        );
+        let result = encode_inst(&inst);
+        assert!(result.is_err(), "Imm operand where register expected should error, not silently encode as XZR");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("expected register operand"), "Error should mention expected register, got: {}", err_msg);
+    }
+
+    #[test]
+    fn test_preg_hw_rejects_frame_index() {
+        use llvm2_ir::types::FrameIdx;
+        let inst = MachInst::new(
+            AArch64Opcode::LdrRI,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::FrameIndex(FrameIdx(-8)),
+            ],
+        );
+        let result = encode_inst(&inst);
+        assert!(result.is_err(), "FrameIndex where register expected should error");
+    }
+
+    #[test]
+    fn test_preg_hw_rejects_stack_slot() {
+        use llvm2_ir::types::StackSlotId;
+        let inst = MachInst::new(
+            AArch64Opcode::StrRI,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::StackSlot(StackSlotId(0)),
+            ],
+        );
+        let result = encode_inst(&inst);
+        assert!(result.is_err(), "StackSlot where register expected should error");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug #105: FP size derived from register class, not hardcoded
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fp_add_double_precision() {
+        use llvm2_ir::regs::{D0, D1};
+        let inst = MachInst::new(
+            AArch64Opcode::FaddRR,
+            vec![
+                MachOperand::PReg(D0),
+                MachOperand::PReg(D0),
+                MachOperand::PReg(D1),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let ftype = (word >> 22) & 0b11;
+        assert_eq!(ftype, 0b01, "FADD with D-regs should use ftype=01 (double), got {}", ftype);
+    }
+
+    #[test]
+    fn test_fp_add_single_precision() {
+        use llvm2_ir::regs::{S0, S1};
+        let inst = MachInst::new(
+            AArch64Opcode::FaddRR,
+            vec![
+                MachOperand::PReg(S0),
+                MachOperand::PReg(S0),
+                MachOperand::PReg(S1),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let ftype = (word >> 22) & 0b11;
+        assert_eq!(ftype, 0b00, "FADD with S-regs should use ftype=00 (single), got {}", ftype);
+    }
+
+    #[test]
+    fn test_fp_add_rejects_gpr_operand() {
+        let inst = MachInst::new(
+            AArch64Opcode::FaddRR,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X1),
+            ],
+        );
+        let result = encode_inst(&inst);
+        assert!(result.is_err(), "FADD with GPR operands should error, not silently default to double");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("expected FPR"), "Error should mention expected FPR, got: {}", err_msg);
+    }
+
+    #[test]
+    fn test_fp_neg_single_precision() {
+        use llvm2_ir::regs::{S0, S1};
+        let inst = MachInst::new(
+            AArch64Opcode::FnegRR,
+            vec![MachOperand::PReg(S0), MachOperand::PReg(S1)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let ftype = (word >> 22) & 0b11;
+        assert_eq!(ftype, 0b00, "FNEG with S-regs should use ftype=00 (single), got {}", ftype);
+    }
+
+    #[test]
+    fn test_fcmp_single_precision() {
+        use llvm2_ir::regs::{S0, S1};
+        let inst = MachInst::new(
+            AArch64Opcode::Fcmp,
+            vec![MachOperand::PReg(S0), MachOperand::PReg(S1)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let ftype = (word >> 22) & 0b11;
+        assert_eq!(ftype, 0b00, "FCMP with S-regs should use ftype=00 (single), got {}", ftype);
+    }
+
+    #[test]
+    fn test_fcvtzs_single_precision() {
+        use llvm2_ir::regs::S0;
+        let inst = MachInst::new(
+            AArch64Opcode::FcvtzsRR,
+            vec![
+                MachOperand::PReg(llvm2_ir::regs::PReg::new(32)),
+                MachOperand::PReg(S0),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let ftype = (word >> 22) & 0b11;
+        assert_eq!(ftype, 0b00, "FCVTZS from S-reg should use ftype=00 (single), got {}", ftype);
+    }
+
+    #[test]
+    fn test_scvtf_single_precision() {
+        use llvm2_ir::regs::S0;
+        let inst = MachInst::new(
+            AArch64Opcode::ScvtfRR,
+            vec![
+                MachOperand::PReg(S0),
+                MachOperand::PReg(X0),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let ftype = (word >> 22) & 0b11;
+        assert_eq!(ftype, 0b00, "SCVTF to S-reg should use ftype=00 (single), got {}", ftype);
     }
 }
