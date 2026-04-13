@@ -649,7 +649,7 @@ impl Pipeline {
         self.run_regalloc(&mut ir_func)?;
 
         // Phase 7: Frame Lowering
-        self.run_frame_lowering(&mut ir_func);
+        let frame_layout = self.run_frame_lowering(&mut ir_func);
 
         // Phase 7.5: Branch Resolution — resolve symbolic Block operands to
         // PC-relative byte offsets before encoding.
@@ -658,8 +658,8 @@ impl Pipeline {
         // Phase 8: Encoding
         let code = encode_function(&ir_func)?;
 
-        // Phase 9: Mach-O Emission
-        let obj_bytes = self.emit_macho(&ir_func.name, &code);
+        // Phase 9: Mach-O Emission (with compact unwind from frame layout)
+        let obj_bytes = self.emit_macho(&ir_func.name, &code, Some(&frame_layout));
 
         Ok(obj_bytes)
     }
@@ -679,7 +679,7 @@ impl Pipeline {
         self.run_regalloc(ir_func)?;
 
         // Phase 7: Frame Lowering
-        self.run_frame_lowering(ir_func);
+        let frame_layout = self.run_frame_lowering(ir_func);
 
         // Phase 7.5: Branch Resolution
         resolve_branches(ir_func);
@@ -687,8 +687,8 @@ impl Pipeline {
         // Phase 8: Encoding
         let code = encode_function(ir_func)?;
 
-        // Phase 9: Mach-O Emission
-        let obj_bytes = self.emit_macho(&ir_func.name, &code);
+        // Phase 9: Mach-O Emission (with compact unwind from frame layout)
+        let obj_bytes = self.emit_macho(&ir_func.name, &code, Some(&frame_layout));
 
         Ok(obj_bytes)
     }
@@ -702,13 +702,13 @@ impl Pipeline {
         ir_func: &mut IrMachFunction,
     ) -> Result<Vec<u8>, PipelineError> {
         // Phase 7: Frame Lowering
-        self.run_frame_lowering(ir_func);
+        let frame_layout = self.run_frame_lowering(ir_func);
 
         // Phase 8: Encoding
         let code = encode_function(ir_func)?;
 
-        // Phase 9: Mach-O Emission
-        let obj_bytes = self.emit_macho(&ir_func.name, &code);
+        // Phase 9: Mach-O Emission (with compact unwind from frame layout)
+        let obj_bytes = self.emit_macho(&ir_func.name, &code, Some(&frame_layout));
 
         Ok(obj_bytes)
     }
@@ -824,24 +824,56 @@ impl Pipeline {
     }
 
     /// Phase 7: Frame lowering — prologue/epilogue + frame index elimination.
-    fn run_frame_lowering(&self, func: &mut IrMachFunction) {
+    ///
+    /// Returns the computed [`FrameLayout`] so downstream phases (compact unwind
+    /// emission) can use it without recomputing.
+    fn run_frame_lowering(
+        &self,
+        func: &mut IrMachFunction,
+    ) -> crate::frame::FrameLayout {
         use crate::frame;
 
         let layout = frame::compute_frame_layout(func, 0, true);
         frame::eliminate_frame_indices(func, &layout);
         frame::insert_prologue_epilogue(func, &layout);
+        layout
     }
 
     /// Phase 9: Emit a Mach-O .o file from encoded machine code.
-    fn emit_macho(&self, func_name: &str, code: &[u8]) -> Vec<u8> {
+    ///
+    /// When `frame_layout` is provided, a `__LD,__compact_unwind` section is
+    /// emitted containing a single compact unwind entry for the function.
+    /// This is required by macOS for backtraces, profilers, and exception handling.
+    fn emit_macho(
+        &self,
+        func_name: &str,
+        code: &[u8],
+        frame_layout: Option<&crate::frame::FrameLayout>,
+    ) -> Vec<u8> {
         use crate::macho::MachOWriter;
+        use crate::unwind::{CompactUnwindEntry, CompactUnwindSection, add_compact_unwind_to_writer};
 
         let mut writer = MachOWriter::new();
         writer.add_text_section(code);
 
         // Add the function symbol with Mach-O name mangling (_prefix).
         let symbol_name = format!("_{}", func_name);
+        // Section index 1 = __text (first section, 1-based).
         writer.add_symbol(&symbol_name, 1, 0, true);
+
+        // Emit compact unwind section if we have frame layout information.
+        if let Some(layout) = frame_layout {
+            let mut cu_section = CompactUnwindSection::new();
+            // Symbol index 0 = the function symbol we just added.
+            let entry = CompactUnwindEntry::from_layout(
+                layout,
+                0, // function_offset (relocated via ARM64_RELOC_UNSIGNED)
+                code.len() as u32,
+                0, // symbol_index for the function
+            );
+            cu_section.add_entry(entry);
+            add_compact_unwind_to_writer(&mut writer, &cu_section);
+        }
 
         writer.write()
     }

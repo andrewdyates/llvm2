@@ -26,6 +26,60 @@ fn macho_filetype(bytes: &[u8]) -> u32 {
     u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]])
 }
 
+/// Search for a section with the given name in the Mach-O section headers.
+/// Returns (section_offset, section_size) if found.
+fn find_section(bytes: &[u8], target_sectname: &[u8]) -> Option<(u32, u64)> {
+    // Parse the LC_SEGMENT_64 to find sections.
+    // Header is 32 bytes, load commands start at offset 32.
+    let sizeofcmds = u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    let mut offset = 32usize; // after mach_header_64
+    let lc_end = 32 + sizeofcmds as usize;
+
+    while offset < lc_end {
+        let cmd = u32::from_le_bytes([bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]]);
+        let cmdsize = u32::from_le_bytes([bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7]]) as usize;
+
+        // LC_SEGMENT_64 = 0x19
+        if cmd == 0x19 {
+            // Segment command: 72 bytes header, then section headers (80 bytes each).
+            let nsects = u32::from_le_bytes([
+                bytes[offset + 64], bytes[offset + 65],
+                bytes[offset + 66], bytes[offset + 67],
+            ]);
+            let mut sec_offset = offset + 72; // first section header
+
+            for _ in 0..nsects {
+                // Section header: first 16 bytes = sectname
+                let sectname = &bytes[sec_offset..sec_offset + 16];
+                // Trim trailing zeros for comparison.
+                let name_len = sectname.iter().position(|&b| b == 0).unwrap_or(16);
+                let name = &sectname[..name_len];
+
+                if name == target_sectname {
+                    // section64: offset at byte 48, size at byte 40
+                    let sec_size = u64::from_le_bytes([
+                        bytes[sec_offset + 40], bytes[sec_offset + 41],
+                        bytes[sec_offset + 42], bytes[sec_offset + 43],
+                        bytes[sec_offset + 44], bytes[sec_offset + 45],
+                        bytes[sec_offset + 46], bytes[sec_offset + 47],
+                    ]);
+                    let sec_file_offset = u32::from_le_bytes([
+                        bytes[sec_offset + 48], bytes[sec_offset + 49],
+                        bytes[sec_offset + 50], bytes[sec_offset + 51],
+                    ]);
+                    return Some((sec_file_offset, sec_size));
+                }
+
+                sec_offset += 80; // next section header
+            }
+        }
+
+        offset += cmdsize;
+    }
+
+    None
+}
+
 /// Build a simple `fn add(a: i32, b: i32) -> i32` function using physical
 /// registers (simulating post-regalloc state).
 fn make_add_function() -> MachFunction {
@@ -258,6 +312,121 @@ fn test_pipeline_add_imm() {
     let expected = (1u32 << 31) | (0b100010 << 23) | (1 << 10);
     let word = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
     assert_eq!(word, expected, "ADD X0, X0, #1 should be 0x{:08X}, got 0x{:08X}", expected, word);
+}
+
+// ---------------------------------------------------------------------------
+// Compact unwind integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_compact_unwind_section_emitted() {
+    // Verify that the pipeline emits a __compact_unwind section.
+    let mut func = make_add_function();
+
+    let pipeline = Pipeline::new(PipelineConfig {
+        opt_level: OptLevel::O0,
+        emit_debug: false,
+    });
+
+    let obj_bytes = pipeline.encode_and_emit(&mut func).expect("pipeline should succeed");
+    assert!(is_valid_macho(&obj_bytes));
+
+    // Find the __compact_unwind section.
+    let cu = find_section(&obj_bytes, b"__compact_unwind");
+    assert!(cu.is_some(), "Mach-O output should contain __compact_unwind section");
+
+    let (cu_offset, cu_size) = cu.unwrap();
+    // Each entry is 32 bytes, we have one function.
+    assert_eq!(cu_size, 32, "One function should produce one 32-byte compact unwind entry");
+    assert!(cu_offset > 0, "Section offset should be non-zero");
+
+    // Verify we can read the compact unwind entry from the file data.
+    let cu_data = &obj_bytes[cu_offset as usize..(cu_offset as usize + cu_size as usize)];
+
+    // function_length at bytes 8..12 should be non-zero (function has actual code).
+    let func_len = u32::from_le_bytes(cu_data[8..12].try_into().unwrap());
+    assert!(func_len > 0, "Function length in compact unwind should be non-zero, got {}", func_len);
+
+    // compact_encoding at bytes 12..16 should have FRAME mode (0x04xxxxxx).
+    let encoding = u32::from_le_bytes(cu_data[12..16].try_into().unwrap());
+    let mode = encoding & 0x0F00_0000;
+    assert_eq!(mode, 0x0400_0000, "Encoding mode should be FRAME (0x04), got 0x{:08X}", encoding);
+
+    // personality and lsda at bytes 16..32 should be zero (no exceptions).
+    let personality = u64::from_le_bytes(cu_data[16..24].try_into().unwrap());
+    let lsda = u64::from_le_bytes(cu_data[24..32].try_into().unwrap());
+    assert_eq!(personality, 0, "Personality should be 0 for C/Rust");
+    assert_eq!(lsda, 0, "LSDA should be 0 for C/Rust");
+}
+
+#[test]
+fn test_compact_unwind_nop_function() {
+    // Minimal function (just RET) should still get compact unwind.
+    let sig = Signature::new(vec![], vec![]);
+    let mut func = MachFunction::new("nop_func_cu".to_string(), sig);
+    let entry = func.entry;
+
+    let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+    let ret_id = func.push_inst(ret);
+    func.append_inst(entry, ret_id);
+
+    let pipeline = Pipeline::new(PipelineConfig {
+        opt_level: OptLevel::O0,
+        emit_debug: false,
+    });
+
+    let obj_bytes = pipeline.encode_and_emit(&mut func).expect("pipeline should succeed");
+
+    let cu = find_section(&obj_bytes, b"__compact_unwind");
+    assert!(cu.is_some(), "Even a minimal function should have compact unwind");
+
+    let (_cu_offset, cu_size) = cu.unwrap();
+    assert_eq!(cu_size, 32, "Should have exactly one 32-byte compact unwind entry");
+}
+
+#[test]
+fn test_compact_unwind_otool_verification() {
+    // Write the .o file and use otool to verify compact unwind.
+    let mut func = make_add_function();
+
+    let pipeline = Pipeline::new(PipelineConfig {
+        opt_level: OptLevel::O0,
+        emit_debug: false,
+    });
+
+    let obj_bytes = pipeline.encode_and_emit(&mut func).expect("pipeline should succeed");
+
+    let tmp_dir = std::env::temp_dir();
+    let obj_path = tmp_dir.join("llvm2_test_cu.o");
+    std::fs::write(&obj_path, &obj_bytes).expect("should write .o file");
+
+    // Use otool -l to check for compact unwind section.
+    let otool_result = std::process::Command::new("otool")
+        .args(["-l", obj_path.to_str().unwrap()])
+        .output();
+
+    match otool_result {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("__compact_unwind"),
+                "otool -l should show __compact_unwind section.\notool output:\n{}",
+                stdout
+            );
+            assert!(
+                stdout.contains("__LD"),
+                "compact unwind should be in __LD segment.\notool output:\n{}",
+                stdout
+            );
+        }
+        _ => {
+            // Not on macOS, just verify section exists in binary.
+            let cu = find_section(&obj_bytes, b"__compact_unwind");
+            assert!(cu.is_some());
+        }
+    }
+
+    let _ = std::fs::remove_file(&obj_path);
 }
 
 #[test]
