@@ -24,6 +24,7 @@ use llvm2_ir::MachFunction;
 
 use crate::addr_mode::AddrModeFormation;
 use crate::cfg_simplify::CfgSimplify;
+use crate::cmp_select::CmpSelectCombine;
 use crate::const_fold::ConstantFolding;
 use crate::copy_prop::CopyPropagation;
 use crate::cse::CommonSubexprElim;
@@ -87,12 +88,14 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(LoopInvariantCodeMotion))
                     .with_pass(Box::new(Peephole))
                     .with_pass(Box::new(AddrModeFormation))
+                    .with_pass(Box::new(CmpSelectCombine))
                     .with_pass(Box::new(DeadCodeElimination))
                     .with_pass(Box::new(CfgSimplify))
             }
             OptLevel::O3 => {
                 // Aggressive: full pipeline with proof-consuming opts (will be iterated).
                 // Address mode formation runs after peephole, before DCE.
+                // CmpSelect combines run after addr-mode, before DCE.
                 PassManager::new()
                     .with_pass(Box::new(ProofOptimization::new()))
                     .with_pass(Box::new(ConstantFolding))
@@ -101,6 +104,7 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(LoopInvariantCodeMotion))
                     .with_pass(Box::new(Peephole))
                     .with_pass(Box::new(AddrModeFormation))
+                    .with_pass(Box::new(CmpSelectCombine))
                     .with_pass(Box::new(DeadCodeElimination))
                     .with_pass(Box::new(CfgSimplify))
             }
@@ -209,7 +213,7 @@ mod tests {
     fn test_o3_iterates() {
         let pipeline = OptimizationPipeline::new(OptLevel::O3);
         let pm = pipeline.build_pass_manager();
-        // 9 passes: proof-opts + const-fold + copy-prop + cse + licm + peephole + addr-mode + dce + cfg-simplify
-        assert_eq!(pm.num_passes(), 9);
+        // 10 passes: proof-opts + const-fold + copy-prop + cse + licm + peephole + addr-mode + cmp-select + dce + cfg-simplify
+        assert_eq!(pm.num_passes(), 10);
     }
 }

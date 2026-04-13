@@ -47,10 +47,17 @@ pub enum AArch64Opcode {
     LsrRI,
     AsrRI,
 
-    // -- Compare --
+    // -- Compare / conditional select --
     CmpRR,
     CmpRI,
     Tst,
+    /// CSEL Xd, Xn, Xm, cond — conditional select.
+    /// Operands: [dst, true_src, false_src, Imm(cond_code_encoding)].
+    Csel,
+    /// CSET Xd, cond — conditional set (materialize condition as 0/1).
+    /// Operands: [dst, Imm(cond_code_encoding)].
+    /// Semantically: Xd = (cond) ? 1 : 0.
+    Cset,
 
     // -- Move --
     MovR,

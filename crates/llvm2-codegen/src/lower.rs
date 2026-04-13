@@ -880,6 +880,45 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             Ok(0xD4200020) // BRK #1
         }
 
+        // --- Conditional select/set ---
+
+        // CSEL Xd, Xn, Xm, cond
+        // Operands: [dst, true_src, false_src, Imm(cond_code_encoding)]
+        AArch64Opcode::Csel => {
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let rm = preg_hw(2)?;
+            let cond = imm_val(3) as u32 & 0xF;
+            Ok((sf << 31)
+                | (0b00 << 29)
+                | (0b11010100 << 21)
+                | (rm << 16)
+                | (cond << 12)
+                | (0b00 << 10)
+                | (rn << 5)
+                | rd)
+        }
+
+        // CSET Xd, cond — encoded as CSINC Xd, XZR, XZR, invert(cond)
+        // Operands: [dst, Imm(cond_code_encoding)]
+        AArch64Opcode::Cset => {
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rd = preg_hw(0)?;
+            let cond = imm_val(1) as u32 & 0xF;
+            let inv_cond = cond ^ 1;
+            let rn = 31u32; // XZR
+            let rm = 31u32; // XZR
+            Ok((sf << 31)
+                | (0b00 << 29)
+                | (0b11010100 << 21)
+                | (rm << 16)
+                | (inv_cond << 12)
+                | (0b01 << 10) // CSINC
+                | (rn << 5)
+                | rd)
+        }
+
         // --- Pseudo-instructions: emit NOP ---
         AArch64Opcode::Phi
         | AArch64Opcode::StackAlloc
