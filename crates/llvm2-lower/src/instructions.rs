@@ -30,8 +30,45 @@ pub enum Opcode {
     Udiv,
     Sdiv,
 
+    // Shift operations
+    Ishl,   // Logical shift left
+    Ushr,   // Logical shift right (unsigned)
+    Sshr,   // Arithmetic shift right (signed)
+
+    // Logical operations
+    Band,   // Bitwise AND
+    Bor,    // Bitwise OR
+    Bxor,   // Bitwise XOR
+    BandNot, // Bitwise AND-NOT (BIC)
+    BorNot,  // Bitwise OR-NOT (ORN)
+
+    // Extensions
+    Sextend { from_ty: Type, to_ty: Type },   // Sign-extend
+    Uextend { from_ty: Type, to_ty: Type },   // Zero-extend
+
+    // Bitfield operations
+    ExtractBits { lsb: u8, width: u8 },        // Unsigned bitfield extract (UBFM)
+    SextractBits { lsb: u8, width: u8 },       // Signed bitfield extract (SBFM)
+    InsertBits { lsb: u8, width: u8 },         // Bitfield insert (BFM)
+
+    // Conditional select
+    Select { cond: IntCC },   // csel(cond, lhs, rhs, cc_val) -> result
+
     // Comparisons
     Icmp { cond: IntCC },
+
+    // Floating-point arithmetic
+    Fadd,
+    Fsub,
+    Fmul,
+    Fdiv,
+    Fcmp { cond: FloatCC },
+    FcvtToInt { dst_ty: Type },    // Float -> Int conversion
+    FcvtFromInt { src_ty: Type },  // Int -> Float conversion
+
+    // Addressing
+    GlobalRef { name: String },     // Reference to a global symbol (ADRP + ADD)
+    StackAddr { slot: u32 },        // Address of a stack slot (SP + offset)
 
     // Control flow
     Jump { dest: Block },
@@ -41,6 +78,19 @@ pub enum Opcode {
     // Memory
     Load { ty: Type },
     Store,
+}
+
+/// Floating-point comparison conditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FloatCC {
+    Equal,
+    NotEqual,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    Ordered,    // Neither operand is NaN
+    Unordered,  // At least one operand is NaN
 }
 
 /// Integer comparison conditions.
