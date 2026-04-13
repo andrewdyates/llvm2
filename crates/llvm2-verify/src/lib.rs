@@ -26,8 +26,13 @@
 //!    concrete Rust arithmetic (exhaustive for small widths, random sampling
 //!    for 32/64-bit). No external solver needed.
 //!
-//! 2. **z4 verification** (future, feature-gated): serializes proof obligations
-//!    to SMT-LIB2 and solves via z4 for full formal guarantees.
+//! 2. **z4/z3 CLI verification** (always available via [`z4_bridge`]): serializes
+//!    proof obligations to SMT-LIB2 and pipes to a z3/z4 subprocess for formal
+//!    guarantees. Requires z3 or z4 binary in PATH.
+//!
+//! 3. **z4 native API verification** (feature-gated via `z4` feature): uses the
+//!    z4 crate's Rust API for in-process SMT solving. No subprocess overhead.
+//!    Enable with: `cargo test -p llvm2-verify --features z4`
 //!
 //! # Example
 //!
@@ -51,7 +56,9 @@ pub mod const_fold_proofs;
 pub mod cse_licm_proofs;
 pub mod memory_model;
 pub mod verify;
+pub mod z4_bridge;
 
 pub use verify::{VerificationResult, Verifier};
 pub use lowering_proof::{ProofObligation, verify_by_evaluation};
 pub use smt::{SmtExpr, SmtSort};
+pub use z4_bridge::{Z4Config, Z4Result, verify_with_z4};

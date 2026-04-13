@@ -12,8 +12,16 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+z4 = ["dep:z4"]  # Enable real z4 solver integration (in-process via Rust API)
+
 [dependencies]
 llvm2-ir = { workspace = true }
 llvm2-lower = { workspace = true }
 thiserror = { workspace = true }
-# z4 = { workspace = true }
+# z4 dependency: use local path for development, switch to git dep for release.
+# Local path assumes z4 repo is checked out at ~/z4/ (see CLAUDE.md).
+# For worktree compatibility, use absolute-style relative path.
+# z4 = { git = "https://github.com/dropbox-ai-prototypes/z4", optional = true }
+z4 = { path = "../../../../../../z4/crates/z4", optional = true }
