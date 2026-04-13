@@ -8,10 +8,8 @@
 //! This crate generates machine code from LIR with formal verification
 //! of correctness. Each lowering step is verified using llvm2-verify.
 //!
-//! Supported targets:
-//! - x86-64
-//! - AArch64
-//! - RISC-V
+//! Target: AArch64 macOS (Apple Silicon) for MVP.
+//! x86-64 and RISC-V are future targets.
 
 pub mod target;
 pub mod lower;

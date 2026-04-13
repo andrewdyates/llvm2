@@ -41,8 +41,14 @@ impl Type {
         }
     }
 
-    /// Returns the size in bits.
+    /// Returns the semantic width in bits.
+    ///
+    /// Note: B1 returns 1 (semantic bit-width), not 8 (storage size).
+    /// Use `bytes()` for the storage size.
     pub fn bits(self) -> u32 {
-        self.bytes() * 8
+        match self {
+            Type::B1 => 1,
+            _ => self.bytes() * 8,
+        }
     }
 }
