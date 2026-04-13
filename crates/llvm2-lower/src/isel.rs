@@ -65,6 +65,12 @@ pub enum ISelError {
     },
     #[error("malformed instruction: expected at least 1 result (opcode context: {0})")]
     MissingResult(&'static str),
+    #[error("StructGep on non-struct type: {0:?}")]
+    StructGepNonStruct(Type),
+    #[error("StructGep field index {index} out of range for struct with {field_count} fields")]
+    StructGepOutOfRange { index: u32, field_count: usize },
+    #[error("aggregate type too large for inline return: {0} bytes")]
+    AggregateReturnTooLarge(u32),
 }
 
 // ---------------------------------------------------------------------------
@@ -678,6 +684,11 @@ impl InstructionSelector {
             // Memory
             Opcode::Load { ty } => self.select_load(ty.clone(), inst, block)?,
             Opcode::Store => self.select_store(inst, block)?,
+
+            // Aggregate operations
+            Opcode::StructGep { struct_ty, field_index } => {
+                self.select_struct_gep(struct_ty.clone(), *field_index, inst, block)?;
+            }
         }
         Ok(())
     }
@@ -1172,8 +1183,10 @@ impl InstructionSelector {
                     );
                 }
                 ArgLocation::Indirect { .. } => {
-                    // Large aggregate return via X8 pointer: store to [X8]
-                    // TODO: Implement indirect return lowering
+                    // Aggregate return: dispatch to aggregate return lowering.
+                    // src is a pointer to the aggregate in memory.
+                    let agg_ty = ret_types[i].clone();
+                    self.select_aggregate_return(src, &agg_ty, block)?;
                 }
                 ArgLocation::Stack { .. } => {
                     return Err(ISelError::UnsupportedReturnLocation);
@@ -1213,9 +1226,16 @@ impl InstructionSelector {
         // Move arguments to ABI locations
         for (i, (val, loc)) in arg_vals.iter().zip(arg_locs.iter()).enumerate() {
             let src = self.use_value(val)?;
+            let ty = arg_types[i].clone();
+
+            // Dispatch aggregate arguments to specialized handler
+            if ty.is_aggregate() {
+                self.select_aggregate_arg(src, &ty, loc, block)?;
+                continue;
+            }
+
             match loc {
                 ArgLocation::Reg(preg) => {
-                    let ty = arg_types[i].clone();
                     let opc = if Self::is_32bit(&ty) {
                         AArch64Opcode::MOVWrr
                     } else {
@@ -1228,7 +1248,6 @@ impl InstructionSelector {
                 }
                 ArgLocation::Stack { offset, size: _ } => {
                     // STR to [SP + offset]
-                    let ty = arg_types[i].clone();
                     let opc = if Self::is_32bit(&ty) {
                         AArch64Opcode::STRWui
                     } else {
@@ -1243,8 +1262,7 @@ impl InstructionSelector {
                     );
                 }
                 ArgLocation::Indirect { ptr_reg } => {
-                    // Large aggregate: store to memory, pass pointer in register
-                    // TODO: Allocate stack space, store aggregate, pass pointer
+                    // Non-aggregate indirect (I128): pass pointer in register
                     self.func.push_inst(
                         block,
                         MachInst::new(
@@ -1284,12 +1302,20 @@ impl InstructionSelector {
                     );
                     self.define_value(*val, MachOperand::VReg(dst), ty);
                 }
-                ArgLocation::Indirect { ptr_reg: _ } => {
-                    // Large aggregate returned via X8 pointer
-                    // TODO: Load from sret pointer
+                ArgLocation::Indirect { ptr_reg } => {
+                    // Aggregate returned via sret pointer (X8).
+                    // The caller passed X8 as the sret buffer; after the call
+                    // the data is at [X8]. Define the result as the sret
+                    // pointer itself so downstream code can access fields.
                     let ty = result_types[i].clone();
-                    let class = reg_class_for_type(&ty);
-                    let dst = self.new_vreg(class);
+                    let dst = self.new_vreg(RegClass::Gpr64);
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::MOVXrr,
+                            vec![MachOperand::VReg(dst), MachOperand::PReg(*ptr_reg)],
+                        ),
+                    );
                     self.define_value(*val, MachOperand::VReg(dst), ty);
                 }
                 ArgLocation::Stack { .. } => {
@@ -1376,6 +1402,322 @@ impl InstructionSelector {
             block,
             MachInst::new(opc, vec![src, addr, MachOperand::Imm(0)]),
         );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Aggregate operations
+    // -----------------------------------------------------------------------
+
+    /// Select a struct field address computation (GEP-like).
+    ///
+    /// Given a pointer to a struct and a field index, compute:
+    ///   result = base + offset_of(struct_ty, field_index)
+    ///
+    /// For zero offset (field 0 with no padding), emits a MOV.
+    /// Otherwise emits ADD Xd, base, #offset.
+    fn select_struct_gep(
+        &mut self,
+        struct_ty: Type,
+        field_index: u32,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        Self::require_args(inst, 1, "StructGep")?;
+        Self::require_result(inst, "StructGep")?;
+
+        // Validate the struct type
+        let field_count = match &struct_ty {
+            Type::Struct(fields) => fields.len(),
+            _ => return Err(ISelError::StructGepNonStruct(struct_ty)),
+        };
+        if field_index as usize >= field_count {
+            return Err(ISelError::StructGepOutOfRange {
+                index: field_index,
+                field_count,
+            });
+        }
+
+        let base_val = inst.args[0];
+        let result_val = inst.results[0];
+        let base = self.use_value(&base_val)?;
+
+        let offset = struct_ty.offset_of(field_index as usize).unwrap_or(0);
+
+        let dst = self.new_vreg(RegClass::Gpr64);
+
+        if offset == 0 {
+            // Field is at base address, just move the pointer
+            self.func.push_inst(
+                block,
+                MachInst::new(
+                    AArch64Opcode::MOVXrr,
+                    vec![MachOperand::VReg(dst), base],
+                ),
+            );
+        } else {
+            // ADD Xd, base, #offset
+            self.func.push_inst(
+                block,
+                MachInst::new(
+                    AArch64Opcode::ADDXri,
+                    vec![
+                        MachOperand::VReg(dst),
+                        base,
+                        MachOperand::Imm(offset as i64),
+                    ],
+                ),
+            );
+        }
+
+        // Result is a pointer (I64 on AArch64)
+        self.define_value(result_val, MachOperand::VReg(dst), Type::I64);
+        Ok(())
+    }
+
+    /// Select aggregate return value lowering.
+    ///
+    /// Apple AArch64 ABI:
+    /// - Small (<=8 bytes): pack fields into X0
+    /// - Medium (<=16 bytes): pack fields into X0 + X1
+    /// - Large (>16 bytes): store to memory pointed to by X8 (sret)
+    ///
+    /// This is called from `select_return` when it detects an aggregate type.
+    fn select_aggregate_return(
+        &mut self,
+        src: MachOperand,
+        agg_ty: &Type,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        let size = agg_ty.bytes();
+
+        if size <= 8 {
+            // Small aggregate: load entire struct as a single X0 value.
+            // src is a pointer to the aggregate in memory.
+            // Emit: LDR X0, [src]
+            self.func.push_inst(
+                block,
+                MachInst::new(
+                    AArch64Opcode::LDRXui,
+                    vec![MachOperand::PReg(gpr::X0), src, MachOperand::Imm(0)],
+                ),
+            );
+        } else if size <= 16 {
+            // Medium aggregate: load into X0 + X1.
+            // First 8 bytes -> X0
+            self.func.push_inst(
+                block,
+                MachInst::new(
+                    AArch64Opcode::LDRXui,
+                    vec![
+                        MachOperand::PReg(gpr::X0),
+                        src.clone(),
+                        MachOperand::Imm(0),
+                    ],
+                ),
+            );
+            // Next bytes -> X1
+            self.func.push_inst(
+                block,
+                MachInst::new(
+                    AArch64Opcode::LDRXui,
+                    vec![MachOperand::PReg(gpr::X1), src, MachOperand::Imm(8)],
+                ),
+            );
+        } else {
+            // Large aggregate: store to [X8] (sret pointer).
+            // Emit a sequence of stores from the source to the sret buffer.
+            // For now, emit word-at-a-time copies. A real implementation would
+            // use memcpy or unrolled LDP/STP for large sizes.
+            let mut offset: u32 = 0;
+            while offset + 8 <= size {
+                // Load 8 bytes from source
+                let tmp = self.new_vreg(RegClass::Gpr64);
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        AArch64Opcode::LDRXui,
+                        vec![
+                            MachOperand::VReg(tmp),
+                            src.clone(),
+                            MachOperand::Imm(offset as i64),
+                        ],
+                    ),
+                );
+                // Store 8 bytes to sret destination
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        AArch64Opcode::STRXui,
+                        vec![
+                            MachOperand::VReg(tmp),
+                            MachOperand::PReg(gpr::X8),
+                            MachOperand::Imm(offset as i64),
+                        ],
+                    ),
+                );
+                offset += 8;
+            }
+            // Handle trailing 4-byte chunk
+            if offset + 4 <= size {
+                let tmp = self.new_vreg(RegClass::Gpr32);
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        AArch64Opcode::LDRWui,
+                        vec![
+                            MachOperand::VReg(tmp),
+                            src.clone(),
+                            MachOperand::Imm(offset as i64),
+                        ],
+                    ),
+                );
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        AArch64Opcode::STRWui,
+                        vec![
+                            MachOperand::VReg(tmp),
+                            MachOperand::PReg(gpr::X8),
+                            MachOperand::Imm(offset as i64),
+                        ],
+                    ),
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Select aggregate argument passing for a call.
+    ///
+    /// Apple AArch64 ABI:
+    /// - Small (<=8 bytes): load into a single GPR
+    /// - Medium (<=16 bytes): load into two consecutive GPRs
+    /// - Large (>16 bytes): allocate stack space, store aggregate, pass pointer
+    ///
+    /// `src` is the pointer to the aggregate in memory.
+    /// `preg` is the physical register assigned by the ABI classifier.
+    fn select_aggregate_arg(
+        &mut self,
+        src: MachOperand,
+        agg_ty: &Type,
+        loc: &ArgLocation,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        let size = agg_ty.bytes();
+
+        match loc {
+            ArgLocation::Reg(preg) => {
+                // Small aggregate (<=8 bytes): load as single value into register
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        AArch64Opcode::LDRXui,
+                        vec![MachOperand::PReg(*preg), src, MachOperand::Imm(0)],
+                    ),
+                );
+            }
+            ArgLocation::Indirect { ptr_reg } => {
+                if size <= 16 {
+                    // Medium aggregate passed as register pair.
+                    // The ABI classifier returns Indirect for medium aggregates,
+                    // meaning the first register of the pair. Load first 8 bytes.
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::LDRXui,
+                            vec![
+                                MachOperand::PReg(*ptr_reg),
+                                src.clone(),
+                                MachOperand::Imm(0),
+                            ],
+                        ),
+                    );
+                    // Load next bytes into the following register.
+                    // ptr_reg is XN, next register is X(N+1).
+                    let next_reg = PReg::new(ptr_reg.hw_enc() as u16 + 1);
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::LDRXui,
+                            vec![
+                                MachOperand::PReg(next_reg),
+                                src,
+                                MachOperand::Imm(8),
+                            ],
+                        ),
+                    );
+                } else {
+                    // Large aggregate: pass pointer to the aggregate.
+                    // The caller has already placed the aggregate in memory;
+                    // just pass the pointer in the designated register.
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::MOVXrr,
+                            vec![MachOperand::PReg(*ptr_reg), src],
+                        ),
+                    );
+                }
+            }
+            ArgLocation::Stack { offset, size: slot_size } => {
+                // Aggregate on stack: store field-by-field.
+                let mut byte_offset: u32 = 0;
+                while byte_offset + 8 <= *slot_size {
+                    let tmp = self.new_vreg(RegClass::Gpr64);
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::LDRXui,
+                            vec![
+                                MachOperand::VReg(tmp),
+                                src.clone(),
+                                MachOperand::Imm(byte_offset as i64),
+                            ],
+                        ),
+                    );
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::STRXui,
+                            vec![
+                                MachOperand::VReg(tmp),
+                                MachOperand::PReg(SP),
+                                MachOperand::Imm(*offset + byte_offset as i64),
+                            ],
+                        ),
+                    );
+                    byte_offset += 8;
+                }
+                if byte_offset + 4 <= *slot_size {
+                    let tmp = self.new_vreg(RegClass::Gpr32);
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::LDRWui,
+                            vec![
+                                MachOperand::VReg(tmp),
+                                src.clone(),
+                                MachOperand::Imm(byte_offset as i64),
+                            ],
+                        ),
+                    );
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::STRWui,
+                            vec![
+                                MachOperand::VReg(tmp),
+                                MachOperand::PReg(SP),
+                                MachOperand::Imm(*offset + byte_offset as i64),
+                            ],
+                        ),
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -4433,5 +4775,376 @@ mod tests {
 
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[0].opcode, AArch64Opcode::MOVWrr);
+    }
+
+    // =======================================================================
+    // Aggregate ISel tests
+    // =======================================================================
+
+    #[test]
+    fn select_struct_gep_field_0() {
+        // struct { I32, I32 } -> field 0 is at offset 0, should emit MOV
+        let (mut isel, entry) = make_empty_isel();
+
+        // Define a pointer value
+        let vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I64);
+
+        let struct_ty = Type::Struct(vec![Type::I32, Type::I32]);
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::StructGep { struct_ty, field_index: 0 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // Field 0 at offset 0 -> MOVXrr
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::MOVXrr);
+    }
+
+    #[test]
+    fn select_struct_gep_field_1_with_offset() {
+        // struct { I32, I32 } -> field 1 is at offset 4, should emit ADD
+        let (mut isel, entry) = make_empty_isel();
+
+        let vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I64);
+
+        let struct_ty = Type::Struct(vec![Type::I32, Type::I32]);
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::StructGep { struct_ty, field_index: 1 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // Field 1 at offset 4 -> ADDXri
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADDXri);
+        // Offset should be 4
+        assert_eq!(mblock.insts[0].operands[2], MachOperand::Imm(4));
+    }
+
+    #[test]
+    fn select_struct_gep_with_padding() {
+        // struct { I8, I32 } -> field 1 is at offset 4 (3 bytes padding)
+        let (mut isel, entry) = make_empty_isel();
+
+        let vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I64);
+
+        let struct_ty = Type::Struct(vec![Type::I8, Type::I32]);
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::StructGep { struct_ty, field_index: 1 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADDXri);
+        assert_eq!(mblock.insts[0].operands[2], MachOperand::Imm(4));
+    }
+
+    #[test]
+    fn select_struct_gep_out_of_range() {
+        let (mut isel, entry) = make_empty_isel();
+
+        let vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I64);
+
+        let struct_ty = Type::Struct(vec![Type::I32]);
+        let result = isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::StructGep { struct_ty, field_index: 5 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn select_struct_gep_non_struct_type() {
+        let (mut isel, entry) = make_empty_isel();
+
+        let vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I64);
+
+        // Using I32 as the struct_ty should fail
+        let result = isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::StructGep { struct_ty: Type::I32, field_index: 0 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn select_small_struct_return() {
+        // Return a small struct (8 bytes, two i32 fields) packed in X0.
+        // The return value is a pointer to the struct; select_return should
+        // load it into X0.
+        let struct_ty = Type::Struct(vec![Type::I32, Type::I32]);
+        let sig = Signature {
+            params: vec![],
+            returns: vec![struct_ty.clone()],
+        };
+        let mut isel = InstructionSelector::new("ret_small".to_string(), sig);
+        let entry = Block(0);
+        isel.func.ensure_block(entry);
+
+        // Define a pointer to the struct as a vreg
+        let vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Return,
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // ABI classifies Struct return as Indirect{X8}, so aggregate return
+        // is invoked. For 8-byte struct: single LDR X0, [src]
+        let insts = &mblock.insts;
+        // Find the LDR X0 instruction
+        let ldr_inst = insts.iter().find(|i| {
+            i.opcode == AArch64Opcode::LDRXui
+                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+        });
+        assert!(ldr_inst.is_some(), "Expected LDR X0 for small struct return");
+        // Must end with RET
+        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::RET);
+    }
+
+    #[test]
+    fn select_medium_struct_return_16bytes() {
+        // Return a 16-byte struct -> X0 + X1
+        let struct_ty = Type::Struct(vec![Type::I64, Type::I64]);
+        assert_eq!(struct_ty.bytes(), 16);
+
+        let sig = Signature {
+            params: vec![],
+            returns: vec![struct_ty.clone()],
+        };
+        let mut isel = InstructionSelector::new("ret_med".to_string(), sig);
+        let entry = Block(0);
+        isel.func.ensure_block(entry);
+
+        let vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Return,
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        let insts = &mblock.insts;
+
+        // Should have LDR X0 at offset 0, LDR X1 at offset 8, then RET
+        let ldr_x0 = insts.iter().find(|i| {
+            i.opcode == AArch64Opcode::LDRXui
+                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+        });
+        assert!(ldr_x0.is_some(), "Expected LDR X0 for medium struct return");
+
+        let ldr_x1 = insts.iter().find(|i| {
+            i.opcode == AArch64Opcode::LDRXui
+                && i.operands.first() == Some(&MachOperand::PReg(gpr::X1))
+        });
+        assert!(ldr_x1.is_some(), "Expected LDR X1 for medium struct return");
+        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::RET);
+    }
+
+    #[test]
+    fn select_large_struct_return_via_sret() {
+        // Return a large struct (24 bytes) -> store to [X8]
+        let struct_ty = Type::Struct(vec![Type::I64, Type::I64, Type::I64]);
+        assert_eq!(struct_ty.bytes(), 24);
+
+        let sig = Signature {
+            params: vec![],
+            returns: vec![struct_ty.clone()],
+        };
+        let mut isel = InstructionSelector::new("ret_large".to_string(), sig);
+        let entry = Block(0);
+        isel.func.ensure_block(entry);
+
+        let vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Return,
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        let insts = &mblock.insts;
+
+        // Should have 3 LDR+STR pairs (24 bytes / 8 = 3 chunks) then RET
+        let str_to_x8: Vec<_> = insts.iter().filter(|i| {
+            i.opcode == AArch64Opcode::STRXui
+                && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
+        }).collect();
+        assert_eq!(str_to_x8.len(), 3, "Expected 3 stores to X8 for 24-byte struct");
+        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::RET);
+    }
+
+    #[test]
+    fn select_call_with_small_aggregate_arg() {
+        // Call a function that takes a small struct (8 bytes).
+        // The ABI should pass it in a single register.
+        let (mut isel, entry) = make_empty_isel();
+
+        let struct_ty = Type::Struct(vec![Type::I32, Type::I32]);
+        // Define a pointer to the struct
+        let vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+
+        // Define a result value
+        let result_types = vec![Type::I32];
+        isel.select_call(
+            "callee",
+            &[Value(0)],
+            &[Value(1)],
+            &result_types,
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // Should have: LDR X0 (aggregate arg), BL, MOV (result)
+        let has_bl = mblock.insts.iter().any(|i| i.opcode == AArch64Opcode::BL);
+        assert!(has_bl, "Expected BL instruction for call");
+
+        // The aggregate arg should be loaded into X0 (small struct -> Reg(X0))
+        let ldr_x0 = mblock.insts.iter().find(|i| {
+            i.opcode == AArch64Opcode::LDRXui
+                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+        });
+        assert!(ldr_x0.is_some(), "Expected LDR X0 for small aggregate arg");
+    }
+
+    #[test]
+    fn select_call_with_large_aggregate_arg() {
+        // Call a function that takes a large struct (24 bytes).
+        // The ABI should pass it indirectly via pointer.
+        let (mut isel, entry) = make_empty_isel();
+
+        let struct_ty = Type::Struct(vec![Type::I64, Type::I64, Type::I64]);
+        let vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+
+        let result_types = vec![Type::I32];
+        isel.select_call(
+            "callee_big",
+            &[Value(0)],
+            &[Value(1)],
+            &result_types,
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // Large aggregate -> Indirect{X0}, so should emit MOVXrr to X0
+        let mov_x0 = mblock.insts.iter().find(|i| {
+            i.opcode == AArch64Opcode::MOVXrr
+                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+        });
+        assert!(mov_x0.is_some(), "Expected MOV X0 for large aggregate indirect pass");
+    }
+
+    #[test]
+    fn select_call_returns_aggregate_via_sret() {
+        // Call a function that returns an aggregate (via X8 sret)
+        let (mut isel, entry) = make_empty_isel();
+
+        let struct_ty = Type::Struct(vec![Type::I64, Type::I64, Type::I64]);
+
+        let result_types = vec![struct_ty];
+        isel.select_call(
+            "returns_struct",
+            &[],
+            &[Value(0)],
+            &result_types,
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // After BL, should copy X8 to a vreg for the result
+        let has_bl = mblock.insts.iter().any(|i| i.opcode == AArch64Opcode::BL);
+        assert!(has_bl);
+
+        // Result should be defined (the MOVXrr from X8)
+        let mov_from_x8 = mblock.insts.iter().find(|i| {
+            i.opcode == AArch64Opcode::MOVXrr
+                && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
+        });
+        assert!(mov_from_x8.is_some(), "Expected MOV from X8 for sret result");
+    }
+
+    #[test]
+    fn struct_gep_three_field_struct() {
+        // struct { I8, I32, I64 } -> test all field offsets
+        let (mut isel, entry) = make_empty_isel();
+
+        let vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I64);
+
+        let struct_ty = Type::Struct(vec![Type::I8, Type::I32, Type::I64]);
+        // Verify expected offsets from the type system
+        assert_eq!(struct_ty.offset_of(0), Some(0));
+        assert_eq!(struct_ty.offset_of(1), Some(4));  // 1 byte + 3 padding
+        assert_eq!(struct_ty.offset_of(2), Some(8));  // 4+4=8, already aligned to 8
+
+        // Field 2 at offset 8
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::StructGep { struct_ty, field_index: 2 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADDXri);
+        assert_eq!(mblock.insts[0].operands[2], MachOperand::Imm(8));
     }
 }
