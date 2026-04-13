@@ -147,6 +147,38 @@ impl MachOWriter {
         });
     }
 
+    /// Add a custom section with the given name, segment, data, alignment, and flags.
+    ///
+    /// This is used for sections like `__LD,__compact_unwind` that don't fit
+    /// the standard `__TEXT/__text` or `__DATA/__data` patterns.
+    ///
+    /// - `sectname`: Section name (e.g., b"__compact_unwind"), max 16 bytes.
+    /// - `segname`: Segment name (e.g., b"__LD"), max 16 bytes.
+    /// - `data`: Section content bytes.
+    /// - `align`: Alignment as power of 2 (e.g., 3 means 8-byte aligned).
+    /// - `flags`: Section flags (e.g., S_ATTR_DEBUG).
+    ///
+    /// Returns the 0-based section index.
+    pub fn add_custom_section(
+        &mut self,
+        sectname: &[u8],
+        segname: &[u8],
+        data: &[u8],
+        align: u32,
+        flags: u32,
+    ) -> usize {
+        let index = self.sections.len();
+        self.sections.push(SectionData {
+            sectname: sectname.to_vec(),
+            segname: segname.to_vec(),
+            data: data.to_vec(),
+            align,
+            flags,
+            relocations: Vec::new(),
+        });
+        index
+    }
+
     /// Add a symbol to the object file.
     ///
     /// - `name`: Symbol name (Mach-O convention adds '_' prefix; caller should
@@ -379,7 +411,7 @@ impl MachOWriter {
         buf.extend_from_slice(&LC_BUILD_VERSION.to_le_bytes()); // cmd
         buf.extend_from_slice(&BUILD_VERSION_COMMAND_SIZE.to_le_bytes()); // cmdsize
         buf.extend_from_slice(&PLATFORM_MACOS.to_le_bytes()); // platform
-        // minos: 14.0.0 encoded as 0x000E0000
+                                                              // minos: 14.0.0 encoded as 0x000E0000
         buf.extend_from_slice(&0x000E_0000u32.to_le_bytes());
         // sdk: 14.0.0
         buf.extend_from_slice(&0x000E_0000u32.to_le_bytes());
@@ -430,19 +462,17 @@ impl MachOWriter {
     }
 
     /// Write a single nlist_64 entry.
-    fn write_nlist64(
-        &self,
-        buf: &mut Vec<u8>,
-        str_offsets: &[u32],
-        idx: usize,
-        sym: &Symbol,
-    ) {
+    fn write_nlist64(&self, buf: &mut Vec<u8>, str_offsets: &[u32], idx: usize, sym: &Symbol) {
         // n_strx: offset into string table (4 bytes)
         buf.extend_from_slice(&str_offsets[idx].to_le_bytes());
 
         // n_type: 1 byte
         let n_type = if sym.section == 0 {
-            if sym.is_global { N_UNDF | N_EXT } else { N_UNDF }
+            if sym.is_global {
+                N_UNDF | N_EXT
+            } else {
+                N_UNDF
+            }
         } else if sym.is_global {
             N_SECT | N_EXT
         } else {

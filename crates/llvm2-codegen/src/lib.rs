@@ -16,5 +16,6 @@ pub mod frame;
 pub mod lower;
 pub mod macho;
 pub mod target;
+pub mod unwind;
 
 pub use target::Target;
