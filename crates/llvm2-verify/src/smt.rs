@@ -53,6 +53,9 @@ impl From<Type> for SmtSort {
             Type::I64 => SmtSort::BitVec(64),
             Type::I128 => SmtSort::BitVec(128),
             Type::F32 | Type::F64 => panic!("FP verification not yet supported"),
+            Type::Struct(_) | Type::Array(_, _) => {
+                panic!("Aggregate type verification not yet supported")
+            }
         }
     }
 }

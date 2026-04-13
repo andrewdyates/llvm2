@@ -672,17 +672,31 @@ impl Pipeline {
     ) -> Vec<llvm2_ir::function::Type> {
         types
             .iter()
-            .map(|t| match t {
-                llvm2_lower::types::Type::I8 => llvm2_ir::function::Type::I8,
-                llvm2_lower::types::Type::I16 => llvm2_ir::function::Type::I16,
-                llvm2_lower::types::Type::I32 => llvm2_ir::function::Type::I32,
-                llvm2_lower::types::Type::I64 => llvm2_ir::function::Type::I64,
-                llvm2_lower::types::Type::I128 => llvm2_ir::function::Type::I128,
-                llvm2_lower::types::Type::F32 => llvm2_ir::function::Type::F32,
-                llvm2_lower::types::Type::F64 => llvm2_ir::function::Type::F64,
-                llvm2_lower::types::Type::B1 => llvm2_ir::function::Type::B1,
-            })
+            .map(|t| Self::convert_lower_type_to_ir(t))
             .collect()
+    }
+
+    /// Convert a single llvm2-lower type to an llvm2-ir type.
+    fn convert_lower_type_to_ir(t: &llvm2_lower::types::Type) -> llvm2_ir::function::Type {
+        match t {
+            llvm2_lower::types::Type::I8 => llvm2_ir::function::Type::I8,
+            llvm2_lower::types::Type::I16 => llvm2_ir::function::Type::I16,
+            llvm2_lower::types::Type::I32 => llvm2_ir::function::Type::I32,
+            llvm2_lower::types::Type::I64 => llvm2_ir::function::Type::I64,
+            llvm2_lower::types::Type::I128 => llvm2_ir::function::Type::I128,
+            llvm2_lower::types::Type::F32 => llvm2_ir::function::Type::F32,
+            llvm2_lower::types::Type::F64 => llvm2_ir::function::Type::F64,
+            llvm2_lower::types::Type::B1 => llvm2_ir::function::Type::B1,
+            llvm2_lower::types::Type::Struct(fields) => {
+                let ir_fields: Vec<llvm2_ir::function::Type> =
+                    fields.iter().map(|f| Self::convert_lower_type_to_ir(f)).collect();
+                llvm2_ir::function::Type::Struct(ir_fields)
+            }
+            llvm2_lower::types::Type::Array(elem, count) => {
+                let ir_elem = Self::convert_lower_type_to_ir(elem);
+                llvm2_ir::function::Type::Array(Box::new(ir_elem), *count)
+            }
+        }
     }
 }
 
