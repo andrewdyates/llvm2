@@ -86,7 +86,7 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
 
         // -- Everything else: pure computation --
         // Arithmetic
-        AddRR | AddRI | SubRR | SubRI | MulRR | SDiv | UDiv | Neg => MemoryEffect::Pure,
+        AddRR | AddRI | SubRR | SubRI | MulRR | Msub | Smull | Umull | SDiv | UDiv | Neg => MemoryEffect::Pure,
 
         // Logical
         AndRR | OrrRR | EorRR => MemoryEffect::Pure,

@@ -23,6 +23,13 @@ pub enum AArch64Opcode {
     SubRR,
     SubRI,
     MulRR,
+    /// MSUB Rd, Rn, Rm, Ra — multiply-subtract: Rd = Ra - Rn * Rm.
+    /// When Ra=XZR, this is MNEG Rd, Rn, Rm.
+    Msub,
+    /// SMULL Xd, Wn, Wm — signed multiply long: Xd = sext(Wn) * sext(Wm).
+    Smull,
+    /// UMULL Xd, Wn, Wm — unsigned multiply long: Xd = zext(Wn) * zext(Wm).
+    Umull,
     SDiv,
     UDiv,
     Neg,
