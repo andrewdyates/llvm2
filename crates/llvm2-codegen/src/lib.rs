@@ -15,5 +15,6 @@
 
 pub mod target;
 pub mod lower;
+pub mod macho;
 
 pub use target::Target;
