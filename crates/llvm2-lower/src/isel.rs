@@ -236,6 +236,8 @@ pub enum AArch64Opcode {
     // Address generation
     ADRP,     // PC-relative page address (ADRP Xd, #page)
     ADDXriPCRel, // Add page offset for global (ADD Xd, Xn, #pageoff)
+    LDRXuiGot,   // Load 64-bit from GOT slot (LDR Xd, [Xn, #gotpageoff])
+    LDRXuiTlvp,  // Load 64-bit from TLV descriptor (LDR Xd, [Xn, #tlvppageoff])
 
     // Stack / frame operations
     ADDXriSP, // SP-relative add for stack slot address
@@ -592,6 +594,12 @@ impl InstructionSelector {
             // Addressing
             Opcode::GlobalRef { name } => {
                 self.select_global_ref(name, inst, block)?;
+            }
+            Opcode::ExternRef { name } => {
+                self.select_extern_ref(name, inst, block)?;
+            }
+            Opcode::TlsRef { name } => {
+                self.select_tls_ref(name, inst, block)?;
             }
             Opcode::StackAddr { slot } => {
                 self.select_stack_addr(*slot, inst, block)?;
@@ -1997,6 +2005,99 @@ impl InstructionSelector {
         Ok(())
     }
 
+    /// Select external symbol reference via GOT (Global Offset Table).
+    ///
+    /// External symbols (from shared libraries or other translation units)
+    /// require GOT-indirect access on Darwin/AArch64:
+    ///   ADRP  Xd, symbol@GOTPAGE       -- load GOT page address
+    ///   LDR   Xd, [Xd, symbol@GOTPAGEOFF]  -- load pointer from GOT slot
+    ///
+    /// This is different from local GlobalRef which uses ADRP+ADD (direct).
+    /// The GOT slot contains the actual address of the symbol, resolved by
+    /// the dynamic linker at load time.
+    fn select_extern_ref(
+        &mut self,
+        name: &str,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        assert!(!inst.results.is_empty(), "ExternRef must have a result");
+
+        let result_val = inst.results[0];
+        let dst = self.new_vreg(RegClass::Gpr64);
+
+        // ADRP Xd, symbol@GOTPAGE
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                AArch64Opcode::ADRP,
+                vec![MachOperand::VReg(dst), MachOperand::Symbol(name.to_string())],
+            ),
+        );
+
+        // LDR Xd, [Xd, symbol@GOTPAGEOFF]
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                AArch64Opcode::LDRXuiGot,
+                vec![
+                    MachOperand::VReg(dst),
+                    MachOperand::VReg(dst),
+                    MachOperand::Symbol(name.to_string()),
+                ],
+            ),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), Type::I64);
+        Ok(())
+    }
+
+    /// Select thread-local variable reference via TLV descriptor.
+    ///
+    /// Thread-local variables on Darwin/AArch64 use a TLV descriptor pattern:
+    ///   ADRP  Xd, symbol@TLVPPAGE        -- load TLV descriptor page address
+    ///   LDR   Xd, [Xd, symbol@TLVPPAGEOFF]  -- load TLV descriptor pointer
+    ///
+    /// The loaded pointer is a TLV descriptor that the runtime uses to resolve
+    /// the thread-local address. After this sequence, the caller typically
+    /// invokes the TLV resolver function stored in the descriptor.
+    fn select_tls_ref(
+        &mut self,
+        name: &str,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        assert!(!inst.results.is_empty(), "TlsRef must have a result");
+
+        let result_val = inst.results[0];
+        let dst = self.new_vreg(RegClass::Gpr64);
+
+        // ADRP Xd, symbol@TLVPPAGE
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                AArch64Opcode::ADRP,
+                vec![MachOperand::VReg(dst), MachOperand::Symbol(name.to_string())],
+            ),
+        );
+
+        // LDR Xd, [Xd, symbol@TLVPPAGEOFF]
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                AArch64Opcode::LDRXuiTlvp,
+                vec![
+                    MachOperand::VReg(dst),
+                    MachOperand::VReg(dst),
+                    MachOperand::Symbol(name.to_string()),
+                ],
+            ),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), Type::I64);
+        Ok(())
+    }
+
     /// Select stack slot address computation.
     ///
     /// Emits ADD Xd, SP, #offset (the actual offset is resolved during
@@ -3081,6 +3182,50 @@ mod tests {
         assert_eq!(mblock.insts[0].operands[1], MachOperand::Symbol("my_global".to_string()));
         assert_eq!(mblock.insts[1].opcode, AArch64Opcode::ADDXriPCRel);
         assert_eq!(mblock.insts[1].operands[2], MachOperand::Symbol("my_global".to_string()));
+    }
+
+    #[test]
+    fn select_extern_ref_got_indirect() {
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::ExternRef { name: "printf".to_string() },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // ADRP + LDR (GOT-indirect, not ADD)
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADRP);
+        assert_eq!(mblock.insts[0].operands[1], MachOperand::Symbol("printf".to_string()));
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::LDRXuiGot);
+        assert_eq!(mblock.insts[1].operands[2], MachOperand::Symbol("printf".to_string()));
+    }
+
+    #[test]
+    fn select_tls_ref_tlv_indirect() {
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::TlsRef { name: "thread_local_var".to_string() },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // ADRP + LDR (TLV-indirect)
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADRP);
+        assert_eq!(mblock.insts[0].operands[1], MachOperand::Symbol("thread_local_var".to_string()));
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::LDRXuiTlvp);
+        assert_eq!(mblock.insts[1].operands[2], MachOperand::Symbol("thread_local_var".to_string()));
     }
 
     #[test]

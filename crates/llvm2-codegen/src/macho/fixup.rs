@@ -118,6 +118,26 @@ impl Fixup {
         }
     }
 
+    /// Create a fixup for an ADRP to a TLV descriptor.
+    pub fn tlvp_adrp(offset: u32, symbol_index: u32) -> Self {
+        Self {
+            offset,
+            kind: AArch64RelocKind::TlvpLoadPage21,
+            target: FixupTarget::Symbol(symbol_index),
+            addend: 0,
+        }
+    }
+
+    /// Create a fixup for an LDR TLV descriptor page offset.
+    pub fn tlvp_ldr(offset: u32, symbol_index: u32) -> Self {
+        Self {
+            offset,
+            kind: AArch64RelocKind::TlvpLoadPageoff12,
+            target: FixupTarget::Symbol(symbol_index),
+            addend: 0,
+        }
+    }
+
     /// Create a fixup for a 64-bit absolute pointer.
     pub fn pointer(offset: u32, symbol_index: u32) -> Self {
         Self {
@@ -380,6 +400,57 @@ mod tests {
 
         assert_eq!(got_adrp.kind, AArch64RelocKind::GotLoadPage21);
         assert_eq!(got_ldr.kind, AArch64RelocKind::GotLoadPageoff12);
+    }
+
+    #[test]
+    fn test_fixup_tlvp_pair() {
+        let tlvp_adrp = Fixup::tlvp_adrp(0x00, 9);
+        let tlvp_ldr = Fixup::tlvp_ldr(0x04, 9);
+
+        assert_eq!(tlvp_adrp.kind, AArch64RelocKind::TlvpLoadPage21);
+        assert_eq!(tlvp_ldr.kind, AArch64RelocKind::TlvpLoadPageoff12);
+        assert_eq!(tlvp_adrp.target, FixupTarget::Symbol(9));
+        assert_eq!(tlvp_ldr.target, FixupTarget::Symbol(9));
+    }
+
+    #[test]
+    fn test_fixup_list_resolve_got_pair() {
+        let mut list = FixupList::new();
+        list.push(Fixup::got_adrp(0x00, 5));
+        list.push(Fixup::got_ldr(0x04, 5));
+
+        let relocs = list.resolve_to_relocations();
+        assert_eq!(relocs.len(), 2);
+
+        assert_eq!(relocs[0].kind, AArch64RelocKind::GotLoadPage21);
+        assert_eq!(relocs[0].symbol_index, 5);
+        assert!(relocs[0].is_extern);
+        assert!(relocs[0].pc_relative);
+
+        assert_eq!(relocs[1].kind, AArch64RelocKind::GotLoadPageoff12);
+        assert_eq!(relocs[1].symbol_index, 5);
+        assert!(relocs[1].is_extern);
+        assert!(!relocs[1].pc_relative);
+    }
+
+    #[test]
+    fn test_fixup_list_resolve_tlvp_pair() {
+        let mut list = FixupList::new();
+        list.push(Fixup::tlvp_adrp(0x00, 9));
+        list.push(Fixup::tlvp_ldr(0x04, 9));
+
+        let relocs = list.resolve_to_relocations();
+        assert_eq!(relocs.len(), 2);
+
+        assert_eq!(relocs[0].kind, AArch64RelocKind::TlvpLoadPage21);
+        assert_eq!(relocs[0].symbol_index, 9);
+        assert!(relocs[0].is_extern);
+        assert!(relocs[0].pc_relative);
+
+        assert_eq!(relocs[1].kind, AArch64RelocKind::TlvpLoadPageoff12);
+        assert_eq!(relocs[1].symbol_index, 9);
+        assert!(relocs[1].is_extern);
+        assert!(!relocs[1].pc_relative);
     }
 
     #[test]

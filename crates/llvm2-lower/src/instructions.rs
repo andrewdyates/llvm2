@@ -84,7 +84,9 @@ pub enum Opcode {
     Bitcast { to_ty: Type },       // Reinterpret bits between same-size types
 
     // Addressing
-    GlobalRef { name: String },     // Reference to a global symbol (ADRP + ADD)
+    GlobalRef { name: String },     // Reference to a local global symbol (ADRP + ADD)
+    ExternRef { name: String },     // Reference to an external symbol via GOT (ADRP + LDR from GOT)
+    TlsRef { name: String },        // Reference to a thread-local variable via TLV descriptor
     StackAddr { slot: u32 },        // Address of a stack slot (SP + offset)
 
     // Control flow
