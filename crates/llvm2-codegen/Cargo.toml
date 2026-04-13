@@ -19,3 +19,7 @@ llvm2-opt = { workspace = true }
 llvm2-regalloc = { workspace = true }
 llvm2-verify = { workspace = true }
 thiserror = { workspace = true }
+
+[[bench]]
+name = "compile_bench"
+harness = false
