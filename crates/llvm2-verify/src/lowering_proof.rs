@@ -359,6 +359,379 @@ pub fn all_arithmetic_proofs() -> Vec<ProofObligation> {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// NZCV flag correctness lemmas
+// ---------------------------------------------------------------------------
+
+/// Build the proof obligation for NZCV N flag correctness (32-bit).
+///
+/// Lemma: forall a, b: BV32 . N_flag(a - b) == (a - b)[31]
+///
+/// We verify this by comparing the N flag from `encode_cmp` with
+/// a direct extraction of the MSB from the subtraction result.
+pub fn proof_nzcv_n_flag_i32() -> ProofObligation {
+    use crate::nzcv::encode_cmp;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    let flags = encode_cmp(a.clone(), b.clone(), 32);
+
+    // Direct computation: MSB of (a - b)
+    let diff = a.bvsub(b);
+    let msb = diff.extract(31, 31).eq_expr(SmtExpr::bv_const(1, 1));
+
+    // Convert both to BV1 via ITE so we can compare as bitvectors
+    let n_bv = SmtExpr::ite(flags.n, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1));
+    let msb_bv = SmtExpr::ite(msb, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1));
+
+    ProofObligation {
+        name: "NZCV_N_flag_I32".to_string(),
+        tmir_expr: msb_bv,
+        aarch64_expr: n_bv,
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+    }
+}
+
+/// Build the proof obligation for NZCV Z flag correctness (32-bit).
+///
+/// Lemma: forall a, b: BV32 . Z_flag(a - b) == ((a - b) == 0)
+pub fn proof_nzcv_z_flag_i32() -> ProofObligation {
+    use crate::nzcv::encode_cmp;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    let flags = encode_cmp(a.clone(), b.clone(), 32);
+
+    // Direct computation: (a - b) == 0
+    let diff = a.bvsub(b);
+    let is_zero = diff.eq_expr(SmtExpr::bv_const(0, 32));
+
+    let z_bv = SmtExpr::ite(flags.z, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1));
+    let zero_bv = SmtExpr::ite(is_zero, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1));
+
+    ProofObligation {
+        name: "NZCV_Z_flag_I32".to_string(),
+        tmir_expr: zero_bv,
+        aarch64_expr: z_bv,
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+    }
+}
+
+/// Build the proof obligation for NZCV C flag correctness (32-bit).
+///
+/// Lemma: forall a, b: BV32 . C_flag(a - b) == (a >=_u b)
+pub fn proof_nzcv_c_flag_i32() -> ProofObligation {
+    use crate::nzcv::encode_cmp;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    let flags = encode_cmp(a.clone(), b.clone(), 32);
+
+    // Direct computation: a >=_u b
+    let uge = a.bvuge(b);
+
+    let c_bv = SmtExpr::ite(flags.c, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1));
+    let uge_bv = SmtExpr::ite(uge, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1));
+
+    ProofObligation {
+        name: "NZCV_C_flag_I32".to_string(),
+        tmir_expr: uge_bv,
+        aarch64_expr: c_bv,
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+    }
+}
+
+/// Build the proof obligation for NZCV V flag correctness (32-bit).
+///
+/// Lemma: forall a, b: BV32 .
+///   V_flag(a - b) == (sign(a) != sign(b) AND sign(a) != sign(a - b))
+pub fn proof_nzcv_v_flag_i32() -> ProofObligation {
+    use crate::nzcv::encode_cmp;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    let flags = encode_cmp(a.clone(), b.clone(), 32);
+
+    // Direct computation of signed overflow for subtraction
+    let diff = a.clone().bvsub(b.clone());
+    let a_msb = a.extract(31, 31);
+    let b_msb = b.extract(31, 31);
+    let r_msb = diff.extract(31, 31);
+    let overflow = a_msb.clone().eq_expr(b_msb).not_expr()
+        .and_expr(a_msb.eq_expr(r_msb).not_expr());
+
+    let v_bv = SmtExpr::ite(flags.v, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1));
+    let ovf_bv = SmtExpr::ite(overflow, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1));
+
+    ProofObligation {
+        name: "NZCV_V_flag_I32".to_string(),
+        tmir_expr: ovf_bv,
+        aarch64_expr: v_bv,
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+    }
+}
+
+/// Return all 4 NZCV flag correctness lemma proofs.
+pub fn all_nzcv_flag_proofs() -> Vec<ProofObligation> {
+    vec![
+        proof_nzcv_n_flag_i32(),
+        proof_nzcv_z_flag_i32(),
+        proof_nzcv_c_flag_i32(),
+        proof_nzcv_v_flag_i32(),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Comparison lowering proofs: tMIR::Icmp -> CMP + CSET
+// ---------------------------------------------------------------------------
+
+/// Generic comparison lowering proof builder.
+///
+/// Builds a proof that `tMIR::Icmp(cond, a, b)` produces the same 1-bit
+/// result as the AArch64 sequence `CMP Rn, Rm ; CSET Rd, cc`.
+fn proof_icmp_generic(
+    intcc: llvm2_lower::instructions::IntCC,
+    aarch64cc: llvm2_lower::isel::AArch64CC,
+    width: u32,
+    name: &str,
+) -> ProofObligation {
+    use crate::nzcv::encode_cmp_cset;
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use llvm2_lower::types::Type;
+
+    let ty = if width == 32 { Type::I32 } else { Type::I64 };
+    let a = SmtExpr::var("a", width);
+    let b = SmtExpr::var("b", width);
+
+    ProofObligation {
+        name: name.to_string(),
+        tmir_expr: encode_tmir_icmp(&intcc, ty, a.clone(), b.clone()),
+        aarch64_expr: encode_cmp_cset(a, b, width, aarch64cc),
+        inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
+        preconditions: vec![],
+    }
+}
+
+/// Proof: tMIR::Icmp(Equal, I32) -> CMP Wn, Wm ; CSET Wd, EQ
+pub fn proof_icmp_eq_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::Equal, AArch64CC::EQ, 32, "Icmp_Eq_I32 -> CMP+CSET_EQ")
+}
+
+/// Proof: tMIR::Icmp(NotEqual, I32) -> CMP Wn, Wm ; CSET Wd, NE
+pub fn proof_icmp_ne_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::NotEqual, AArch64CC::NE, 32, "Icmp_NE_I32 -> CMP+CSET_NE")
+}
+
+/// Proof: tMIR::Icmp(SignedLessThan, I32) -> CMP Wn, Wm ; CSET Wd, LT
+pub fn proof_icmp_slt_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::SignedLessThan, AArch64CC::LT, 32, "Icmp_SLT_I32 -> CMP+CSET_LT")
+}
+
+/// Proof: tMIR::Icmp(SignedGreaterThanOrEqual, I32) -> CMP + CSET GE
+pub fn proof_icmp_sge_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::SignedGreaterThanOrEqual, AArch64CC::GE, 32, "Icmp_SGE_I32 -> CMP+CSET_GE")
+}
+
+/// Proof: tMIR::Icmp(SignedGreaterThan, I32) -> CMP + CSET GT
+pub fn proof_icmp_sgt_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::SignedGreaterThan, AArch64CC::GT, 32, "Icmp_SGT_I32 -> CMP+CSET_GT")
+}
+
+/// Proof: tMIR::Icmp(SignedLessThanOrEqual, I32) -> CMP + CSET LE
+pub fn proof_icmp_sle_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::SignedLessThanOrEqual, AArch64CC::LE, 32, "Icmp_SLE_I32 -> CMP+CSET_LE")
+}
+
+/// Proof: tMIR::Icmp(UnsignedLessThan, I32) -> CMP + CSET LO
+pub fn proof_icmp_ult_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::UnsignedLessThan, AArch64CC::LO, 32, "Icmp_ULT_I32 -> CMP+CSET_LO")
+}
+
+/// Proof: tMIR::Icmp(UnsignedGreaterThanOrEqual, I32) -> CMP + CSET HS
+pub fn proof_icmp_uge_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::UnsignedGreaterThanOrEqual, AArch64CC::HS, 32, "Icmp_UGE_I32 -> CMP+CSET_HS")
+}
+
+/// Proof: tMIR::Icmp(UnsignedGreaterThan, I32) -> CMP + CSET HI
+pub fn proof_icmp_ugt_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::UnsignedGreaterThan, AArch64CC::HI, 32, "Icmp_UGT_I32 -> CMP+CSET_HI")
+}
+
+/// Proof: tMIR::Icmp(UnsignedLessThanOrEqual, I32) -> CMP + CSET LS
+pub fn proof_icmp_ule_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::UnsignedLessThanOrEqual, AArch64CC::LS, 32, "Icmp_ULE_I32 -> CMP+CSET_LS")
+}
+
+/// Return all 10 comparison lowering proofs (32-bit).
+pub fn all_comparison_proofs_i32() -> Vec<ProofObligation> {
+    vec![
+        proof_icmp_eq_i32(),
+        proof_icmp_ne_i32(),
+        proof_icmp_slt_i32(),
+        proof_icmp_sge_i32(),
+        proof_icmp_sgt_i32(),
+        proof_icmp_sle_i32(),
+        proof_icmp_ult_i32(),
+        proof_icmp_uge_i32(),
+        proof_icmp_ugt_i32(),
+        proof_icmp_ule_i32(),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// 64-bit comparison proofs
+// ---------------------------------------------------------------------------
+
+/// Proof: tMIR::Icmp(Equal, I64) -> CMP Xn, Xm ; CSET Xd, EQ
+pub fn proof_icmp_eq_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::Equal, AArch64CC::EQ, 64, "Icmp_Eq_I64 -> CMP+CSET_EQ")
+}
+
+/// Proof: tMIR::Icmp(SignedLessThan, I64) -> CMP + CSET LT (64-bit)
+pub fn proof_icmp_slt_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::SignedLessThan, AArch64CC::LT, 64, "Icmp_SLT_I64 -> CMP+CSET_LT")
+}
+
+/// Proof: tMIR::Icmp(UnsignedLessThan, I64) -> CMP + CSET LO (64-bit)
+pub fn proof_icmp_ult_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::UnsignedLessThan, AArch64CC::LO, 64, "Icmp_ULT_I64 -> CMP+CSET_LO")
+}
+
+// ---------------------------------------------------------------------------
+// Branch lowering proofs: tMIR::CondBr(Icmp) -> CMP + B.cond
+// ---------------------------------------------------------------------------
+
+/// Build a proof that conditional branch lowering preserves semantics.
+///
+/// `tMIR::CondBr(Icmp(cond, a, b))` branches if the comparison is true.
+/// AArch64 lowers this to `CMP Rn, Rm ; B.cc target`.
+///
+/// The proof obligation: the branch is taken (condition evaluates to true)
+/// iff the tMIR comparison evaluates to true.
+fn proof_condbr_generic(
+    intcc: llvm2_lower::instructions::IntCC,
+    aarch64cc: llvm2_lower::isel::AArch64CC,
+    width: u32,
+    name: &str,
+) -> ProofObligation {
+    use crate::nzcv::{encode_cmp, eval_condition};
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use llvm2_lower::types::Type;
+
+    let ty = if width == 32 { Type::I32 } else { Type::I64 };
+    let a = SmtExpr::var("a", width);
+    let b = SmtExpr::var("b", width);
+
+    // tMIR side: Icmp produces B1. Branch is taken if result == 1.
+    let tmir_cmp = encode_tmir_icmp(&intcc, ty, a.clone(), b.clone());
+    // This is already a BV1 (0 or 1). Branch taken iff == 1.
+    // We use it directly for comparison.
+
+    // AArch64 side: CMP sets flags, B.cond evaluates condition.
+    // eval_condition returns a Bool. Convert to BV1 for comparison.
+    let flags = encode_cmp(a, b, width);
+    let cond_bool = eval_condition(aarch64cc, &flags);
+    let aarch64_branch_taken = SmtExpr::ite(
+        cond_bool,
+        SmtExpr::bv_const(1, 1),
+        SmtExpr::bv_const(0, 1),
+    );
+
+    ProofObligation {
+        name: name.to_string(),
+        tmir_expr: tmir_cmp,
+        aarch64_expr: aarch64_branch_taken,
+        inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
+        preconditions: vec![],
+    }
+}
+
+/// Proof: tMIR::CondBr(Icmp(Equal)) -> CMP + B.EQ
+pub fn proof_condbr_eq_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::Equal, AArch64CC::EQ, 32, "CondBr_Eq_I32 -> CMP+B.EQ")
+}
+
+/// Proof: tMIR::CondBr(Icmp(NotEqual)) -> CMP + B.NE
+pub fn proof_condbr_ne_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::NotEqual, AArch64CC::NE, 32, "CondBr_NE_I32 -> CMP+B.NE")
+}
+
+/// Proof: tMIR::CondBr(Icmp(SignedLessThan)) -> CMP + B.LT
+pub fn proof_condbr_slt_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::SignedLessThan, AArch64CC::LT, 32, "CondBr_SLT_I32 -> CMP+B.LT")
+}
+
+/// Proof: tMIR::CondBr(Icmp(UnsignedLessThan)) -> CMP + B.LO
+pub fn proof_condbr_ult_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::UnsignedLessThan, AArch64CC::LO, 32, "CondBr_ULT_I32 -> CMP+B.LO")
+}
+
+/// Return all branch lowering proofs.
+pub fn all_branch_proofs() -> Vec<ProofObligation> {
+    vec![
+        proof_condbr_eq_i32(),
+        proof_condbr_ne_i32(),
+        proof_condbr_slt_i32(),
+        proof_condbr_ult_i32(),
+    ]
+}
+
+/// Return all NZCV-related proofs (flags + comparisons + branches).
+pub fn all_nzcv_proofs() -> Vec<ProofObligation> {
+    let mut proofs = Vec::new();
+    proofs.extend(all_nzcv_flag_proofs());
+    proofs.extend(all_comparison_proofs_i32());
+    proofs.extend(vec![
+        proof_icmp_eq_i64(),
+        proof_icmp_slt_i64(),
+        proof_icmp_ult_i64(),
+    ]);
+    proofs.extend(all_branch_proofs());
+    proofs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,6 +815,179 @@ mod tests {
         match result {
             VerificationResult::Invalid { .. } => {} // expected
             other => panic!("Expected Invalid for wrong rule, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // NZCV flag correctness lemma tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_nzcv_n_flag_i32() {
+        assert_valid(&proof_nzcv_n_flag_i32());
+    }
+
+    #[test]
+    fn test_proof_nzcv_z_flag_i32() {
+        assert_valid(&proof_nzcv_z_flag_i32());
+    }
+
+    #[test]
+    fn test_proof_nzcv_c_flag_i32() {
+        assert_valid(&proof_nzcv_c_flag_i32());
+    }
+
+    #[test]
+    fn test_proof_nzcv_v_flag_i32() {
+        assert_valid(&proof_nzcv_v_flag_i32());
+    }
+
+    #[test]
+    fn test_all_nzcv_flag_proofs() {
+        for obligation in all_nzcv_flag_proofs() {
+            assert_valid(&obligation);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Comparison lowering proof tests (32-bit, all 10 conditions)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_icmp_eq_i32() {
+        assert_valid(&proof_icmp_eq_i32());
+    }
+
+    #[test]
+    fn test_proof_icmp_ne_i32() {
+        assert_valid(&proof_icmp_ne_i32());
+    }
+
+    #[test]
+    fn test_proof_icmp_slt_i32() {
+        assert_valid(&proof_icmp_slt_i32());
+    }
+
+    #[test]
+    fn test_proof_icmp_sge_i32() {
+        assert_valid(&proof_icmp_sge_i32());
+    }
+
+    #[test]
+    fn test_proof_icmp_sgt_i32() {
+        assert_valid(&proof_icmp_sgt_i32());
+    }
+
+    #[test]
+    fn test_proof_icmp_sle_i32() {
+        assert_valid(&proof_icmp_sle_i32());
+    }
+
+    #[test]
+    fn test_proof_icmp_ult_i32() {
+        assert_valid(&proof_icmp_ult_i32());
+    }
+
+    #[test]
+    fn test_proof_icmp_uge_i32() {
+        assert_valid(&proof_icmp_uge_i32());
+    }
+
+    #[test]
+    fn test_proof_icmp_ugt_i32() {
+        assert_valid(&proof_icmp_ugt_i32());
+    }
+
+    #[test]
+    fn test_proof_icmp_ule_i32() {
+        assert_valid(&proof_icmp_ule_i32());
+    }
+
+    #[test]
+    fn test_all_comparison_proofs_i32() {
+        for obligation in all_comparison_proofs_i32() {
+            assert_valid(&obligation);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 64-bit comparison proofs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_icmp_eq_i64() {
+        assert_valid(&proof_icmp_eq_i64());
+    }
+
+    #[test]
+    fn test_proof_icmp_slt_i64() {
+        assert_valid(&proof_icmp_slt_i64());
+    }
+
+    #[test]
+    fn test_proof_icmp_ult_i64() {
+        assert_valid(&proof_icmp_ult_i64());
+    }
+
+    // -----------------------------------------------------------------------
+    // Branch lowering proof tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_condbr_eq_i32() {
+        assert_valid(&proof_condbr_eq_i32());
+    }
+
+    #[test]
+    fn test_proof_condbr_ne_i32() {
+        assert_valid(&proof_condbr_ne_i32());
+    }
+
+    #[test]
+    fn test_proof_condbr_slt_i32() {
+        assert_valid(&proof_condbr_slt_i32());
+    }
+
+    #[test]
+    fn test_proof_condbr_ult_i32() {
+        assert_valid(&proof_condbr_ult_i32());
+    }
+
+    #[test]
+    fn test_all_nzcv_proofs() {
+        for obligation in all_nzcv_proofs() {
+            assert_valid(&obligation);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Negative test: verify wrong comparison mapping is detected
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wrong_comparison_detected() {
+        // Map Eq to LT -- should find a counterexample
+        use crate::nzcv::encode_cmp_cset;
+        use crate::tmir_semantics::encode_tmir_icmp;
+        use llvm2_lower::instructions::IntCC;
+        use llvm2_lower::isel::AArch64CC;
+        use llvm2_lower::types::Type;
+
+        let a = SmtExpr::var("a", 8);
+        let b = SmtExpr::var("b", 8);
+
+        let obligation = ProofObligation {
+            name: "WRONG: Icmp_Eq -> CMP+CSET_LT".to_string(),
+            tmir_expr: encode_tmir_icmp(&IntCC::Equal, Type::I8, a.clone(), b.clone()),
+            aarch64_expr: encode_cmp_cset(a, b, 8, AArch64CC::LT),
+            inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+            preconditions: vec![],
+        };
+
+        let result = verify_by_evaluation(&obligation);
+        match result {
+            VerificationResult::Invalid { .. } => {} // expected
+            other => panic!("Expected Invalid for wrong comparison mapping, got {:?}", other),
         }
     }
 

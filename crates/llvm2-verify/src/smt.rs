@@ -116,6 +116,24 @@ pub enum SmtExpr {
     /// `and(lhs, rhs)` -- boolean AND.
     And { lhs: Box<SmtExpr>, rhs: Box<SmtExpr> },
 
+    /// `or(lhs, rhs)` -- boolean OR.
+    Or { lhs: Box<SmtExpr>, rhs: Box<SmtExpr> },
+
+    /// `bvsgt(lhs, rhs)` -- signed greater-than.
+    BvSgt { lhs: Box<SmtExpr>, rhs: Box<SmtExpr>, width: u32 },
+
+    /// `bvsle(lhs, rhs)` -- signed less-or-equal.
+    BvSle { lhs: Box<SmtExpr>, rhs: Box<SmtExpr>, width: u32 },
+
+    /// `bvult(lhs, rhs)` -- unsigned less-than.
+    BvUlt { lhs: Box<SmtExpr>, rhs: Box<SmtExpr>, width: u32 },
+
+    /// `bvugt(lhs, rhs)` -- unsigned greater-than.
+    BvUgt { lhs: Box<SmtExpr>, rhs: Box<SmtExpr>, width: u32 },
+
+    /// `bvule(lhs, rhs)` -- unsigned less-or-equal.
+    BvUle { lhs: Box<SmtExpr>, rhs: Box<SmtExpr>, width: u32 },
+
     /// `ite(cond, then_expr, else_expr)` -- if-then-else.
     Ite { cond: Box<SmtExpr>, then_expr: Box<SmtExpr>, else_expr: Box<SmtExpr> },
 
@@ -212,6 +230,41 @@ impl SmtExpr {
         SmtExpr::And { lhs: Box::new(self), rhs: Box::new(other) }
     }
 
+    /// `or`
+    pub fn or_expr(self, other: Self) -> Self {
+        SmtExpr::Or { lhs: Box::new(self), rhs: Box::new(other) }
+    }
+
+    /// `bvsgt` (signed greater-than)
+    pub fn bvsgt(self, other: Self) -> Self {
+        let w = self.bv_width();
+        SmtExpr::BvSgt { lhs: Box::new(self), rhs: Box::new(other), width: w }
+    }
+
+    /// `bvsle` (signed less-or-equal)
+    pub fn bvsle(self, other: Self) -> Self {
+        let w = self.bv_width();
+        SmtExpr::BvSle { lhs: Box::new(self), rhs: Box::new(other), width: w }
+    }
+
+    /// `bvult` (unsigned less-than)
+    pub fn bvult(self, other: Self) -> Self {
+        let w = self.bv_width();
+        SmtExpr::BvUlt { lhs: Box::new(self), rhs: Box::new(other), width: w }
+    }
+
+    /// `bvugt` (unsigned greater-than)
+    pub fn bvugt(self, other: Self) -> Self {
+        let w = self.bv_width();
+        SmtExpr::BvUgt { lhs: Box::new(self), rhs: Box::new(other), width: w }
+    }
+
+    /// `bvule` (unsigned less-or-equal)
+    pub fn bvule(self, other: Self) -> Self {
+        let w = self.bv_width();
+        SmtExpr::BvUle { lhs: Box::new(self), rhs: Box::new(other), width: w }
+    }
+
     /// `ite` (if-then-else)
     pub fn ite(cond: Self, then_expr: Self, else_expr: Self) -> Self {
         SmtExpr::Ite {
@@ -250,8 +303,14 @@ impl SmtExpr {
             | SmtExpr::Not { .. }
             | SmtExpr::BvSlt { .. }
             | SmtExpr::BvSge { .. }
+            | SmtExpr::BvSgt { .. }
+            | SmtExpr::BvSle { .. }
+            | SmtExpr::BvUlt { .. }
             | SmtExpr::BvUge { .. }
-            | SmtExpr::And { .. } => {
+            | SmtExpr::BvUgt { .. }
+            | SmtExpr::BvUle { .. }
+            | SmtExpr::And { .. }
+            | SmtExpr::Or { .. } => {
                 panic!("bv_width called on Bool-sorted expression")
             }
         }
@@ -265,8 +324,14 @@ impl SmtExpr {
             | SmtExpr::Not { .. }
             | SmtExpr::BvSlt { .. }
             | SmtExpr::BvSge { .. }
+            | SmtExpr::BvSgt { .. }
+            | SmtExpr::BvSle { .. }
+            | SmtExpr::BvUlt { .. }
             | SmtExpr::BvUge { .. }
-            | SmtExpr::And { .. } => SmtSort::Bool,
+            | SmtExpr::BvUgt { .. }
+            | SmtExpr::BvUle { .. }
+            | SmtExpr::And { .. }
+            | SmtExpr::Or { .. } => SmtSort::Bool,
             _ => SmtSort::BitVec(self.bv_width()),
         }
     }
@@ -292,8 +357,14 @@ impl SmtExpr {
             | SmtExpr::Eq { lhs, rhs }
             | SmtExpr::BvSlt { lhs, rhs, .. }
             | SmtExpr::BvSge { lhs, rhs, .. }
+            | SmtExpr::BvSgt { lhs, rhs, .. }
+            | SmtExpr::BvSle { lhs, rhs, .. }
+            | SmtExpr::BvUlt { lhs, rhs, .. }
             | SmtExpr::BvUge { lhs, rhs, .. }
-            | SmtExpr::And { lhs, rhs } => {
+            | SmtExpr::BvUgt { lhs, rhs, .. }
+            | SmtExpr::BvUle { lhs, rhs, .. }
+            | SmtExpr::And { lhs, rhs }
+            | SmtExpr::Or { lhs, rhs } => {
                 lhs.collect_vars(vars);
                 rhs.collect_vars(vars);
             }
@@ -447,8 +518,36 @@ impl SmtExpr {
                 let b = rhs.eval(env).as_u64();
                 EvalResult::Bool(a >= b)
             }
+            SmtExpr::BvSgt { lhs, rhs, width } => {
+                let a = sign_extend(lhs.eval(env).as_u64(), *width);
+                let b = sign_extend(rhs.eval(env).as_u64(), *width);
+                EvalResult::Bool(a > b)
+            }
+            SmtExpr::BvSle { lhs, rhs, width } => {
+                let a = sign_extend(lhs.eval(env).as_u64(), *width);
+                let b = sign_extend(rhs.eval(env).as_u64(), *width);
+                EvalResult::Bool(a <= b)
+            }
+            SmtExpr::BvUlt { lhs, rhs, .. } => {
+                let a = lhs.eval(env).as_u64();
+                let b = rhs.eval(env).as_u64();
+                EvalResult::Bool(a < b)
+            }
+            SmtExpr::BvUgt { lhs, rhs, .. } => {
+                let a = lhs.eval(env).as_u64();
+                let b = rhs.eval(env).as_u64();
+                EvalResult::Bool(a > b)
+            }
+            SmtExpr::BvUle { lhs, rhs, .. } => {
+                let a = lhs.eval(env).as_u64();
+                let b = rhs.eval(env).as_u64();
+                EvalResult::Bool(a <= b)
+            }
             SmtExpr::And { lhs, rhs } => {
                 EvalResult::Bool(lhs.eval(env).as_bool() && rhs.eval(env).as_bool())
+            }
+            SmtExpr::Or { lhs, rhs } => {
+                EvalResult::Bool(lhs.eval(env).as_bool() || rhs.eval(env).as_bool())
             }
             SmtExpr::Ite { cond, then_expr, else_expr } => {
                 if cond.eval(env).as_bool() {
@@ -489,8 +588,14 @@ impl fmt::Display for SmtExpr {
             SmtExpr::Not { operand } => write!(f, "(not {})", operand),
             SmtExpr::BvSlt { lhs, rhs, .. } => write!(f, "(bvslt {} {})", lhs, rhs),
             SmtExpr::BvSge { lhs, rhs, .. } => write!(f, "(bvsge {} {})", lhs, rhs),
+            SmtExpr::BvSgt { lhs, rhs, .. } => write!(f, "(bvsgt {} {})", lhs, rhs),
+            SmtExpr::BvSle { lhs, rhs, .. } => write!(f, "(bvsle {} {})", lhs, rhs),
+            SmtExpr::BvUlt { lhs, rhs, .. } => write!(f, "(bvult {} {})", lhs, rhs),
             SmtExpr::BvUge { lhs, rhs, .. } => write!(f, "(bvuge {} {})", lhs, rhs),
+            SmtExpr::BvUgt { lhs, rhs, .. } => write!(f, "(bvugt {} {})", lhs, rhs),
+            SmtExpr::BvUle { lhs, rhs, .. } => write!(f, "(bvule {} {})", lhs, rhs),
             SmtExpr::And { lhs, rhs } => write!(f, "(and {} {})", lhs, rhs),
+            SmtExpr::Or { lhs, rhs } => write!(f, "(or {} {})", lhs, rhs),
             SmtExpr::Ite { cond, then_expr, else_expr } => {
                 write!(f, "(ite {} {} {})", cond, then_expr, else_expr)
             }
