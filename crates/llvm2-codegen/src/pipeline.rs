@@ -457,6 +457,40 @@ pub fn apply_regalloc(
 }
 
 // ---------------------------------------------------------------------------
+// Copy lowering: pseudo Copy -> real MovR
+// ---------------------------------------------------------------------------
+
+/// Lower all pseudo `Copy` instructions to real `MovR` instructions.
+///
+/// After register allocation, the allocator inserts `Copy` pseudo-instructions
+/// to move data between physical registers. These must be lowered to real
+/// `MovR` (encoded as `ORR Rd, XZR, Rm`) before encoding, since the encoder
+/// skips pseudo-instructions.
+///
+/// Copies where source == destination are eliminated entirely (converted to Nop).
+pub fn lower_copies(ir_func: &mut IrMachFunction) {
+    for inst in &mut ir_func.insts {
+        if inst.opcode == IrOpcode::Copy && inst.operands.len() >= 2 {
+            // Copy operands: [dst, src]
+            // Check if src == dst (redundant copy).
+            let is_redundant = match (&inst.operands[0], &inst.operands[1]) {
+                (IrOperand::PReg(a), IrOperand::PReg(b)) => a == b,
+                _ => false,
+            };
+            if is_redundant {
+                inst.opcode = IrOpcode::Nop;
+                // Nop is still pseudo, flags stay IS_PSEUDO — that's correct.
+            } else {
+                inst.opcode = IrOpcode::MovR;
+                // Clear the IS_PSEUDO flag so the encoder processes this as a
+                // real instruction. MovR encodes as ORR Rd, XZR, Rm.
+                inst.flags.remove(llvm2_ir::inst::InstFlags::IS_PSEUDO);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Encoding: IR MachFunction -> machine code bytes
 // ---------------------------------------------------------------------------
 
@@ -627,6 +661,9 @@ impl Pipeline {
         // Phase 4-6: Register Allocation
         self.run_regalloc(&mut ir_func)?;
 
+        // Phase 6.5: Lower pseudo Copy instructions to real MovR.
+        lower_copies(&mut ir_func);
+
         // Phase 7: Frame Lowering
         let frame_layout = self.run_frame_lowering(&mut ir_func);
 
@@ -656,6 +693,9 @@ impl Pipeline {
 
         // Phase 4-6: Register Allocation
         self.run_regalloc(ir_func)?;
+
+        // Phase 6.5: Lower pseudo Copy instructions to real MovR.
+        lower_copies(ir_func);
 
         // Phase 7: Frame Lowering
         let frame_layout = self.run_frame_lowering(ir_func);
