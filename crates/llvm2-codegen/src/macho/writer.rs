@@ -561,4 +561,79 @@ mod tests {
         // Just verify it produces a valid-looking file
         assert_eq!(&bytes[0..4], &[0xCF, 0xFA, 0xED, 0xFE]);
     }
+
+    #[test]
+    fn test_got_relocations_in_object() {
+        use super::super::reloc::{encode_relocation, Relocation};
+
+        let mut writer = MachOWriter::new();
+        // Two ARM64 instructions: ADRP + LDR (GOT-indirect pattern)
+        let adrp = 0x9000_0000u32; // ADRP X0, #0
+        let ldr = 0xF940_0000u32;  // LDR X0, [X0, #0]
+        let mut code = Vec::new();
+        code.extend_from_slice(&adrp.to_le_bytes());
+        code.extend_from_slice(&ldr.to_le_bytes());
+        writer.add_text_section(&code);
+
+        // External symbol for GOT access
+        writer.add_symbol("_printf", 0, 0, true); // undefined external
+
+        // GOT relocations
+        writer.add_relocation(0, Relocation::got_load_page21(0x00, 0));
+        writer.add_relocation(0, Relocation::got_load_pageoff12(0x04, 0));
+
+        let bytes = writer.write();
+        // Verify valid Mach-O
+        assert_eq!(&bytes[0..4], &[0xCF, 0xFA, 0xED, 0xFE]);
+
+        // Verify the GOT relocations encode correctly
+        let got_page_encoded = encode_relocation(&Relocation::got_load_page21(0x00, 0));
+        let r_word1 = u32::from_le_bytes([got_page_encoded[4], got_page_encoded[5],
+                                           got_page_encoded[6], got_page_encoded[7]]);
+        assert_eq!((r_word1 >> 28) & 0xF, 5, "GOT_LOAD_PAGE21 type = 5");
+        assert_eq!((r_word1 >> 24) & 1, 1, "GOT_LOAD_PAGE21 is PC-relative");
+
+        let got_off_encoded = encode_relocation(&Relocation::got_load_pageoff12(0x04, 0));
+        let r_word1 = u32::from_le_bytes([got_off_encoded[4], got_off_encoded[5],
+                                           got_off_encoded[6], got_off_encoded[7]]);
+        assert_eq!((r_word1 >> 28) & 0xF, 6, "GOT_LOAD_PAGEOFF12 type = 6");
+        assert_eq!((r_word1 >> 24) & 1, 0, "GOT_LOAD_PAGEOFF12 is not PC-relative");
+    }
+
+    #[test]
+    fn test_tlvp_relocations_in_object() {
+        use super::super::reloc::{encode_relocation, Relocation};
+
+        let mut writer = MachOWriter::new();
+        // Two ARM64 instructions: ADRP + LDR (TLV pattern)
+        let adrp = 0x9000_0000u32;
+        let ldr = 0xF940_0000u32;
+        let mut code = Vec::new();
+        code.extend_from_slice(&adrp.to_le_bytes());
+        code.extend_from_slice(&ldr.to_le_bytes());
+        writer.add_text_section(&code);
+
+        // TLV symbol
+        writer.add_symbol("_thread_var", 0, 0, true);
+
+        // TLV relocations
+        writer.add_relocation(0, Relocation::tlvp_load_page21(0x00, 0));
+        writer.add_relocation(0, Relocation::tlvp_load_pageoff12(0x04, 0));
+
+        let bytes = writer.write();
+        assert_eq!(&bytes[0..4], &[0xCF, 0xFA, 0xED, 0xFE]);
+
+        // Verify TLV relocation types
+        let tlvp_page_encoded = encode_relocation(&Relocation::tlvp_load_page21(0x00, 0));
+        let r_word1 = u32::from_le_bytes([tlvp_page_encoded[4], tlvp_page_encoded[5],
+                                           tlvp_page_encoded[6], tlvp_page_encoded[7]]);
+        assert_eq!((r_word1 >> 28) & 0xF, 8, "TLVP_LOAD_PAGE21 type = 8");
+        assert_eq!((r_word1 >> 24) & 1, 1, "TLVP_LOAD_PAGE21 is PC-relative");
+
+        let tlvp_off_encoded = encode_relocation(&Relocation::tlvp_load_pageoff12(0x04, 0));
+        let r_word1 = u32::from_le_bytes([tlvp_off_encoded[4], tlvp_off_encoded[5],
+                                           tlvp_off_encoded[6], tlvp_off_encoded[7]]);
+        assert_eq!((r_word1 >> 28) & 0xF, 9, "TLVP_LOAD_PAGEOFF12 type = 9");
+        assert_eq!((r_word1 >> 24) & 1, 0, "TLVP_LOAD_PAGEOFF12 is not PC-relative");
+    }
 }

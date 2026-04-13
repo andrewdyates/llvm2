@@ -181,6 +181,16 @@ impl Relocation {
         Self::new(offset, symbol_index, AArch64RelocKind::GotLoadPageoff12)
     }
 
+    /// Create a TLV page relocation for ADRP to TLV descriptor.
+    pub fn tlvp_load_page21(offset: u32, symbol_index: u32) -> Self {
+        Self::new(offset, symbol_index, AArch64RelocKind::TlvpLoadPage21)
+    }
+
+    /// Create a TLV page offset relocation for LDR from TLV descriptor.
+    pub fn tlvp_load_pageoff12(offset: u32, symbol_index: u32) -> Self {
+        Self::new(offset, symbol_index, AArch64RelocKind::TlvpLoadPageoff12)
+    }
+
     /// Create an Unsigned (absolute pointer) relocation.
     pub fn unsigned_ptr(offset: u32, symbol_index: u32) -> Self {
         Self {
@@ -539,11 +549,57 @@ mod tests {
         assert!(!AArch64RelocKind::Unsigned.is_pc_relative());
         assert!(AArch64RelocKind::GotLoadPage21.is_pc_relative());
         assert!(!AArch64RelocKind::GotLoadPageoff12.is_pc_relative());
+        assert!(AArch64RelocKind::TlvpLoadPage21.is_pc_relative());
+        assert!(!AArch64RelocKind::TlvpLoadPageoff12.is_pc_relative());
 
         assert_eq!(AArch64RelocKind::Unsigned.default_log2_size(), 3);
         assert_eq!(AArch64RelocKind::Branch26.default_log2_size(), 2);
         assert_eq!(AArch64RelocKind::Page21.default_log2_size(), 2);
         assert_eq!(AArch64RelocKind::Pageoff12.default_log2_size(), 2);
+        assert_eq!(AArch64RelocKind::TlvpLoadPage21.default_log2_size(), 2);
+        assert_eq!(AArch64RelocKind::TlvpLoadPageoff12.default_log2_size(), 2);
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip_tlvp() {
+        let reloc = Relocation::tlvp_load_page21(0x20, 8);
+        let encoded = encode_relocation(&reloc);
+        let decoded = decode_relocation(&encoded).unwrap();
+        assert_eq!(reloc, decoded);
+        assert!(decoded.pc_relative);
+        assert_eq!(decoded.kind, AArch64RelocKind::TlvpLoadPage21);
+
+        let reloc = Relocation::tlvp_load_pageoff12(0x24, 8);
+        let encoded = encode_relocation(&reloc);
+        let decoded = decode_relocation(&encoded).unwrap();
+        assert_eq!(reloc, decoded);
+        assert!(!decoded.pc_relative);
+        assert_eq!(decoded.kind, AArch64RelocKind::TlvpLoadPageoff12);
+    }
+
+    #[test]
+    fn test_tlvp_reloc_binary_layout() {
+        // TlvpLoadPage21: offset=0x20, symbol=8, pcrel=1, length=2, extern=1, type=8
+        let reloc = Relocation::tlvp_load_page21(0x20, 8);
+        let bytes = encode_relocation(&reloc);
+
+        let r_word1 = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        assert_eq!(r_word1 & 0x00FF_FFFF, 8, "symbol index");
+        assert_eq!((r_word1 >> 24) & 1, 1, "pc_relative");
+        assert_eq!((r_word1 >> 25) & 3, 2, "length");
+        assert_eq!((r_word1 >> 27) & 1, 1, "is_extern");
+        assert_eq!((r_word1 >> 28) & 0xF, 8, "type (TlvpLoadPage21)");
+
+        // TlvpLoadPageoff12: offset=0x24, symbol=8, pcrel=0, length=2, extern=1, type=9
+        let reloc = Relocation::tlvp_load_pageoff12(0x24, 8);
+        let bytes = encode_relocation(&reloc);
+
+        let r_word1 = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        assert_eq!(r_word1 & 0x00FF_FFFF, 8, "symbol index");
+        assert_eq!((r_word1 >> 24) & 1, 0, "pc_relative (pageoff is not pcrel)");
+        assert_eq!((r_word1 >> 25) & 3, 2, "length");
+        assert_eq!((r_word1 >> 27) & 1, 1, "is_extern");
+        assert_eq!((r_word1 >> 28) & 0xF, 9, "type (TlvpLoadPageoff12)");
     }
 
     #[test]
