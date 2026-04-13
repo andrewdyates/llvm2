@@ -76,6 +76,8 @@ pub enum PipelineError {
     UnsupportedOpcode(IrOpcode),
     #[error("branch relaxation failed: {0}")]
     Relaxation(#[from] crate::relax::RelaxError),
+    #[error("invalid operand in regalloc adapter: {0}")]
+    InvalidOperand(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -274,7 +276,7 @@ pub fn isel_to_ir(
 /// The regalloc MachFunction separates defs from uses for liveness analysis.
 /// We use a simple heuristic: first operand is def, rest are uses
 /// (for most instructions). Special cases: branches have no defs, etc.
-pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> llvm2_regalloc::MachFunction {
+pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> Result<llvm2_regalloc::MachFunction, PipelineError> {
     use llvm2_regalloc::machine_types as ra;
 
     let mut ra_func = ra::MachFunction {
@@ -303,7 +305,7 @@ pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> llvm2_regalloc::MachFunction 
     for ir_inst in &ir_func.insts {
         let flags = convert_ir_flags_to_regalloc(ir_inst);
 
-        let (defs, uses) = classify_def_use(ir_inst);
+        let (defs, uses) = classify_def_use(ir_inst)?;
         let implicit_defs: Vec<PReg> = ir_inst.implicit_defs.to_vec();
         let implicit_uses: Vec<PReg> = ir_inst.implicit_uses.to_vec();
 
@@ -327,7 +329,7 @@ pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> llvm2_regalloc::MachFunction 
         });
     }
 
-    ra_func
+    Ok(ra_func)
 }
 
 /// Classify operands into defs and uses for regalloc.
@@ -339,34 +341,34 @@ pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> llvm2_regalloc::MachFunction 
 /// - For loads: operand[0] is def, rest are uses
 fn classify_def_use(
     inst: &IrMachInst,
-) -> (Vec<llvm2_regalloc::MachOperand>, Vec<llvm2_regalloc::MachOperand>) {
+) -> Result<(Vec<llvm2_regalloc::MachOperand>, Vec<llvm2_regalloc::MachOperand>), PipelineError> {
     use llvm2_regalloc::machine_types::MachOperand as RaOp;
 
-    let convert_op = |op: &IrOperand| -> RaOp {
+    let convert_op = |op: &IrOperand| -> Result<RaOp, PipelineError> {
         match op {
-            IrOperand::VReg(v) => RaOp::VReg(*v),
-            IrOperand::PReg(p) => RaOp::PReg(*p),
-            IrOperand::Imm(i) => RaOp::Imm(*i),
-            IrOperand::FImm(f) => RaOp::FImm(*f),
-            IrOperand::Block(b) => RaOp::Block(*b),
-            IrOperand::StackSlot(s) => RaOp::StackSlot(*s),
+            IrOperand::VReg(v) => Ok(RaOp::VReg(*v)),
+            IrOperand::PReg(p) => Ok(RaOp::PReg(*p)),
+            IrOperand::Imm(i) => Ok(RaOp::Imm(*i)),
+            IrOperand::FImm(f) => Ok(RaOp::FImm(*f)),
+            IrOperand::Block(b) => Ok(RaOp::Block(*b)),
+            IrOperand::StackSlot(s) => Ok(RaOp::StackSlot(*s)),
             // FrameIndex, MemOp, and Special should not appear pre-regalloc.
             // Silently mapping them to Imm(0) produces wrong code (#94).
-            IrOperand::FrameIndex(fi) => panic!(
+            IrOperand::FrameIndex(fi) => Err(PipelineError::InvalidOperand(format!(
                 "FrameIndex({:?}) operand reached regalloc adapter; \
                  frame indices must be eliminated before register allocation",
                 fi
-            ),
-            IrOperand::MemOp { base, offset } => panic!(
+            ))),
+            IrOperand::MemOp { base, offset } => Err(PipelineError::InvalidOperand(format!(
                 "MemOp(base={:?}, offset={}) operand reached regalloc adapter; \
                  memory operands must be lowered before register allocation",
                 base, offset
-            ),
-            IrOperand::Special(s) => panic!(
+            ))),
+            IrOperand::Special(s) => Err(PipelineError::InvalidOperand(format!(
                 "Special({:?}) operand reached regalloc adapter; \
                  special registers must be lowered to PReg before register allocation",
                 s
-            ),
+            ))),
         }
     };
 
@@ -377,13 +379,17 @@ fn classify_def_use(
 
     if is_store || is_branch || is_return || is_cmp || inst.operands.is_empty() {
         // All uses, no defs.
-        let uses: Vec<RaOp> = inst.operands.iter().map(convert_op).collect();
-        (Vec::new(), uses)
+        let uses: Vec<RaOp> = inst.operands.iter()
+            .map(|op| convert_op(op))
+            .collect::<Result<_, _>>()?;
+        Ok((Vec::new(), uses))
     } else {
         // First operand is def, rest are uses.
-        let defs = vec![convert_op(&inst.operands[0])];
-        let uses: Vec<RaOp> = inst.operands[1..].iter().map(convert_op).collect();
-        (defs, uses)
+        let defs = vec![convert_op(&inst.operands[0])?];
+        let uses: Vec<RaOp> = inst.operands[1..].iter()
+            .map(|op| convert_op(op))
+            .collect::<Result<_, _>>()?;
+        Ok((defs, uses))
     }
 }
 
@@ -746,7 +752,7 @@ impl Pipeline {
         ir_func: &mut IrMachFunction,
     ) -> Result<(), PipelineError> {
         // Phase 4: Convert IR to regalloc format
-        let mut ra_func = ir_to_regalloc(ir_func);
+        let mut ra_func = ir_to_regalloc(ir_func)?;
 
         // Debug: dump block structure before regalloc
         #[cfg(debug_assertions)]
