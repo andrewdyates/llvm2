@@ -39,10 +39,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use llvm2_ir::{AArch64Opcode, BlockId, InstId, MachFunction, MachOperand};
+use llvm2_ir::{BlockId, InstId, MachFunction, MachOperand};
 
 use crate::dom::DomTree;
-use crate::effects::{opcode_effect, MemoryEffect};
+use crate::effects::{opcode_effect, produces_value, MemoryEffect};
 use crate::loops::{create_preheader, LoopAnalysis, NaturalLoop};
 use crate::pass_manager::MachinePass;
 
@@ -225,19 +225,6 @@ fn is_operand_loop_invariant(
             }
         }
         // Immediates, physical registers, blocks, etc. are invariant.
-        _ => true,
-    }
-}
-
-/// Returns true if this opcode produces a value (operand[0] is a def).
-fn produces_value(opcode: AArch64Opcode) -> bool {
-    use AArch64Opcode::*;
-    match opcode {
-        CmpRR | CmpRI | Tst | Fcmp => false,
-        StrRI | StpRI | StpPreIndex => false,
-        B | BCond | Cbz | Cbnz | Br | Ret => false,
-        Nop => false,
-        Bl | Blr => false,
         _ => true,
     }
 }

@@ -36,6 +36,7 @@ use std::collections::HashSet;
 
 use llvm2_ir::{InstFlags, InstId, MachFunction, MachOperand, AArch64Opcode};
 
+use crate::effects::inst_produces_value;
 use crate::pass_manager::MachinePass;
 
 /// Dead Code Elimination pass.
@@ -116,7 +117,7 @@ fn collect_used_vregs(func: &MachFunction) -> HashSet<u32> {
             let inst = func.inst(inst_id);
 
             // Determine which operands are "uses" vs "defs".
-            let use_start = if produces_value(inst) { 1 } else { 0 };
+            let use_start = if inst_produces_value(inst) { 1 } else { 0 };
 
             for operand in &inst.operands[use_start..] {
                 if let MachOperand::VReg(vreg) = operand {
@@ -137,43 +138,13 @@ fn collect_used_vregs(func: &MachFunction) -> HashSet<u32> {
 /// Convention: for instructions that produce a value, operand[0] is the
 /// destination register (def).
 fn get_def_vreg(inst: &llvm2_ir::MachInst) -> Option<u32> {
-    if !produces_value(inst) {
+    if !inst_produces_value(inst) {
         return None;
     }
     if let Some(MachOperand::VReg(vreg)) = inst.operands.first() {
         Some(vreg.id)
     } else {
         None
-    }
-}
-
-/// Returns true if this instruction produces a value (has a def operand).
-///
-/// Instructions that don't produce values: CMP, TST, STR, STP, branches,
-/// returns, NOP, and calls that return void (simplified: we treat all
-/// calls as having side effects anyway).
-fn produces_value(inst: &llvm2_ir::MachInst) -> bool {
-    use AArch64Opcode::*;
-    match inst.opcode {
-        // Compare/test: set flags, no register def
-        CmpRR | CmpRI | Tst | Fcmp => false,
-        // Stores: write to memory, no register def
-        StrRI | StpRI | StpPreIndex => false,
-        // Branches and returns: control flow, no register def
-        B | BCond | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => false,
-        // Trap pseudo-instructions: control flow, no register def
-        TrapOverflow | TrapBoundsCheck | TrapNull | TrapDivZero | TrapShiftRange => false,
-        // Reference counting: side effects, no register def
-        Retain | Release => false,
-        // Nop: no def
-        Nop => false,
-        // Calls: they DO produce a result (in X0 typically), but that's
-        // handled via implicit defs. For our simple model, calls have
-        // side effects and won't be DCE'd anyway.
-        Bl | Blr => false,
-        // Everything else produces a value in operand[0]
-        // (including AddsRR/SubsRR which produce a result plus set flags)
-        _ => true,
     }
 }
 

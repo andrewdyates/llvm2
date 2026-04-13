@@ -981,10 +981,19 @@ impl<'a> TmirAdapter<'a> {
                 if (index as usize) < field_types.len() {
                     field_types[index as usize].clone()
                 } else {
-                    Type::I64 // fallback
+                    return Err(AdapterError::UnsupportedType(format!(
+                        "field index {} out of bounds for struct with {} fields",
+                        index,
+                        field_types.len()
+                    )));
                 }
             }
-            _ => Type::I64, // fallback for non-struct
+            _ => {
+                return Err(AdapterError::UnsupportedType(format!(
+                    "field extract on non-struct type: {:?}",
+                    ty
+                )));
+            }
         };
 
         let load_ptr = if offset == 0 {

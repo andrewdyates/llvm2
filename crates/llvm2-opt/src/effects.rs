@@ -150,6 +150,47 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
     }
 }
 
+/// Returns true if this opcode produces a value (operand[0] is a def).
+///
+/// Instructions that don't produce values: CMP, TST, STR, STP, branches,
+/// returns, NOP, calls, traps, and reference counting ops.
+///
+/// This is the **authoritative, single definition** — all passes (DCE, CSE,
+/// LICM, addr-mode, etc.) must call this rather than maintaining their own
+/// copy. See issue #96.
+pub fn produces_value(opcode: AArch64Opcode) -> bool {
+    use AArch64Opcode::*;
+    match opcode {
+        // Compare/test: set flags, no register def
+        CmpRR | CmpRI | Tst | Fcmp => false,
+        // Stores: write to memory, no register def
+        StrRI | StrbRI | StrhRI | StpRI | StpPreIndex | StrRO => false,
+        // Branches and returns: control flow, no register def
+        B | BCond | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => false,
+        // Trap pseudo-instructions: control flow, no register def
+        TrapOverflow | TrapBoundsCheck | TrapNull | TrapDivZero | TrapShiftRange => false,
+        // Reference counting: side effects, no register def
+        Retain | Release => false,
+        // Nop: no def
+        Nop => false,
+        // Calls: they DO produce a result (in X0 typically), but that's
+        // handled via implicit defs. For our simple model, calls have
+        // side effects and won't be DCE'd anyway.
+        Bl | Blr => false,
+        // Everything else produces a value in operand[0]
+        // (including AddsRR/SubsRR which produce a result plus set flags)
+        _ => true,
+    }
+}
+
+/// Returns true if this instruction produces a value.
+///
+/// Convenience wrapper around [`produces_value`] that takes a `MachInst`
+/// reference instead of a bare opcode.
+pub fn inst_produces_value(inst: &llvm2_ir::MachInst) -> bool {
+    produces_value(inst.opcode)
+}
+
 /// Returns true if an instruction with the given opcode can be safely
 /// eliminated if its result is unused and it has no other side effects.
 ///

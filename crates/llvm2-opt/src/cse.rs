@@ -46,7 +46,7 @@ use std::collections::HashMap;
 use llvm2_ir::{AArch64Opcode, BlockId, InstId, MachFunction, MachOperand, ProofAnnotation, VReg};
 
 use crate::dom::DomTree;
-use crate::effects::{opcode_effect, MemoryEffect};
+use crate::effects::{opcode_effect, produces_value, MemoryEffect};
 use crate::pass_manager::MachinePass;
 
 /// Common Subexpression Elimination pass.
@@ -281,19 +281,6 @@ fn dom_preorder(dom: &DomTree, entry: BlockId) -> Vec<BlockId> {
     }
 
     order
-}
-
-/// Returns true if this opcode produces a value (operand[0] is a def).
-fn produces_value(opcode: AArch64Opcode) -> bool {
-    use AArch64Opcode::*;
-    match opcode {
-        CmpRR | CmpRI | Tst | Fcmp => false,
-        StrRI | StpRI | StpPreIndex => false,
-        B | BCond | Cbz | Cbnz | Br | Ret => false,
-        Nop => false,
-        Bl | Blr => false,
-        _ => true,
-    }
 }
 
 #[cfg(test)]

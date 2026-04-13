@@ -36,8 +36,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use llvm2_ir::{AArch64Opcode, InstId, MachFunction, MachInst, MachOperand};
+use llvm2_ir::{AArch64Opcode, InstId, MachFunction, MachOperand};
 
+use crate::effects::inst_produces_value;
 use crate::pass_manager::MachinePass;
 
 /// Maximum unsigned immediate byte offset for 64-bit LDR/STR.
@@ -170,7 +171,7 @@ fn count_vreg_uses(func: &MachFunction) -> HashMap<u32, u32> {
         let block = func.block(*block_id);
         for &inst_id in &block.insts {
             let inst = func.inst(inst_id);
-            let use_start = if produces_value(inst) { 1 } else { 0 };
+            let use_start = if inst_produces_value(inst) { 1 } else { 0 };
 
             for operand in &inst.operands[use_start..] {
                 if let MachOperand::VReg(vreg) = operand {
@@ -203,23 +204,6 @@ fn collect_add_ri_defs(func: &MachFunction) -> HashMap<u32, InstId> {
     }
 
     defs
-}
-
-/// Returns true if this instruction produces a value (has a def operand).
-///
-/// Mirrors the convention in dce.rs.
-fn produces_value(inst: &MachInst) -> bool {
-    use AArch64Opcode::*;
-    match inst.opcode {
-        CmpRR | CmpRI | Tst | Fcmp => false,
-        StrRI | StpRI | StpPreIndex => false,
-        B | BCond | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => false,
-        TrapOverflow | TrapBoundsCheck | TrapNull | TrapDivZero | TrapShiftRange => false,
-        Retain | Release => false,
-        Nop => false,
-        Bl | Blr => false,
-        _ => true,
-    }
 }
 
 #[cfg(test)]
