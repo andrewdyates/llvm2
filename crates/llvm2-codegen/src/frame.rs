@@ -152,6 +152,7 @@ pub struct FrameLayout {
 impl FrameLayout {
     /// Size of the SP adjustment needed after callee-save pushes.
     /// This is locals + spills + outgoing args.
+    #[inline]
     pub fn sp_adjustment(&self) -> u32 {
         self.total_frame_size - self.callee_saved_area_size
     }
@@ -161,65 +162,70 @@ impl FrameLayout {
 // Frame layout computation
 // ---------------------------------------------------------------------------
 
-/// Determine which callee-saved GPR pairs are needed.
+/// Results of a single-pass scan over all instructions.
 ///
-/// Scans all instructions for physical register uses/defs in X19-X28.
-/// Returns a bitmask where bit N means X(19+N) is used.
-fn scan_callee_saved_gprs(func: &MachFunction) -> u16 {
-    let mut used = 0u16;
+/// Replaces the previous three separate passes (`scan_callee_saved_gprs`,
+/// `scan_callee_saved_fprs`, `has_calls`) with one pass for better cache
+/// utilization on large functions.
+struct ScanResult {
+    /// Bitmask of callee-saved GPRs used (bit N = X(19+N)).
+    gpr_used: u16,
+    /// Bitmask of callee-saved FPRs used (bit N = V(8+N)).
+    fpr_used: u8,
+    /// Whether the function contains any call instructions.
+    has_calls: bool,
+}
+
+/// Scan all instructions in a single pass to determine:
+/// - Which callee-saved GPRs (X19-X28) are used
+/// - Which callee-saved FPRs (V8-V15) are used
+/// - Whether the function contains any call instructions
+///
+/// This merged scan replaces three separate iteration passes for better
+/// cache locality and reduced overhead on functions with many instructions.
+#[inline]
+fn scan_function(func: &MachFunction) -> ScanResult {
+    let mut gpr_used = 0u16;
+    let mut fpr_used = 0u8;
+    let mut has_calls = false;
+
     for inst in &func.insts {
+        // Check for call instructions.
+        if !has_calls && inst.is_call() {
+            has_calls = true;
+        }
+
+        // Scan explicit operands for callee-saved register uses.
         for op in &inst.operands {
             if let MachOperand::PReg(preg) = op {
                 let r = preg.encoding();
                 // X19=19 through X28=28
-                if (19..=28).contains(&r) {
-                    used |= 1 << (r - 19);
+                if r >= 19 && r <= 28 {
+                    gpr_used |= 1 << (r - 19);
+                }
+                // V8=72 through V15=79 (unified PReg encoding)
+                else if r >= 72 && r <= 79 {
+                    fpr_used |= 1 << (r - 72);
                 }
             }
         }
+
         // Check implicit defs/uses.
         for preg in inst.implicit_defs.iter().chain(inst.implicit_uses.iter()) {
             let r = preg.encoding();
-            if (19..=28).contains(&r) {
-                used |= 1 << (r - 19);
+            if r >= 19 && r <= 28 {
+                gpr_used |= 1 << (r - 19);
+            } else if r >= 72 && r <= 79 {
+                fpr_used |= 1 << (r - 72);
             }
         }
     }
-    used
-}
 
-/// Determine which callee-saved FPR pairs are needed.
-///
-/// Scans all instructions for physical register uses/defs in V8-V15.
-/// Returns a bitmask where bit N means V(8+N) is used.
-fn scan_callee_saved_fprs(func: &MachFunction) -> u8 {
-    let mut used = 0u8;
-    for inst in &func.insts {
-        for op in &inst.operands {
-            if let MachOperand::PReg(preg) = op {
-                let r = preg.encoding();
-                // V8=72 through V15=79 (unified PReg encoding)
-                if (72..=79).contains(&r) {
-                    used |= 1 << (r - 72);
-                }
-            }
-        }
-        for preg in inst.implicit_defs.iter().chain(inst.implicit_uses.iter()) {
-            let r = preg.encoding();
-            if (72..=79).contains(&r) {
-                used |= 1 << (r - 72);
-            }
-        }
-    }
-    used
-}
-
-/// Returns true if the function contains any call instructions.
-fn has_calls(func: &MachFunction) -> bool {
-    func.insts.iter().any(|inst| inst.is_call())
+    ScanResult { gpr_used, fpr_used, has_calls }
 }
 
 /// Compute the total size of all stack slots (spills + locals), respecting alignment.
+#[inline]
 fn compute_stack_slot_area(func: &MachFunction) -> u32 {
     let mut offset: u32 = 0;
     for slot in &func.stack_slots {
@@ -266,17 +272,20 @@ fn compute_frame_layout_inner(
     enable_red_zone: bool,
     has_dynamic_alloc: bool,
 ) -> FrameLayout {
-    let is_leaf = !has_calls(func);
+    // Single-pass scan replaces three separate iterations.
+    let scan = scan_function(func);
+    let is_leaf = !scan.has_calls;
 
     // On Apple AArch64, frame pointer is ALWAYS required.
     let uses_frame_pointer = true;
 
-    // Scan for callee-saved register usage.
-    let gpr_used = scan_callee_saved_gprs(func);
-    let fpr_used = scan_callee_saved_fprs(func);
+    // Callee-saved register usage from merged scan.
+    let gpr_used = scan.gpr_used;
+    let fpr_used = scan.fpr_used;
 
     // Build callee-saved pairs. FP/LR is always first.
-    let mut pairs = Vec::new();
+    // Pre-allocate for max 10 pairs (1 FP/LR + 5 GPR + 4 FPR).
+    let mut pairs = Vec::with_capacity(10);
     let mut csa_offset: i32 = -16; // FP/LR pair is at [FP, #0] but stored with offset -16 from old SP
 
     // Always save FP/LR pair.
@@ -392,7 +401,9 @@ fn compute_frame_layout_inner(
 ///
 /// Returns the generated instructions in order.
 pub fn emit_prologue(layout: &FrameLayout) -> Vec<MachInst> {
-    let mut insts = Vec::new();
+    // Pre-allocate: worst case is 1 (STP pre-index) + 1 (MOV FP) + N-1 (STP pairs) + 1 (SUB SP)
+    let capacity = layout.callee_saved_pairs.len() + 2;
+    let mut insts = Vec::with_capacity(capacity);
 
     if layout.uses_red_zone && layout.sp_adjustment() == 0 && layout.callee_saved_pairs.len() <= 1 {
         // Red zone: minimal prologue for trivial leaf functions.
@@ -467,7 +478,9 @@ pub fn emit_prologue(layout: &FrameLayout) -> Vec<MachInst> {
 ///
 /// Returns the generated instructions in order.
 pub fn emit_epilogue(layout: &FrameLayout) -> Vec<MachInst> {
-    let mut insts = Vec::new();
+    // Pre-allocate: worst case is 1 (ADD SP) + N-1 (LDP pairs) + 1 (LDP post-index) + 1 (RET)
+    let capacity = layout.callee_saved_pairs.len() + 2;
+    let mut insts = Vec::with_capacity(capacity);
 
     if layout.uses_red_zone && layout.sp_adjustment() == 0 && layout.callee_saved_pairs.len() <= 1 {
         // Red zone: minimal epilogue.
@@ -523,9 +536,18 @@ pub fn emit_epilogue(layout: &FrameLayout) -> Vec<MachInst> {
 /// Frame index encoding: `FrameIdx(i)` where `i` is the stack slot index.
 /// The concrete offset is computed from the frame layout.
 pub fn eliminate_frame_indices(func: &mut MachFunction, layout: &FrameLayout) {
+    // Early exit: if no stack slots, no FrameIndex operands can exist.
+    if func.stack_slots.is_empty() {
+        return;
+    }
+
     // Precompute stack slot offsets from FP.
     // Stack slots are in the spill/local area, which starts at FP - callee_saved_area_size.
     let slot_offsets = compute_slot_offsets(func, layout);
+
+    // Pre-compute the SP adjustment once (used only in the SP-relative path).
+    let sp_adj = layout.sp_adjustment() as i32;
+    let uses_fp = layout.uses_frame_pointer;
 
     // Walk all instructions and rewrite FrameIndex operands.
     for inst in &mut func.insts {
@@ -534,7 +556,7 @@ pub fn eliminate_frame_indices(func: &mut MachFunction, layout: &FrameLayout) {
                 let slot_idx = fi.0 as usize;
                 if slot_idx < slot_offsets.len() {
                     let offset = slot_offsets[slot_idx];
-                    if layout.uses_frame_pointer {
+                    if uses_fp {
                         // FP-relative: MemOp { base: X29, offset }
                         *operand = MachOperand::MemOp {
                             base: X29,
@@ -543,7 +565,7 @@ pub fn eliminate_frame_indices(func: &mut MachFunction, layout: &FrameLayout) {
                     } else {
                         // SP-relative: offset from current SP
                         // SP-relative offset = FP_offset + callee_saved_area + sp_adjustment
-                        let sp_offset = offset + (layout.sp_adjustment() as i32);
+                        let sp_offset = offset + sp_adj;
                         *operand = MachOperand::MemOp {
                             base: SP, // SP = PReg(31)
                             offset: sp_offset as i64,
@@ -673,6 +695,7 @@ pub fn encode_compact_unwind(layout: &FrameLayout) -> CompactUnwindEncoding {
 // ---------------------------------------------------------------------------
 
 /// STP Rt, Rt2, [SP, #-imm]! (pre-index, allocates stack space)
+#[inline]
 fn make_stp_pre_index(reg1: PReg, reg2: PReg, offset: i64) -> MachInst {
     MachInst::new(
         AArch64Opcode::StpPreIndex,
@@ -686,6 +709,7 @@ fn make_stp_pre_index(reg1: PReg, reg2: PReg, offset: i64) -> MachInst {
 }
 
 /// STP Rt, Rt2, [SP, #imm] (signed offset from current SP)
+#[inline]
 fn make_stp_offset(reg1: PReg, reg2: PReg, offset: i64) -> MachInst {
     MachInst::new(
         AArch64Opcode::StpRI,
@@ -699,6 +723,7 @@ fn make_stp_offset(reg1: PReg, reg2: PReg, offset: i64) -> MachInst {
 }
 
 /// LDP Rt, Rt2, [SP, #imm] (signed offset load pair)
+#[inline]
 fn make_ldp_offset(reg1: PReg, reg2: PReg, offset: i64) -> MachInst {
     MachInst::new(
         AArch64Opcode::LdpRI,
@@ -712,6 +737,7 @@ fn make_ldp_offset(reg1: PReg, reg2: PReg, offset: i64) -> MachInst {
 }
 
 /// LDP Rt, Rt2, [SP], #imm (post-index, deallocates stack space)
+#[inline]
 fn make_ldp_post_index(reg1: PReg, reg2: PReg, offset: i64) -> MachInst {
     MachInst::new(
         AArch64Opcode::LdpPostIndex,
@@ -728,6 +754,7 @@ fn make_ldp_post_index(reg1: PReg, reg2: PReg, offset: i64) -> MachInst {
 ///
 /// Encoded as ADD X29, SP, #0 because register 31 in ADD context is SP,
 /// whereas in ORR (logical) context register 31 is XZR.
+#[inline]
 fn make_mov_sp_to_fp() -> MachInst {
     MachInst::new(
         AArch64Opcode::AddRI,
@@ -740,6 +767,7 @@ fn make_mov_sp_to_fp() -> MachInst {
 }
 
 /// SUB SP, SP, #imm (allocate stack space)
+#[inline]
 fn make_sub_sp_imm(imm: i64) -> MachInst {
     MachInst::new(
         AArch64Opcode::SubRI,
@@ -752,6 +780,7 @@ fn make_sub_sp_imm(imm: i64) -> MachInst {
 }
 
 /// ADD SP, SP, #imm (deallocate stack space)
+#[inline]
 fn make_add_sp_imm(imm: i64) -> MachInst {
     MachInst::new(
         AArch64Opcode::AddRI,
@@ -764,6 +793,7 @@ fn make_add_sp_imm(imm: i64) -> MachInst {
 }
 
 /// RET (return via X30)
+#[inline]
 fn make_ret() -> MachInst {
     MachInst::new(AArch64Opcode::Ret, vec![])
 }
@@ -789,18 +819,23 @@ fn align_up(value: u32, align: u32) -> u32 {
 /// and epilogue instructions before every return instruction.
 ///
 /// This is the main entry point for frame lowering after layout computation.
+///
+/// # Performance notes
+///
+/// - Entry block insts are moved (via `mem::take`) rather than cloned.
+/// - Epilogue instructions are generated fresh per return site rather than
+///   cloning a template, avoiding heap allocation for operand Vecs.
+/// - Block inst lists are only rebuilt for blocks that contain returns,
+///   skipping non-terminating blocks entirely.
 pub fn insert_prologue_epilogue(func: &mut MachFunction, layout: &FrameLayout) {
     let prologue = emit_prologue(layout);
-    let epilogue_before_ret = emit_epilogue(layout);
-    // The epilogue includes RET, so we strip the existing RET instructions
-    // from blocks and let the epilogue provide them.
 
     // Insert prologue at the start of the entry block.
+    // Use mem::take to move the old insts without cloning.
     let entry = func.entry;
-    let entry_block = &func.blocks[entry.0 as usize];
-    let old_entry_insts = entry_block.insts.clone();
+    let old_entry_insts = std::mem::take(&mut func.blocks[entry.0 as usize].insts);
 
-    let mut new_entry_insts = Vec::new();
+    let mut new_entry_insts = Vec::with_capacity(prologue.len() + old_entry_insts.len());
     for prologue_inst in prologue {
         let id = func.push_inst(prologue_inst);
         new_entry_insts.push(id);
@@ -809,17 +844,29 @@ pub fn insert_prologue_epilogue(func: &mut MachFunction, layout: &FrameLayout) {
     func.blocks[entry.0 as usize].insts = new_entry_insts;
 
     // For each block, find return instructions and insert epilogue before them.
+    // First pass: identify which blocks contain returns to avoid unnecessary work.
     let num_blocks = func.blocks.len();
     for block_idx in 0..num_blocks {
-        let block_insts = func.blocks[block_idx].insts.clone();
-        let mut new_insts = Vec::new();
+        // Check if this block has any return instructions.
+        let has_return = func.blocks[block_idx].insts.iter().any(|&inst_id| {
+            func.insts[inst_id.0 as usize].is_return()
+        });
+
+        if !has_return {
+            continue;
+        }
+
+        // Move the old insts out to avoid borrow conflict.
+        let block_insts = std::mem::take(&mut func.blocks[block_idx].insts);
+        let mut new_insts = Vec::with_capacity(block_insts.len() + 8);
+
         for &inst_id in &block_insts {
-            let inst = func.inst(inst_id);
-            if inst.is_return() {
-                // Insert epilogue (which includes its own RET).
-                // Drop the original return instruction.
-                for epi_inst in &epilogue_before_ret {
-                    let id = func.push_inst(epi_inst.clone());
+            if func.insts[inst_id.0 as usize].is_return() {
+                // Generate epilogue instructions fresh (avoids cloning a template).
+                // The epilogue includes its own RET, so we drop the original.
+                let epilogue = emit_epilogue(layout);
+                for epi_inst in epilogue {
+                    let id = func.push_inst(epi_inst);
                     new_insts.push(id);
                 }
             } else {
@@ -1321,23 +1368,23 @@ mod tests {
     #[test]
     fn test_scan_callee_saved_gprs() {
         let func = make_func_with_callee_saved_gprs(&[X19, X22, X28]);
-        let mask = scan_callee_saved_gprs(&func);
+        let scan = scan_function(&func);
 
-        assert!(mask & (1 << 0) != 0); // X19
-        assert!(mask & (1 << 1) == 0); // X20 not used
-        assert!(mask & (1 << 3) != 0); // X22
-        assert!(mask & (1 << 9) != 0); // X28
+        assert!(scan.gpr_used & (1 << 0) != 0); // X19
+        assert!(scan.gpr_used & (1 << 1) == 0); // X20 not used
+        assert!(scan.gpr_used & (1 << 3) != 0); // X22
+        assert!(scan.gpr_used & (1 << 9) != 0); // X28
     }
 
     #[test]
     fn test_scan_callee_saved_fprs() {
         let func = make_func_with_callee_saved_fprs(&[V8, V11, V15]);
-        let mask = scan_callee_saved_fprs(&func);
+        let scan = scan_function(&func);
 
-        assert!(mask & (1 << 0) != 0); // V8
-        assert!(mask & (1 << 3) != 0); // V11
-        assert!(mask & (1 << 7) != 0); // V15
-        assert!(mask & (1 << 1) == 0); // V9 not used
+        assert!(scan.fpr_used & (1 << 0) != 0); // V8
+        assert!(scan.fpr_used & (1 << 3) != 0); // V11
+        assert!(scan.fpr_used & (1 << 7) != 0); // V15
+        assert!(scan.fpr_used & (1 << 1) == 0); // V9 not used
     }
 
     // --- has_dynamic_alloc field tests ---
