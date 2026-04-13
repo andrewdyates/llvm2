@@ -15,5 +15,6 @@
 
 pub mod target;
 pub mod lower;
+pub mod aarch64;
 
 pub use target::Target;
