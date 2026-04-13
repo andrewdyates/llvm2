@@ -13,6 +13,7 @@
 //! - AArch64
 //! - RISC-V
 
+pub mod aarch64;
 pub mod target;
 pub mod lower;
 
