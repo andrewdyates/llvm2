@@ -370,7 +370,7 @@ mod tests {
             uses: Vec::new(),
             implicit_defs,
             implicit_uses: Vec::new(),
-            flags: InstFlags(InstFlags::IS_CALL | InstFlags::HAS_SIDE_EFFECTS),
+            flags: InstFlags::IS_CALL.union(InstFlags::HAS_SIDE_EFFECTS),
         }
     }
 

@@ -145,7 +145,7 @@ fn make_spill_load(vreg: VReg, slot: StackSlotId) -> MachInst {
         uses: vec![MachOperand::StackSlot(slot)],
         implicit_defs: Vec::new(),
         implicit_uses: Vec::new(),
-        flags: InstFlags(InstFlags::READS_MEMORY),
+        flags: InstFlags::READS_MEMORY,
     }
 }
 
@@ -157,7 +157,7 @@ fn make_spill_store(vreg: VReg, slot: StackSlotId) -> MachInst {
         uses: vec![MachOperand::VReg(vreg), MachOperand::StackSlot(slot)],
         implicit_defs: Vec::new(),
         implicit_uses: Vec::new(),
-        flags: InstFlags(InstFlags::WRITES_MEMORY),
+        flags: InstFlags::WRITES_MEMORY,
     }
 }
 
@@ -398,7 +398,7 @@ mod tests {
         let load = make_spill_load(v, slot);
 
         assert_eq!(load.opcode, PSEUDO_SPILL_LOAD);
-        assert!(load.flags.0 & InstFlags::READS_MEMORY != 0);
+        assert!(load.flags.reads_memory());
         assert_eq!(load.defs.len(), 1);
         assert_eq!(load.defs[0].as_vreg(), Some(v));
         assert_eq!(load.uses.len(), 1);
@@ -412,7 +412,7 @@ mod tests {
         let store = make_spill_store(v, slot);
 
         assert_eq!(store.opcode, PSEUDO_SPILL_STORE);
-        assert!(store.flags.0 & InstFlags::WRITES_MEMORY != 0);
+        assert!(store.flags.writes_memory());
         assert!(store.defs.is_empty());
         assert_eq!(store.uses.len(), 2);
         assert_eq!(store.uses[0].as_vreg(), Some(v));
@@ -441,7 +441,7 @@ mod tests {
             uses: vec![MachOperand::Block(BlockId(1))],
             implicit_defs: Vec::new(),
             implicit_uses: Vec::new(),
-            flags: InstFlags(InstFlags::IS_BRANCH | InstFlags::IS_TERMINATOR),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
         });
 
         // Block 1: use v0

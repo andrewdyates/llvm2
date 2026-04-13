@@ -15,7 +15,7 @@
 
 use crate::linear_scan::SpillInfo;
 use crate::machine_types::{
-    InstFlags, InstId, MachFunction, MachInst, MachOperand, VReg,
+    InstId, MachFunction, MachInst, MachOperand, VReg,
 };
 use crate::spill::PSEUDO_SPILL_LOAD;
 
@@ -58,9 +58,9 @@ pub fn classify_remat_cost(inst: &MachInst) -> RematCost {
 
     // Side-effectful or memory instructions cannot be rematerialized.
     if flags.is_call()
-        || (flags.0 & InstFlags::READS_MEMORY) != 0
-        || (flags.0 & InstFlags::WRITES_MEMORY) != 0
-        || (flags.0 & InstFlags::HAS_SIDE_EFFECTS) != 0
+        || flags.reads_memory()
+        || flags.writes_memory()
+        || flags.has_side_effects()
     {
         return RematCost::Expensive;
     }
@@ -281,7 +281,7 @@ mod tests {
             uses: vec![MachOperand::VReg(vreg(1))],
             implicit_defs: Vec::new(),
             implicit_uses: Vec::new(),
-            flags: InstFlags(InstFlags::READS_MEMORY),
+            flags: InstFlags::READS_MEMORY,
         };
         assert_eq!(classify_remat_cost(&inst), RematCost::Expensive);
     }
@@ -294,7 +294,7 @@ mod tests {
             uses: vec![],
             implicit_defs: Vec::new(),
             implicit_uses: Vec::new(),
-            flags: InstFlags(InstFlags::IS_CALL),
+            flags: InstFlags::IS_CALL,
         };
         assert_eq!(classify_remat_cost(&inst), RematCost::Expensive);
     }
@@ -332,7 +332,7 @@ mod tests {
                 uses: vec![MachOperand::VReg(vreg(2))],
                 implicit_defs: Vec::new(),
                 implicit_uses: Vec::new(),
-                flags: InstFlags(InstFlags::READS_MEMORY),
+                flags: InstFlags::READS_MEMORY,
             },
         ]);
 
@@ -364,7 +364,7 @@ mod tests {
                 uses: vec![MachOperand::StackSlot(StackSlotId(0))],
                 implicit_defs: Vec::new(),
                 implicit_uses: Vec::new(),
-                flags: InstFlags(InstFlags::READS_MEMORY),
+                flags: InstFlags::READS_MEMORY,
             },
             // inst 2: use v0
             MachInst {

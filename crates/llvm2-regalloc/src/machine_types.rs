@@ -5,30 +5,34 @@
 
 //! Machine-level type definitions used by the register allocator.
 //!
-//! ## Primitive types (re-exported from `llvm2-ir`)
+//! ## Unified types (re-exported from `llvm2-ir`)
 //!
-//! `VReg`, `PReg`, `RegClass`, `BlockId`, `InstId`, `StackSlotId` are
-//! imported from `llvm2-ir`, the canonical source of truth for machine IR types.
+//! These types are shared with `llvm2-ir` via re-export (no adapter needed):
+//!
+//! | Type | Source |
+//! |------|--------|
+//! | `VReg`, `PReg`, `RegClass` | `llvm2_ir::regs` |
+//! | `BlockId`, `InstId`, `StackSlotId` | `llvm2_ir::types` |
+//! | `InstFlags` | `llvm2_ir::inst` (unified in issue #73) |
 //!
 //! ## Compound types (regalloc-specific, intentionally separate)
 //!
 //! The compound types (`MachInst`, `MachBlock`, `MachFunction`, `MachOperand`,
-//! `InstFlags`, `StackSlot`) are regalloc-specific versions that shadow the
-//! `llvm2-ir` types by name. They are NOT stale stubs -- they have structural
-//! differences required for register allocation:
+//! `StackSlot`) are regalloc-specific versions that shadow the `llvm2-ir`
+//! types by name. They have structural differences required for register
+//! allocation:
 //!
 //! | Type | Why separate |
 //! |------|--------------|
 //! | `MachInst` | Separates defs/uses for liveness; opcode is `u16` not enum |
 //! | `MachOperand` | Subset of variants (no MemOp/FrameIndex/Special) |
-//! | `InstFlags` | Same encoding, different API (`pub u16` vs typed constants) |
 //! | `MachBlock` | Adds `loop_depth` for spill weight computation |
 //! | `StackSlot` | No alignment assertion |
 //! | `MachFunction` | `HashMap` stack slots, `next_stack_slot` counter |
 //!
 //! These will be unified with the `llvm2-ir` versions in a future phase,
 //! likely by enriching `llvm2_ir::MachInst` with def/use classification.
-//! See issue #37 for tracking.
+//! See issue #73 for tracking.
 //!
 //! Reference: `~/llvm-project-ref/llvm/include/llvm/CodeGen/MachineInstr.h`
 
@@ -38,11 +42,29 @@ use std::collections::HashMap;
 pub use llvm2_ir::regs::{PReg, RegClass, VReg};
 pub use llvm2_ir::types::{BlockId, InstId, StackSlotId};
 
+// ---------------------------------------------------------------------------
+// InstFlags — unified, re-exported from llvm2-ir (issue #73)
+// ---------------------------------------------------------------------------
+//
+// Previously this module had its own `InstFlags` struct with the same bit
+// encoding but a different API (`pub u16` inner field, `u16` constants).
+// As of issue #73, regalloc uses the canonical `llvm2_ir::InstFlags` directly.
+//
+// Migration note for existing code:
+//   Old: `InstFlags(InstFlags::IS_CALL | InstFlags::IS_BRANCH)`
+//   New: `InstFlags::IS_CALL.union(InstFlags::IS_BRANCH)`
+//   Or:  `InstFlags::from_bits(0x01 | 0x02)`
+//
+// Query methods (`is_call()`, `is_branch()`, etc.) now live on `InstFlags`
+// itself (in llvm2-ir), so `inst.flags.is_call()` works the same as before.
+// ---------------------------------------------------------------------------
+pub use llvm2_ir::inst::InstFlags;
+
 /// Operand of a regalloc-level machine instruction.
 ///
 /// Subset of `llvm2_ir::MachOperand` — omits `MemOp`, `FrameIndex`, and
 /// `Special` variants which are not needed for register allocation.
-/// Will be unified with `llvm2_ir::MachOperand` in a future phase. (#37)
+/// Will be unified with `llvm2_ir::MachOperand` in a future phase. (#73)
 #[derive(Debug, Clone, PartialEq)]
 pub enum MachOperand {
     VReg(VReg),
@@ -68,45 +90,6 @@ impl MachOperand {
             MachOperand::PReg(p) => Some(*p),
             _ => None,
         }
-    }
-}
-
-/// Instruction flags describing side effects and control flow.
-///
-/// Duplicates `llvm2_ir::InstFlags` with the same bit encoding but a
-/// different API: exposes constants as `u16` values (not `Self` constants)
-/// and uses `pub` inner field to allow direct construction via bitwise OR
-/// (e.g., `InstFlags(IS_CALL | IS_BRANCH)`). The `llvm2_ir::InstFlags`
-/// version uses `const fn union()` and typed constants instead.
-/// Will be unified with `llvm2_ir::InstFlags` in a future phase. (#37)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct InstFlags(pub u16);
-
-impl InstFlags {
-    pub const IS_CALL: u16 = 0x01;
-    pub const IS_BRANCH: u16 = 0x02;
-    pub const IS_RETURN: u16 = 0x04;
-    pub const IS_TERMINATOR: u16 = 0x08;
-    pub const HAS_SIDE_EFFECTS: u16 = 0x10;
-    pub const IS_PSEUDO: u16 = 0x20;
-    pub const READS_MEMORY: u16 = 0x40;
-    pub const WRITES_MEMORY: u16 = 0x80;
-    pub const IS_PHI: u16 = 0x100;
-
-    pub fn is_call(self) -> bool {
-        self.0 & Self::IS_CALL != 0
-    }
-    pub fn is_branch(self) -> bool {
-        self.0 & Self::IS_BRANCH != 0
-    }
-    pub fn is_return(self) -> bool {
-        self.0 & Self::IS_RETURN != 0
-    }
-    pub fn is_terminator(self) -> bool {
-        self.0 & Self::IS_TERMINATOR != 0
-    }
-    pub fn is_phi(self) -> bool {
-        self.0 & Self::IS_PHI != 0
     }
 }
 

@@ -43,12 +43,27 @@
 //!   Vec<u8> -> Mach-O .o file bytes
 //! ```
 //!
-//! # Type adapters
+//! # Type adapters and unification status (issue #73)
 //!
-//! Opcodes are unified: ISel uses `llvm2_ir::AArch64Opcode` directly (issue #73).
-//! However, each crate still has its own MachFunction/MachInst/MachOperand types.
-//! The adapter functions in this module convert the structural wrappers between
-//! crates. TODO(#73): Unify MachInst types so structural adapters are unnecessary.
+//! **Unified (no adapter needed):**
+//! - `AArch64Opcode`: ISel uses `llvm2_ir::AArch64Opcode` directly.
+//! - `InstFlags`: regalloc re-exports `llvm2_ir::InstFlags` directly.
+//!   The `convert_ir_flags_to_regalloc()` function has been eliminated.
+//! - Primitive types: `VReg`, `PReg`, `RegClass`, `BlockId`, `InstId`,
+//!   `StackSlotId` — all re-exported from `llvm2_ir` by regalloc.
+//!
+//! **Remaining structural adapters (separate types with good reason):**
+//! - `MachOperand`: ISel has `CondCode`/`Symbol`/`StackSlot(u32)` variants;
+//!   regalloc omits `MemOp`/`FrameIndex`/`Special`. Unification requires
+//!   a superset enum with phase-dependent validation.
+//! - `MachInst`: regalloc separates defs/uses for liveness analysis;
+//!   ISel has no flags/implicit-defs/proofs. Unification requires adding
+//!   def/use classification to `llvm2_ir::MachInst`.
+//! - `MachBlock`: regalloc adds `loop_depth`; ISel uses inline `Vec<MachInst>`.
+//! - `MachFunction`: ISel uses `HashMap<Block, MachBlock>` (construction-friendly);
+//!   regalloc uses `HashMap<StackSlotId, StackSlot>` + `next_stack_slot`.
+//!
+//! See issue #73 for the remaining unification plan.
 
 use std::collections::HashMap;
 use thiserror::Error;
@@ -302,9 +317,9 @@ pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> Result<llvm2_regalloc::MachFu
     }
 
     // Convert instructions.
+    // InstFlags are unified (issue #73) — same type in llvm2_ir and llvm2_regalloc,
+    // so flags pass through directly without conversion.
     for ir_inst in &ir_func.insts {
-        let flags = convert_ir_flags_to_regalloc(ir_inst);
-
         let (defs, uses) = classify_def_use(ir_inst)?;
         let implicit_defs: Vec<PReg> = ir_inst.implicit_defs.to_vec();
         let implicit_uses: Vec<PReg> = ir_inst.implicit_uses.to_vec();
@@ -315,7 +330,7 @@ pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> Result<llvm2_regalloc::MachFu
             uses,
             implicit_defs,
             implicit_uses,
-            flags,
+            flags: ir_inst.flags,
         });
     }
 
@@ -396,43 +411,11 @@ fn classify_def_use(
     }
 }
 
-/// Convert IR InstFlags to regalloc InstFlags.
-fn convert_ir_flags_to_regalloc(inst: &IrMachInst) -> llvm2_regalloc::InstFlags {
-    use llvm2_regalloc::machine_types::InstFlags as RaFlags;
-
-    let ir_flags = inst.flags;
-    let mut ra_bits: u16 = 0;
-
-    if ir_flags.contains(llvm2_ir::inst::InstFlags::IS_CALL) {
-        ra_bits |= RaFlags::IS_CALL;
-    }
-    if ir_flags.contains(llvm2_ir::inst::InstFlags::IS_BRANCH) {
-        ra_bits |= RaFlags::IS_BRANCH;
-    }
-    if ir_flags.contains(llvm2_ir::inst::InstFlags::IS_RETURN) {
-        ra_bits |= RaFlags::IS_RETURN;
-    }
-    if ir_flags.contains(llvm2_ir::inst::InstFlags::IS_TERMINATOR) {
-        ra_bits |= RaFlags::IS_TERMINATOR;
-    }
-    if ir_flags.contains(llvm2_ir::inst::InstFlags::HAS_SIDE_EFFECTS) {
-        ra_bits |= RaFlags::HAS_SIDE_EFFECTS;
-    }
-    if ir_flags.contains(llvm2_ir::inst::InstFlags::IS_PSEUDO) {
-        ra_bits |= RaFlags::IS_PSEUDO;
-    }
-    if ir_flags.contains(llvm2_ir::inst::InstFlags::READS_MEMORY) {
-        ra_bits |= RaFlags::READS_MEMORY;
-    }
-    if ir_flags.contains(llvm2_ir::inst::InstFlags::WRITES_MEMORY) {
-        ra_bits |= RaFlags::WRITES_MEMORY;
-    }
-    if ir_flags.contains(llvm2_ir::inst::InstFlags::IS_PHI) {
-        ra_bits |= RaFlags::IS_PHI;
-    }
-
-    RaFlags(ra_bits)
-}
+// NOTE: `convert_ir_flags_to_regalloc()` has been ELIMINATED as of issue #73.
+//
+// InstFlags are now unified: llvm2_regalloc re-exports llvm2_ir::InstFlags
+// directly. The bit-for-bit flag conversion function is no longer needed —
+// flags pass through directly in ir_to_regalloc().
 
 // ---------------------------------------------------------------------------
 // Apply register allocation results back to IR

@@ -160,7 +160,7 @@ pub fn insert_call_save_restore(
                                 ],
                                 implicit_defs: Vec::new(),
                                 implicit_uses: Vec::new(),
-                                flags: InstFlags(InstFlags::WRITES_MEMORY),
+                                flags: InstFlags::WRITES_MEMORY,
                             });
 
                             // Load after call.
@@ -170,7 +170,7 @@ pub fn insert_call_save_restore(
                                 uses: vec![MachOperand::StackSlot(slot)],
                                 implicit_defs: Vec::new(),
                                 implicit_uses: Vec::new(),
-                                flags: InstFlags(InstFlags::READS_MEMORY),
+                                flags: InstFlags::READS_MEMORY,
                             });
 
                             pairs_inserted += 1;
@@ -322,7 +322,7 @@ mod tests {
                 uses: vec![],
                 implicit_defs: Vec::new(),
                 implicit_uses: Vec::new(),
-                flags: InstFlags(InstFlags::IS_CALL),
+                flags: InstFlags::IS_CALL,
             },
             // inst 2: use v0
             MachInst {

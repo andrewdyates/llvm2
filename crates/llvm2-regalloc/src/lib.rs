@@ -347,7 +347,7 @@ mod tests {
             ],
             implicit_defs: Vec::new(),
             implicit_uses: Vec::new(),
-            flags: InstFlags(InstFlags::IS_BRANCH | InstFlags::IS_TERMINATOR),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
         });
 
         // Block 1 (then): def v1
@@ -480,7 +480,7 @@ mod tests {
             ],
             implicit_defs: Vec::new(),
             implicit_uses: Vec::new(),
-            flags: InstFlags(InstFlags::IS_BRANCH | InstFlags::IS_TERMINATOR),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
         });
 
         // Block 2 (exit): use v1
@@ -597,7 +597,7 @@ mod tests {
             uses: vec![],
             implicit_defs: Vec::new(),
             implicit_uses: Vec::new(),
-            flags: InstFlags(InstFlags::IS_CALL | InstFlags::HAS_SIDE_EFFECTS),
+            flags: InstFlags::IS_CALL.union(InstFlags::HAS_SIDE_EFFECTS),
         });
         let i2 = InstId(2);
         insts.push(MachInst {

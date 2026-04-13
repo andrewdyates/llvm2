@@ -413,6 +413,66 @@ impl InstFlags {
     pub const fn bits(self) -> u16 {
         self.0
     }
+
+    /// Create from raw bits (e.g., `InstFlags::from_bits(IS_CALL | IS_BRANCH)`).
+    ///
+    /// Used by crates that construct InstFlags from u16 constants
+    /// (e.g., regalloc test helpers, pipeline adapters).
+    #[inline]
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
+    // -- Convenience query methods --
+    //
+    // These duplicate the methods on MachInst but operate on InstFlags directly.
+    // Used by the register allocator which stores InstFlags separately from
+    // opcode/operands and needs to query flags without a MachInst wrapper.
+
+    #[inline]
+    pub const fn is_call(self) -> bool {
+        self.contains(Self::IS_CALL)
+    }
+
+    #[inline]
+    pub const fn is_branch(self) -> bool {
+        self.contains(Self::IS_BRANCH)
+    }
+
+    #[inline]
+    pub const fn is_return(self) -> bool {
+        self.contains(Self::IS_RETURN)
+    }
+
+    #[inline]
+    pub const fn is_terminator(self) -> bool {
+        self.contains(Self::IS_TERMINATOR)
+    }
+
+    #[inline]
+    pub const fn has_side_effects(self) -> bool {
+        self.contains(Self::HAS_SIDE_EFFECTS)
+    }
+
+    #[inline]
+    pub const fn is_pseudo(self) -> bool {
+        self.contains(Self::IS_PSEUDO)
+    }
+
+    #[inline]
+    pub const fn reads_memory(self) -> bool {
+        self.contains(Self::READS_MEMORY)
+    }
+
+    #[inline]
+    pub const fn writes_memory(self) -> bool {
+        self.contains(Self::WRITES_MEMORY)
+    }
+
+    #[inline]
+    pub const fn is_phi(self) -> bool {
+        self.contains(Self::IS_PHI)
+    }
 }
 
 impl Default for InstFlags {

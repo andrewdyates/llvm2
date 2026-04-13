@@ -456,7 +456,7 @@ mod tests {
             ],
             implicit_defs: Vec::new(),
             implicit_uses: Vec::new(),
-            flags: InstFlags(InstFlags::IS_BRANCH | InstFlags::IS_TERMINATOR),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
         });
 
         // Block 1 (then): just a branch to merge
@@ -467,7 +467,7 @@ mod tests {
             uses: vec![MachOperand::Block(BlockId(3))],
             implicit_defs: Vec::new(),
             implicit_uses: Vec::new(),
-            flags: InstFlags(InstFlags::IS_BRANCH | InstFlags::IS_TERMINATOR),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
         });
 
         // Block 2 (else): just a branch to merge
@@ -478,7 +478,7 @@ mod tests {
             uses: vec![MachOperand::Block(BlockId(3))],
             implicit_defs: Vec::new(),
             implicit_uses: Vec::new(),
-            flags: InstFlags(InstFlags::IS_BRANCH | InstFlags::IS_TERMINATOR),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
         });
 
         // Block 3 (merge): phi v2 = [v0 from block1, v1 from block2], then use v2
@@ -492,7 +492,7 @@ mod tests {
             ],
             implicit_defs: Vec::new(),
             implicit_uses: Vec::new(),
-            flags: InstFlags(InstFlags::IS_PHI),
+            flags: InstFlags::IS_PHI,
         });
         let i6 = InstId(insts.len() as u32);
         insts.push(MachInst {
@@ -575,7 +575,7 @@ mod tests {
             uses: vec![MachOperand::Block(BlockId(1)), MachOperand::Block(BlockId(2))],
             implicit_defs: Vec::new(),
             implicit_uses: Vec::new(),
-            flags: InstFlags(InstFlags::IS_BRANCH | InstFlags::IS_TERMINATOR),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
         });
 
         // Block 1: cbranch -> block 2 or block 3
@@ -586,7 +586,7 @@ mod tests {
             uses: vec![MachOperand::Block(BlockId(2)), MachOperand::Block(BlockId(3))],
             implicit_defs: Vec::new(),
             implicit_uses: Vec::new(),
-            flags: InstFlags(InstFlags::IS_BRANCH | InstFlags::IS_TERMINATOR),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
         });
 
         // Block 2: nop (merge point)
