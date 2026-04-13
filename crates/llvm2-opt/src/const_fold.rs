@@ -130,7 +130,8 @@ fn try_fold(
                 AArch64Opcode::AndRR => lhs & rhs,
                 AArch64Opcode::OrrRR => lhs | rhs,
                 AArch64Opcode::EorRR => lhs ^ rhs,
-                _ => unreachable!(),
+                // SAFETY: inner match is constrained by outer arm to these 6 opcodes
+                _ => unreachable!("inner match constrained by outer arm"),
             };
             Some((dst, result))
         }
@@ -148,7 +149,8 @@ fn try_fold(
             let result = match opcode {
                 AArch64Opcode::AddRI => src.wrapping_add(imm),
                 AArch64Opcode::SubRI => src.wrapping_sub(imm),
-                _ => unreachable!(),
+                // SAFETY: inner match is constrained by outer arm to AddRI|SubRI
+                _ => unreachable!("inner match constrained by outer arm"),
             };
             Some((dst, result))
         }
@@ -173,7 +175,8 @@ fn try_fold(
                 AArch64Opcode::LslRI => src.wrapping_shl(shift),
                 AArch64Opcode::LsrRI => ((src as u64).wrapping_shr(shift)) as i64,
                 AArch64Opcode::AsrRI => src.wrapping_shr(shift),
-                _ => unreachable!(),
+                // SAFETY: inner match is constrained by outer arm to LslRI|LsrRI|AsrRI
+                _ => unreachable!("inner match constrained by outer arm"),
             };
             Some((dst, result))
         }
@@ -195,7 +198,8 @@ fn try_fold(
                 AArch64Opcode::LslRR => src.wrapping_shl(shift),
                 AArch64Opcode::LsrRR => ((src as u64).wrapping_shr(shift)) as i64,
                 AArch64Opcode::AsrRR => src.wrapping_shr(shift),
-                _ => unreachable!(),
+                // SAFETY: inner match is constrained by outer arm to LslRR|LsrRR|AsrRR
+                _ => unreachable!("inner match constrained by outer arm"),
             };
             Some((dst, result))
         }

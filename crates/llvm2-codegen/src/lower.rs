@@ -799,7 +799,8 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 AArch64Opcode::FsubRR => 0b0011u32,
                 AArch64Opcode::FmulRR => 0b0000u32,
                 AArch64Opcode::FdivRR => 0b0001u32,
-                _ => unreachable!(),
+                // SAFETY: inner match is constrained by outer arm to FaddRR|FsubRR|FmulRR|FdivRR
+                _ => unreachable!("inner match constrained by outer arm"),
             };
             let rd = preg_hw(0)?;
             let rn = preg_hw(1)?;

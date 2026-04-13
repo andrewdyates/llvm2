@@ -19,6 +19,31 @@
 use llvm2_lower::types::Type;
 use std::collections::HashMap;
 use std::fmt;
+use thiserror::Error;
+
+// ---------------------------------------------------------------------------
+// SmtError
+// ---------------------------------------------------------------------------
+
+/// Errors arising from SMT expression construction or evaluation.
+#[derive(Debug, Error)]
+pub enum SmtError {
+    /// A type cannot be represented in the SMT bitvector domain.
+    #[error("unsupported type for SMT encoding: {0}")]
+    UnsupportedType(String),
+
+    /// `bv_width()` called on a Bool-sorted expression.
+    #[error("bv_width called on Bool-sorted expression")]
+    BoolHasNoWidth,
+
+    /// Variable not found during concrete evaluation.
+    #[error("variable '{0}' not found in evaluation environment")]
+    UndefinedVariable(String),
+
+    /// Recursive evaluation failed.
+    #[error("evaluation error: {0}")]
+    EvalError(String),
+}
 
 // ---------------------------------------------------------------------------
 // SmtSort
@@ -43,19 +68,23 @@ impl SmtSort {
     }
 }
 
-impl From<Type> for SmtSort {
-    fn from(ty: Type) -> Self {
+impl TryFrom<Type> for SmtSort {
+    type Error = SmtError;
+
+    fn try_from(ty: Type) -> Result<Self, SmtError> {
         match ty {
-            Type::B1 => SmtSort::BitVec(1),
-            Type::I8 => SmtSort::BitVec(8),
-            Type::I16 => SmtSort::BitVec(16),
-            Type::I32 => SmtSort::BitVec(32),
-            Type::I64 => SmtSort::BitVec(64),
-            Type::I128 => SmtSort::BitVec(128),
-            Type::F32 | Type::F64 => panic!("FP verification not yet supported"),
-            Type::Struct(_) | Type::Array(_, _) => {
-                panic!("Aggregate type verification not yet supported")
-            }
+            Type::B1 => Ok(SmtSort::BitVec(1)),
+            Type::I8 => Ok(SmtSort::BitVec(8)),
+            Type::I16 => Ok(SmtSort::BitVec(16)),
+            Type::I32 => Ok(SmtSort::BitVec(32)),
+            Type::I64 => Ok(SmtSort::BitVec(64)),
+            Type::I128 => Ok(SmtSort::BitVec(128)),
+            Type::F32 | Type::F64 => Err(SmtError::UnsupportedType(
+                "floating-point verification not yet supported".to_string(),
+            )),
+            Type::Struct(_) | Type::Array(_, _) => Err(SmtError::UnsupportedType(
+                "aggregate type verification not yet supported".to_string(),
+            )),
         }
     }
 }
@@ -346,25 +375,25 @@ impl SmtExpr {
         }
     }
 
-    /// Return the bitvector width of this expression (panics for Bool).
-    pub fn bv_width(&self) -> u32 {
+    /// Return the bitvector width of this expression, or an error for Bool-sorted expressions.
+    pub fn try_bv_width(&self) -> Result<u32, SmtError> {
         match self {
-            SmtExpr::Var { width, .. } => *width,
-            SmtExpr::BvConst { width, .. } => *width,
-            SmtExpr::BvAdd { width, .. } => *width,
-            SmtExpr::BvSub { width, .. } => *width,
-            SmtExpr::BvMul { width, .. } => *width,
-            SmtExpr::BvSDiv { width, .. } => *width,
-            SmtExpr::BvUDiv { width, .. } => *width,
-            SmtExpr::BvNeg { width, .. } => *width,
-            SmtExpr::Extract { width, .. } => *width,
-            SmtExpr::BvAnd { width, .. } => *width,
-            SmtExpr::BvOr { width, .. } => *width,
-            SmtExpr::BvXor { width, .. } => *width,
-            SmtExpr::BvShl { width, .. } => *width,
-            SmtExpr::BvLshr { width, .. } => *width,
-            SmtExpr::BvAshr { width, .. } => *width,
-            SmtExpr::Ite { then_expr, .. } => then_expr.bv_width(),
+            SmtExpr::Var { width, .. } => Ok(*width),
+            SmtExpr::BvConst { width, .. } => Ok(*width),
+            SmtExpr::BvAdd { width, .. } => Ok(*width),
+            SmtExpr::BvSub { width, .. } => Ok(*width),
+            SmtExpr::BvMul { width, .. } => Ok(*width),
+            SmtExpr::BvSDiv { width, .. } => Ok(*width),
+            SmtExpr::BvUDiv { width, .. } => Ok(*width),
+            SmtExpr::BvNeg { width, .. } => Ok(*width),
+            SmtExpr::Extract { width, .. } => Ok(*width),
+            SmtExpr::BvAnd { width, .. } => Ok(*width),
+            SmtExpr::BvOr { width, .. } => Ok(*width),
+            SmtExpr::BvXor { width, .. } => Ok(*width),
+            SmtExpr::BvShl { width, .. } => Ok(*width),
+            SmtExpr::BvLshr { width, .. } => Ok(*width),
+            SmtExpr::BvAshr { width, .. } => Ok(*width),
+            SmtExpr::Ite { then_expr, .. } => then_expr.try_bv_width(),
             SmtExpr::BoolConst(_)
             | SmtExpr::Eq { .. }
             | SmtExpr::Not { .. }
@@ -377,10 +406,19 @@ impl SmtExpr {
             | SmtExpr::BvUgt { .. }
             | SmtExpr::BvUle { .. }
             | SmtExpr::And { .. }
-            | SmtExpr::Or { .. } => {
-                panic!("bv_width called on Bool-sorted expression")
-            }
+            | SmtExpr::Or { .. } => Err(SmtError::BoolHasNoWidth),
         }
+    }
+
+    /// Return the bitvector width of this expression.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on a Bool-sorted expression (comparisons, logical ops).
+    /// Callers that may encounter Bool expressions should use [`try_bv_width`]
+    /// instead.
+    pub fn bv_width(&self) -> u32 {
+        self.try_bv_width().expect("bv_width called on Bool-sorted expression; use try_bv_width() for fallible access")
     }
 
     /// Return the sort of this expression.
@@ -504,186 +542,198 @@ fn sign_extend(value: u64, width: u32) -> i64 {
 }
 
 impl SmtExpr {
-    /// Evaluate this expression under the given variable assignment.
+    /// Evaluate this expression under the given variable assignment (fallible).
     ///
     /// Variables map name -> u64 value (already masked to width).
-    /// Panics if a variable is not found in the environment.
-    pub fn eval(&self, env: &HashMap<String, u64>) -> EvalResult {
+    /// Returns `Err(SmtError::UndefinedVariable)` if a variable is not found.
+    pub fn try_eval(&self, env: &HashMap<String, u64>) -> Result<EvalResult, SmtError> {
         match self {
             SmtExpr::Var { name, width } => {
-                let v = env.get(name).unwrap_or_else(|| {
-                    panic!("variable '{}' not found in environment", name)
-                });
-                EvalResult::Bv(mask(*v, *width))
+                let v = env.get(name).ok_or_else(|| {
+                    SmtError::UndefinedVariable(name.clone())
+                })?;
+                Ok(EvalResult::Bv(mask(*v, *width)))
             }
             SmtExpr::BvConst { value, width } => {
-                EvalResult::Bv(mask(*value, *width))
+                Ok(EvalResult::Bv(mask(*value, *width)))
             }
-            SmtExpr::BoolConst(b) => EvalResult::Bool(*b),
+            SmtExpr::BoolConst(b) => Ok(EvalResult::Bool(*b)),
 
             SmtExpr::BvAdd { lhs, rhs, width } => {
-                let a = lhs.eval(env).as_u64();
-                let b = rhs.eval(env).as_u64();
-                EvalResult::Bv(mask(a.wrapping_add(b), *width))
+                let a = lhs.try_eval(env)?.as_u64();
+                let b = rhs.try_eval(env)?.as_u64();
+                Ok(EvalResult::Bv(mask(a.wrapping_add(b), *width)))
             }
             SmtExpr::BvSub { lhs, rhs, width } => {
-                let a = lhs.eval(env).as_u64();
-                let b = rhs.eval(env).as_u64();
-                EvalResult::Bv(mask(a.wrapping_sub(b), *width))
+                let a = lhs.try_eval(env)?.as_u64();
+                let b = rhs.try_eval(env)?.as_u64();
+                Ok(EvalResult::Bv(mask(a.wrapping_sub(b), *width)))
             }
             SmtExpr::BvMul { lhs, rhs, width } => {
-                let a = lhs.eval(env).as_u64();
-                let b = rhs.eval(env).as_u64();
-                EvalResult::Bv(mask(a.wrapping_mul(b), *width))
+                let a = lhs.try_eval(env)?.as_u64();
+                let b = rhs.try_eval(env)?.as_u64();
+                Ok(EvalResult::Bv(mask(a.wrapping_mul(b), *width)))
             }
             SmtExpr::BvSDiv { lhs, rhs, width } => {
-                let a = sign_extend(lhs.eval(env).as_u64(), *width);
-                let b = sign_extend(rhs.eval(env).as_u64(), *width);
+                let a = sign_extend(lhs.try_eval(env)?.as_u64(), *width);
+                let b = sign_extend(rhs.try_eval(env)?.as_u64(), *width);
                 if b == 0 {
                     // SMT-LIB: bvsdiv by zero is defined (returns all-ones
                     // for positive dividend, etc.). For verification we gate
                     // on b != 0 as a precondition, but we still need a defined
                     // value here. Return 0 as sentinel.
-                    EvalResult::Bv(0)
+                    Ok(EvalResult::Bv(0))
                 } else if a == i64::MIN && b == -1 && *width == 64 {
                     // Overflow: INT_MIN / -1.
-                    EvalResult::Bv(mask(a as u64, *width))
+                    Ok(EvalResult::Bv(mask(a as u64, *width)))
                 } else {
                     let result = a.wrapping_div(b);
-                    EvalResult::Bv(mask(result as u64, *width))
+                    Ok(EvalResult::Bv(mask(result as u64, *width)))
                 }
             }
             SmtExpr::BvUDiv { lhs, rhs, width } => {
-                let a = lhs.eval(env).as_u64();
-                let b = rhs.eval(env).as_u64();
+                let a = lhs.try_eval(env)?.as_u64();
+                let b = rhs.try_eval(env)?.as_u64();
                 if b == 0 {
-                    EvalResult::Bv(0) // sentinel, gated by precondition
+                    Ok(EvalResult::Bv(0)) // sentinel, gated by precondition
                 } else {
-                    EvalResult::Bv(mask(a / b, *width))
+                    Ok(EvalResult::Bv(mask(a / b, *width)))
                 }
             }
             SmtExpr::BvAnd { lhs, rhs, width } => {
-                let a = lhs.eval(env).as_u64();
-                let b = rhs.eval(env).as_u64();
-                EvalResult::Bv(mask(a & b, *width))
+                let a = lhs.try_eval(env)?.as_u64();
+                let b = rhs.try_eval(env)?.as_u64();
+                Ok(EvalResult::Bv(mask(a & b, *width)))
             }
             SmtExpr::BvOr { lhs, rhs, width } => {
-                let a = lhs.eval(env).as_u64();
-                let b = rhs.eval(env).as_u64();
-                EvalResult::Bv(mask(a | b, *width))
+                let a = lhs.try_eval(env)?.as_u64();
+                let b = rhs.try_eval(env)?.as_u64();
+                Ok(EvalResult::Bv(mask(a | b, *width)))
             }
             SmtExpr::BvXor { lhs, rhs, width } => {
-                let a = lhs.eval(env).as_u64();
-                let b = rhs.eval(env).as_u64();
-                EvalResult::Bv(mask(a ^ b, *width))
+                let a = lhs.try_eval(env)?.as_u64();
+                let b = rhs.try_eval(env)?.as_u64();
+                Ok(EvalResult::Bv(mask(a ^ b, *width)))
             }
             SmtExpr::BvShl { lhs, rhs, width } => {
-                let a = lhs.eval(env).as_u64();
-                let b = rhs.eval(env).as_u64();
+                let a = lhs.try_eval(env)?.as_u64();
+                let b = rhs.try_eval(env)?.as_u64();
                 // SMT-LIB: if shift amount >= width, result is 0.
                 if b >= *width as u64 {
-                    EvalResult::Bv(0)
+                    Ok(EvalResult::Bv(0))
                 } else {
-                    EvalResult::Bv(mask(a << b, *width))
+                    Ok(EvalResult::Bv(mask(a << b, *width)))
                 }
             }
             SmtExpr::BvLshr { lhs, rhs, width } => {
-                let a = lhs.eval(env).as_u64();
-                let b = rhs.eval(env).as_u64();
+                let a = lhs.try_eval(env)?.as_u64();
+                let b = rhs.try_eval(env)?.as_u64();
                 if b >= *width as u64 {
-                    EvalResult::Bv(0)
+                    Ok(EvalResult::Bv(0))
                 } else {
-                    EvalResult::Bv(mask(a >> b, *width))
+                    Ok(EvalResult::Bv(mask(a >> b, *width)))
                 }
             }
             SmtExpr::BvAshr { lhs, rhs, width } => {
-                let a = sign_extend(lhs.eval(env).as_u64(), *width);
-                let b = rhs.eval(env).as_u64();
+                let a = sign_extend(lhs.try_eval(env)?.as_u64(), *width);
+                let b = rhs.try_eval(env)?.as_u64();
                 if b >= *width as u64 {
                     // Sign-fill: all 1s if negative, all 0s if positive.
                     if a < 0 {
-                        EvalResult::Bv(mask(u64::MAX, *width))
+                        Ok(EvalResult::Bv(mask(u64::MAX, *width)))
                     } else {
-                        EvalResult::Bv(0)
+                        Ok(EvalResult::Bv(0))
                     }
                 } else {
-                    EvalResult::Bv(mask((a >> b) as u64, *width))
+                    Ok(EvalResult::Bv(mask((a >> b) as u64, *width)))
                 }
             }
             SmtExpr::BvNeg { operand, width } => {
-                let a = operand.eval(env).as_u64();
+                let a = operand.try_eval(env)?.as_u64();
                 // Two's complement negation = wrapping negate.
-                EvalResult::Bv(mask((!a).wrapping_add(1), *width))
+                Ok(EvalResult::Bv(mask((!a).wrapping_add(1), *width)))
             }
 
             SmtExpr::Eq { lhs, rhs } => {
-                let a = lhs.eval(env);
-                let b = rhs.eval(env);
-                EvalResult::Bool(a == b)
+                let a = lhs.try_eval(env)?;
+                let b = rhs.try_eval(env)?;
+                Ok(EvalResult::Bool(a == b))
             }
             SmtExpr::Not { operand } => {
-                EvalResult::Bool(!operand.eval(env).as_bool())
+                Ok(EvalResult::Bool(!operand.try_eval(env)?.as_bool()))
             }
             SmtExpr::BvSlt { lhs, rhs, width } => {
-                let a = sign_extend(lhs.eval(env).as_u64(), *width);
-                let b = sign_extend(rhs.eval(env).as_u64(), *width);
-                EvalResult::Bool(a < b)
+                let a = sign_extend(lhs.try_eval(env)?.as_u64(), *width);
+                let b = sign_extend(rhs.try_eval(env)?.as_u64(), *width);
+                Ok(EvalResult::Bool(a < b))
             }
             SmtExpr::BvSge { lhs, rhs, width } => {
-                let a = sign_extend(lhs.eval(env).as_u64(), *width);
-                let b = sign_extend(rhs.eval(env).as_u64(), *width);
-                EvalResult::Bool(a >= b)
+                let a = sign_extend(lhs.try_eval(env)?.as_u64(), *width);
+                let b = sign_extend(rhs.try_eval(env)?.as_u64(), *width);
+                Ok(EvalResult::Bool(a >= b))
             }
             SmtExpr::BvUge { lhs, rhs, .. } => {
-                let a = lhs.eval(env).as_u64();
-                let b = rhs.eval(env).as_u64();
-                EvalResult::Bool(a >= b)
+                let a = lhs.try_eval(env)?.as_u64();
+                let b = rhs.try_eval(env)?.as_u64();
+                Ok(EvalResult::Bool(a >= b))
             }
             SmtExpr::BvSgt { lhs, rhs, width } => {
-                let a = sign_extend(lhs.eval(env).as_u64(), *width);
-                let b = sign_extend(rhs.eval(env).as_u64(), *width);
-                EvalResult::Bool(a > b)
+                let a = sign_extend(lhs.try_eval(env)?.as_u64(), *width);
+                let b = sign_extend(rhs.try_eval(env)?.as_u64(), *width);
+                Ok(EvalResult::Bool(a > b))
             }
             SmtExpr::BvSle { lhs, rhs, width } => {
-                let a = sign_extend(lhs.eval(env).as_u64(), *width);
-                let b = sign_extend(rhs.eval(env).as_u64(), *width);
-                EvalResult::Bool(a <= b)
+                let a = sign_extend(lhs.try_eval(env)?.as_u64(), *width);
+                let b = sign_extend(rhs.try_eval(env)?.as_u64(), *width);
+                Ok(EvalResult::Bool(a <= b))
             }
             SmtExpr::BvUlt { lhs, rhs, .. } => {
-                let a = lhs.eval(env).as_u64();
-                let b = rhs.eval(env).as_u64();
-                EvalResult::Bool(a < b)
+                let a = lhs.try_eval(env)?.as_u64();
+                let b = rhs.try_eval(env)?.as_u64();
+                Ok(EvalResult::Bool(a < b))
             }
             SmtExpr::BvUgt { lhs, rhs, .. } => {
-                let a = lhs.eval(env).as_u64();
-                let b = rhs.eval(env).as_u64();
-                EvalResult::Bool(a > b)
+                let a = lhs.try_eval(env)?.as_u64();
+                let b = rhs.try_eval(env)?.as_u64();
+                Ok(EvalResult::Bool(a > b))
             }
             SmtExpr::BvUle { lhs, rhs, .. } => {
-                let a = lhs.eval(env).as_u64();
-                let b = rhs.eval(env).as_u64();
-                EvalResult::Bool(a <= b)
+                let a = lhs.try_eval(env)?.as_u64();
+                let b = rhs.try_eval(env)?.as_u64();
+                Ok(EvalResult::Bool(a <= b))
             }
             SmtExpr::And { lhs, rhs } => {
-                EvalResult::Bool(lhs.eval(env).as_bool() && rhs.eval(env).as_bool())
+                Ok(EvalResult::Bool(lhs.try_eval(env)?.as_bool() && rhs.try_eval(env)?.as_bool()))
             }
             SmtExpr::Or { lhs, rhs } => {
-                EvalResult::Bool(lhs.eval(env).as_bool() || rhs.eval(env).as_bool())
+                Ok(EvalResult::Bool(lhs.try_eval(env)?.as_bool() || rhs.try_eval(env)?.as_bool()))
             }
             SmtExpr::Ite { cond, then_expr, else_expr } => {
-                if cond.eval(env).as_bool() {
-                    then_expr.eval(env)
+                if cond.try_eval(env)?.as_bool() {
+                    then_expr.try_eval(env)
                 } else {
-                    else_expr.eval(env)
+                    else_expr.try_eval(env)
                 }
             }
             SmtExpr::Extract { high, low, operand, width } => {
-                let v = operand.eval(env).as_u64();
+                let v = operand.try_eval(env)?.as_u64();
                 let extracted = (v >> low) & ((1u64 << width) - 1);
                 let _ = high; // used in width calculation
-                EvalResult::Bv(extracted)
+                Ok(EvalResult::Bv(extracted))
             }
         }
+    }
+
+    /// Evaluate this expression under the given variable assignment.
+    ///
+    /// Variables map name -> u64 value (already masked to width).
+    ///
+    /// # Panics
+    ///
+    /// Panics if a variable is not found in the environment. Use [`try_eval`]
+    /// for fallible evaluation.
+    pub fn eval(&self, env: &HashMap<String, u64>) -> EvalResult {
+        self.try_eval(env).expect("SmtExpr::eval failed; use try_eval() for fallible evaluation")
     }
 }
 
