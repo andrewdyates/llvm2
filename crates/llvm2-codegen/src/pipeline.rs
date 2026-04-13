@@ -595,7 +595,8 @@ impl Pipeline {
 
         // Process blocks in order.
         for (&block_ref, basic_block) in &input.blocks {
-            isel.select_block(block_ref, &basic_block.instructions);
+            isel.select_block(block_ref, &basic_block.instructions)
+                .map_err(|e| PipelineError::ISel(e.to_string()))?;
         }
 
         Ok(isel.finalize())

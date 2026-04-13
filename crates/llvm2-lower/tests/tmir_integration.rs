@@ -40,7 +40,7 @@ fn compile_tmir_function(func: &TmirFunction) -> MachFunction {
 
     // Lower formal arguments into the entry block (establishes Value -> VReg mapping
     // for function parameters).
-    isel.lower_formal_arguments(&lir_func.signature, lir_func.entry_block);
+    isel.lower_formal_arguments(&lir_func.signature, lir_func.entry_block).unwrap();
 
     // Select each block. We need a deterministic order: entry block first, then
     // the rest. The ISel requires that values are defined before use, and block
@@ -56,7 +56,7 @@ fn compile_tmir_function(func: &TmirFunction) -> MachFunction {
 
     for block_id in &block_order {
         let bb = &lir_func.blocks[block_id];
-        isel.select_block(*block_id, &bb.instructions);
+        isel.select_block(*block_id, &bb.instructions).unwrap();
     }
 
     isel.finalize()
@@ -576,7 +576,7 @@ fn test_sum_isel_body_instructions() {
     };
     let mut isel = InstructionSelector::new("sum_body".to_string(), sig.clone());
     let entry = Block(0);
-    isel.lower_formal_arguments(&sig, entry);
+    isel.lower_formal_arguments(&sig, entry).unwrap();
 
     // Simulate: v2 = add(v0, v1)  (s += n)
     isel.select_block(
@@ -626,7 +626,7 @@ fn test_sum_isel_body_instructions() {
                 results: vec![],
             },
         ],
-    );
+    ).unwrap();
 
     let mfunc = isel.finalize();
     let mblock = &mfunc.blocks[&entry];

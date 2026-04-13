@@ -252,10 +252,25 @@ pub fn encode_relocation(reloc: &Relocation) -> [u8; 8] {
     buf
 }
 
+/// Error type for relocation decoding failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelocDecodeError {
+    /// The unknown relocation type value.
+    pub type_val: u8,
+}
+
+impl core::fmt::Display for RelocDecodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "unknown ARM64 relocation type: {}", self.type_val)
+    }
+}
+
 /// Decode a Mach-O relocation from its 8-byte binary representation (little-endian).
 ///
 /// This is the inverse of [`encode_relocation`].
-pub fn decode_relocation(bytes: &[u8; 8]) -> Relocation {
+///
+/// Returns an error if the relocation type field contains an unrecognized value.
+pub fn decode_relocation(bytes: &[u8; 8]) -> Result<Relocation, RelocDecodeError> {
     let r_word0 = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let r_word1 = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
 
@@ -278,17 +293,17 @@ pub fn decode_relocation(bytes: &[u8; 8]) -> Relocation {
         9 => AArch64RelocKind::TlvpLoadPageoff12,
         10 => AArch64RelocKind::Addend,
         11 => AArch64RelocKind::AuthenticatedPointer,
-        _ => panic!("unknown ARM64 relocation type: {}", type_val),
+        _ => return Err(RelocDecodeError { type_val }),
     };
 
-    Relocation {
+    Ok(Relocation {
         offset: r_word0,
         symbol_index,
         kind,
         pc_relative,
         length,
         is_extern,
-    }
+    })
 }
 
 /// Create an addend relocation pair.
@@ -381,7 +396,7 @@ mod tests {
     fn test_encode_decode_roundtrip_branch26() {
         let reloc = Relocation::branch26(0x100, 42);
         let encoded = encode_relocation(&reloc);
-        let decoded = decode_relocation(&encoded);
+        let decoded = decode_relocation(&encoded).unwrap();
         assert_eq!(reloc, decoded);
     }
 
@@ -389,7 +404,7 @@ mod tests {
     fn test_encode_decode_roundtrip_page21() {
         let reloc = Relocation::page21(0x200, 7);
         let encoded = encode_relocation(&reloc);
-        let decoded = decode_relocation(&encoded);
+        let decoded = decode_relocation(&encoded).unwrap();
         assert_eq!(reloc, decoded);
     }
 
@@ -397,7 +412,7 @@ mod tests {
     fn test_encode_decode_roundtrip_pageoff12() {
         let reloc = Relocation::pageoff12(0x300, 15);
         let encoded = encode_relocation(&reloc);
-        let decoded = decode_relocation(&encoded);
+        let decoded = decode_relocation(&encoded).unwrap();
         assert_eq!(reloc, decoded);
     }
 
@@ -405,7 +420,7 @@ mod tests {
     fn test_encode_decode_roundtrip_unsigned() {
         let reloc = Relocation::unsigned_ptr(0x400, 99);
         let encoded = encode_relocation(&reloc);
-        let decoded = decode_relocation(&encoded);
+        let decoded = decode_relocation(&encoded).unwrap();
         assert_eq!(reloc, decoded);
     }
 
@@ -413,13 +428,25 @@ mod tests {
     fn test_encode_decode_roundtrip_got() {
         let reloc = Relocation::got_load_page21(0x10, 3);
         let encoded = encode_relocation(&reloc);
-        let decoded = decode_relocation(&encoded);
+        let decoded = decode_relocation(&encoded).unwrap();
         assert_eq!(reloc, decoded);
 
         let reloc = Relocation::got_load_pageoff12(0x14, 3);
         let encoded = encode_relocation(&reloc);
-        let decoded = decode_relocation(&encoded);
+        let decoded = decode_relocation(&encoded).unwrap();
         assert_eq!(reloc, decoded);
+    }
+
+    #[test]
+    fn test_decode_unknown_reloc_type_returns_error() {
+        // Craft bytes with type_val = 15 (invalid)
+        let mut bytes = [0u8; 8];
+        // r_word1: type=15 in bits 28-31
+        let r_word1: u32 = 0xF000_0000;
+        bytes[4..8].copy_from_slice(&r_word1.to_le_bytes());
+        let result = decode_relocation(&bytes);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().type_val, 15);
     }
 
     #[test]
