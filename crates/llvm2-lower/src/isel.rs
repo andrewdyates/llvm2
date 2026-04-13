@@ -434,6 +434,16 @@ impl InstructionSelector {
         matches!(ty, Type::B1 | Type::I8 | Type::I16 | Type::I32 | Type::F32)
     }
 
+    /// Select the register class for a local LIR Type.
+    fn reg_class_for_type(ty: Type) -> RegClass {
+        match ty {
+            Type::I8 | Type::I16 | Type::I32 | Type::B1 => RegClass::Gpr32,
+            Type::I64 | Type::I128 => RegClass::Gpr64,
+            Type::F32 => RegClass::Fpr32,
+            Type::F64 => RegClass::Fpr64,
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Top-level selection
     // -----------------------------------------------------------------------
@@ -1110,7 +1120,7 @@ impl InstructionSelector {
 
         let ty = self.value_type(&src_val);
         let is_32 = Self::is_32bit(ty);
-        let class = RegClass::for_type(ty);
+        let class = Self::reg_class_for_type(ty);
         let dst = self.new_vreg(class);
 
         let src = self.use_value(&src_val);
@@ -1167,7 +1177,7 @@ impl InstructionSelector {
 
         let ty = self.value_type(&lhs_val);
         let is_32 = Self::is_32bit(ty);
-        let class = RegClass::for_type(ty);
+        let class = Self::reg_class_for_type(ty);
         let dst = self.new_vreg(class);
 
         let lhs = self.use_value(&lhs_val);
@@ -1217,7 +1227,7 @@ impl InstructionSelector {
         let src_val = inst.args[0];
         let result_val = inst.results[0];
 
-        let dst_class = RegClass::for_type(to_ty);
+        let dst_class = Self::reg_class_for_type(to_ty);
         let dst = self.new_vreg(dst_class);
         let src = self.use_value(&src_val);
 
@@ -1310,7 +1320,7 @@ impl InstructionSelector {
 
         let ty = self.value_type(&src_val);
         let is_32 = Self::is_32bit(ty);
-        let class = RegClass::for_type(ty);
+        let class = Self::reg_class_for_type(ty);
         let dst = self.new_vreg(class);
         let src = self.use_value(&src_val);
 
@@ -1362,7 +1372,7 @@ impl InstructionSelector {
 
         let ty = self.value_type(&dst_val);
         let is_32 = Self::is_32bit(ty);
-        let class = RegClass::for_type(ty);
+        let class = Self::reg_class_for_type(ty);
         let result_val = inst.results[0];
 
         // BFM reads and writes the destination register. We model this by
@@ -1432,7 +1442,7 @@ impl InstructionSelector {
 
         let ty = self.value_type(&true_val);
         let is_32 = Self::is_32bit(ty);
-        let class = RegClass::for_type(ty);
+        let class = Self::reg_class_for_type(ty);
         let dst = self.new_vreg(class);
 
         let cond_op = self.use_value(&cond_val);
@@ -1487,7 +1497,7 @@ impl InstructionSelector {
 
         let ty = self.value_type(&lhs_val);
         let is_f32 = matches!(ty, Type::F32);
-        let class = RegClass::for_type(ty);
+        let class = Self::reg_class_for_type(ty);
         let dst = self.new_vreg(class);
 
         let lhs = self.use_value(&lhs_val);
@@ -1565,7 +1575,7 @@ impl InstructionSelector {
         let src_ty = self.value_type(&src_val);
         let src = self.use_value(&src_val);
 
-        let dst_class = RegClass::for_type(dst_ty);
+        let dst_class = Self::reg_class_for_type(dst_ty);
         let dst = self.new_vreg(dst_class);
 
         // Select based on destination integer width. The source float
@@ -1616,7 +1626,7 @@ impl InstructionSelector {
             Type::F64
         };
 
-        let dst_class = RegClass::for_type(dst_ty);
+        let dst_class = Self::reg_class_for_type(dst_ty);
         let dst = self.new_vreg(dst_class);
 
         let opc = match (Self::is_32bit(src_ty), matches!(dst_ty, Type::F32)) {

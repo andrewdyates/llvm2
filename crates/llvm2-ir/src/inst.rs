@@ -63,6 +63,8 @@ pub enum AArch64Opcode {
     BCond,
     Cbz,
     Cbnz,
+    Tbz,
+    Tbnz,
     Br,
     Bl,
     Blr,
@@ -103,6 +105,8 @@ impl AArch64Opcode {
             BCond => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
             Cbz => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
             Cbnz => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+            Tbz => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+            Tbnz => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
             Br => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
 
             // Calls
