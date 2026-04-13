@@ -160,8 +160,31 @@ pub fn expand_pseudos(func: &mut IrMachFunction) {
             AArch64Opcode::Nop => {
                 // Already a no-op; will be skipped during encoding.
             }
-            _ => {
-                // Unknown pseudo — leave as NOP to avoid encoding errors.
+            // Trap pseudo-instructions survive into lowering intentionally.
+            // They are encoded as BRK #1 by the encoder — do not convert to NOP.
+            AArch64Opcode::TrapOverflow
+            | AArch64Opcode::TrapBoundsCheck
+            | AArch64Opcode::TrapNull
+            | AArch64Opcode::TrapDivZero
+            | AArch64Opcode::TrapShiftRange => {
+                // Leave as-is; the encoder handles these directly.
+            }
+            // Reference counting pseudo-instructions should have been lowered
+            // to actual call sequences before reaching this point. Leave as-is
+            // for the encoder, which emits NOP (they are effectively eliminated).
+            AArch64Opcode::Retain | AArch64Opcode::Release => {
+                // Leave as-is; the encoder handles these directly.
+            }
+            other => {
+                // Unknown pseudo-instruction — this is a bug. An unrecognized
+                // pseudo reaching expansion means either ISel emitted something
+                // we don't handle, or an earlier pass failed to lower it.
+                // Log a warning with the opcode for debugging.
+                eprintln!(
+                    "WARNING: unrecognized pseudo-instruction {:?} in expand_pseudos, \
+                     converting to NOP. This may indicate a missing expansion rule.",
+                    other
+                );
                 inst.opcode = AArch64Opcode::Nop;
                 inst.flags = InstFlags::IS_PSEUDO;
                 inst.operands.clear();
@@ -1513,6 +1536,99 @@ mod tests {
         expand_pseudos(&mut func);
         // MOV X0, X1 should be kept (not identity).
         assert_eq!(func.insts[0].opcode, AArch64Opcode::MovR);
+    }
+
+    #[test]
+    fn test_expand_pseudos_preserves_trap_overflow() {
+        // TrapOverflow is a real pseudo that the encoder handles as BRK #1.
+        // expand_pseudos must NOT convert it to NOP.
+        let mut inst = MachInst::new(AArch64Opcode::TrapOverflow, vec![MachOperand::Imm(0)]);
+        inst.flags = InstFlags::IS_PSEUDO;
+        let mut func = make_func("trap_test", vec![
+            inst,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        expand_pseudos(&mut func);
+        assert_eq!(func.insts[0].opcode, AArch64Opcode::TrapOverflow,
+            "TrapOverflow must survive expand_pseudos, not become NOP");
+    }
+
+    #[test]
+    fn test_expand_pseudos_preserves_trap_bounds_check() {
+        let mut inst = MachInst::new(AArch64Opcode::TrapBoundsCheck, vec![]);
+        inst.flags = InstFlags::IS_PSEUDO;
+        let mut func = make_func("trap_bounds", vec![
+            inst,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        expand_pseudos(&mut func);
+        assert_eq!(func.insts[0].opcode, AArch64Opcode::TrapBoundsCheck,
+            "TrapBoundsCheck must survive expand_pseudos, not become NOP");
+    }
+
+    #[test]
+    fn test_expand_pseudos_preserves_trap_null() {
+        let mut inst = MachInst::new(AArch64Opcode::TrapNull, vec![]);
+        inst.flags = InstFlags::IS_PSEUDO;
+        let mut func = make_func("trap_null", vec![
+            inst,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        expand_pseudos(&mut func);
+        assert_eq!(func.insts[0].opcode, AArch64Opcode::TrapNull,
+            "TrapNull must survive expand_pseudos, not become NOP");
+    }
+
+    #[test]
+    fn test_expand_pseudos_preserves_trap_div_zero() {
+        let mut inst = MachInst::new(AArch64Opcode::TrapDivZero, vec![]);
+        inst.flags = InstFlags::IS_PSEUDO;
+        let mut func = make_func("trap_div", vec![
+            inst,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        expand_pseudos(&mut func);
+        assert_eq!(func.insts[0].opcode, AArch64Opcode::TrapDivZero,
+            "TrapDivZero must survive expand_pseudos, not become NOP");
+    }
+
+    #[test]
+    fn test_expand_pseudos_preserves_trap_shift_range() {
+        let mut inst = MachInst::new(AArch64Opcode::TrapShiftRange, vec![]);
+        inst.flags = InstFlags::IS_PSEUDO;
+        let mut func = make_func("trap_shift", vec![
+            inst,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        expand_pseudos(&mut func);
+        assert_eq!(func.insts[0].opcode, AArch64Opcode::TrapShiftRange,
+            "TrapShiftRange must survive expand_pseudos, not become NOP");
+    }
+
+    #[test]
+    fn test_expand_pseudos_preserves_retain() {
+        let mut inst = MachInst::new(AArch64Opcode::Retain, vec![MachOperand::PReg(X0)]);
+        inst.flags = InstFlags::IS_PSEUDO;
+        let mut func = make_func("retain_test", vec![
+            inst,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        expand_pseudos(&mut func);
+        assert_eq!(func.insts[0].opcode, AArch64Opcode::Retain,
+            "Retain must survive expand_pseudos, not become NOP");
+    }
+
+    #[test]
+    fn test_expand_pseudos_preserves_release() {
+        let mut inst = MachInst::new(AArch64Opcode::Release, vec![MachOperand::PReg(X0)]);
+        inst.flags = InstFlags::IS_PSEUDO;
+        let mut func = make_func("release_test", vec![
+            inst,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        expand_pseudos(&mut func);
+        assert_eq!(func.insts[0].opcode, AArch64Opcode::Release,
+            "Release must survive expand_pseudos, not become NOP");
     }
 
     // -----------------------------------------------------------------------
