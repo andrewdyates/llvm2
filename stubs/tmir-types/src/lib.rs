@@ -1,0 +1,133 @@
+// tmir-types stub — minimal tMIR type definitions for LLVM2 development
+//
+// Author: Andrew Yates <ayates@dropbox.com>
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+//
+// This is a development stub. The real tMIR crate (ayates_dbx/tMIR) defines
+// the full type system. This stub provides only the subset needed by LLVM2.
+
+#![allow(dead_code)]
+
+use serde::{Deserialize, Serialize};
+
+/// A tMIR type.
+///
+/// tMIR uses a small, closed type system suitable for verified compilation.
+/// Every value in tMIR has exactly one type, and types carry enough
+/// information for the backend to select correct machine instructions.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Ty {
+    /// Boolean (1-bit logical value).
+    Bool,
+    /// Signed integer with bit-width (8, 16, 32, 64, 128).
+    Int(u16),
+    /// Unsigned integer with bit-width.
+    UInt(u16),
+    /// IEEE 754 floating-point (32 or 64 bits).
+    Float(u16),
+    /// Raw pointer to a typed value.
+    Ptr(Box<Ty>),
+    /// Fixed-size array: `[T; N]`.
+    Array(Box<Ty>, u64),
+    /// Named struct type (fields resolved via StructDef).
+    Struct(StructId),
+    /// Function type: params -> returns.
+    Func(FuncTy),
+    /// Void / unit (no value).
+    Void,
+}
+
+impl Ty {
+    /// Size in bytes for scalar types. Returns None for aggregates.
+    pub fn scalar_bytes(&self) -> Option<u32> {
+        match self {
+            Ty::Bool => Some(1),
+            Ty::Int(bits) | Ty::UInt(bits) | Ty::Float(bits) => Some((*bits as u32 + 7) / 8),
+            Ty::Ptr(_) => Some(8), // 64-bit pointers
+            _ => None,
+        }
+    }
+
+    /// Bit-width for scalar types.
+    pub fn bits(&self) -> Option<u16> {
+        match self {
+            Ty::Bool => Some(1),
+            Ty::Int(b) | Ty::UInt(b) | Ty::Float(b) => Some(*b),
+            Ty::Ptr(_) => Some(64),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this is a floating-point type.
+    pub fn is_float(&self) -> bool {
+        matches!(self, Ty::Float(_))
+    }
+
+    /// Returns true if this is an integer or boolean type.
+    pub fn is_integer(&self) -> bool {
+        matches!(self, Ty::Bool | Ty::Int(_) | Ty::UInt(_))
+    }
+
+    /// Returns true if this is a pointer type.
+    pub fn is_pointer(&self) -> bool {
+        matches!(self, Ty::Ptr(_))
+    }
+
+    /// Convenience constructors for common types.
+    pub fn i8() -> Self { Ty::Int(8) }
+    pub fn i16() -> Self { Ty::Int(16) }
+    pub fn i32() -> Self { Ty::Int(32) }
+    pub fn i64() -> Self { Ty::Int(64) }
+    pub fn i128() -> Self { Ty::Int(128) }
+    pub fn u8() -> Self { Ty::UInt(8) }
+    pub fn u16() -> Self { Ty::UInt(16) }
+    pub fn u32() -> Self { Ty::UInt(32) }
+    pub fn u64() -> Self { Ty::UInt(64) }
+    pub fn f32() -> Self { Ty::Float(32) }
+    pub fn f64() -> Self { Ty::Float(64) }
+    pub fn ptr(inner: Ty) -> Self { Ty::Ptr(Box::new(inner)) }
+}
+
+/// Struct type identifier (index into a struct definition table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StructId(pub u32);
+
+/// Function type: parameter types and return types.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FuncTy {
+    pub params: Vec<Ty>,
+    pub returns: Vec<Ty>,
+}
+
+/// A named field in a struct definition.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FieldDef {
+    pub name: String,
+    pub ty: Ty,
+    /// Byte offset within the struct (populated by layout).
+    pub offset: Option<u32>,
+}
+
+/// Struct definition: name + ordered fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructDef {
+    pub id: StructId,
+    pub name: String,
+    pub fields: Vec<FieldDef>,
+    /// Total size in bytes (populated by layout).
+    pub size: Option<u32>,
+    /// Alignment in bytes (populated by layout).
+    pub align: Option<u32>,
+}
+
+/// A tMIR value reference (SSA value ID within a function).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ValueId(pub u32);
+
+/// A basic block identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BlockId(pub u32);
+
+/// A function identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FuncId(pub u32);

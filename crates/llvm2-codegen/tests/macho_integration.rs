@@ -7,7 +7,8 @@
 // that macOS system tools (otool, nm) can parse.
 
 use llvm2_codegen::macho::constants::*;
-use llvm2_codegen::macho::{MachOWriter, Relocation};
+use llvm2_codegen::macho::MachOWriter;
+use llvm2_codegen::macho::writer::Relocation;
 
 use std::io::Write;
 use std::process::Command;

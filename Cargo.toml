@@ -34,11 +34,12 @@ anyhow = "1.0"
 # Verification (z4 SMT solver)
 # z4 = { git = "https://github.com/ayates_dbx/z4" }
 
-# Input IR (tMIR)
-tmir-types = { path = "../tMIR/crates/tmir-types" }
-tmir-instrs = { path = "../tMIR/crates/tmir-instrs" }
-tmir-func = { path = "../tMIR/crates/tmir-func" }
-tmir-semantics = { path = "../tMIR/crates/tmir-semantics" }
+# Input IR (tMIR) — in-tree stubs for development.
+# When the real tMIR repo is available, update paths to "../tMIR/crates/...".
+tmir-types = { path = "stubs/tmir-types" }
+tmir-instrs = { path = "stubs/tmir-instrs" }
+tmir-func = { path = "stubs/tmir-func" }
+tmir-semantics = { path = "stubs/tmir-semantics" }
 
 # Internal crates
 llvm2-ir = { path = "crates/llvm2-ir" }

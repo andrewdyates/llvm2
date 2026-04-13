@@ -1,0 +1,19 @@
+# tmir-func stub — minimal function IR for LLVM2 development
+#
+# Author: Andrew Yates <ayates@dropbox.com>
+# Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+#
+# This is a development stub. When the real tMIR crate is available,
+# replace the workspace dep path to point to the tMIR repo.
+
+[package]
+name = "tmir-func"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Stub: tMIR function representation for LLVM2 development"
+
+[dependencies]
+tmir-types = { path = "../tmir-types" }
+tmir-instrs = { path = "../tmir-instrs" }
+serde = { version = "1.0", features = ["derive"] }
