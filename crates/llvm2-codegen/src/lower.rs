@@ -845,6 +845,102 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 | (rn << 5)
                 | rd)
         }
+        AArch64Opcode::FcvtzuRR => {
+            // FCVTZU Wd/Xd, Dn (unsigned variant)
+            // sf | 0 | 0 | 11110 | ftype | 1 | 11 | 001 | 000000 | Rn | Rd
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let ftype = 0b01u32; // double
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            Ok((sf << 31)
+                | (0b0011110u32 << 24)
+                | (ftype << 22)
+                | (1u32 << 21)
+                | (0b11u32 << 19)
+                | (0b001u32 << 16)
+                | (0u32 << 10)
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::UcvtfRR => {
+            // UCVTF Dd, Wn/Xn (unsigned variant)
+            // sf | 0 | 0 | 11110 | ftype | 1 | 00 | 011 | 000000 | Rn | Rd
+            let sf = if is_64bit(1) { 1u32 } else { 0u32 };
+            let ftype = 0b01u32; // double
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            Ok((sf << 31)
+                | (0b0011110u32 << 24)
+                | (ftype << 22)
+                | (1u32 << 21)
+                | (0b00u32 << 19)
+                | (0b011u32 << 16)
+                | (0u32 << 10)
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::FcvtSD => {
+            // FCVT Dd, Sn (f32 -> f64)
+            // 0 | 00 | 11110 | 00 | 1 | 0001 | 01 | 10000 | Rn | Rd
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            Ok((0b0011110u32 << 24)
+                | (0b00u32 << 22)  // ftype = single source
+                | (1u32 << 21)
+                | (0b0001u32 << 17)
+                | (0b01u32 << 15)  // opc = convert to double
+                | (0b10000u32 << 10)
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::FcvtDS => {
+            // FCVT Ss, Dn (f64 -> f32)
+            // 0 | 00 | 11110 | 01 | 1 | 0001 | 00 | 10000 | Rn | Rd
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            Ok((0b0011110u32 << 24)
+                | (0b01u32 << 22)  // ftype = double source
+                | (1u32 << 21)
+                | (0b0001u32 << 17)
+                | (0b00u32 << 15)  // opc = convert to single
+                | (0b10000u32 << 10)
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::FmovGprFpr => {
+            // FMOV Sd, Wn (or FMOV Dd, Xn)
+            // sf | 0 | 0 | 11110 | ftype | 1 | 00 | 111 | 000000 | Rn | Rd
+            let sf = if is_64bit(1) { 1u32 } else { 0u32 };
+            let ftype = if sf == 1 { 0b01u32 } else { 0b00u32 };
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            Ok((sf << 31)
+                | (0b0011110u32 << 24)
+                | (ftype << 22)
+                | (1u32 << 21)
+                | (0b00u32 << 19)
+                | (0b111u32 << 16)
+                | (0u32 << 10)
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::FmovFprGpr => {
+            // FMOV Wn, Sd (or FMOV Xn, Dd)
+            // sf | 0 | 0 | 11110 | ftype | 1 | 00 | 110 | 000000 | Rn | Rd
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let ftype = if sf == 1 { 0b01u32 } else { 0b00u32 };
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            Ok((sf << 31)
+                | (0b0011110u32 << 24)
+                | (ftype << 22)
+                | (1u32 << 21)
+                | (0b00u32 << 19)
+                | (0b110u32 << 16)
+                | (0u32 << 10)
+                | (rn << 5)
+                | rd)
+        }
 
         // --- Data-processing (3 source): MSUB, SMULL, UMULL ---
         AArch64Opcode::Msub => {

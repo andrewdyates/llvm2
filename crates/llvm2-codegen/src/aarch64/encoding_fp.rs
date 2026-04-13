@@ -75,9 +75,15 @@ pub enum FpConvOp {
     /// FCVTZS — FP to signed integer, round toward zero.
     /// rmode = 0b11, opcode = 0b000
     FcvtzsToInt,
+    /// FCVTZU — FP to unsigned integer, round toward zero.
+    /// rmode = 0b11, opcode = 0b001
+    FcvtzuToInt,
     /// SCVTF — signed integer to FP.
     /// rmode = 0b00, opcode = 0b010
     ScvtfToFp,
+    /// UCVTF — unsigned integer to FP.
+    /// rmode = 0b00, opcode = 0b011
+    UcvtfToFp,
     /// FMOV — move GP register to FP register.
     /// rmode = 0b00, opcode = 0b111
     FmovToFp,
@@ -91,7 +97,9 @@ impl FpConvOp {
     fn rmode_opcode(self) -> (u32, u32) {
         match self {
             FpConvOp::FcvtzsToInt => (0b11, 0b000),
+            FpConvOp::FcvtzuToInt => (0b11, 0b001),
             FpConvOp::ScvtfToFp => (0b00, 0b010),
+            FpConvOp::UcvtfToFp => (0b00, 0b011),
             FpConvOp::FmovToFp => (0b00, 0b111),
             FpConvOp::FmovToGp => (0b00, 0b110),
         }
@@ -264,6 +272,42 @@ pub fn encode_fp_unary(
     inst |= 1 << 21;
     // bits[20:17] = 0000
     inst |= (op as u32) << 15;
+    inst |= 0b10000 << 10;
+    inst |= (rn as u32) << 5;
+    inst |= rd as u32;
+    Ok(inst)
+}
+
+/// Encode a float precision conversion instruction (FCVT between sizes).
+///
+/// ```text
+/// 0 | 00 | 11110 | ftype(2) | 1 | 0001 | opc(2) | 10000 | Rn(5) | Rd(5)
+/// ```
+///
+/// - `src_size`: the FP size of the source register
+/// - `dst_size`: the FP size of the destination register
+///
+/// `ftype` is derived from `src_size`, `opc` from `dst_size`:
+///   FCVT Dd, Sn: ftype=00 (single), opc=01 (double)
+///   FCVT Ss, Dn: ftype=01 (double), opc=00 (single)
+pub fn encode_fp_precision_cvt(
+    src_size: FpSize,
+    dst_size: FpSize,
+    rn: u8,
+    rd: u8,
+) -> Result<u32, FpEncodeError> {
+    check_reg(rn, 31)?;
+    check_reg(rd, 31)?;
+
+    let ftype = src_size as u32;
+    let opc = dst_size as u32;
+
+    let mut inst: u32 = 0;
+    inst |= 0b11110 << 24;
+    inst |= ftype << 22;
+    inst |= 1 << 21;
+    inst |= 0b0001 << 17;
+    inst |= opc << 15;
     inst |= 0b10000 << 10;
     inst |= (rn as u32) << 5;
     inst |= rd as u32;

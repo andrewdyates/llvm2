@@ -115,7 +115,19 @@ pub enum AArch64Opcode {
     FnegRR,
     Fcmp,
     FcvtzsRR,
+    /// FCVTZU: float-to-unsigned-integer conversion (round toward zero).
+    FcvtzuRR,
     ScvtfRR,
+    /// UCVTF: unsigned-integer-to-float conversion.
+    UcvtfRR,
+    /// FCVT Dd, Sn: float precision widen (f32 -> f64).
+    FcvtSD,
+    /// FCVT Ss, Dn: float precision narrow (f64 -> f32).
+    FcvtDS,
+    /// FMOV between GPR and FPR (e.g., FMOV Sd, Wn or FMOV Dd, Xn).
+    FmovGprFpr,
+    /// FMOV between FPR and GPR (e.g., FMOV Wn, Sd or FMOV Xn, Dd).
+    FmovFprGpr,
 
     // -- Address --
     Adrp,
