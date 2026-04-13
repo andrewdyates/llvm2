@@ -159,9 +159,12 @@ pub struct CompactUnwindReloc {
 ///
 /// # Usage
 ///
-/// ```ignore
+/// ```no_run
+/// use llvm2_codegen::unwind::{CompactUnwindSection, CompactUnwindEntry};
+/// use llvm2_codegen::frame::UNWIND_ARM64_MODE_FRAME;
+///
 /// let mut section = CompactUnwindSection::new();
-/// section.add_entry(CompactUnwindEntry::new(0, 64, encoding, 0));
+/// section.add_entry(CompactUnwindEntry::new(0, 64, UNWIND_ARM64_MODE_FRAME, 0));
 /// let bytes = section.to_bytes();
 /// let relocs = section.relocations();
 /// ```
