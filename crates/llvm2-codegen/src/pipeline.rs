@@ -179,10 +179,10 @@ fn convert_isel_operand(op: &llvm2_lower::isel::MachOperand) -> IrOperand {
             };
             IrOperand::Imm(encoding)
         }
-        IsOp::Symbol(_name) => {
-            // Symbol references become immediates (relocated later).
-            // TODO: Add a proper Symbol operand to IR.
-            IrOperand::Imm(0)
+        IsOp::Symbol(name) => {
+            // Symbol references are preserved through the pipeline so the
+            // relocation collector can emit proper linker entries.
+            IrOperand::Symbol(name.clone())
         }
         IsOp::StackSlot(idx) => {
             IrOperand::StackSlot(llvm2_ir::types::StackSlotId(*idx))

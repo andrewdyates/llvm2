@@ -1343,15 +1343,12 @@ fn collect_relocations(instructions: &[MachInst]) -> Vec<Relocation> {
 
 /// Extract a symbol name from an instruction's operands, if present.
 ///
-/// Symbol references may appear as Imm(0) placeholders from ISel conversion
-/// (see pipeline.rs convert_isel_operand). In a complete implementation,
-/// these would be carried as a dedicated Symbol operand. For now, we don't
-/// extract symbols since the current IR doesn't carry them through.
-fn extract_symbol_name(_inst: &MachInst) -> Option<String> {
-    // TODO: When the IR gains a Symbol operand type, extract it here.
-    // For now, relocations for external symbols are not emitted because
-    // the current ISel converts symbols to Imm(0) placeholders.
-    None
+/// Walks the operand list and returns the first `Symbol(name)` found.
+/// Symbol operands are created by ISel for instructions that reference
+/// external names (BL for calls, ADRP/ADD for globals, etc.) and are
+/// preserved through the IR pipeline by `convert_isel_operand`.
+fn extract_symbol_name(inst: &MachInst) -> Option<String> {
+    inst.operands.iter().find_map(|op| op.as_symbol().map(|s| s.to_string()))
 }
 
 // ===========================================================================
@@ -1856,5 +1853,207 @@ mod tests {
         );
         let word = encode_inst(&inst).unwrap();
         assert_eq!(word, 0xD63F0000, "BLR X0 = 0x{word:08X}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Symbol extraction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_symbol_from_bl() {
+        let inst = MachInst::new(
+            AArch64Opcode::Bl,
+            vec![MachOperand::Symbol("_printf".to_string())],
+        );
+        assert_eq!(extract_symbol_name(&inst), Some("_printf".to_string()));
+    }
+
+    #[test]
+    fn test_extract_symbol_from_adrp() {
+        // ADRP Xd, symbol — operands: [PReg(dst), Symbol(name)]
+        let inst = MachInst::new(
+            AArch64Opcode::Adrp,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::Symbol("_my_global".to_string()),
+            ],
+        );
+        assert_eq!(extract_symbol_name(&inst), Some("_my_global".to_string()));
+    }
+
+    #[test]
+    fn test_extract_symbol_from_add_pcrel() {
+        // ADD Xd, Xn, #pageoff — operands: [PReg(dst), PReg(src), Symbol(name)]
+        let inst = MachInst::new(
+            AArch64Opcode::AddPCRel,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X0),
+                MachOperand::Symbol("_my_global".to_string()),
+            ],
+        );
+        assert_eq!(extract_symbol_name(&inst), Some("_my_global".to_string()));
+    }
+
+    #[test]
+    fn test_extract_symbol_none_for_plain_add() {
+        let inst = MachInst::new(
+            AArch64Opcode::AddRR,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X1),
+            ],
+        );
+        assert_eq!(extract_symbol_name(&inst), None);
+    }
+
+    #[test]
+    fn test_extract_symbol_none_for_ret() {
+        let inst = MachInst::new(AArch64Opcode::Ret, vec![]);
+        assert_eq!(extract_symbol_name(&inst), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Relocation collection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_collect_relocations_bl_branch26() {
+        let instructions = vec![
+            MachInst::new(
+                AArch64Opcode::Bl,
+                vec![MachOperand::Symbol("_callee".to_string())],
+            ),
+        ];
+        let relocs = collect_relocations(&instructions);
+        assert_eq!(relocs.len(), 1);
+        assert_eq!(relocs[0].offset, 0);
+        assert_eq!(relocs[0].kind, RelocKind::Branch26);
+        assert_eq!(relocs[0].symbol, "_callee");
+        assert_eq!(relocs[0].addend, 0);
+    }
+
+    #[test]
+    fn test_collect_relocations_adrp_page21() {
+        let instructions = vec![
+            MachInst::new(
+                AArch64Opcode::Adrp,
+                vec![
+                    MachOperand::PReg(X0),
+                    MachOperand::Symbol("_global_var".to_string()),
+                ],
+            ),
+        ];
+        let relocs = collect_relocations(&instructions);
+        assert_eq!(relocs.len(), 1);
+        assert_eq!(relocs[0].offset, 0);
+        assert_eq!(relocs[0].kind, RelocKind::AdrpPage21);
+        assert_eq!(relocs[0].symbol, "_global_var");
+    }
+
+    #[test]
+    fn test_collect_relocations_add_pcrel_pageoff12() {
+        let instructions = vec![
+            MachInst::new(
+                AArch64Opcode::AddPCRel,
+                vec![
+                    MachOperand::PReg(X0),
+                    MachOperand::PReg(X0),
+                    MachOperand::Symbol("_global_var".to_string()),
+                ],
+            ),
+        ];
+        let relocs = collect_relocations(&instructions);
+        assert_eq!(relocs.len(), 1);
+        assert_eq!(relocs[0].offset, 0);
+        assert_eq!(relocs[0].kind, RelocKind::AddPageOff12);
+        assert_eq!(relocs[0].symbol, "_global_var");
+    }
+
+    #[test]
+    fn test_collect_relocations_adrp_add_pair() {
+        // Typical global access pattern: ADRP + ADD
+        let instructions = vec![
+            MachInst::new(
+                AArch64Opcode::Adrp,
+                vec![
+                    MachOperand::PReg(X0),
+                    MachOperand::Symbol("_data".to_string()),
+                ],
+            ),
+            MachInst::new(
+                AArch64Opcode::AddPCRel,
+                vec![
+                    MachOperand::PReg(X0),
+                    MachOperand::PReg(X0),
+                    MachOperand::Symbol("_data".to_string()),
+                ],
+            ),
+        ];
+        let relocs = collect_relocations(&instructions);
+        assert_eq!(relocs.len(), 2);
+        // First: ADRP at offset 0
+        assert_eq!(relocs[0].offset, 0);
+        assert_eq!(relocs[0].kind, RelocKind::AdrpPage21);
+        assert_eq!(relocs[0].symbol, "_data");
+        // Second: ADD at offset 4
+        assert_eq!(relocs[1].offset, 4);
+        assert_eq!(relocs[1].kind, RelocKind::AddPageOff12);
+        assert_eq!(relocs[1].symbol, "_data");
+    }
+
+    #[test]
+    fn test_collect_relocations_mixed_with_no_symbol_instrs() {
+        // ADD X0, X0, X1 (no symbol), then BL _callee (with symbol)
+        let instructions = vec![
+            MachInst::new(
+                AArch64Opcode::AddRR,
+                vec![
+                    MachOperand::PReg(X0),
+                    MachOperand::PReg(X0),
+                    MachOperand::PReg(X1),
+                ],
+            ),
+            MachInst::new(
+                AArch64Opcode::Bl,
+                vec![MachOperand::Symbol("_callee".to_string())],
+            ),
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ];
+        let relocs = collect_relocations(&instructions);
+        assert_eq!(relocs.len(), 1);
+        // BL is the second instruction, so offset = 4
+        assert_eq!(relocs[0].offset, 4);
+        assert_eq!(relocs[0].kind, RelocKind::Branch26);
+        assert_eq!(relocs[0].symbol, "_callee");
+    }
+
+    #[test]
+    fn test_collect_relocations_no_symbol_no_relocs() {
+        let instructions = vec![
+            MachInst::new(
+                AArch64Opcode::AddRR,
+                vec![
+                    MachOperand::PReg(X0),
+                    MachOperand::PReg(X0),
+                    MachOperand::PReg(X1),
+                ],
+            ),
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ];
+        let relocs = collect_relocations(&instructions);
+        assert!(relocs.is_empty());
+    }
+
+    #[test]
+    fn test_collect_relocations_bl_without_symbol_no_reloc() {
+        // BL with a numeric offset (resolved branch) should produce no relocation.
+        let inst = MachInst::new(
+            AArch64Opcode::Bl,
+            vec![MachOperand::Imm(42)],
+        );
+        let relocs = collect_relocations(&[inst]);
+        assert!(relocs.is_empty());
     }
 }
