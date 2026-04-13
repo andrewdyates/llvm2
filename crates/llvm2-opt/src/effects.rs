@@ -73,10 +73,10 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
     use AArch64Opcode::*;
     match opcode {
         // -- Loads: read memory --
-        LdrRI | LdrLiteral | LdpRI => MemoryEffect::Load,
+        LdrRI | LdrLiteral | LdpRI | LdpPostIndex => MemoryEffect::Load,
 
         // -- Stores: write memory --
-        StrRI | StpRI => MemoryEffect::Store,
+        StrRI | StpRI | StpPreIndex => MemoryEffect::Store,
 
         // -- Calls: full barrier --
         Bl | Blr => MemoryEffect::Call,

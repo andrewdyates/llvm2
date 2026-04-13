@@ -18,6 +18,7 @@
 // Reference: frame.rs (prologue/epilogue insertion, frame index elimination)
 
 use crate::aarch64::encoding;
+use crate::aarch64::encoding_mem;
 use crate::frame::{self, FrameLayout};
 use crate::relax;
 use llvm2_ir::function::MachFunction as IrMachFunction;
@@ -213,7 +214,7 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
     // Helper: determine if the instruction operates on 64-bit registers.
     let is_64bit = |idx: usize| -> bool {
         match inst.operands.get(idx) {
-            Some(MachOperand::PReg(p)) => p.is_gpr() && p.0 < 32,
+            Some(MachOperand::PReg(p)) => p.is_gpr() && p.encoding() < 32,
             _ => true,
         }
     };
@@ -456,18 +457,30 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
 
         // --- Move ---
         AArch64Opcode::MovR => {
-            // MOV Rd, Rm = ORR Rd, XZR, Rm
+            // MOV Rd, Rm
+            // When source is SP, use ADD Rd, SP, #0 (reg 31 = SP in ADD context).
+            // Otherwise, use ORR Rd, XZR, Rm (reg 31 = XZR in logical context).
             let sf = if is_64bit(0) { 1 } else { 0 };
-            Ok(encoding::encode_logical_shifted_reg(
-                sf,
-                0b01,
-                0,
-                0,
-                preg_hw(1)?,
-                0,
-                31,
-                preg_hw(0)?,
-            ))
+            let is_sp_source = matches!(
+                inst.operands.get(1),
+                Some(MachOperand::Special(SpecialReg::SP))
+            );
+            if is_sp_source {
+                Ok(encoding::encode_add_sub_imm(
+                    sf, 0, 0, 0, 0, 31, preg_hw(0)?,
+                ))
+            } else {
+                Ok(encoding::encode_logical_shifted_reg(
+                    sf,
+                    0b01,
+                    0,
+                    0,
+                    preg_hw(1)?,
+                    0,
+                    31,
+                    preg_hw(0)?,
+                ))
+            }
         }
         AArch64Opcode::MovI | AArch64Opcode::Movz => {
             // MOVZ Rd, #imm16
@@ -566,7 +579,7 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             ))
         }
         AArch64Opcode::StpRI => {
-            // STP Rt, Rt2, [Rn, #offset]
+            // STP Rt, Rt2, [Rn, #offset] (signed offset)
             let offset = if inst.operands.len() > 3 { imm_val(3) } else { 0 };
             let scaled_imm7 = ((offset / 8) as i32 as u32) & 0x7F;
             Ok(encoding::encode_load_store_pair(
@@ -579,8 +592,22 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 preg_hw(0)?,
             ))
         }
+        AArch64Opcode::StpPreIndex => {
+            // STP Rt, Rt2, [Rn, #offset]! (pre-index writeback)
+            let offset = if inst.operands.len() > 3 { imm_val(3) } else { 0 };
+            let scaled_imm7 = (offset / 8) as i8;
+            encoding_mem::encode_ldp_stp_pre_index(
+                encoding_mem::PairSize::X64,
+                false,
+                encoding_mem::PairOp::StorePair,
+                scaled_imm7,
+                preg_hw(1)? as u8,
+                preg_hw(2)? as u8,
+                preg_hw(0)? as u8,
+            ).map_err(|e| LowerError::EncodingFailed(e.to_string()))
+        }
         AArch64Opcode::LdpRI => {
-            // LDP Rt, Rt2, [Rn, #offset]
+            // LDP Rt, Rt2, [Rn, #offset] (signed offset)
             let offset = if inst.operands.len() > 3 { imm_val(3) } else { 0 };
             let scaled_imm7 = ((offset / 8) as i32 as u32) & 0x7F;
             Ok(encoding::encode_load_store_pair(
@@ -592,6 +619,20 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 preg_hw(2)?,
                 preg_hw(0)?,
             ))
+        }
+        AArch64Opcode::LdpPostIndex => {
+            // LDP Rt, Rt2, [Rn], #offset (post-index writeback)
+            let offset = if inst.operands.len() > 3 { imm_val(3) } else { 0 };
+            let scaled_imm7 = (offset / 8) as i8;
+            encoding_mem::encode_ldp_stp_post_index(
+                encoding_mem::PairSize::X64,
+                false,
+                encoding_mem::PairOp::LoadPair,
+                scaled_imm7,
+                preg_hw(1)? as u8,
+                preg_hw(2)? as u8,
+                preg_hw(0)? as u8,
+            ).map_err(|e| LowerError::EncodingFailed(e.to_string()))
         }
         AArch64Opcode::LdrLiteral => {
             // LDR Xt, <literal> — PC-relative literal load
@@ -762,8 +803,39 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 | rd)
         }
 
+        // --- Checked arithmetic (ADDS/SUBS — same as ADD/SUB with S=1) ---
+        AArch64Opcode::AddsRR => {
+            let sf = if is_64bit(0) { 1 } else { 0 };
+            Ok(encoding::encode_add_sub_shifted_reg(
+                sf, 0, 1, 0, preg_hw(2)?, 0, preg_hw(1)?, preg_hw(0)?,
+            ))
+        }
+        AArch64Opcode::AddsRI => {
+            let sf = if is_64bit(0) { 1 } else { 0 };
+            let imm = imm_val(2) as u32 & 0xFFF;
+            Ok(encoding::encode_add_sub_imm(
+                sf, 0, 1, 0, imm, preg_hw(1)?, preg_hw(0)?,
+            ))
+        }
+        AArch64Opcode::SubsRR => {
+            let sf = if is_64bit(0) { 1 } else { 0 };
+            Ok(encoding::encode_add_sub_shifted_reg(
+                sf, 1, 1, 0, preg_hw(2)?, 0, preg_hw(1)?, preg_hw(0)?,
+            ))
+        }
+        AArch64Opcode::SubsRI => {
+            let sf = if is_64bit(0) { 1 } else { 0 };
+            let imm = imm_val(2) as u32 & 0xFFF;
+            Ok(encoding::encode_add_sub_imm(
+                sf, 1, 1, 0, imm, preg_hw(1)?, preg_hw(0)?,
+            ))
+        }
+
         // --- Pseudo-instructions: emit NOP ---
-        AArch64Opcode::Phi | AArch64Opcode::StackAlloc | AArch64Opcode::Nop => {
+        AArch64Opcode::Phi | AArch64Opcode::StackAlloc | AArch64Opcode::Nop
+        | AArch64Opcode::TrapOverflow | AArch64Opcode::TrapBoundsCheck
+        | AArch64Opcode::TrapNull | AArch64Opcode::Retain
+        | AArch64Opcode::Release => {
             // These should have been eliminated, but emit NOP as safe fallback.
             Ok(0xD503201F)
         }

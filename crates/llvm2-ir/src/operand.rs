@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn operand_equality_different_variants() {
         // Different variants with "similar" values should not be equal
-        assert_ne!(MachOperand::Imm(0), MachOperand::PReg(PReg(0)));
+        assert_ne!(MachOperand::Imm(0), MachOperand::PReg(PReg::new(0)));
         assert_ne!(
             MachOperand::VReg(VReg::new(0, RegClass::Gpr64)),
             MachOperand::PReg(X0)

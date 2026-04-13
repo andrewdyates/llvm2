@@ -77,7 +77,7 @@ fn imm_val(inst: &MachInst, idx: usize) -> i64 {
 fn sf_from_operand(inst: &MachInst, idx: usize) -> u32 {
     match inst.operands.get(idx) {
         Some(MachOperand::PReg(p)) => {
-            if p.is_gpr() && p.0 < 32 {
+            if p.is_gpr() && p.encoding() < 32 {
                 1 // All GPRs default to 64-bit in this model
             } else {
                 1
@@ -381,12 +381,28 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
         // Move
         // =================================================================
 
-        // MOV Rd, Rm = ORR Rd, XZR, Rm
+        // MOV Rd, Rm
+        // When the source is SP (Special::SP), we must use ADD Rd, SP, #0
+        // because register 31 in logical instructions (ORR) is XZR, not SP.
+        // In ADD/SUB (immediate) context, register 31 is SP.
+        // For all other registers, use ORR Rd, XZR, Rm.
         AArch64Opcode::MovR => {
             let sf = sf_from_operand(inst, 0);
-            Ok(encoding::encode_logical_shifted_reg(
-                sf, 0b01, 0, 0, preg_hw(inst, 1), 0, 31, preg_hw(inst, 0),
-            ))
+            let is_sp_source = matches!(
+                inst.operands.get(1),
+                Some(MachOperand::Special(SpecialReg::SP))
+            );
+            if is_sp_source {
+                // ADD Rd, SP, #0
+                Ok(encoding::encode_add_sub_imm(
+                    sf, 0, 0, 0, 0, 31, preg_hw(inst, 0),
+                ))
+            } else {
+                // ORR Rd, XZR, Rm
+                Ok(encoding::encode_logical_shifted_reg(
+                    sf, 0b01, 0, 0, preg_hw(inst, 1), 0, 31, preg_hw(inst, 0),
+                ))
+            }
         }
 
         // MOVZ Rd, #imm16 (and MovI treated as MOVZ)
@@ -450,7 +466,7 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
                 | rt)
         }
 
-        // STP Rt, Rt2, [Rn, #offset]
+        // STP Rt, Rt2, [Rn, #offset] (signed offset)
         AArch64Opcode::StpRI => {
             let offset = if inst.operands.len() > 3 { imm_val(inst, 3) } else { 0 };
             let scaled_imm7 = ((offset / 8) as i32 as u32) & 0x7F;
@@ -459,13 +475,43 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             ))
         }
 
-        // LDP Rt, Rt2, [Rn, #offset]
+        // STP Rt, Rt2, [Rn, #offset]! (pre-index: base updated before store)
+        AArch64Opcode::StpPreIndex => {
+            let offset = if inst.operands.len() > 3 { imm_val(inst, 3) } else { 0 };
+            let scaled_imm7 = (offset / 8) as i8;
+            Ok(encoding_mem::encode_ldp_stp_pre_index(
+                encoding_mem::PairSize::X64,
+                false,
+                encoding_mem::PairOp::StorePair,
+                scaled_imm7,
+                preg_hw(inst, 1) as u8,
+                preg_hw(inst, 2) as u8,
+                preg_hw(inst, 0) as u8,
+            )?)
+        }
+
+        // LDP Rt, Rt2, [Rn, #offset] (signed offset)
         AArch64Opcode::LdpRI => {
             let offset = if inst.operands.len() > 3 { imm_val(inst, 3) } else { 0 };
             let scaled_imm7 = ((offset / 8) as i32 as u32) & 0x7F;
             Ok(encoding::encode_load_store_pair(
                 0b10, 0, 1, scaled_imm7, preg_hw(inst, 1), preg_hw(inst, 2), preg_hw(inst, 0),
             ))
+        }
+
+        // LDP Rt, Rt2, [Rn], #offset (post-index: base updated after load)
+        AArch64Opcode::LdpPostIndex => {
+            let offset = if inst.operands.len() > 3 { imm_val(inst, 3) } else { 0 };
+            let scaled_imm7 = (offset / 8) as i8;
+            Ok(encoding_mem::encode_ldp_stp_post_index(
+                encoding_mem::PairSize::X64,
+                false,
+                encoding_mem::PairOp::LoadPair,
+                scaled_imm7,
+                preg_hw(inst, 1) as u8,
+                preg_hw(inst, 2) as u8,
+                preg_hw(inst, 0) as u8,
+            )?)
         }
 
         // =================================================================
@@ -732,6 +778,50 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
         // =================================================================
 
         AArch64Opcode::Phi | AArch64Opcode::StackAlloc | AArch64Opcode::Nop => Ok(NOP),
+
+        // =================================================================
+        // Checked arithmetic (ADDS/SUBS — same encoding as ADD/SUB with S=1)
+        // =================================================================
+
+        AArch64Opcode::AddsRR => {
+            let sf = sf_from_operand(inst, 0);
+            Ok(encoding::encode_add_sub_shifted_reg(
+                sf, 0, 1, 0, preg_hw(inst, 2), 0, preg_hw(inst, 1), preg_hw(inst, 0),
+            ))
+        }
+
+        AArch64Opcode::AddsRI => {
+            let sf = sf_from_operand(inst, 0);
+            let imm = imm_val(inst, 2) as u32 & 0xFFF;
+            Ok(encoding::encode_add_sub_imm(
+                sf, 0, 1, 0, imm, preg_hw(inst, 1), preg_hw(inst, 0),
+            ))
+        }
+
+        AArch64Opcode::SubsRR => {
+            let sf = sf_from_operand(inst, 0);
+            Ok(encoding::encode_add_sub_shifted_reg(
+                sf, 1, 1, 0, preg_hw(inst, 2), 0, preg_hw(inst, 1), preg_hw(inst, 0),
+            ))
+        }
+
+        AArch64Opcode::SubsRI => {
+            let sf = sf_from_operand(inst, 0);
+            let imm = imm_val(inst, 2) as u32 & 0xFFF;
+            Ok(encoding::encode_add_sub_imm(
+                sf, 1, 1, 0, imm, preg_hw(inst, 1), preg_hw(inst, 0),
+            ))
+        }
+
+        // =================================================================
+        // Trap and refcounting pseudo-instructions — should not reach encoder
+        // =================================================================
+
+        AArch64Opcode::TrapOverflow
+        | AArch64Opcode::TrapBoundsCheck
+        | AArch64Opcode::TrapNull
+        | AArch64Opcode::Retain
+        | AArch64Opcode::Release => Ok(NOP),
     }
 }
 

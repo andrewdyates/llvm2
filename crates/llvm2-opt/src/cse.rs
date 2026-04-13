@@ -274,7 +274,7 @@ fn produces_value(opcode: AArch64Opcode) -> bool {
     use AArch64Opcode::*;
     match opcode {
         CmpRR | CmpRI | Tst | Fcmp => false,
-        StrRI | StpRI => false,
+        StrRI | StpRI | StpPreIndex => false,
         B | BCond | Cbz | Cbnz | Br | Ret => false,
         Nop => false,
         Bl | Blr => false,

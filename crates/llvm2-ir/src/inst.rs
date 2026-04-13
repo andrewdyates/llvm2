@@ -57,6 +57,14 @@ pub enum AArch64Opcode {
     LdrLiteral,
     LdpRI,
     StpRI,
+    /// STP with pre-index writeback: STP Rt, Rt2, [Rn, #imm]!
+    /// The base register is updated before the store.
+    /// Operands: [PReg(Rt), PReg(Rt2), Special(SP)|PReg(Rn), Imm(offset)]
+    StpPreIndex,
+    /// LDP with post-index writeback: LDP Rt, Rt2, [Rn], #imm
+    /// The base register is updated after the load.
+    /// Operands: [PReg(Rt), PReg(Rt2), Special(SP)|PReg(Rn), Imm(offset)]
+    LdpPostIndex,
 
     // -- Branch --
     B,
@@ -146,11 +154,11 @@ impl AArch64Opcode {
             // Memory loads
             LdrRI => InstFlags::READS_MEMORY,
             LdrLiteral => InstFlags::READS_MEMORY,
-            LdpRI => InstFlags::READS_MEMORY,
+            LdpRI | LdpPostIndex => InstFlags::READS_MEMORY,
 
             // Memory stores
             StrRI => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
-            StpRI => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
+            StpRI | StpPreIndex => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Pseudo-instructions
             Phi => InstFlags::IS_PSEUDO,
@@ -542,6 +550,7 @@ mod tests {
             AArch64Opcode::LdrRI,
             AArch64Opcode::LdrLiteral,
             AArch64Opcode::LdpRI,
+            AArch64Opcode::LdpPostIndex,
         ];
         for op in &load_ops {
             let flags = op.default_flags();
@@ -558,7 +567,7 @@ mod tests {
 
     #[test]
     fn store_opcodes_have_writes_memory_and_side_effects() {
-        let store_ops = [AArch64Opcode::StrRI, AArch64Opcode::StpRI];
+        let store_ops = [AArch64Opcode::StrRI, AArch64Opcode::StpRI, AArch64Opcode::StpPreIndex];
         for op in &store_ops {
             let flags = op.default_flags();
             assert!(
