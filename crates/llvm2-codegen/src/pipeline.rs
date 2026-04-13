@@ -852,6 +852,10 @@ impl Pipeline {
     /// When `frame_layout` is provided, a `__LD,__compact_unwind` section is
     /// emitted containing a single compact unwind entry for the function.
     /// This is required by macOS for backtraces, profilers, and exception handling.
+    ///
+    /// When `self.config.emit_debug` is true, DWARF debug sections are also
+    /// emitted (`__DWARF,__debug_info`, `__debug_abbrev`, `__debug_str`,
+    /// `__debug_line`).
     fn emit_macho(
         &self,
         func_name: &str,
@@ -881,6 +885,28 @@ impl Pipeline {
             );
             cu_section.add_entry(entry);
             add_compact_unwind_to_writer(&mut writer, &cu_section);
+        }
+
+        // Emit DWARF debug sections when debug info is requested.
+        if self.config.emit_debug {
+            use crate::dwarf_info::{
+                DwarfDebugInfo, FunctionDebugInfo, SourceLanguage,
+                add_debug_info_to_writer,
+            };
+
+            let mut debug_info = DwarfDebugInfo::new(
+                &format!("{}.rs", func_name),
+                ".",
+                SourceLanguage::Rust,
+            );
+            debug_info.add_standard_types();
+            debug_info.add_function(FunctionDebugInfo {
+                name: func_name.to_string(),
+                low_pc: 0,
+                size: code.len() as u32,
+                params: vec![],
+            });
+            add_debug_info_to_writer(&mut writer, &debug_info);
         }
 
         writer.write()

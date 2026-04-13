@@ -13,6 +13,7 @@
 
 pub mod aarch64;
 pub mod dwarf_cfi;
+pub mod dwarf_info;
 pub mod error;
 pub mod frame;
 pub mod layout;
