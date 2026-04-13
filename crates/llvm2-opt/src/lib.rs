@@ -10,7 +10,7 @@
 //! # Architecture
 //!
 //! ```text
-//! PassManager { passes: [ConstFold, CopyProp, CSE, LICM, Peephole, DCE] }
+//! PassManager { passes: [ConstFold, CopyProp, CSE, LICM, Peephole, DCE, CfgSimplify] }
 //!     │
 //!     ├── run_once(func)              → single pass
 //!     └── run_to_fixpoint(func, max)  → iterate until stable
@@ -27,6 +27,7 @@
 //! | [`CommonSubexprElim`] | Eliminate redundant computations (dominator-based) |
 //! | [`LoopInvariantCodeMotion`] | Hoist loop-invariant computations to preheader |
 //! | [`ProofOptimization`] | Consume tMIR proof annotations to eliminate runtime checks |
+//! | [`CfgSimplify`] | Simplify CFG: branch folding, empty block elim, unreachable removal |
 //!
 //! # Memory Effects Model
 //!
@@ -44,6 +45,7 @@
 //! // let stats = pipeline.run(&mut func);
 //! ```
 
+pub mod cfg_simplify;
 pub mod const_fold;
 pub mod copy_prop;
 pub mod cse;
