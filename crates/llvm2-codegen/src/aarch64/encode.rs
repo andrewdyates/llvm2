@@ -1127,6 +1127,26 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             // TODO(#73): Implement proper encoding for these opcodes.
             Err(EncodeError::UnsupportedOpcode(inst.opcode))
         }
+
+        // LLVM-style typed aliases (used by llvm2-lower isel)
+        AArch64Opcode::MOVWrr
+        | AArch64Opcode::MOVXrr
+        | AArch64Opcode::STRWui
+        | AArch64Opcode::STRXui
+        | AArch64Opcode::STRSui
+        | AArch64Opcode::STRDui
+        | AArch64Opcode::BL
+        | AArch64Opcode::BLR
+        | AArch64Opcode::CMPWrr
+        | AArch64Opcode::CMPXrr
+        | AArch64Opcode::CMPWri
+        | AArch64Opcode::CMPXri
+        | AArch64Opcode::MOVZWi
+        | AArch64Opcode::MOVZXi
+        | AArch64Opcode::Bcc => {
+            // TODO: Map typed aliases to their generic counterparts for encoding.
+            Err(EncodeError::UnsupportedOpcode(inst.opcode))
+        }
     }
 }
 

@@ -636,4 +636,384 @@ mod tests {
         assert_eq!((r_word1 >> 28) & 0xF, 9, "TLVP_LOAD_PAGEOFF12 type = 9");
         assert_eq!((r_word1 >> 24) & 1, 0, "TLVP_LOAD_PAGEOFF12 is not PC-relative");
     }
+
+    // =====================================================================
+    // Additional coverage tests
+    // =====================================================================
+
+    // -- Helper to read a little-endian u32 from a byte slice --
+    fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
+    }
+
+    fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+        u64::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ])
+    }
+
+    #[test]
+    fn test_empty_function_valid_macho_header() {
+        // An empty writer (no sections, no symbols) should still produce a
+        // structurally valid Mach-O header.
+        let writer = MachOWriter::new();
+        let bytes = writer.write();
+
+        // Mach-O magic
+        assert_eq!(read_u32(&bytes, 0), MH_MAGIC_64);
+        // CPU type = ARM64
+        assert_eq!(read_u32(&bytes, 4), CPU_TYPE_ARM64);
+        // CPU subtype = ALL
+        assert_eq!(read_u32(&bytes, 8), CPU_SUBTYPE_ARM64_ALL);
+        // File type = MH_OBJECT
+        assert_eq!(read_u32(&bytes, 12), MH_OBJECT);
+        // ncmds = 4 (segment, build_version, symtab, dysymtab)
+        assert_eq!(read_u32(&bytes, 16), 4);
+        // sizeofcmds should be non-zero
+        let sizeofcmds = read_u32(&bytes, 20);
+        assert!(sizeofcmds > 0);
+        // flags
+        let flags = read_u32(&bytes, 24);
+        assert_eq!(flags & MH_SUBSECTIONS_VIA_SYMBOLS, MH_SUBSECTIONS_VIA_SYMBOLS);
+    }
+
+    #[test]
+    fn test_single_text_section_alignment() {
+        let mut writer = MachOWriter::new();
+        // 16 bytes of ARM64 code (4 NOPs)
+        let nop = 0xD503201Fu32;
+        let code: Vec<u8> = (0..4).flat_map(|_| nop.to_le_bytes()).collect();
+        writer.add_text_section(&code);
+
+        let bytes = writer.write();
+        let header_plus_lc = MACH_HEADER_64_SIZE
+            + SEGMENT_COMMAND_64_SIZE
+            + SECTION_64_SIZE
+            + BUILD_VERSION_COMMAND_SIZE
+            + SYMTAB_COMMAND_SIZE
+            + DYSYMTAB_COMMAND_SIZE;
+
+        // Section data should be aligned to 4 bytes (2^2).
+        // Since header+lc is already a multiple of 4, offset = header_plus_lc.
+        assert_eq!(header_plus_lc % 4, 0, "header+lc should be 4-byte aligned");
+
+        // Verify the section data is present at the expected offset.
+        let offset = header_plus_lc as usize;
+        assert_eq!(
+            read_u32(&bytes, offset),
+            nop,
+            "first instruction at section offset should be NOP"
+        );
+    }
+
+    #[test]
+    fn test_symbol_table_local_vs_external() {
+        let mut writer = MachOWriter::new();
+        writer.add_text_section(&[0x1F, 0x20, 0x03, 0xD5]); // 1 NOP
+
+        // Add symbols: 2 locals, 1 global defined, 1 global undefined
+        writer.add_symbol("_local1", 1, 0, false);
+        writer.add_symbol("_local2", 1, 4, false);
+        writer.add_symbol("_main", 1, 0, true);
+        writer.add_symbol("_extern_undef", 0, 0, true);
+
+        let bytes = writer.write();
+
+        // Find the LC_SYMTAB command to locate the symbol table.
+        // It comes after LC_SEGMENT_64 + sections + LC_BUILD_VERSION.
+        let seg_cmd_size = SEGMENT_COMMAND_64_SIZE + SECTION_64_SIZE;
+        let symtab_cmd_offset = (MACH_HEADER_64_SIZE + seg_cmd_size + BUILD_VERSION_COMMAND_SIZE) as usize;
+        let symtab_cmd = read_u32(&bytes, symtab_cmd_offset);
+        assert_eq!(symtab_cmd, LC_SYMTAB, "expected LC_SYMTAB command");
+
+        let symoff = read_u32(&bytes, symtab_cmd_offset + 8) as usize;
+        let nsyms = read_u32(&bytes, symtab_cmd_offset + 12);
+        assert_eq!(nsyms, 4, "should have 4 symbols");
+
+        let stroff = read_u32(&bytes, symtab_cmd_offset + 16) as usize;
+
+        // Read the 4 nlist_64 entries (16 bytes each).
+        // Mach-O requires locals first, then extdef, then undef.
+        // Expected ordering: _local1, _local2, _main, _extern_undef.
+
+        // Symbol 0: should be local (n_type = N_SECT, no N_EXT)
+        let n_type_0 = bytes[symoff + 4]; // offset 4 in nlist_64
+        assert_eq!(n_type_0, N_SECT, "symbol 0 should be local (N_SECT, no N_EXT)");
+
+        // Symbol 1: should also be local
+        let n_type_1 = bytes[symoff + 16 + 4];
+        assert_eq!(n_type_1, N_SECT, "symbol 1 should be local");
+
+        // Symbol 2: should be external defined (N_SECT | N_EXT)
+        let n_type_2 = bytes[symoff + 32 + 4];
+        assert_eq!(n_type_2, N_SECT | N_EXT, "symbol 2 should be global defined");
+
+        // Symbol 3: should be undefined external (N_UNDF | N_EXT)
+        let n_type_3 = bytes[symoff + 48 + 4];
+        assert_eq!(n_type_3, N_UNDF | N_EXT, "symbol 3 should be undefined external");
+
+        // Verify string table offsets point to valid strings.
+        let str_offset_0 = read_u32(&bytes, symoff) as usize;
+        assert!(stroff + str_offset_0 < bytes.len());
+    }
+
+    #[test]
+    fn test_string_table_correctness() {
+        let mut writer = MachOWriter::new();
+        writer.add_text_section(&[0x1F, 0x20, 0x03, 0xD5]);
+        writer.add_symbol("_foo", 1, 0, true);
+        writer.add_symbol("_bar", 1, 0, false);
+
+        let bytes = writer.write();
+
+        // Find string table via LC_SYMTAB.
+        let seg_cmd_size = SEGMENT_COMMAND_64_SIZE + SECTION_64_SIZE;
+        let symtab_cmd_offset = (MACH_HEADER_64_SIZE + seg_cmd_size + BUILD_VERSION_COMMAND_SIZE) as usize;
+        let stroff = read_u32(&bytes, symtab_cmd_offset + 16) as usize;
+        let strsize = read_u32(&bytes, symtab_cmd_offset + 20) as usize;
+
+        // String table starts with a null byte.
+        assert_eq!(bytes[stroff], 0, "string table must start with null byte");
+
+        // Verify both symbol names appear in the string table.
+        let strtab = &bytes[stroff..stroff + strsize];
+        let strtab_str = String::from_utf8_lossy(strtab);
+        assert!(strtab_str.contains("_foo"), "string table should contain _foo");
+        assert!(strtab_str.contains("_bar"), "string table should contain _bar");
+    }
+
+    #[test]
+    fn test_relocation_emission_in_section() {
+        use super::super::reloc::Relocation;
+
+        let mut writer = MachOWriter::new();
+        // 3 ARM64 instructions
+        let nop = 0xD503201Fu32;
+        let code: Vec<u8> = (0..3).flat_map(|_| nop.to_le_bytes()).collect();
+        writer.add_text_section(&code);
+        writer.add_symbol("_callee", 0, 0, true); // undefined external
+
+        // Add a BRANCH26 relocation at offset 4 (second instruction).
+        writer.add_relocation(0, Relocation::branch26(0x04, 0));
+
+        let bytes = writer.write();
+
+        // The section header should record 1 relocation.
+        // Section header is at: header(32) + segment_cmd(72) = offset 104.
+        // section_64 layout: sectname(16) + segname(16) + addr(8) + size(8)
+        //   + offset(4) + align(4) + reloff(4) + nreloc(4) + flags(4) + reserved(12) = 80
+        let section_hdr_offset = (MACH_HEADER_64_SIZE + SEGMENT_COMMAND_64_SIZE) as usize;
+
+        // reloff at offset 56 in section_64 (16+16+8+8+4+4=56)
+        let reloff = read_u32(&bytes, section_hdr_offset + 56) as usize;
+        assert!(reloff > 0, "relocation offset should be non-zero");
+
+        // nreloc at offset 60 in section_64 (56+4=60)
+        let nreloc = read_u32(&bytes, section_hdr_offset + 60);
+        assert_eq!(nreloc, 1, "section should have 1 relocation");
+
+        // Verify relocation address field (first 4 bytes of relocation_info).
+        let r_address = read_u32(&bytes, reloff);
+        assert_eq!(r_address, 0x04, "relocation should be at offset 0x04");
+    }
+
+    #[test]
+    fn test_multi_section_output() {
+        let mut writer = MachOWriter::new();
+        writer.add_text_section(&[0x1F, 0x20, 0x03, 0xD5]); // 4 bytes text
+        writer.add_data_section(&[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE]); // 8 bytes data
+
+        // Add a custom section (e.g., compact unwind)
+        writer.add_custom_section(
+            b"__compact_unwind",
+            b"__LD",
+            &[0; 32], // 32 bytes of zero (compact unwind entry)
+            3,         // 8-byte aligned
+            S_REGULAR,
+        );
+
+        writer.add_symbol("_main", 1, 0, true);
+        writer.add_symbol("_data_sym", 2, 0, true);
+
+        let bytes = writer.write();
+
+        // Header should show nsects = 3 in the segment command.
+        let seg_cmd_offset = MACH_HEADER_64_SIZE as usize;
+        // nsects is at offset 64 of segment_command_64:
+        // cmd(4) + cmdsize(4) + segname(16) + vmaddr(8) + vmsize(8) +
+        // fileoff(8) + filesize(8) + maxprot(4) + initprot(4) + nsects(4)
+        let nsects = read_u32(&bytes, seg_cmd_offset + 64);
+        assert_eq!(nsects, 3, "should have 3 sections");
+
+        // Verify all section data is present in the file.
+        // The text section data (NOP) should be somewhere in the file.
+        let nop_bytes = &[0x1F, 0x20, 0x03, 0xD5];
+        let found_nop = bytes.windows(4).any(|w| w == nop_bytes);
+        assert!(found_nop, "text section NOP should be in the output");
+
+        // The data section bytes should be somewhere in the file.
+        let data_bytes = &[0xDE, 0xAD, 0xBE, 0xEF];
+        let found_data = bytes.windows(4).any(|w| w == data_bytes);
+        assert!(found_data, "data section content should be in the output");
+    }
+
+    #[test]
+    fn test_dysymtab_partition_counts() {
+        let mut writer = MachOWriter::new();
+        writer.add_text_section(&[0x1F, 0x20, 0x03, 0xD5]);
+
+        // 2 locals, 3 globals defined, 1 undefined
+        writer.add_symbol("_local_a", 1, 0, false);
+        writer.add_symbol("_local_b", 1, 4, false);
+        writer.add_symbol("_global_a", 1, 0, true);
+        writer.add_symbol("_global_b", 1, 4, true);
+        writer.add_symbol("_global_c", 1, 8, true);
+        writer.add_symbol("_undef", 0, 0, true);
+
+        let bytes = writer.write();
+
+        // Find LC_DYSYMTAB command.
+        let seg_cmd_size = SEGMENT_COMMAND_64_SIZE + SECTION_64_SIZE;
+        let dysymtab_offset = (MACH_HEADER_64_SIZE
+            + seg_cmd_size
+            + BUILD_VERSION_COMMAND_SIZE
+            + SYMTAB_COMMAND_SIZE) as usize;
+        let cmd = read_u32(&bytes, dysymtab_offset);
+        assert_eq!(cmd, LC_DYSYMTAB, "should be LC_DYSYMTAB");
+
+        // ilocalsym = 0
+        let ilocalsym = read_u32(&bytes, dysymtab_offset + 8);
+        assert_eq!(ilocalsym, 0);
+
+        // nlocalsym = 2
+        let nlocalsym = read_u32(&bytes, dysymtab_offset + 12);
+        assert_eq!(nlocalsym, 2);
+
+        // iextdefsym = nlocalsym = 2
+        let iextdefsym = read_u32(&bytes, dysymtab_offset + 16);
+        assert_eq!(iextdefsym, 2);
+
+        // nextdefsym = 3
+        let nextdefsym = read_u32(&bytes, dysymtab_offset + 20);
+        assert_eq!(nextdefsym, 3);
+
+        // iundefsym = nlocalsym + nextdefsym = 5
+        let iundefsym = read_u32(&bytes, dysymtab_offset + 24);
+        assert_eq!(iundefsym, 5);
+
+        // nundefsym = 1
+        let nundefsym = read_u32(&bytes, dysymtab_offset + 28);
+        assert_eq!(nundefsym, 1);
+    }
+
+    #[test]
+    fn test_symbol_value_computation() {
+        // Symbol value should be the section base VM address + offset.
+        let mut writer = MachOWriter::new();
+        writer.add_text_section(&[0u8; 16]); // 16 bytes of code
+        writer.add_symbol("_func_at_8", 1, 8, true);
+
+        let bytes = writer.write();
+
+        // Find symbol table.
+        let seg_cmd_size = SEGMENT_COMMAND_64_SIZE + SECTION_64_SIZE;
+        let symtab_cmd_offset = (MACH_HEADER_64_SIZE + seg_cmd_size + BUILD_VERSION_COMMAND_SIZE) as usize;
+        let symoff = read_u32(&bytes, symtab_cmd_offset + 8) as usize;
+
+        // n_value is at offset 8 in nlist_64 (8 bytes).
+        let n_value = read_u64(&bytes, symoff + 8);
+        // Section 1 starts at vmaddr=0, so symbol value = 0 + 8.
+        assert_eq!(n_value, 8, "symbol value should be section base + offset");
+    }
+
+    #[test]
+    fn test_build_version_command() {
+        let writer = MachOWriter::new();
+        let bytes = writer.write();
+
+        // LC_BUILD_VERSION is the second load command (after LC_SEGMENT_64).
+        let seg_cmd_size = SEGMENT_COMMAND_64_SIZE; // no sections for empty writer
+        let bv_offset = (MACH_HEADER_64_SIZE + seg_cmd_size) as usize;
+
+        let cmd = read_u32(&bytes, bv_offset);
+        assert_eq!(cmd, LC_BUILD_VERSION, "expected LC_BUILD_VERSION");
+
+        let cmdsize = read_u32(&bytes, bv_offset + 4);
+        assert_eq!(cmdsize, BUILD_VERSION_COMMAND_SIZE);
+
+        let platform = read_u32(&bytes, bv_offset + 8);
+        assert_eq!(platform, PLATFORM_MACOS, "platform should be macOS");
+
+        // minos: 14.0.0 = 0x000E0000
+        let minos = read_u32(&bytes, bv_offset + 12);
+        assert_eq!(minos, 0x000E_0000, "minimum OS should be macOS 14.0");
+
+        // ntools = 0
+        let ntools = read_u32(&bytes, bv_offset + 20);
+        assert_eq!(ntools, 0, "no tool entries");
+    }
+
+    #[test]
+    fn test_default_impl() {
+        // Verify the Default implementation works.
+        let writer: MachOWriter = MachOWriter::default();
+        let bytes = writer.write();
+        assert_eq!(read_u32(&bytes, 0), MH_MAGIC_64);
+    }
+
+    #[test]
+    fn test_custom_section_index_returned() {
+        let mut writer = MachOWriter::new();
+        writer.add_text_section(&[0; 4]);
+        let idx = writer.add_custom_section(b"__cstring", b"__TEXT", b"hello\0", 0, S_CSTRING_LITERALS);
+        assert_eq!(idx, 1, "custom section should be at index 1 (after text at index 0)");
+    }
+
+    #[test]
+    fn test_relocation_to_out_of_range_section_ignored() {
+        let mut writer = MachOWriter::new();
+        writer.add_text_section(&[0; 4]);
+
+        // Adding a relocation to section 99 (out of range) should not crash.
+        use super::super::reloc::Relocation;
+        writer.add_relocation(99, Relocation::branch26(0, 0));
+
+        // Should still produce valid output.
+        let bytes = writer.write();
+        assert_eq!(read_u32(&bytes, 0), MH_MAGIC_64);
+    }
+
+    #[test]
+    fn test_segment_vmsize_and_filesize() {
+        let mut writer = MachOWriter::new();
+        // 8 bytes text + 16 bytes data
+        writer.add_text_section(&[0u8; 8]);
+        writer.add_data_section(&[0u8; 16]);
+
+        let bytes = writer.write();
+
+        // Segment command layout: cmd(4) + cmdsize(4) + segname(16) +
+        // vmaddr(8, offset 24) + vmsize(8, offset 32) +
+        // fileoff(8, offset 40) + filesize(8, offset 48)
+        let seg_offset = MACH_HEADER_64_SIZE as usize;
+        let vmsize = read_u64(&bytes, seg_offset + 32);
+        let filesize = read_u64(&bytes, seg_offset + 48);
+
+        // vmsize: text(8) aligned to data alignment (8-byte, so 8 is ok) + data(16) = 24
+        assert!(vmsize >= 24, "vmsize should cover all sections: got {}", vmsize);
+        // filesize should also cover all section data.
+        assert!(filesize >= 24, "filesize should cover all sections: got {}", filesize);
+    }
 }

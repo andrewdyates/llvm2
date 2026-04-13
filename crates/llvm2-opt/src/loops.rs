@@ -633,4 +633,494 @@ mod tests {
         assert_eq!(lp.latch, BlockId(1));
         assert_eq!(lp.body.len(), 1); // just bb1
     }
+
+    // =====================================================================
+    // Additional coverage tests
+    // =====================================================================
+
+    #[test]
+    fn test_loop_with_multiple_exits() {
+        // Loop with two exit edges:
+        //
+        //   bb0 (entry)
+        //    |
+        //   bb1 (header) <---+
+        //   / \               |
+        // bb2  bb3            |
+        //  |    |             |
+        // bb4  bb5 (latch) --+
+        //
+        // bb2 -> bb4 is an exit, bb3 -> bb5 -> bb1 is the back edge.
+        let mut func = MachFunction::new(
+            "multi_exit".to_string(),
+            Signature::new(vec![], vec![]),
+        );
+        let bb0 = func.entry;
+        let bb1 = func.create_block();
+        let bb2 = func.create_block();
+        let bb3 = func.create_block();
+        let bb4 = func.create_block();
+        let bb5 = func.create_block();
+
+        let br0 = func.push_inst(MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(bb1)],
+        ));
+        func.append_inst(bb0, br0);
+
+        let br1 = func.push_inst(MachInst::new(
+            AArch64Opcode::BCond,
+            vec![MachOperand::Block(bb2), MachOperand::Block(bb3)],
+        ));
+        func.append_inst(bb1, br1);
+
+        let br2 = func.push_inst(MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(bb4)],
+        ));
+        func.append_inst(bb2, br2);
+
+        let br3 = func.push_inst(MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(bb5)],
+        ));
+        func.append_inst(bb3, br3);
+
+        let ret = func.push_inst(MachInst::new(AArch64Opcode::Ret, vec![]));
+        func.append_inst(bb4, ret);
+
+        let br5 = func.push_inst(MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(bb1)],
+        ));
+        func.append_inst(bb5, br5);
+
+        func.add_edge(bb0, bb1);
+        func.add_edge(bb1, bb2);
+        func.add_edge(bb1, bb3);
+        func.add_edge(bb2, bb4);
+        func.add_edge(bb3, bb5);
+        func.add_edge(bb5, bb1);
+
+        let dom = DomTree::compute(&func);
+        let la = LoopAnalysis::compute(&func, &dom);
+
+        assert_eq!(la.num_loops(), 1);
+        let lp = la.get_loop(BlockId(1)).unwrap();
+        assert_eq!(lp.header, BlockId(1));
+
+        // Loop body includes header (bb1), the in-loop path (bb3, bb5),
+        // but NOT the exit path (bb2, bb4).
+        assert!(lp.body.contains(&BlockId(1)));
+        assert!(lp.body.contains(&BlockId(3)));
+        assert!(lp.body.contains(&BlockId(5)));
+        // bb2 exits the loop (bb2 -> bb4, where bb4 has no back-edge).
+        // Whether bb2 is in the body depends on the algorithm: bb2 is a
+        // successor of bb1 but has no path back to bb1 without going through
+        // bb4 (which is not in the loop). The natural loop body algorithm
+        // starts from the latch (bb5) and walks predecessors.
+        assert!(!lp.body.contains(&BlockId(4)), "exit block bb4 should not be in loop");
+    }
+
+    #[test]
+    fn test_loop_depth_computation() {
+        // Triple-nested loops:
+        // bb0 -> bb1(outer) -> bb2(mid) -> bb3(inner) -> bb3 back to bb2 -> bb1
+        let func = make_nested_loops();
+        let dom = DomTree::compute(&func);
+        let la = LoopAnalysis::compute(&func, &dom);
+
+        // Outer loop depth = 1
+        let outer = la.get_loop(BlockId(1)).unwrap();
+        assert_eq!(outer.depth, 1, "outermost loop depth should be 1");
+
+        // Inner loop depth = 2
+        let inner = la.get_loop(BlockId(2)).unwrap();
+        assert_eq!(inner.depth, 2, "inner loop depth should be 2");
+    }
+
+    #[test]
+    fn test_triple_nested_loop_depths() {
+        // Build a triple-nested loop:
+        //   bb0 -> bb1(outer) -> bb2(mid) -> bb3(inner) -> bb3 -> bb2 -> bb1 -> bb4
+        let mut func = MachFunction::new(
+            "triple_nested".to_string(),
+            Signature::new(vec![], vec![]),
+        );
+        let bb0 = func.entry;
+        let bb1 = func.create_block(); // outer header
+        let bb2 = func.create_block(); // mid header
+        let bb3 = func.create_block(); // inner header = inner latch (self-loop)
+        let bb4 = func.create_block(); // exit
+
+        let br0 = func.push_inst(MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(bb1)],
+        ));
+        func.append_inst(bb0, br0);
+
+        let br1 = func.push_inst(MachInst::new(
+            AArch64Opcode::BCond,
+            vec![MachOperand::Block(bb2), MachOperand::Block(bb4)],
+        ));
+        func.append_inst(bb1, br1);
+
+        let br2 = func.push_inst(MachInst::new(
+            AArch64Opcode::BCond,
+            vec![MachOperand::Block(bb3), MachOperand::Block(bb1)],
+        ));
+        func.append_inst(bb2, br2);
+
+        // bb3 is a self-loop (innermost).
+        let br3 = func.push_inst(MachInst::new(
+            AArch64Opcode::BCond,
+            vec![MachOperand::Block(bb3), MachOperand::Block(bb2)],
+        ));
+        func.append_inst(bb3, br3);
+
+        let ret = func.push_inst(MachInst::new(AArch64Opcode::Ret, vec![]));
+        func.append_inst(bb4, ret);
+
+        func.add_edge(bb0, bb1);
+        func.add_edge(bb1, bb2);
+        func.add_edge(bb1, bb4);
+        func.add_edge(bb2, bb3);
+        func.add_edge(bb2, bb1); // outer back-edge
+        func.add_edge(bb3, bb3); // inner self-loop
+        func.add_edge(bb3, bb2); // mid back-edge
+
+        let dom = DomTree::compute(&func);
+        let la = LoopAnalysis::compute(&func, &dom);
+
+        assert_eq!(la.num_loops(), 3, "should detect 3 loops (outer, mid, inner)");
+
+        let outer = la.get_loop(BlockId(1)).unwrap();
+        let mid = la.get_loop(BlockId(2)).unwrap();
+        let inner = la.get_loop(BlockId(3)).unwrap();
+
+        assert_eq!(outer.depth, 1);
+        assert_eq!(mid.depth, 2);
+        assert_eq!(inner.depth, 3);
+
+        // Verify nesting: inner's parent = mid, mid's parent = outer
+        assert_eq!(inner.parent, Some(BlockId(2)));
+        assert_eq!(mid.parent, Some(BlockId(1)));
+        assert!(outer.parent.is_none());
+    }
+
+    #[test]
+    fn test_containing_loop_returns_innermost() {
+        let func = make_nested_loops();
+        let dom = DomTree::compute(&func);
+        let la = LoopAnalysis::compute(&func, &dom);
+
+        // bb3 (inner latch) should be in the inner loop.
+        let containing = la.containing_loop(BlockId(3)).unwrap();
+        assert_eq!(containing.header, BlockId(2), "bb3 should be in inner loop");
+
+        // bb4 (outer latch) should be in the outer loop.
+        let containing_4 = la.containing_loop(BlockId(4)).unwrap();
+        assert_eq!(containing_4.header, BlockId(1), "bb4 should be in outer loop");
+
+        // bb0 (entry) is not in any loop.
+        assert!(la.containing_loop(BlockId(0)).is_none());
+
+        // bb5 (exit) is not in any loop.
+        assert!(la.containing_loop(BlockId(5)).is_none());
+    }
+
+    #[test]
+    fn test_all_loops_iterator() {
+        let func = make_nested_loops();
+        let dom = DomTree::compute(&func);
+        let la = LoopAnalysis::compute(&func, &dom);
+
+        let all: Vec<_> = la.all_loops().collect();
+        assert_eq!(all.len(), 2);
+
+        let headers: HashSet<BlockId> = all.iter().map(|lp| lp.header).collect();
+        assert!(headers.contains(&BlockId(1)));
+        assert!(headers.contains(&BlockId(2)));
+    }
+
+    #[test]
+    fn test_loop_with_multiple_latches() {
+        // Loop with 2 back-edges (2 latch blocks):
+        //
+        //   bb0 (entry)
+        //    |
+        //   bb1 (header) <---+---+
+        //   / \               |   |
+        // bb2  bb3            |   |
+        //  |    |             |   |
+        //  +----+-> bb4 -----+   |
+        //        \                |
+        //         bb5 -----------+
+        //
+        // Both bb4 -> bb1 and bb5 -> bb1 are back-edges.
+        let mut func = MachFunction::new(
+            "multi_latch".to_string(),
+            Signature::new(vec![], vec![]),
+        );
+        let bb0 = func.entry;
+        let bb1 = func.create_block();
+        let bb2 = func.create_block();
+        let bb3 = func.create_block();
+        let bb4 = func.create_block();
+        let bb5 = func.create_block();
+        let bb6 = func.create_block(); // exit
+
+        let br0 = func.push_inst(MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(bb1)],
+        ));
+        func.append_inst(bb0, br0);
+
+        let br1 = func.push_inst(MachInst::new(
+            AArch64Opcode::BCond,
+            vec![MachOperand::Block(bb2), MachOperand::Block(bb3)],
+        ));
+        func.append_inst(bb1, br1);
+
+        let br2 = func.push_inst(MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(bb4)],
+        ));
+        func.append_inst(bb2, br2);
+
+        let br3 = func.push_inst(MachInst::new(
+            AArch64Opcode::BCond,
+            vec![MachOperand::Block(bb4), MachOperand::Block(bb5)],
+        ));
+        func.append_inst(bb3, br3);
+
+        let br4 = func.push_inst(MachInst::new(
+            AArch64Opcode::BCond,
+            vec![MachOperand::Block(bb1), MachOperand::Block(bb6)],
+        ));
+        func.append_inst(bb4, br4);
+
+        let br5 = func.push_inst(MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(bb1)],
+        ));
+        func.append_inst(bb5, br5);
+
+        let ret = func.push_inst(MachInst::new(AArch64Opcode::Ret, vec![]));
+        func.append_inst(bb6, ret);
+
+        func.add_edge(bb0, bb1);
+        func.add_edge(bb1, bb2);
+        func.add_edge(bb1, bb3);
+        func.add_edge(bb2, bb4);
+        func.add_edge(bb3, bb4);
+        func.add_edge(bb3, bb5);
+        func.add_edge(bb4, bb1);
+        func.add_edge(bb4, bb6);
+        func.add_edge(bb5, bb1);
+
+        let dom = DomTree::compute(&func);
+        let la = LoopAnalysis::compute(&func, &dom);
+
+        // Should detect exactly 1 loop (both back-edges merge into one loop body).
+        assert_eq!(la.num_loops(), 1);
+        let lp = la.get_loop(BlockId(1)).unwrap();
+        assert_eq!(lp.header, BlockId(1));
+
+        // The merged body should include all blocks reachable from either latch.
+        assert!(lp.body.contains(&BlockId(1)));
+        assert!(lp.body.contains(&BlockId(2)));
+        assert!(lp.body.contains(&BlockId(3)));
+        assert!(lp.body.contains(&BlockId(4)));
+        assert!(lp.body.contains(&BlockId(5)));
+    }
+
+    #[test]
+    fn test_no_preheader_with_multiple_entries() {
+        // Header with 2 non-loop predecessors -> no natural preheader.
+        let mut func = MachFunction::new(
+            "no_preheader".to_string(),
+            Signature::new(vec![], vec![]),
+        );
+        let bb0 = func.entry;
+        let bb1 = func.create_block(); // another entry to loop
+        let bb2 = func.create_block(); // header
+        let bb3 = func.create_block(); // latch
+        let bb4 = func.create_block(); // exit
+
+        let br0 = func.push_inst(MachInst::new(
+            AArch64Opcode::BCond,
+            vec![MachOperand::Block(bb1), MachOperand::Block(bb2)],
+        ));
+        func.append_inst(bb0, br0);
+
+        let br1 = func.push_inst(MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(bb2)],
+        ));
+        func.append_inst(bb1, br1);
+
+        let br2 = func.push_inst(MachInst::new(
+            AArch64Opcode::BCond,
+            vec![MachOperand::Block(bb3), MachOperand::Block(bb4)],
+        ));
+        func.append_inst(bb2, br2);
+
+        let br3 = func.push_inst(MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(bb2)],
+        ));
+        func.append_inst(bb3, br3);
+
+        let ret = func.push_inst(MachInst::new(AArch64Opcode::Ret, vec![]));
+        func.append_inst(bb4, ret);
+
+        func.add_edge(bb0, bb1);
+        func.add_edge(bb0, bb2);
+        func.add_edge(bb1, bb2);
+        func.add_edge(bb2, bb3);
+        func.add_edge(bb2, bb4);
+        func.add_edge(bb3, bb2);
+
+        let dom = DomTree::compute(&func);
+        let la = LoopAnalysis::compute(&func, &dom);
+
+        assert_eq!(la.num_loops(), 1);
+        let lp = la.get_loop(BlockId(2)).unwrap();
+        // Header bb2 has two non-loop predecessors (bb0 and bb1),
+        // so there should be no natural preheader.
+        assert!(
+            lp.preheader.is_none(),
+            "should have no preheader when header has multiple non-loop preds"
+        );
+    }
+
+    #[test]
+    fn test_is_in_loop_for_all_blocks() {
+        let func = make_simple_loop();
+        let dom = DomTree::compute(&func);
+        let la = LoopAnalysis::compute(&func, &dom);
+
+        // bb0: not in loop (entry/preheader)
+        assert!(!la.is_in_loop(BlockId(0)));
+        // bb1: in loop (header)
+        assert!(la.is_in_loop(BlockId(1)));
+        // bb2: not in loop (exit)
+        assert!(!la.is_in_loop(BlockId(2)));
+        // bb3: in loop (latch)
+        assert!(la.is_in_loop(BlockId(3)));
+    }
+
+    #[test]
+    fn test_linear_chain_no_loops() {
+        // bb0 -> bb1 -> bb2 -> bb3 (no back-edges)
+        let mut func = MachFunction::new(
+            "chain".to_string(),
+            Signature::new(vec![], vec![]),
+        );
+        let bb0 = func.entry;
+        let bb1 = func.create_block();
+        let bb2 = func.create_block();
+        let bb3 = func.create_block();
+
+        let br0 = func.push_inst(MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(bb1)],
+        ));
+        func.append_inst(bb0, br0);
+
+        let br1 = func.push_inst(MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(bb2)],
+        ));
+        func.append_inst(bb1, br1);
+
+        let br2 = func.push_inst(MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(bb3)],
+        ));
+        func.append_inst(bb2, br2);
+
+        let ret = func.push_inst(MachInst::new(AArch64Opcode::Ret, vec![]));
+        func.append_inst(bb3, ret);
+
+        func.add_edge(bb0, bb1);
+        func.add_edge(bb1, bb2);
+        func.add_edge(bb2, bb3);
+
+        let dom = DomTree::compute(&func);
+        let la = LoopAnalysis::compute(&func, &dom);
+
+        assert!(la.is_empty());
+        assert_eq!(la.num_loops(), 0);
+    }
+
+    #[test]
+    fn test_self_loop_preheader() {
+        // bb0 -> bb1, bb1 -> bb1 (self-loop), bb1 -> bb2
+        // bb0 should be the preheader since it's the only non-loop pred.
+        let mut func = MachFunction::new(
+            "self_loop_ph".to_string(),
+            Signature::new(vec![], vec![]),
+        );
+        let bb0 = func.entry;
+        let bb1 = func.create_block();
+        let bb2 = func.create_block();
+
+        let br0 = func.push_inst(MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(bb1)],
+        ));
+        func.append_inst(bb0, br0);
+
+        let br1 = func.push_inst(MachInst::new(
+            AArch64Opcode::BCond,
+            vec![MachOperand::Block(bb1), MachOperand::Block(bb2)],
+        ));
+        func.append_inst(bb1, br1);
+
+        let ret = func.push_inst(MachInst::new(AArch64Opcode::Ret, vec![]));
+        func.append_inst(bb2, ret);
+
+        func.add_edge(bb0, bb1);
+        func.add_edge(bb1, bb1);
+        func.add_edge(bb1, bb2);
+
+        let dom = DomTree::compute(&func);
+        let la = LoopAnalysis::compute(&func, &dom);
+
+        let lp = la.get_loop(BlockId(1)).unwrap();
+        assert_eq!(lp.preheader, Some(BlockId(0)), "bb0 should be preheader of self-loop");
+    }
+
+    #[test]
+    fn test_nested_loop_body_subset() {
+        let func = make_nested_loops();
+        let dom = DomTree::compute(&func);
+        let la = LoopAnalysis::compute(&func, &dom);
+
+        let outer = la.get_loop(BlockId(1)).unwrap();
+        let inner = la.get_loop(BlockId(2)).unwrap();
+
+        // Inner body must be a strict subset of outer body.
+        assert!(inner.body.is_subset(&outer.body));
+        assert!(inner.body.len() < outer.body.len());
+    }
+
+    #[test]
+    fn test_single_block_function_no_loops() {
+        let mut func = MachFunction::new(
+            "single_block".to_string(),
+            Signature::new(vec![], vec![]),
+        );
+        let bb0 = func.entry;
+        let ret = func.push_inst(MachInst::new(AArch64Opcode::Ret, vec![]));
+        func.append_inst(bb0, ret);
+
+        let dom = DomTree::compute(&func);
+        let la = LoopAnalysis::compute(&func, &dom);
+
+        assert!(la.is_empty());
+        assert!(!la.is_in_loop(BlockId(0)));
+    }
 }

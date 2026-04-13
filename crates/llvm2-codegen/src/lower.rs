@@ -1185,6 +1185,27 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             ))
         }
 
+        // LLVM-style typed aliases (used by llvm2-lower isel)
+        AArch64Opcode::MOVWrr
+        | AArch64Opcode::MOVXrr
+        | AArch64Opcode::STRWui
+        | AArch64Opcode::STRXui
+        | AArch64Opcode::STRSui
+        | AArch64Opcode::STRDui
+        | AArch64Opcode::BL
+        | AArch64Opcode::BLR
+        | AArch64Opcode::CMPWrr
+        | AArch64Opcode::CMPXrr
+        | AArch64Opcode::CMPWri
+        | AArch64Opcode::CMPXri
+        | AArch64Opcode::MOVZWi
+        | AArch64Opcode::MOVZXi
+        | AArch64Opcode::Bcc => {
+            Err(LowerError::UnsupportedInstruction(
+                format!("{:?} typed alias not yet lowered (issue #73)", inst.opcode),
+            ))
+        }
+
     }
 }
 

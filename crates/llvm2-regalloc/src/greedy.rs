@@ -1007,4 +1007,296 @@ mod tests {
         };
         assert!(b > c);
     }
+
+    // =====================================================================
+    // Additional coverage tests
+    // =====================================================================
+
+    #[test]
+    fn test_basic_allocation_no_spills() {
+        // 4 non-overlapping intervals with 2 registers.
+        // Each pair shares a register since they don't overlap.
+        let intervals = vec![
+            make_interval(0, &[(0, 5)], 1.0),
+            make_interval(1, &[(5, 10)], 1.0),
+            make_interval(2, &[(10, 15)], 1.0),
+            make_interval(3, &[(15, 20)], 1.0),
+        ];
+        let regs = two_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        assert_eq!(result.allocation.len(), 4);
+        assert!(alloc.spilled.is_empty(), "no spills expected with non-overlapping intervals");
+    }
+
+    #[test]
+    fn test_allocation_requiring_spills_more_live_than_regs() {
+        // 3 simultaneously-live intervals with only 2 registers.
+        // The lowest-weight one must be spilled.
+        let intervals = vec![
+            make_interval(0, &[(0, 20)], 1.0),
+            make_interval(1, &[(0, 20)], 3.0),
+            make_interval(2, &[(0, 20)], 5.0),
+        ];
+        let regs = two_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        // Top-2 weights get assigned.
+        assert_eq!(result.allocation.len(), 2);
+        assert!(result.allocation.contains_key(&vreg(1)));
+        assert!(result.allocation.contains_key(&vreg(2)));
+        // Lowest weight is spilled.
+        assert_eq!(alloc.spilled.len(), 1);
+        assert_eq!(alloc.spilled[0].id, 0);
+    }
+
+    #[test]
+    fn test_interference_graph_correctness() {
+        // Test that the allocator correctly detects interference between
+        // overlapping intervals and assigns different registers.
+        let intervals = vec![
+            make_interval(0, &[(0, 10)], 1.0),
+            make_interval(1, &[(5, 15)], 1.0),
+            make_interval(2, &[(10, 20)], 1.0),
+        ];
+        let regs = two_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        // v0 and v1 overlap -> different regs.
+        let p0 = result.allocation[&vreg(0)];
+        let p1 = result.allocation[&vreg(1)];
+        assert_ne!(p0, p1, "overlapping intervals must get different regs");
+
+        // v1 and v2 overlap -> different regs.
+        let p2 = result.allocation[&vreg(2)];
+        assert_ne!(p1, p2, "overlapping intervals must get different regs");
+
+        // v0 and v2 do NOT overlap (0..10 and 10..20 are adjacent, not overlapping)
+        // so they CAN share a register.
+        assert!(alloc.spilled.is_empty());
+    }
+
+    #[test]
+    fn test_spill_weight_determines_spill_victim() {
+        // 5 overlapping intervals, 2 registers. The 3 lowest-weight
+        // intervals should be spilled.
+        let intervals = vec![
+            make_interval(0, &[(0, 100)], 10.0),
+            make_interval(1, &[(0, 100)], 50.0),
+            make_interval(2, &[(0, 100)], 30.0),
+            make_interval(3, &[(0, 100)], 20.0),
+            make_interval(4, &[(0, 100)], 40.0),
+        ];
+        let regs = two_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        // Top-2 by weight: v1 (50.0) and v4 (40.0)
+        assert_eq!(result.allocation.len(), 2);
+        assert!(result.allocation.contains_key(&vreg(1)), "highest weight should be allocated");
+        assert!(result.allocation.contains_key(&vreg(4)), "second highest should be allocated");
+
+        // The other 3 should be spilled.
+        assert_eq!(alloc.spilled.len(), 3);
+        let spilled_ids: Vec<u32> = alloc.spilled.iter().map(|v| v.id).collect();
+        assert!(spilled_ids.contains(&0));
+        assert!(spilled_ids.contains(&2));
+        assert!(spilled_ids.contains(&3));
+    }
+
+    #[test]
+    fn test_call_clobber_handling_live_across_call() {
+        // Simulate live range across a call instruction.
+        // v0 spans the entire function including a "call" at instruction 10.
+        // v1 only spans post-call. With 1 register, eviction should
+        // keep the higher-weight one.
+        let intervals = vec![
+            make_interval(0, &[(0, 20)], 2.0),  // crosses "call" at 10
+            make_interval(1, &[(10, 20)], 5.0),  // starts at call
+        ];
+        let regs = one_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        // v1 has higher weight, so it gets the register.
+        assert!(result.allocation.contains_key(&vreg(1)));
+        // v0 must be spilled (lower weight, can't share the register).
+        assert_eq!(alloc.spilled.len(), 1);
+        assert_eq!(alloc.spilled[0].id, 0);
+    }
+
+    #[test]
+    fn test_multiple_register_classes_independent() {
+        // GPR and FPR intervals use disjoint PReg sets and don't interfere.
+        // AArch64 convention: GPRs are PReg 0-30, FPRs are PReg 32-63.
+        let gpr_iv = {
+            let mut iv = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+            iv.add_range(0, 10);
+            iv.spill_weight = 1.0;
+            iv.def_positions.push(0);
+            iv.use_positions.push(9);
+            iv
+        };
+        let fpr_iv = {
+            let mut iv = LiveInterval::new(VReg { id: 1, class: RegClass::Fpr64 });
+            iv.add_range(0, 10);
+            iv.spill_weight = 1.0;
+            iv.def_positions.push(0);
+            iv.use_positions.push(9);
+            iv
+        };
+
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);
+        regs.insert(RegClass::Fpr64, vec![PReg::new(32)]); // disjoint from GPR
+
+        let intervals = vec![gpr_iv, fpr_iv];
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        // Both should be allocated to their respective class registers.
+        assert_eq!(result.allocation.len(), 2);
+        assert!(alloc.spilled.is_empty());
+    }
+
+    #[test]
+    fn test_eviction_cascade_respects_weight_ordering() {
+        // Chain: v0(1.0) assigned first, v1(2.0) evicts v0,
+        // v2(3.0) evicts v1, etc. All overlapping, 1 register.
+        let intervals = vec![
+            make_interval(0, &[(0, 10)], 1.0),
+            make_interval(1, &[(0, 10)], 2.0),
+            make_interval(2, &[(0, 10)], 3.0),
+        ];
+        let regs = one_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        // The highest weight (v2) should win.
+        assert!(result.allocation.contains_key(&vreg(2)));
+        assert_eq!(alloc.spilled.len(), 2);
+    }
+
+    #[test]
+    fn test_hint_conflicts_with_existing_allocation() {
+        // v0 gets PReg(0). v1 has a hint for PReg(0) but overlaps v0,
+        // so it should fall back to PReg(1).
+        let intervals = vec![
+            make_interval(0, &[(0, 10)], 5.0),
+            make_interval(1, &[(0, 10)], 3.0),
+        ];
+        let regs = two_gpr_regs();
+        let mut hints = HashMap::new();
+        hints.insert(vreg(1), vec![PReg::new(0)]);
+
+        let mut alloc = GreedyAllocator::new(intervals, &regs, hints);
+        let result = alloc.allocate().unwrap();
+
+        assert_eq!(result.allocation.len(), 2);
+        // Both should be allocated to different regs despite the hint conflict.
+        let p0 = result.allocation[&vreg(0)];
+        let p1 = result.allocation[&vreg(1)];
+        assert_ne!(p0, p1);
+    }
+
+    #[test]
+    fn test_single_instruction_interval() {
+        // An interval that spans exactly one instruction.
+        let intervals = vec![
+            make_interval(0, &[(5, 6)], 1.0),
+        ];
+        let regs = one_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        assert_eq!(result.allocation.len(), 1);
+        assert!(alloc.spilled.is_empty());
+    }
+
+    #[test]
+    fn test_interleaved_intervals_no_overlap() {
+        // Intervals that alternate: v0=[0,5), v1=[5,10), v2=[10,15), etc.
+        // All should fit in 1 register.
+        let intervals: Vec<LiveInterval> = (0..5)
+            .map(|i| make_interval(i, &[(i * 5, i * 5 + 5)], 1.0))
+            .collect();
+        let regs = one_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        assert_eq!(result.allocation.len(), 5);
+        assert!(alloc.spilled.is_empty());
+        // All should get the same register.
+        let preg0 = result.allocation[&vreg(0)];
+        for i in 1..5 {
+            assert_eq!(result.allocation[&vreg(i)], preg0);
+        }
+    }
+
+    #[test]
+    fn test_stage_progression_new_to_done() {
+        // Verify that a successfully allocated interval goes from New to Done.
+        let intervals = vec![make_interval(0, &[(0, 5)], 1.0)];
+        let regs = one_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let _ = alloc.allocate().unwrap();
+
+        // After allocation, the stage should be Done.
+        assert_eq!(*alloc.stage.get(&0).unwrap(), Stage::Done);
+    }
+
+    #[test]
+    fn test_spilled_vregs_accessor() {
+        // 2 overlapping same-weight intervals, 1 register.
+        let intervals = vec![
+            make_interval(0, &[(0, 10)], 1.0),
+            make_interval(1, &[(0, 10)], 1.0),
+        ];
+        let regs = one_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let _ = alloc.allocate().unwrap();
+
+        // One gets allocated, one gets spilled.
+        let spilled = alloc.spilled_vregs();
+        assert_eq!(spilled.len(), 1);
+        assert_eq!(spilled[0].class, RegClass::Gpr64);
+    }
+
+    #[test]
+    fn test_max_cascade_depth_zero_disables_eviction() {
+        // With max_cascade_depth=0, eviction should be impossible.
+        let intervals = vec![
+            make_interval(0, &[(0, 10)], 1.0),
+            make_interval(1, &[(0, 10)], 5.0),
+        ];
+        let regs = one_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        alloc.max_cascade_depth = 0;
+        let result = alloc.allocate().unwrap();
+
+        // v1 gets allocated first (higher priority). v0 cannot evict
+        // because cascade depth is 0, so it spills.
+        assert!(result.allocation.contains_key(&vreg(1)));
+        assert_eq!(alloc.spilled.len(), 1);
+        assert_eq!(alloc.spilled[0].id, 0);
+    }
+
+    #[test]
+    fn test_disjoint_live_ranges_same_vreg() {
+        // An interval with multiple disjoint ranges (hole in the middle).
+        let intervals = vec![
+            make_interval(0, &[(0, 5), (15, 20)], 1.0),
+            make_interval(1, &[(5, 15)], 2.0),
+        ];
+        let regs = one_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        // The two intervals don't overlap (v0 has a hole where v1 lives).
+        assert_eq!(result.allocation.len(), 2);
+        assert!(alloc.spilled.is_empty());
+    }
 }

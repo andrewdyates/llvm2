@@ -367,6 +367,11 @@ fn classify_def_use(
                  special registers must be lowered to PReg before register allocation",
                 s
             ),
+            IrOperand::Symbol(name) => panic!(
+                "Symbol({:?}) operand reached regalloc adapter; \
+                 symbol references must be resolved before register allocation",
+                name
+            ),
         }
     };
 
