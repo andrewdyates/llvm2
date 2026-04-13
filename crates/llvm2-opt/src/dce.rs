@@ -160,7 +160,11 @@ fn produces_value(inst: &llvm2_ir::MachInst) -> bool {
         // Stores: write to memory, no register def
         StrRI | StpRI => false,
         // Branches and returns: control flow, no register def
-        B | BCond | Cbz | Cbnz | Br | Ret => false,
+        B | BCond | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => false,
+        // Trap pseudo-instructions: control flow, no register def
+        TrapOverflow | TrapBoundsCheck | TrapNull => false,
+        // Reference counting: side effects, no register def
+        Retain | Release => false,
         // Nop: no def
         Nop => false,
         // Calls: they DO produce a result (in X0 typically), but that's
@@ -168,6 +172,7 @@ fn produces_value(inst: &llvm2_ir::MachInst) -> bool {
         // side effects and won't be DCE'd anyway.
         Bl | Blr => false,
         // Everything else produces a value in operand[0]
+        // (including AddsRR/SubsRR which produce a result plus set flags)
         _ => true,
     }
 }

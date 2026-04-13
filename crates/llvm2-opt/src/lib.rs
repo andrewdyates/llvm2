@@ -26,6 +26,7 @@
 //! | [`Peephole`] | AArch64-specific instruction simplification |
 //! | [`CommonSubexprElim`] | Eliminate redundant computations (dominator-based) |
 //! | [`LoopInvariantCodeMotion`] | Hoist loop-invariant computations to preheader |
+//! | [`ProofOptimization`] | Consume tMIR proof annotations to eliminate runtime checks |
 //!
 //! # Memory Effects Model
 //!
@@ -55,6 +56,7 @@ pub mod pass_manager;
 pub mod passes;
 pub mod peephole;
 pub mod pipeline;
+pub mod proof_opts;
 
 // Re-export the most important types at crate root.
 pub use pass_manager::{MachinePass, PassManager, PassStats};

@@ -14,3 +14,4 @@ pub use crate::cse::CommonSubexprElim;
 pub use crate::dce::DeadCodeElimination;
 pub use crate::licm::LoopInvariantCodeMotion;
 pub use crate::peephole::Peephole;
+pub use crate::proof_opts::ProofOptimization;

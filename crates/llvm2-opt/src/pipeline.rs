@@ -29,6 +29,7 @@ use crate::dce::DeadCodeElimination;
 use crate::licm::LoopInvariantCodeMotion;
 use crate::pass_manager::{PassManager, PassStats};
 use crate::peephole::Peephole;
+use crate::proof_opts::ProofOptimization;
 
 /// Optimization level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,8 +71,11 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(Peephole))
             }
             OptLevel::O2 | OptLevel::Os => {
-                // Standard: full pipeline with CSE and LICM.
+                // Standard: full pipeline with proof-consuming opts + CSE and LICM.
+                // Proof opts run first: they eliminate checks that DCE/peephole
+                // can then clean up further.
                 PassManager::new()
+                    .with_pass(Box::new(ProofOptimization::new()))
                     .with_pass(Box::new(ConstantFolding))
                     .with_pass(Box::new(CopyPropagation))
                     .with_pass(Box::new(CommonSubexprElim))
@@ -80,8 +84,9 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(DeadCodeElimination))
             }
             OptLevel::O3 => {
-                // Aggressive: full pipeline (will be iterated).
+                // Aggressive: full pipeline with proof-consuming opts (will be iterated).
                 PassManager::new()
+                    .with_pass(Box::new(ProofOptimization::new()))
                     .with_pass(Box::new(ConstantFolding))
                     .with_pass(Box::new(CopyPropagation))
                     .with_pass(Box::new(CommonSubexprElim))
@@ -194,6 +199,7 @@ mod tests {
     fn test_o3_iterates() {
         let pipeline = OptimizationPipeline::new(OptLevel::O3);
         let pm = pipeline.build_pass_manager();
-        assert_eq!(pm.num_passes(), 6);
+        // 7 passes: proof-opts + const-fold + copy-prop + cse + licm + peephole + dce
+        assert_eq!(pm.num_passes(), 7);
     }
 }
