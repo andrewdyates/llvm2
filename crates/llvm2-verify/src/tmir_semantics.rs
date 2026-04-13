@@ -15,14 +15,14 @@
 //! Each function takes symbolic input expressions and returns the symbolic
 //! output expression representing the instruction's semantics.
 
-use crate::smt::SmtExpr;
+use crate::smt::{SmtError, SmtExpr};
 use llvm2_lower::instructions::{IntCC, Opcode};
 use llvm2_lower::types::Type;
 
-/// Encode a tMIR binary arithmetic operation as an SMT bitvector expression.
+/// Encode a tMIR binary arithmetic operation as an SMT bitvector expression (fallible).
 ///
-/// The returned expression computes `lhs <op> rhs` at the given type's
-/// bit-width using wrapping (two's complement) semantics.
+/// Returns `Err(SmtError::UnsupportedType)` if the opcode is not a supported
+/// binary arithmetic opcode.
 ///
 /// # Supported opcodes
 ///
@@ -33,29 +33,45 @@ use llvm2_lower::types::Type;
 /// - `Opcode::Udiv` -> `bvudiv`
 /// - `Opcode::Srem` -> `a - bvsdiv(a, b) * b`
 /// - `Opcode::Urem` -> `a - bvudiv(a, b) * b`
-///
-/// # Panics
-///
-/// Panics if `opcode` is not a binary arithmetic opcode.
-pub fn encode_tmir_binop(opcode: &Opcode, _ty: Type, lhs: SmtExpr, rhs: SmtExpr) -> SmtExpr {
+pub fn try_encode_tmir_binop(
+    opcode: &Opcode,
+    _ty: Type,
+    lhs: SmtExpr,
+    rhs: SmtExpr,
+) -> Result<SmtExpr, SmtError> {
     match opcode {
-        Opcode::Iadd => lhs.bvadd(rhs),
-        Opcode::Isub => lhs.bvsub(rhs),
-        Opcode::Imul => lhs.bvmul(rhs),
-        Opcode::Sdiv => lhs.bvsdiv(rhs),
-        Opcode::Udiv => lhs.bvudiv(rhs),
+        Opcode::Iadd => Ok(lhs.bvadd(rhs)),
+        Opcode::Isub => Ok(lhs.bvsub(rhs)),
+        Opcode::Imul => Ok(lhs.bvmul(rhs)),
+        Opcode::Sdiv => Ok(lhs.bvsdiv(rhs)),
+        Opcode::Udiv => Ok(lhs.bvudiv(rhs)),
         // Remainder: a % b = a - (a / b) * b
         // Composed from existing SMT operations until native bvsrem/bvurem are added.
         Opcode::Srem => {
             let quotient = lhs.clone().bvsdiv(rhs.clone());
-            lhs.bvsub(quotient.bvmul(rhs))
+            Ok(lhs.bvsub(quotient.bvmul(rhs)))
         }
         Opcode::Urem => {
             let quotient = lhs.clone().bvudiv(rhs.clone());
-            lhs.bvsub(quotient.bvmul(rhs))
+            Ok(lhs.bvsub(quotient.bvmul(rhs)))
         }
-        _ => panic!("encode_tmir_binop: unsupported opcode {:?}", opcode),
+        other => Err(SmtError::UnsupportedType(format!(
+            "encode_tmir_binop: unsupported opcode {:?}",
+            other
+        ))),
     }
+}
+
+/// Encode a tMIR binary arithmetic operation as an SMT bitvector expression.
+///
+/// Convenience wrapper around [`try_encode_tmir_binop`].
+///
+/// # Panics
+///
+/// Panics if `opcode` is not a binary arithmetic opcode.
+pub fn encode_tmir_binop(opcode: &Opcode, ty: Type, lhs: SmtExpr, rhs: SmtExpr) -> SmtExpr {
+    try_encode_tmir_binop(opcode, ty, lhs, rhs)
+        .expect("encode_tmir_binop: unsupported opcode; use try_encode_tmir_binop() for fallible encoding")
 }
 
 /// Encode a tMIR unary negation as an SMT bitvector expression.

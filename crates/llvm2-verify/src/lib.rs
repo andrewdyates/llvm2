@@ -60,5 +60,5 @@ pub mod z4_bridge;
 
 pub use verify::{VerificationResult, Verifier};
 pub use lowering_proof::{ProofObligation, verify_by_evaluation};
-pub use smt::{SmtExpr, SmtSort};
+pub use smt::{SmtError, SmtExpr, SmtSort};
 pub use z4_bridge::{Z4Config, Z4Result, verify_with_z4};
