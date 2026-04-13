@@ -33,7 +33,7 @@ pub mod types;
 // Re-export the most commonly used types at crate root.
 pub use cc::{AArch64CC, FloatSize, OperandSize};
 pub use function::{MachBlock, MachFunction, Signature, StackSlot, Type};
-pub use inst::{AArch64Opcode, InstFlags, MachInst};
+pub use inst::{AArch64Opcode, InstFlags, MachInst, ProofAnnotation};
 pub use operand::MachOperand;
 pub use regs::{PReg, RegClass, SpecialReg, VReg};
 pub use types::{BlockId, FrameIdx, InstId, StackSlotId, VRegId};

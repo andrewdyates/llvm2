@@ -89,6 +89,33 @@ pub enum AArch64Opcode {
     Adrp,
     AddPCRel,
 
+    // -- Checked arithmetic (set flags for overflow detection) --
+    /// ADDS: add and set flags (used for overflow-checked addition).
+    AddsRR,
+    /// ADDS immediate: add immediate and set flags.
+    AddsRI,
+    /// SUBS: subtract and set flags (used for overflow-checked subtraction).
+    SubsRR,
+    /// SUBS immediate: subtract immediate and set flags.
+    SubsRI,
+
+    // -- Trap / panic pseudo-instructions --
+    /// Trap on overflow: conditional branch to trap block after ADDS/SUBS.
+    /// Operands: [condition_code_imm, Block(trap_target)].
+    TrapOverflow,
+    /// Trap on bounds check failure: branch to panic if index >= length.
+    /// Operands: [Block(panic_target)].
+    TrapBoundsCheck,
+    /// Trap on null pointer.
+    /// Operands: [Block(panic_target)].
+    TrapNull,
+
+    // -- Reference counting pseudo-instructions --
+    /// Retain (increment reference count). Operands: [ptr].
+    Retain,
+    /// Release (decrement reference count). Operands: [ptr].
+    Release,
+
     // -- Pseudo-instructions (no hardware encoding) --
     Phi,
     StackAlloc,
@@ -133,6 +160,18 @@ impl AArch64Opcode {
             // Compare/test (set condition flags = side effect)
             CmpRR | CmpRI | Tst | Fcmp => InstFlags::HAS_SIDE_EFFECTS,
 
+            // Checked arithmetic: produce a result AND set flags (side effect)
+            AddsRR | AddsRI | SubsRR | SubsRI => InstFlags::HAS_SIDE_EFFECTS,
+
+            // Trap pseudo-instructions: conditional branches to panic blocks
+            TrapOverflow => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR).union(InstFlags::HAS_SIDE_EFFECTS),
+            TrapBoundsCheck => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR).union(InstFlags::HAS_SIDE_EFFECTS),
+            TrapNull => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR).union(InstFlags::HAS_SIDE_EFFECTS),
+
+            // Reference counting: side effects (modify refcount in memory)
+            Retain => InstFlags::HAS_SIDE_EFFECTS.union(InstFlags::READS_MEMORY).union(InstFlags::WRITES_MEMORY),
+            Release => InstFlags::HAS_SIDE_EFFECTS.union(InstFlags::READS_MEMORY).union(InstFlags::WRITES_MEMORY),
+
             // Everything else: pure computation, no flags
             _ => InstFlags::EMPTY,
         }
@@ -140,7 +179,17 @@ impl AArch64Opcode {
 
     /// Returns true if this is a pseudo-instruction with no hardware encoding.
     pub fn is_pseudo(self) -> bool {
-        matches!(self, Self::Phi | Self::StackAlloc | Self::Nop)
+        matches!(
+            self,
+            Self::Phi
+                | Self::StackAlloc
+                | Self::Nop
+                | Self::TrapOverflow
+                | Self::TrapBoundsCheck
+                | Self::TrapNull
+                | Self::Retain
+                | Self::Release
+        )
     }
 
     /// Returns true if this is a phi instruction.
@@ -273,6 +322,45 @@ impl core::fmt::Debug for InstFlags {
 }
 
 // ---------------------------------------------------------------------------
+// ProofAnnotation
+// ---------------------------------------------------------------------------
+
+/// Proof annotations from tMIR that enable optimizations no other compiler can do.
+///
+/// These annotations represent formally verified preconditions that the tMIR
+/// frontend has proven about program values. The LLVM2 backend can consume
+/// these proofs to eliminate runtime checks that would otherwise be required.
+///
+/// Each annotation corresponds to a specific optimization opportunity:
+/// - `NoOverflow` → eliminate overflow checks, use unchecked arithmetic
+/// - `InBounds` → eliminate array bounds checks
+/// - `NotNull` → eliminate null pointer checks
+/// - `ValidBorrow` → enable load/store reordering (refined alias analysis)
+/// - `PositiveRefCount` → eliminate redundant retain/release pairs
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProofAnnotation {
+    /// tMIR has proven this arithmetic operation cannot overflow.
+    /// Enables: ADDS/SUBS → ADD/SUB, remove TrapOverflow.
+    NoOverflow,
+
+    /// tMIR has proven this array access index is within bounds.
+    /// Enables: remove CMP+B.HS bounds check guard.
+    InBounds,
+
+    /// tMIR has proven this pointer is not null.
+    /// Enables: remove CBZ/CBNZ null check guard.
+    NotNull,
+
+    /// tMIR has proven this borrow/reference is valid (no aliasing violations).
+    /// Enables: load/store reordering past other memory operations.
+    ValidBorrow,
+
+    /// tMIR has proven the reference count is positive (object is live).
+    /// Enables: eliminate redundant retain/release pairs.
+    PositiveRefCount,
+}
+
+// ---------------------------------------------------------------------------
 // MachInst
 // ---------------------------------------------------------------------------
 
@@ -280,6 +368,9 @@ impl core::fmt::Debug for InstFlags {
 ///
 /// Operands are stored inline in a Vec. Implicit defs/uses are static slices
 /// (e.g., call instructions implicitly clobber caller-saved registers).
+///
+/// The `proof` field carries optional tMIR proof annotations that enable
+/// proof-consuming optimizations unique to LLVM2.
 #[derive(Debug, Clone)]
 pub struct MachInst {
     pub opcode: AArch64Opcode,
@@ -287,6 +378,10 @@ pub struct MachInst {
     pub implicit_defs: &'static [PReg],
     pub implicit_uses: &'static [PReg],
     pub flags: InstFlags,
+    /// Optional proof annotation from tMIR. When present, indicates that
+    /// the tMIR frontend has formally verified a property about this
+    /// instruction's operands, enabling proof-consuming optimizations.
+    pub proof: Option<ProofAnnotation>,
 }
 
 impl MachInst {
@@ -298,6 +393,7 @@ impl MachInst {
             operands,
             implicit_defs: &[],
             implicit_uses: &[],
+            proof: None,
         }
     }
 
@@ -313,7 +409,14 @@ impl MachInst {
             implicit_defs: &[],
             implicit_uses: &[],
             flags,
+            proof: None,
         }
+    }
+
+    /// Attach a proof annotation to this instruction.
+    pub fn with_proof(mut self, proof: ProofAnnotation) -> Self {
+        self.proof = Some(proof);
+        self
     }
 
     /// Set implicit register definitions (clobbers).

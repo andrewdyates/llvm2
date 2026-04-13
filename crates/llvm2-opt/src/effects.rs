@@ -115,8 +115,17 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         // Address computation (no memory access)
         Adrp | AddPCRel => MemoryEffect::Pure,
 
+        // Checked arithmetic: set flags but no memory access
+        AddsRR | AddsRI | SubsRR | SubsRI => MemoryEffect::Pure,
+
+        // Trap pseudo-instructions: control flow, not memory ops
+        TrapOverflow | TrapBoundsCheck | TrapNull => MemoryEffect::Pure,
+
+        // Reference counting: read and write memory (refcount field)
+        Retain | Release => MemoryEffect::Store,
+
         // Branches: not memory ops. DCE handles branches via InstFlags.
-        B | BCond | Cbz | Cbnz | Br | Ret => MemoryEffect::Pure,
+        B | BCond | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => MemoryEffect::Pure,
 
         // Pseudo-instructions
         Phi => MemoryEffect::Pure,
@@ -137,9 +146,9 @@ pub fn is_removable(opcode: AArch64Opcode) -> bool {
     }
 
     use AArch64Opcode::*;
-    // Compare/test instructions set NZCV flags — not removable
+    // Compare/test and checked arithmetic set NZCV flags — not removable
     // even though they don't access memory.
-    !matches!(opcode, CmpRR | CmpRI | Tst | Fcmp)
+    !matches!(opcode, CmpRR | CmpRI | Tst | Fcmp | AddsRR | AddsRI | SubsRR | SubsRI)
 }
 
 #[cfg(test)]
