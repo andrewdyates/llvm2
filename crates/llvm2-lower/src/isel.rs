@@ -32,12 +32,14 @@ use llvm2_ir::regs::{RegClass, VReg, SP};
 // ---------------------------------------------------------------------------
 
 /// Derive the register class for a given LIR type.
-fn reg_class_for_type(ty: Type) -> RegClass {
+fn reg_class_for_type(ty: &Type) -> RegClass {
     match ty {
         Type::B1 | Type::I8 | Type::I16 | Type::I32 => RegClass::Gpr32,
         Type::I64 | Type::I128 => RegClass::Gpr64,
         Type::F32 => RegClass::Fpr32,
         Type::F64 => RegClass::Fpr64,
+        // Aggregates are handled via pointers at the machine level.
+        Type::Struct(_) | Type::Array(_, _) => RegClass::Gpr64,
     }
 }
 
@@ -463,12 +465,12 @@ impl InstructionSelector {
     fn value_type(&self, val: &Value) -> Type {
         self.value_types
             .get(val)
-            .copied()
+            .cloned()
             .unwrap_or(Type::I64) // default to i64 if unknown
     }
 
     /// Determine if a type is 32-bit (uses W registers).
-    fn is_32bit(ty: Type) -> bool {
+    fn is_32bit(ty: &Type) -> bool {
         matches!(ty, Type::B1 | Type::I8 | Type::I16 | Type::I32 | Type::F32)
     }
 
@@ -488,8 +490,8 @@ impl InstructionSelector {
     fn select_instruction(&mut self, inst: &Instruction, block: Block) {
         match &inst.opcode {
             // Constants
-            Opcode::Iconst { ty, imm } => self.select_iconst(*ty, *imm, inst, block),
-            Opcode::Fconst { ty, imm } => self.select_fconst(*ty, *imm, inst, block),
+            Opcode::Iconst { ty, imm } => self.select_iconst(ty.clone(), *imm, inst, block),
+            Opcode::Fconst { ty, imm } => self.select_fconst(ty.clone(), *imm, inst, block),
 
             // Arithmetic
             Opcode::Iadd => self.select_binop(AArch64BinOp::Add, inst, block),
@@ -512,10 +514,10 @@ impl InstructionSelector {
 
             // Extensions
             Opcode::Sextend { from_ty, to_ty } => {
-                self.select_extend(true, *from_ty, *to_ty, inst, block);
+                self.select_extend(true, from_ty, to_ty, inst, block);
             }
             Opcode::Uextend { from_ty, to_ty } => {
-                self.select_extend(false, *from_ty, *to_ty, inst, block);
+                self.select_extend(false, from_ty, to_ty, inst, block);
             }
 
             // Bitfield operations
@@ -542,10 +544,10 @@ impl InstructionSelector {
             Opcode::Fdiv => self.select_fp_binop(AArch64FpBinOp::Fdiv, inst, block),
             Opcode::Fcmp { cond } => self.select_fcmp(*cond, inst, block),
             Opcode::FcvtToInt { dst_ty } => {
-                self.select_fcvt_to_int(*dst_ty, inst, block);
+                self.select_fcvt_to_int(dst_ty.clone(), inst, block);
             }
             Opcode::FcvtFromInt { src_ty } => {
-                self.select_fcvt_from_int(*src_ty, inst, block);
+                self.select_fcvt_from_int(src_ty.clone(), inst, block);
             }
 
             // Addressing
@@ -567,7 +569,7 @@ impl InstructionSelector {
             }
 
             // Memory
-            Opcode::Load { ty } => self.select_load(*ty, inst, block),
+            Opcode::Load { ty } => self.select_load(ty.clone(), inst, block),
             Opcode::Store => self.select_store(inst, block),
         }
     }
@@ -581,13 +583,13 @@ impl InstructionSelector {
     /// Negative small values: MOVN
     /// Large values: MOVZ + MOVK sequence (TODO: full sequence)
     fn select_iconst(&mut self, ty: Type, imm: i64, inst: &Instruction, block: Block) {
-        let class = reg_class_for_type(ty);
+        let class = reg_class_for_type(&ty);
         let dst = self.new_vreg(class);
         let result = inst.results.first().expect("Iconst must have a result");
 
         if imm >= 0 && imm <= 0xFFFF {
             // Simple MOVZ
-            let opc = if Self::is_32bit(ty) {
+            let opc = if Self::is_32bit(&ty) {
                 AArch64Opcode::MOVZWi
             } else {
                 AArch64Opcode::MOVZXi
@@ -598,7 +600,7 @@ impl InstructionSelector {
             );
         } else if imm < 0 && imm >= -0x10000 {
             // MOVN for small negative values
-            let opc = if Self::is_32bit(ty) {
+            let opc = if Self::is_32bit(&ty) {
                 AArch64Opcode::MOVNWi
             } else {
                 AArch64Opcode::MOVNXi
@@ -615,7 +617,7 @@ impl InstructionSelector {
         } else {
             // Large immediate: MOVZ + MOVK sequence
             // Start with lowest 16 bits via MOVZ
-            let opc_z = if Self::is_32bit(ty) {
+            let opc_z = if Self::is_32bit(&ty) {
                 AArch64Opcode::MOVZWi
             } else {
                 AArch64Opcode::MOVZXi
@@ -630,7 +632,7 @@ impl InstructionSelector {
             );
 
             // Insert remaining 16-bit chunks via MOVK
-            let chunks = if Self::is_32bit(ty) { 2 } else { 4 };
+            let chunks = if Self::is_32bit(&ty) { 2 } else { 4 };
             for shift in 1..chunks {
                 let chunk = ((imm as u64) >> (shift * 16)) & 0xFFFF;
                 if chunk != 0 {
@@ -654,7 +656,7 @@ impl InstructionSelector {
 
     /// Select float constant materialization.
     fn select_fconst(&mut self, ty: Type, imm: f64, inst: &Instruction, block: Block) {
-        let class = reg_class_for_type(ty);
+        let class = reg_class_for_type(&ty);
         let dst = self.new_vreg(class);
         let result = inst.results.first().expect("Fconst must have a result");
 
@@ -691,9 +693,9 @@ impl InstructionSelector {
 
         // Determine type from LHS
         let ty = self.value_type(&lhs_val);
-        let is_32 = Self::is_32bit(ty);
+        let is_32 = Self::is_32bit(&ty);
 
-        let class = reg_class_for_type(ty);
+        let class = reg_class_for_type(&ty);
         let dst = self.new_vreg(class);
 
         let lhs = self.use_value(&lhs_val);
@@ -738,7 +740,7 @@ impl InstructionSelector {
         let result_val = inst.results[0];
 
         let ty = self.value_type(&lhs_val);
-        let is_32 = Self::is_32bit(ty);
+        let is_32 = Self::is_32bit(&ty);
 
         let lhs = self.use_value(&lhs_val);
         let rhs = self.use_value(&rhs_val);
@@ -851,8 +853,8 @@ impl InstructionSelector {
             let src = self.use_value(val);
             match loc {
                 ArgLocation::Reg(preg) => {
-                    let ty = ret_types[i];
-                    let opc = if Self::is_32bit(ty) {
+                    let ty = ret_types[i].clone();
+                    let opc = if Self::is_32bit(&ty) {
                         AArch64Opcode::MOVWrr
                     } else {
                         AArch64Opcode::MOVXrr
@@ -909,8 +911,8 @@ impl InstructionSelector {
             let src = self.use_value(val);
             match loc {
                 ArgLocation::Reg(preg) => {
-                    let ty = arg_types[i];
-                    let opc = if Self::is_32bit(ty) {
+                    let ty = arg_types[i].clone();
+                    let opc = if Self::is_32bit(&ty) {
                         AArch64Opcode::MOVWrr
                     } else {
                         AArch64Opcode::MOVXrr
@@ -922,8 +924,8 @@ impl InstructionSelector {
                 }
                 ArgLocation::Stack { offset, size: _ } => {
                     // STR to [SP + offset]
-                    let ty = arg_types[i];
-                    let opc = if Self::is_32bit(ty) {
+                    let ty = arg_types[i].clone();
+                    let opc = if Self::is_32bit(&ty) {
                         AArch64Opcode::STRWui
                     } else {
                         AArch64Opcode::STRXui
@@ -964,10 +966,10 @@ impl InstructionSelector {
         for (i, (val, loc)) in result_vals.iter().zip(ret_locs.iter()).enumerate() {
             match loc {
                 ArgLocation::Reg(preg) => {
-                    let ty = result_types[i];
-                    let class = reg_class_for_type(ty);
+                    let ty = result_types[i].clone();
+                    let class = reg_class_for_type(&ty);
                     let dst = self.new_vreg(class);
-                    let opc = if Self::is_32bit(ty) {
+                    let opc = if Self::is_32bit(&ty) {
                         AArch64Opcode::MOVWrr
                     } else {
                         AArch64Opcode::MOVXrr
@@ -981,8 +983,8 @@ impl InstructionSelector {
                 ArgLocation::Indirect { ptr_reg: _ } => {
                     // Large aggregate returned via X8 pointer
                     // TODO: Load from sret pointer
-                    let ty = result_types[i];
-                    let class = reg_class_for_type(ty);
+                    let ty = result_types[i].clone();
+                    let class = reg_class_for_type(&ty);
                     let dst = self.new_vreg(class);
                     self.define_value(*val, MachOperand::VReg(dst), ty);
                 }
@@ -1021,7 +1023,7 @@ impl InstructionSelector {
         let result_val = inst.results[0];
         let addr = self.use_value(&addr_val);
 
-        let class = reg_class_for_type(ty);
+        let class = reg_class_for_type(&ty);
         let dst = self.new_vreg(class);
 
         let opc = match ty {
@@ -1092,7 +1094,7 @@ impl InstructionSelector {
         // args are Value(0), Value(1), ..., Value(n-1).
         for (i, (ty, loc)) in sig.params.iter().zip(param_locs.iter()).enumerate() {
             let val = Value(i as u32);
-            let class = reg_class_for_type(*ty);
+            let class = reg_class_for_type(ty);
             let vreg = self.new_vreg(class);
 
             match loc {
@@ -1108,7 +1110,7 @@ impl InstructionSelector {
                 }
                 ArgLocation::Stack { offset, size: _ } => {
                     // Load from stack: LDR vreg, [SP, #offset]
-                    let opc = if Self::is_32bit(*ty) {
+                    let opc = if Self::is_32bit(ty) {
                         AArch64Opcode::LDRWui
                     } else {
                         AArch64Opcode::LDRXui
@@ -1139,7 +1141,7 @@ impl InstructionSelector {
                 }
             }
 
-            self.define_value(val, MachOperand::VReg(vreg), *ty);
+            self.define_value(val, MachOperand::VReg(vreg), ty.clone());
         }
     }
 
@@ -1160,8 +1162,8 @@ impl InstructionSelector {
         let result_val = inst.results[0];
 
         let ty = self.value_type(&src_val);
-        let is_32 = Self::is_32bit(ty);
-        let class = reg_class_for_type(ty);
+        let is_32 = Self::is_32bit(&ty);
+        let class = reg_class_for_type(&ty);
         let dst = self.new_vreg(class);
 
         let src = self.use_value(&src_val);
@@ -1217,8 +1219,8 @@ impl InstructionSelector {
         let result_val = inst.results[0];
 
         let ty = self.value_type(&lhs_val);
-        let is_32 = Self::is_32bit(ty);
-        let class = reg_class_for_type(ty);
+        let is_32 = Self::is_32bit(&ty);
+        let class = reg_class_for_type(&ty);
         let dst = self.new_vreg(class);
 
         let lhs = self.use_value(&lhs_val);
@@ -1257,8 +1259,8 @@ impl InstructionSelector {
     fn select_extend(
         &mut self,
         signed: bool,
-        from_ty: Type,
-        to_ty: Type,
+        from_ty: &Type,
+        to_ty: &Type,
         inst: &Instruction,
         block: Block,
     ) {
@@ -1273,6 +1275,7 @@ impl InstructionSelector {
         let src = self.use_value(&src_val);
 
         let to_64 = !Self::is_32bit(to_ty);
+        let to_ty_owned = to_ty.clone();
 
         let opc = if signed {
             match (from_ty, to_64) {
@@ -1290,7 +1293,7 @@ impl InstructionSelector {
                             vec![MachOperand::VReg(dst), src],
                         ),
                     );
-                    self.define_value(result_val, MachOperand::VReg(dst), to_ty);
+                    self.define_value(result_val, MachOperand::VReg(dst), to_ty_owned);
                     return;
                 }
             }
@@ -1310,7 +1313,7 @@ impl InstructionSelector {
                             vec![MachOperand::VReg(dst), src],
                         ),
                     );
-                    self.define_value(result_val, MachOperand::VReg(dst), to_ty);
+                    self.define_value(result_val, MachOperand::VReg(dst), to_ty_owned);
                     return;
                 }
                 _ => {
@@ -1321,7 +1324,7 @@ impl InstructionSelector {
                             vec![MachOperand::VReg(dst), src],
                         ),
                     );
-                    self.define_value(result_val, MachOperand::VReg(dst), to_ty);
+                    self.define_value(result_val, MachOperand::VReg(dst), to_ty_owned);
                     return;
                 }
             }
@@ -1331,7 +1334,7 @@ impl InstructionSelector {
             block,
             MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
         );
-        self.define_value(result_val, MachOperand::VReg(dst), to_ty);
+        self.define_value(result_val, MachOperand::VReg(dst), to_ty_owned);
     }
 
     // -----------------------------------------------------------------------
@@ -1360,8 +1363,8 @@ impl InstructionSelector {
         let result_val = inst.results[0];
 
         let ty = self.value_type(&src_val);
-        let is_32 = Self::is_32bit(ty);
-        let class = reg_class_for_type(ty);
+        let is_32 = Self::is_32bit(&ty);
+        let class = reg_class_for_type(&ty);
         let dst = self.new_vreg(class);
         let src = self.use_value(&src_val);
 
@@ -1412,8 +1415,8 @@ impl InstructionSelector {
         let src_val = inst.args[1]; // source of bits to insert
 
         let ty = self.value_type(&dst_val);
-        let is_32 = Self::is_32bit(ty);
-        let class = reg_class_for_type(ty);
+        let is_32 = Self::is_32bit(&ty);
+        let class = reg_class_for_type(&ty);
         let result_val = inst.results[0];
 
         // BFM reads and writes the destination register. We model this by
@@ -1482,8 +1485,8 @@ impl InstructionSelector {
         let result_val = inst.results[0];
 
         let ty = self.value_type(&true_val);
-        let is_32 = Self::is_32bit(ty);
-        let class = reg_class_for_type(ty);
+        let is_32 = Self::is_32bit(&ty);
+        let class = reg_class_for_type(&ty);
         let dst = self.new_vreg(class);
 
         let cond_op = self.use_value(&cond_val);
@@ -1538,7 +1541,7 @@ impl InstructionSelector {
 
         let ty = self.value_type(&lhs_val);
         let is_f32 = matches!(ty, Type::F32);
-        let class = reg_class_for_type(ty);
+        let class = reg_class_for_type(&ty);
         let dst = self.new_vreg(class);
 
         let lhs = self.use_value(&lhs_val);
@@ -1616,12 +1619,12 @@ impl InstructionSelector {
         let src_ty = self.value_type(&src_val);
         let src = self.use_value(&src_val);
 
-        let dst_class = reg_class_for_type(dst_ty);
+        let dst_class = reg_class_for_type(&dst_ty);
         let dst = self.new_vreg(dst_class);
 
         // Select based on destination integer width. The source float
         // precision is encoded in the operand register class.
-        let opc = if Self::is_32bit(dst_ty) {
+        let opc = if Self::is_32bit(&dst_ty) {
             AArch64Opcode::FCVTZSWr
         } else {
             AArch64Opcode::FCVTZSXr
@@ -1661,16 +1664,16 @@ impl InstructionSelector {
         // the result type is tracked. For now, use the convention that
         // FcvtFromInt produces a value of the same "size class" as src_ty:
         //   I32 -> F32, I64 -> F64
-        let dst_ty = if Self::is_32bit(src_ty) {
+        let dst_ty = if Self::is_32bit(&src_ty) {
             Type::F32
         } else {
             Type::F64
         };
 
-        let dst_class = reg_class_for_type(dst_ty);
+        let dst_class = reg_class_for_type(&dst_ty);
         let dst = self.new_vreg(dst_class);
 
-        let opc = match (Self::is_32bit(src_ty), matches!(dst_ty, Type::F32)) {
+        let opc = match (Self::is_32bit(&src_ty), matches!(dst_ty, Type::F32)) {
             (true, true) => AArch64Opcode::SCVTFSWr,    // SCVTF Sd, Wn
             (true, false) => AArch64Opcode::SCVTFDWr,   // SCVTF Dd, Wn
             (false, true) => AArch64Opcode::SCVTFSXr,   // SCVTF Sd, Xn

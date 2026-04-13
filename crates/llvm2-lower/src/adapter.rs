@@ -158,7 +158,19 @@ impl ProofContext {
 ///
 /// Signedness is lost in the conversion (tMIR `Int` vs `UInt` both map to `I*`).
 /// The signedness is preserved in the opcodes (e.g., `Sdiv` vs `Udiv`).
+///
+/// For aggregate types (Struct, Array), pass the module's struct definitions
+/// via `translate_type_with_structs`.
 pub fn translate_type(ty: &Ty) -> Result<Type, AdapterError> {
+    translate_type_with_structs(ty, &[])
+}
+
+/// Convert a tMIR `Ty` to an internal LIR `Type`, with struct definitions for
+/// resolving `Ty::Struct(StructId)` references.
+pub fn translate_type_with_structs(
+    ty: &Ty,
+    structs: &[StructDef],
+) -> Result<Type, AdapterError> {
     match ty {
         Ty::Bool => Ok(Type::B1),
         Ty::Int(8) | Ty::UInt(8) => Ok(Type::I8),
@@ -173,7 +185,24 @@ pub fn translate_type(ty: &Ty) -> Result<Type, AdapterError> {
         Ty::Int(w) | Ty::UInt(w) | Ty::Float(w) => {
             Err(AdapterError::UnsupportedBitWidth(*w))
         }
-        Ty::Struct(_) | Ty::Array(_, _) | Ty::Func(_) => {
+        Ty::Struct(sid) => {
+            // Look up the struct definition and translate each field type.
+            let sdef = structs
+                .iter()
+                .find(|s| s.id == *sid)
+                .ok_or_else(|| AdapterError::UnsupportedType(format!("unknown struct {:?}", sid)))?;
+            let field_types: Vec<Type> = sdef
+                .fields
+                .iter()
+                .map(|f| translate_type_with_structs(&f.ty, structs))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Type::Struct(field_types))
+        }
+        Ty::Array(elem_ty, count) => {
+            let elem = translate_type_with_structs(elem_ty, structs)?;
+            Ok(Type::Array(Box::new(elem), *count as u32))
+        }
+        Ty::Func(_) => {
             Err(AdapterError::UnsupportedType(format!("{:?}", ty)))
         }
     }
@@ -244,8 +273,8 @@ fn translate_float_cmp(op: &CmpOp) -> Option<FloatCC> {
 
 /// The tMIR-to-LIR adapter. Translates one function at a time.
 struct TmirAdapter<'a> {
-    /// Struct definitions from the module (for future aggregate support).
-    _structs: &'a [StructDef],
+    /// Struct definitions from the module (for aggregate type translation).
+    structs: &'a [StructDef],
 
     /// tMIR ValueId -> internal LIR Value mapping.
     value_map: HashMap<ValueId, Value>,
@@ -272,7 +301,7 @@ struct TmirAdapter<'a> {
 impl<'a> TmirAdapter<'a> {
     fn new(structs: &'a [StructDef], func_names: HashMap<FuncId, String>) -> Self {
         Self {
-            _structs: structs,
+            structs,
             value_map: HashMap::new(),
             block_map: HashMap::new(),
             next_value: 0,
@@ -322,6 +351,11 @@ impl<'a> TmirAdapter<'a> {
     /// Map all result Values for an instruction.
     fn map_results(&mut self, results: &[ValueId]) -> Vec<Value> {
         results.iter().map(|vid| self.map_value(*vid)).collect()
+    }
+
+    /// Translate a tMIR type using the adapter's struct definitions.
+    fn translate_ty(&self, ty: &Ty) -> Result<Type, AdapterError> {
+        translate_type_with_structs(ty, self.structs)
     }
 
     // -----------------------------------------------------------------------
@@ -457,12 +491,15 @@ impl<'a> TmirAdapter<'a> {
                     results: vec![dst],
                 }])
             }
-            // Aggregate operations: unsupported in MVP.
-            Instr::Struct { .. } | Instr::Field { .. } | Instr::Index { .. } => {
-                Err(AdapterError::UnsupportedInstruction(format!(
-                    "{:?}",
-                    node.instr
-                )))
+            // Aggregate operations: lowered to stack allocation + loads/stores.
+            Instr::Struct { ty, fields } => {
+                self.translate_struct_construct(ty, fields, &node.results)
+            }
+            Instr::Field { ty, value, index } => {
+                self.translate_field_extract(ty, value, *index, &node.results)
+            }
+            Instr::Index { ty, base, index } => {
+                self.translate_array_index(ty, base, index, &node.results)
             }
             // Switch: unsupported in MVP.
             Instr::Switch { .. } => Err(AdapterError::UnsupportedInstruction(
@@ -947,6 +984,205 @@ impl<'a> TmirAdapter<'a> {
     }
 
     // -----------------------------------------------------------------------
+    // Aggregate operations
+    // -----------------------------------------------------------------------
+
+    /// Translate `Struct { ty, fields }` — construct a struct value.
+    ///
+    /// Lowering: allocate a stack slot for the struct, store each field at
+    /// its computed offset, then produce a pointer (StackAddr) to the slot
+    /// as the result. The result represents the struct's memory location.
+    fn translate_struct_construct(
+        &mut self,
+        ty: &Ty,
+        fields: &[ValueId],
+        results: &[ValueId],
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        let struct_ty = self.translate_ty(ty)?;
+        let dst = self.map_result(results)?;
+        let mut instrs = Vec::new();
+
+        // Allocate a stack slot (placeholder slot 0; real allocation in frame lowering).
+        let base_ptr = self.fresh_value();
+        instrs.push(Instruction {
+            opcode: Opcode::StackAddr { slot: 0 },
+            args: vec![],
+            results: vec![base_ptr],
+        });
+
+        // Store each field at its offset from the base pointer.
+        for (i, field_vid) in fields.iter().enumerate() {
+            let field_val = self.map_value(*field_vid);
+            let offset = struct_ty.offset_of(i).unwrap_or(0);
+
+            if offset == 0 {
+                // Store directly to base pointer.
+                instrs.push(Instruction {
+                    opcode: Opcode::Store,
+                    args: vec![field_val, base_ptr],
+                    results: vec![],
+                });
+            } else {
+                // Compute field address: base_ptr + offset.
+                let offset_val = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Iconst {
+                        ty: Type::I64,
+                        imm: offset as i64,
+                    },
+                    args: vec![],
+                    results: vec![offset_val],
+                });
+                let field_ptr = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Iadd,
+                    args: vec![base_ptr, offset_val],
+                    results: vec![field_ptr],
+                });
+                instrs.push(Instruction {
+                    opcode: Opcode::Store,
+                    args: vec![field_val, field_ptr],
+                    results: vec![],
+                });
+            }
+        }
+
+        // Result is the base pointer (struct location).
+        instrs.push(Instruction {
+            opcode: Opcode::Iadd,
+            args: vec![base_ptr],
+            results: vec![dst],
+        });
+
+        Ok(instrs)
+    }
+
+    /// Translate `Field { ty, value, index }` — extract a struct field.
+    ///
+    /// Lowering: compute field offset, add to struct base pointer, load the
+    /// field value from that address.
+    fn translate_field_extract(
+        &mut self,
+        ty: &Ty,
+        value: &ValueId,
+        index: u32,
+        results: &[ValueId],
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        let struct_ty = self.translate_ty(ty)?;
+        let base_ptr = self.map_value(*value);
+        let dst = self.map_result(results)?;
+        let mut instrs = Vec::new();
+
+        let offset = struct_ty.offset_of(index as usize).unwrap_or(0);
+
+        // Determine the field's scalar type for the load.
+        let field_ty = match &struct_ty {
+            Type::Struct(field_types) => {
+                if (index as usize) < field_types.len() {
+                    field_types[index as usize].clone()
+                } else {
+                    Type::I64 // fallback
+                }
+            }
+            _ => Type::I64, // fallback for non-struct
+        };
+
+        let load_ptr = if offset == 0 {
+            base_ptr
+        } else {
+            let offset_val = self.fresh_value();
+            instrs.push(Instruction {
+                opcode: Opcode::Iconst {
+                    ty: Type::I64,
+                    imm: offset as i64,
+                },
+                args: vec![],
+                results: vec![offset_val],
+            });
+            let ptr = self.fresh_value();
+            instrs.push(Instruction {
+                opcode: Opcode::Iadd,
+                args: vec![base_ptr, offset_val],
+                results: vec![ptr],
+            });
+            ptr
+        };
+
+        instrs.push(Instruction {
+            opcode: Opcode::Load { ty: field_ty },
+            args: vec![load_ptr],
+            results: vec![dst],
+        });
+
+        Ok(instrs)
+    }
+
+    /// Translate `Index { ty, base, index }` — array element access (GEP-like).
+    ///
+    /// Lowering: compute element offset = index * element_size, add to base
+    /// pointer, produce the element address as the result. The caller uses
+    /// Load/Store on the result.
+    fn translate_array_index(
+        &mut self,
+        ty: &Ty,
+        base: &ValueId,
+        index: &ValueId,
+        results: &[ValueId],
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        let array_ty = self.translate_ty(ty)?;
+        let base_ptr = self.map_value(*base);
+        let index_val = self.map_value(*index);
+        let dst = self.map_result(results)?;
+        let mut instrs = Vec::new();
+
+        // Determine element size.
+        let elem_size = match &array_ty {
+            Type::Array(elem, _) => elem.bytes(),
+            _ => {
+                // For pointer indexing (Ptr type), use the pointee size.
+                // Fall back to 1-byte elements if we can't determine.
+                match ty {
+                    Ty::Ptr(inner) => translate_type(inner).map(|t| t.bytes()).unwrap_or(1),
+                    _ => 1,
+                }
+            }
+        };
+
+        if elem_size == 1 {
+            // offset = index (no multiplication needed)
+            instrs.push(Instruction {
+                opcode: Opcode::Iadd,
+                args: vec![base_ptr, index_val],
+                results: vec![dst],
+            });
+        } else {
+            // offset = index * elem_size
+            let size_val = self.fresh_value();
+            instrs.push(Instruction {
+                opcode: Opcode::Iconst {
+                    ty: Type::I64,
+                    imm: elem_size as i64,
+                },
+                args: vec![],
+                results: vec![size_val],
+            });
+            let offset = self.fresh_value();
+            instrs.push(Instruction {
+                opcode: Opcode::Imul,
+                args: vec![index_val, size_val],
+                results: vec![offset],
+            });
+            instrs.push(Instruction {
+                opcode: Opcode::Iadd,
+                args: vec![base_ptr, offset],
+                results: vec![dst],
+            });
+        }
+
+        Ok(instrs)
+    }
+
+    // -----------------------------------------------------------------------
     // Constants
     // -----------------------------------------------------------------------
 
@@ -1170,12 +1406,18 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_type_unsupported() {
+    fn test_translate_type_unknown_struct_errors() {
+        // Struct without matching StructDef should error
         let struct_ty = Ty::Struct(tmir_types::StructId(0));
         assert!(translate_type(&struct_ty).is_err());
+    }
 
+    #[test]
+    fn test_translate_type_array() {
+        // Array of scalar type should succeed even without struct defs
         let array_ty = Ty::Array(Box::new(Ty::Int(32)), 10);
-        assert!(translate_type(&array_ty).is_err());
+        let result = translate_type(&array_ty).unwrap();
+        assert_eq!(result, Type::Array(Box::new(Type::I32), 10));
     }
 
     #[test]

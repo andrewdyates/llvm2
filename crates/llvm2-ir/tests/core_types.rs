@@ -186,7 +186,7 @@ fn regclass_for_type_consistent_with_type_properties() {
     // Integer types should map to GPR classes
     let int_types = [Type::I8, Type::I16, Type::I32, Type::I64, Type::I128];
     for ty in &int_types {
-        let rc = RegClass::for_type(*ty);
+        let rc = RegClass::for_type(ty);
         assert!(
             rc == RegClass::Gpr32 || rc == RegClass::Gpr64,
             "{:?} should map to a GPR class", ty
@@ -196,7 +196,7 @@ fn regclass_for_type_consistent_with_type_properties() {
     // Float types should map to FPR classes
     let float_types = [Type::F32, Type::F64];
     for ty in &float_types {
-        let rc = RegClass::for_type(*ty);
+        let rc = RegClass::for_type(ty);
         assert!(
             rc == RegClass::Fpr32 || rc == RegClass::Fpr64,
             "{:?} should map to an FPR class", ty
@@ -204,10 +204,16 @@ fn regclass_for_type_consistent_with_type_properties() {
     }
 
     // Ptr should be 64-bit
-    assert_eq!(RegClass::for_type(Type::Ptr), RegClass::Gpr64);
+    assert_eq!(RegClass::for_type(&Type::Ptr), RegClass::Gpr64);
 
     // B1 should be 32-bit (smallest GPR)
-    assert_eq!(RegClass::for_type(Type::B1), RegClass::Gpr32);
+    assert_eq!(RegClass::for_type(&Type::B1), RegClass::Gpr32);
+
+    // Aggregates should be GPR64 (passed by pointer)
+    let struct_ty = Type::Struct(vec![Type::I32, Type::I64]);
+    assert_eq!(RegClass::for_type(&struct_ty), RegClass::Gpr64);
+    let array_ty = Type::Array(Box::new(Type::F32), 4);
+    assert_eq!(RegClass::for_type(&array_ty), RegClass::Gpr64);
 }
 
 // ===========================================================================

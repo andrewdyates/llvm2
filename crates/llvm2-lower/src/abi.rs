@@ -125,7 +125,7 @@ impl AppleAArch64ABI {
         let mut fpr_idx: usize = 0;
         let mut stack_offset: i64 = 0;
 
-        for &ty in params {
+        for ty in params {
             match ty {
                 // Integer and boolean types -> GPR
                 Type::B1 | Type::I8 | Type::I16 | Type::I32 | Type::I64 => {
@@ -179,6 +179,51 @@ impl AppleAArch64ABI {
                         stack_offset += align_up(size as i64, 8);
                     }
                 }
+
+                // Aggregate types: pass by pointer (indirect) if > 16 bytes,
+                // otherwise pack into register(s).
+                Type::Struct(_) | Type::Array(_, _) => {
+                    let size = ty.bytes();
+                    if size <= 16 && gpr_idx < GPR_ARG_REGS.len() {
+                        // Small aggregates: pass in register(s)
+                        if size <= 8 {
+                            result.push(ArgLocation::Reg(GPR_ARG_REGS[gpr_idx]));
+                            gpr_idx += 1;
+                        } else if gpr_idx + 1 < GPR_ARG_REGS.len() {
+                            // 9-16 bytes: two registers
+                            result.push(ArgLocation::Indirect {
+                                ptr_reg: GPR_ARG_REGS[gpr_idx],
+                            });
+                            gpr_idx += 2;
+                        } else {
+                            result.push(ArgLocation::Stack {
+                                offset: stack_offset,
+                                size,
+                            });
+                            stack_offset += align_up(size as i64, 8);
+                        }
+                    } else if size > 16 {
+                        // Large aggregates: pass indirect via pointer
+                        if gpr_idx < GPR_ARG_REGS.len() {
+                            result.push(ArgLocation::Indirect {
+                                ptr_reg: GPR_ARG_REGS[gpr_idx],
+                            });
+                            gpr_idx += 1;
+                        } else {
+                            result.push(ArgLocation::Stack {
+                                offset: stack_offset,
+                                size: 8, // pointer size
+                            });
+                            stack_offset += 8;
+                        }
+                    } else {
+                        result.push(ArgLocation::Stack {
+                            offset: stack_offset,
+                            size,
+                        });
+                        stack_offset += align_up(size as i64, 8);
+                    }
+                }
             }
         }
 
@@ -197,7 +242,7 @@ impl AppleAArch64ABI {
         let mut gpr_idx: usize = 0;
         let mut fpr_idx: usize = 0;
 
-        for &ty in returns {
+        for ty in returns {
             match ty {
                 Type::B1 | Type::I8 | Type::I16 | Type::I32 | Type::I64 => {
                     if gpr_idx < GPR_ARG_REGS.len() {
@@ -227,6 +272,11 @@ impl AppleAArch64ABI {
                     } else {
                         result.push(ArgLocation::Indirect { ptr_reg: gpr::X8 });
                     }
+                }
+
+                // Aggregate returns: indirect via X8 (sret convention)
+                Type::Struct(_) | Type::Array(_, _) => {
+                    result.push(ArgLocation::Indirect { ptr_reg: gpr::X8 });
                 }
             }
         }
@@ -348,13 +398,15 @@ mod tests {
     #[test]
     fn stack_args_size_no_overflow() {
         // 4 integer args -> all in registers, 0 stack
-        assert_eq!(AppleAArch64ABI::stack_args_size(&[Type::I32; 4]), 0);
+        let params: Vec<Type> = (0..4).map(|_| Type::I32).collect();
+        assert_eq!(AppleAArch64ABI::stack_args_size(&params), 0);
     }
 
     #[test]
     fn stack_args_size_with_overflow() {
         // 10 integer args -> 2 overflow on stack (8 bytes each)
-        let size = AppleAArch64ABI::stack_args_size(&[Type::I64; 10]);
+        let params: Vec<Type> = (0..10).map(|_| Type::I64).collect();
+        let size = AppleAArch64ABI::stack_args_size(&params);
         assert_eq!(size, 16); // two 8-byte slots
     }
 }

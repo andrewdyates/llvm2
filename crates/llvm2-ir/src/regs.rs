@@ -77,13 +77,18 @@ impl core::fmt::Display for VReg {
 
 impl RegClass {
     /// Select the register class for a given IR type.
-    pub fn for_type(ty: crate::function::Type) -> Self {
+    ///
+    /// For aggregate types (struct/array), returns Gpr64 since aggregates are
+    /// passed by pointer or decomposed into scalar loads/stores.
+    pub fn for_type(ty: &crate::function::Type) -> Self {
         use crate::function::Type;
         match ty {
             Type::I8 | Type::I16 | Type::I32 | Type::B1 => RegClass::Gpr32,
             Type::I64 | Type::Ptr | Type::I128 => RegClass::Gpr64,
             Type::F32 => RegClass::Fpr32,
             Type::F64 => RegClass::Fpr64,
+            // Aggregates are handled via pointers at the machine level.
+            Type::Struct(_) | Type::Array(_, _) => RegClass::Gpr64,
         }
     }
 }

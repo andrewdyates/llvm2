@@ -49,7 +49,11 @@ impl Default for MachBlock {
 }
 
 /// Type information for function signatures and stack slots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Scalar types (I8..I128, F32, F64, B1, Ptr) are the original machine-level
+/// types. Aggregate types (Struct, Array) were added to support real programs
+/// that pass/return structs and allocate arrays on the stack.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     I8,
     I16,
@@ -62,33 +66,110 @@ pub enum Type {
     B1,
     /// Pointer-sized integer.
     Ptr,
+    /// Aggregate structure type with C-like field layout.
+    Struct(Vec<Type>),
+    /// Fixed-size array type: element type and count.
+    Array(Box<Type>, u32),
 }
 
 impl Type {
+    /// Round `offset` up to the next multiple of `align`.
+    fn align_to(offset: u32, align: u32) -> u32 {
+        if align <= 1 {
+            offset
+        } else {
+            let rem = offset % align;
+            if rem == 0 { offset } else { offset + (align - rem) }
+        }
+    }
+
     /// Size of this type in bytes.
-    pub fn bytes(self) -> u32 {
+    ///
+    /// For structs, uses C-like layout with alignment padding between fields
+    /// and trailing padding to the struct's alignment.
+    /// For arrays, returns element_size * count.
+    pub fn bytes(&self) -> u32 {
         match self {
             Self::I8 | Self::B1 => 1,
             Self::I16 => 2,
             Self::I32 | Self::F32 => 4,
             Self::I64 | Self::F64 | Self::Ptr => 8,
             Self::I128 => 16,
+            Self::Struct(fields) => {
+                let mut offset: u32 = 0;
+                let mut max_align: u32 = 1;
+                for field in fields {
+                    let a = field.align();
+                    max_align = max_align.max(a);
+                    offset = Self::align_to(offset, a);
+                    offset += field.bytes();
+                }
+                Self::align_to(offset, max_align)
+            }
+            Self::Array(elem, count) => elem.bytes() * count,
         }
     }
 
+    /// Alias for `bytes()`.
+    pub fn size_of(&self) -> u32 {
+        self.bytes()
+    }
+
     /// Natural alignment of this type in bytes.
-    pub fn align(self) -> u32 {
-        self.bytes().min(8)
+    ///
+    /// Scalars: min(size, 8). Struct: max alignment of fields. Array: element alignment.
+    pub fn align(&self) -> u32 {
+        match self {
+            Self::Struct(fields) => fields.iter().map(|f| f.align()).max().unwrap_or(1),
+            Self::Array(elem, _) => elem.align(),
+            _ => self.bytes().min(8),
+        }
+    }
+
+    /// Alias for `align()`.
+    pub fn align_of(&self) -> u32 {
+        self.align()
+    }
+
+    /// Byte offset of a struct field using C-like layout rules.
+    ///
+    /// Returns `None` if this is not a struct type or the index is out of range.
+    pub fn offset_of(&self, field_index: usize) -> Option<u32> {
+        let Self::Struct(fields) = self else {
+            return None;
+        };
+        if field_index >= fields.len() {
+            return None;
+        }
+        let mut offset: u32 = 0;
+        for (idx, field) in fields.iter().enumerate() {
+            offset = Self::align_to(offset, field.align());
+            if idx == field_index {
+                return Some(offset);
+            }
+            offset += field.bytes();
+        }
+        None
+    }
+
+    /// Returns true if this is an aggregate (struct or array) type.
+    pub fn is_aggregate(&self) -> bool {
+        matches!(self, Self::Struct(_) | Self::Array(_, _))
     }
 
     /// Returns true if this is an integer type.
-    pub fn is_int(self) -> bool {
+    pub fn is_int(&self) -> bool {
         matches!(self, Self::I8 | Self::I16 | Self::I32 | Self::I64 | Self::I128)
     }
 
     /// Returns true if this is a floating-point type.
-    pub fn is_float(self) -> bool {
+    pub fn is_float(&self) -> bool {
         matches!(self, Self::F32 | Self::F64)
+    }
+
+    /// Returns true if this is a scalar (non-aggregate) type.
+    pub fn is_scalar(&self) -> bool {
+        !self.is_aggregate()
     }
 }
 
@@ -349,10 +430,10 @@ mod tests {
     }
 
     #[test]
-    fn type_copy_clone_hash() {
+    fn type_clone_hash() {
         use std::collections::HashSet;
         let a = Type::I64;
-        let b = a; // Copy
+        let b = a.clone(); // Clone
         let c = a.clone(); // Clone
         assert_eq!(a, b);
         assert_eq!(a, c);
