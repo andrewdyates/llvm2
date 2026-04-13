@@ -7,6 +7,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/llvm2-ir",
     "crates/llvm2-lower",
     "crates/llvm2-opt",
     "crates/llvm2-verify",
@@ -39,6 +40,7 @@ tmir-func = { path = "../tMIR/crates/tmir-func" }
 tmir-semantics = { path = "../tMIR/crates/tmir-semantics" }
 
 # Internal crates
+llvm2-ir = { path = "crates/llvm2-ir" }
 llvm2-lower = { path = "crates/llvm2-lower" }
 llvm2-opt = { path = "crates/llvm2-opt" }
 llvm2-verify = { path = "crates/llvm2-verify" }
