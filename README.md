@@ -146,6 +146,24 @@ LLVM2 is designed for AI agents to interact with, not just humans:
 
 **Status:** Library-based crate architecture supports this. API surface and structured output are not yet implemented.
 
+### 4. Automatic Heterogeneous Compute Allocation
+
+A compiler already decides which register to use and when to spill to memory. **Why should the programmer manually target GPU, Neural Engine, or SIMD?** Compute resource allocation is the same problem as register allocation at a coarser granularity.
+
+An M-series MacBook has 12 CPU cores, 40 GPU cores, 16 Neural Engine cores, ~40 TOPS of compute. Most programs use one CPU core. The compiler should fix this:
+
+- **Computation graph analysis** — identify data-parallel and matrix-heavy subgraphs in tMIR
+- **Automatic dispatch** — compiler decides: CPU, GPU (Metal), Neural Engine (CoreML), or SIMD (NEON)
+- **Cost-model driven** — latency, throughput, energy, and data transfer costs determine placement
+- **Proven correct** — every compute allocation decision verified to preserve program semantics
+- **Energy-aware** — optimize for performance, battery life, or a custom balance
+
+The programmer writes pure math. The compiler maps it to the best hardware. With proofs.
+
+**Status:** Design complete. Implementation not started.
+
+**Design docs:** `designs/2026-04-13-superoptimization.md`, `designs/2026-04-13-debugging-transparency.md`, `designs/2026-04-13-ai-native-compilation.md`, `designs/2026-04-13-heterogeneous-compute.md`
+
 ## Crates
 
 | Crate | Lines | Tests | Description |
