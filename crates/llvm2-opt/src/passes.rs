@@ -8,6 +8,7 @@
 //! This module re-exports the pass implementations from their dedicated
 //! submodules for convenient access.
 
+pub use crate::addr_mode::AddrModeFormation;
 pub use crate::cfg_simplify::CfgSimplify;
 pub use crate::const_fold::ConstantFolding;
 pub use crate::copy_prop::CopyPropagation;
