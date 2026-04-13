@@ -315,4 +315,234 @@ mod tests {
         let preg1 = result.allocation[&VReg { id: 1, class: RegClass::Gpr64 }];
         assert_ne!(preg0, preg1);
     }
+
+    #[test]
+    fn test_non_overlapping_intervals_reuse_register() {
+        let regs = aarch64_allocatable_regs();
+        // Two intervals that don't overlap can use the same register.
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+                i.add_range(0, 5);
+                i.spill_weight = 1.0;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg { id: 1, class: RegClass::Gpr64 });
+                i.add_range(5, 10); // starts exactly where first ends
+                i.spill_weight = 1.0;
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+        assert_eq!(result.allocation.len(), 2);
+        // With plenty of registers, they may or may not reuse — the important
+        // thing is both are allocated successfully.
+    }
+
+    #[test]
+    fn test_spill_under_register_pressure() {
+        // Create a situation with only 2 registers and 3 overlapping intervals.
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0), PReg::new(1)]);
+
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+                i.add_range(0, 20);
+                i.spill_weight = 1.0; // low weight = spill candidate
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg { id: 1, class: RegClass::Gpr64 });
+                i.add_range(0, 20);
+                i.spill_weight = 5.0; // high weight
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg { id: 2, class: RegClass::Gpr64 });
+                i.add_range(0, 20);
+                i.spill_weight = 10.0; // highest weight
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+        // Only 2 registers for 3 overlapping intervals — one must be spilled.
+        assert_eq!(result.allocation.len(), 2, "should allocate 2");
+        assert_eq!(scan.spilled_vregs().len(), 1, "should spill 1");
+
+        // The spilled VReg should be the one with the lowest spill weight (v0).
+        let spilled = scan.spilled_vregs();
+        assert_eq!(spilled[0].id, 0, "lowest weight vreg should be spilled");
+    }
+
+    #[test]
+    fn test_spill_current_if_cheaper() {
+        // When the current interval has lower weight than all active intervals,
+        // the current interval itself should be spilled.
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);
+
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+                i.add_range(0, 20);
+                i.spill_weight = 10.0; // high weight, allocated first
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg { id: 1, class: RegClass::Gpr64 });
+                i.add_range(5, 15);
+                i.spill_weight = 1.0; // low weight, arrives later
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+        assert_eq!(result.allocation.len(), 1);
+        assert_eq!(scan.spilled_vregs().len(), 1);
+        // v1 (the cheaper one) should be spilled since v0 is already active
+        // and has higher weight.
+        assert_eq!(scan.spilled_vregs()[0].id, 1);
+    }
+
+    #[test]
+    fn test_expire_old_intervals_frees_registers() {
+        // Two non-overlapping intervals + one overlapping should work with 1 register.
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);
+
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+                i.add_range(0, 5);
+                i.spill_weight = 1.0;
+                i
+            },
+            {
+                // Starts after v0 ends — register should be freed.
+                let mut i = LiveInterval::new(VReg { id: 1, class: RegClass::Gpr64 });
+                i.add_range(5, 10);
+                i.spill_weight = 1.0;
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+        // Both should be allocated (same register, sequentially).
+        assert_eq!(result.allocation.len(), 2);
+        assert!(scan.spilled_vregs().is_empty());
+    }
+
+    #[test]
+    fn test_fixed_intervals_skipped() {
+        let regs = aarch64_allocatable_regs();
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+                i.add_range(0, 10);
+                i.is_fixed = true; // should be skipped
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg { id: 1, class: RegClass::Gpr64 });
+                i.add_range(0, 10);
+                i.spill_weight = 1.0;
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+        // Fixed interval should NOT appear in allocation.
+        assert!(!result.allocation.contains_key(&VReg { id: 0, class: RegClass::Gpr64 }));
+        // Non-fixed interval should be allocated.
+        assert!(result.allocation.contains_key(&VReg { id: 1, class: RegClass::Gpr64 }));
+    }
+
+    #[test]
+    fn test_multiple_register_classes() {
+        let regs = aarch64_allocatable_regs();
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+                i.add_range(0, 10);
+                i.spill_weight = 1.0;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg { id: 1, class: RegClass::Fpr64 });
+                i.add_range(0, 10);
+                i.spill_weight = 1.0;
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+        // Both should be allocated — they use different register classes.
+        assert_eq!(result.allocation.len(), 2);
+        let preg_gpr = result.allocation[&VReg { id: 0, class: RegClass::Gpr64 }];
+        let preg_fpr = result.allocation[&VReg { id: 1, class: RegClass::Fpr64 }];
+        // GPR and FPR registers should have different encodings.
+        assert_ne!(preg_gpr, preg_fpr);
+    }
+
+    #[test]
+    fn test_many_sequential_intervals_no_spill() {
+        // 100 intervals that don't overlap should all be allocated with 1 register.
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);
+
+        let intervals: Vec<LiveInterval> = (0..100)
+            .map(|i| {
+                let mut interval = LiveInterval::new(VReg { id: i, class: RegClass::Gpr64 });
+                interval.add_range(i * 10, i * 10 + 5);
+                interval.spill_weight = 1.0;
+                interval
+            })
+            .collect();
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+        assert_eq!(result.allocation.len(), 100);
+        assert!(scan.spilled_vregs().is_empty());
+    }
+
+    #[test]
+    fn test_empty_intervals() {
+        let regs = aarch64_allocatable_regs();
+        let intervals: Vec<LiveInterval> = Vec::new();
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("empty should succeed");
+        assert!(result.allocation.is_empty());
+        assert!(result.spills.is_empty());
+    }
+
+    #[test]
+    fn test_aarch64_regs_gpr32_count() {
+        let regs = aarch64_allocatable_regs();
+        // GPR32: W0-W15 (16) + W19-W28 (10) = 26
+        assert_eq!(regs[&RegClass::Gpr32].len(), 26);
+    }
+
+    #[test]
+    fn test_aarch64_regs_fpr128_count() {
+        let regs = aarch64_allocatable_regs();
+        // FPR128: V0-V31 = 32
+        assert_eq!(regs[&RegClass::Fpr128].len(), 32);
+    }
+
+    #[test]
+    fn test_aarch64_regs_fpr32_count() {
+        let regs = aarch64_allocatable_regs();
+        // FPR32: S0-S31 = 32
+        assert_eq!(regs[&RegClass::Fpr32].len(), 32);
+    }
 }

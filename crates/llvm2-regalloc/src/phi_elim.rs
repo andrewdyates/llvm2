@@ -315,4 +315,451 @@ mod tests {
         // Should use a temporary to break the cycle.
         assert!(result.len() >= 3, "cycle should introduce a temp: got {:?}", result);
     }
+
+    #[test]
+    fn test_parallel_copy_empty() {
+        let mut func = MachFunction {
+            name: "test".into(),
+            insts: Vec::new(),
+            blocks: Vec::new(),
+            block_order: Vec::new(),
+            entry_block: BlockId(0),
+            next_vreg: 10,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        };
+
+        let result = resolve_parallel_copies(&[], &mut func);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parallel_copy_single() {
+        let mut func = MachFunction {
+            name: "test".into(),
+            insts: Vec::new(),
+            blocks: Vec::new(),
+            block_order: Vec::new(),
+            entry_block: BlockId(0),
+            next_vreg: 10,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        };
+
+        let v0 = VReg { id: 0, class: RegClass::Gpr64 };
+        let v1 = VReg { id: 1, class: RegClass::Gpr64 };
+        let copies = vec![(v0, v1)];
+        let result = resolve_parallel_copies(&copies, &mut func);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], (v0, v1));
+    }
+
+    #[test]
+    fn test_parallel_copy_chain_order() {
+        // Chain: v0 <- v1, v1 <- v2, v2 <- v3
+        // Correct order: v0 <- v1 first (v0 isn't a source), then v1 <- v2, then v2 <- v3.
+        let mut func = MachFunction {
+            name: "test".into(),
+            insts: Vec::new(),
+            blocks: Vec::new(),
+            block_order: Vec::new(),
+            entry_block: BlockId(0),
+            next_vreg: 10,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        };
+
+        let v0 = VReg { id: 0, class: RegClass::Gpr64 };
+        let v1 = VReg { id: 1, class: RegClass::Gpr64 };
+        let v2 = VReg { id: 2, class: RegClass::Gpr64 };
+        let v3 = VReg { id: 3, class: RegClass::Gpr64 };
+
+        let copies = vec![(v0, v1), (v1, v2), (v2, v3)];
+        let result = resolve_parallel_copies(&copies, &mut func);
+
+        // No cycle, so no temporary needed.
+        assert_eq!(result.len(), 3, "chain should not need temporaries");
+
+        // v0 <- v1 must come before v1 <- v2 (v1 is read by first, written by second).
+        let pos_v0 = result.iter().position(|&(d, _)| d == v0).unwrap();
+        let pos_v1 = result.iter().position(|&(d, _)| d == v1).unwrap();
+        let pos_v2 = result.iter().position(|&(d, _)| d == v2).unwrap();
+        assert!(pos_v0 < pos_v1, "v0 <- v1 must come before v1 <- v2");
+        assert!(pos_v1 < pos_v2, "v1 <- v2 must come before v2 <- v3");
+    }
+
+    #[test]
+    fn test_parallel_copy_three_way_cycle() {
+        // v0 <- v1, v1 <- v2, v2 <- v0 — 3-way cycle.
+        let mut func = MachFunction {
+            name: "test".into(),
+            insts: Vec::new(),
+            blocks: Vec::new(),
+            block_order: Vec::new(),
+            entry_block: BlockId(0),
+            next_vreg: 10,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        };
+
+        let v0 = VReg { id: 0, class: RegClass::Gpr64 };
+        let v1 = VReg { id: 1, class: RegClass::Gpr64 };
+        let v2 = VReg { id: 2, class: RegClass::Gpr64 };
+
+        let copies = vec![(v0, v1), (v1, v2), (v2, v0)];
+        let result = resolve_parallel_copies(&copies, &mut func);
+
+        // 3-way cycle requires at least one temporary, so result should be > 3.
+        assert!(result.len() > 3, "3-way cycle needs a temp: got {:?}", result);
+
+        // Verify that a fresh temporary was allocated.
+        assert!(func.next_vreg > 10, "should have allocated a temporary VReg");
+    }
+
+    /// Helper: build a diamond CFG with phi instructions.
+    ///
+    /// Block 0 (entry): def v0, def v1, branch -> block 1 or block 2
+    /// Block 1 (then): -- falls through to block 3
+    /// Block 2 (else): -- falls through to block 3
+    /// Block 3 (merge): phi v2 = [v0 from block1, v1 from block2], use v2
+    fn make_diamond_with_phi() -> MachFunction {
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        // Block 0: def v0, def v1, cbranch
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(10)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(20)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i2 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBB,
+            defs: vec![],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 }),
+                MachOperand::Block(BlockId(1)),
+                MachOperand::Block(BlockId(2)),
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags(InstFlags::IS_BRANCH | InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 1 (then): just a branch to merge
+        let i3 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(3))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags(InstFlags::IS_BRANCH | InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 2 (else): just a branch to merge
+        let i4 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(3))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags(InstFlags::IS_BRANCH | InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 3 (merge): phi v2 = [v0 from block1, v1 from block2], then use v2
+        let i5 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0x00, // phi
+            defs: vec![MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 })],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 }), // from block 1
+                MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 }), // from block 2
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags(InstFlags::IS_PHI),
+        });
+        let i6 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 3,
+            defs: vec![],
+            uses: vec![MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        MachFunction {
+            name: "diamond_phi".into(),
+            insts,
+            blocks: vec![
+                MachBlock {
+                    insts: vec![i0, i1, i2],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(1), BlockId(2)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i3],
+                    preds: vec![BlockId(0)],
+                    succs: vec![BlockId(3)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i4],
+                    preds: vec![BlockId(0)],
+                    succs: vec![BlockId(3)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i5, i6],
+                    preds: vec![BlockId(1), BlockId(2)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+            ],
+            block_order: vec![BlockId(0), BlockId(1), BlockId(2), BlockId(3)],
+            entry_block: BlockId(0),
+            next_vreg: 3,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_critical_edge_splitting_diamond() {
+        // In the diamond, block 0 has 2 successors and block 3 has 2 predecessors.
+        // The edges (0->1) and (0->2) are NOT critical because blocks 1 and 2
+        // each have only 1 predecessor. But if block 3 had >1 pred and block 0 >1 succ,
+        // we get critical edges. Here, edges 1->3 and 2->3 are NOT critical because
+        // blocks 1 and 2 each have only 1 successor. Let's verify the count.
+        let mut func = make_diamond_with_phi();
+        let edges_split = split_critical_edges(&mut func);
+        // In this specific diamond, there are no critical edges:
+        // - (0->1): block 1 has 1 pred, not critical
+        // - (0->2): block 2 has 1 pred, not critical
+        // - (1->3): block 1 has 1 succ, not critical
+        // - (2->3): block 2 has 1 succ, not critical
+        assert_eq!(edges_split, 0);
+    }
+
+    /// Helper: build a CFG that has a critical edge.
+    /// Block 0: branch -> block 1 or block 2
+    /// Block 1: branch -> block 2 or block 3
+    /// Block 2: (merge point with preds from block 0 AND block 1)
+    /// Block 3: exit
+    fn make_critical_edge_cfg() -> MachFunction {
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        // Block 0: cbranch -> block 1 or block 2
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBB,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(1)), MachOperand::Block(BlockId(2))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags(InstFlags::IS_BRANCH | InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 1: cbranch -> block 2 or block 3
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBB,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(2)), MachOperand::Block(BlockId(3))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags(InstFlags::IS_BRANCH | InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 2: nop (merge point)
+        let i2 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0x00,
+            defs: vec![],
+            uses: vec![],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        // Block 3: nop (exit)
+        let i3 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0x00,
+            defs: vec![],
+            uses: vec![],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        MachFunction {
+            name: "critical_edge".into(),
+            insts,
+            blocks: vec![
+                MachBlock { // Block 0: 2 succs
+                    insts: vec![i0],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(1), BlockId(2)],
+                    loop_depth: 0,
+                },
+                MachBlock { // Block 1: 2 succs
+                    insts: vec![i1],
+                    preds: vec![BlockId(0)],
+                    succs: vec![BlockId(2), BlockId(3)],
+                    loop_depth: 0,
+                },
+                MachBlock { // Block 2: 2 preds (from block 0 and block 1) — target of critical edges
+                    insts: vec![i2],
+                    preds: vec![BlockId(0), BlockId(1)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+                MachBlock { // Block 3: 1 pred
+                    insts: vec![i3],
+                    preds: vec![BlockId(1)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+            ],
+            block_order: vec![BlockId(0), BlockId(1), BlockId(2), BlockId(3)],
+            entry_block: BlockId(0),
+            next_vreg: 0,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_critical_edge_splitting_with_critical_edges() {
+        let mut func = make_critical_edge_cfg();
+        let initial_block_count = func.blocks.len();
+
+        let edges_split = split_critical_edges(&mut func);
+
+        // Critical edges: (0->2) because block 0 has 2 succs and block 2 has 2 preds.
+        // (1->2) because block 1 has 2 succs and block 2 has 2 preds.
+        assert_eq!(edges_split, 2, "should split 2 critical edges");
+
+        // Two new blocks should have been added.
+        assert_eq!(func.blocks.len(), initial_block_count + 2);
+    }
+
+    #[test]
+    fn test_critical_edge_split_preserves_cfg_consistency() {
+        let mut func = make_critical_edge_cfg();
+        split_critical_edges(&mut func);
+
+        // After splitting, verify CFG consistency:
+        // Every block's succs should reference blocks that have it as a pred.
+        for &block_id in &func.block_order {
+            let bi = block_id.0 as usize;
+            let block = &func.blocks[bi];
+            for &succ_id in &block.succs {
+                let succ = &func.blocks[succ_id.0 as usize];
+                assert!(
+                    succ.preds.contains(&block_id),
+                    "block {:?} lists {:?} as succ but {:?} doesn't have {:?} as pred",
+                    block_id, succ_id, succ_id, block_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_eliminate_phis_removes_phi_instructions() {
+        let mut func = make_diamond_with_phi();
+        let phi_count_before = func.insts.iter().filter(|i| i.flags.is_phi()).count();
+        assert_eq!(phi_count_before, 1, "should start with 1 phi");
+
+        eliminate_phis(&mut func);
+
+        // After elimination, no phi instructions should remain in any block.
+        for &block_id in &func.block_order {
+            let block = &func.blocks[block_id.0 as usize];
+            for &inst_id in &block.insts {
+                let inst = &func.insts[inst_id.0 as usize];
+                assert!(!inst.flags.is_phi(), "phi should have been eliminated: {:?}", inst);
+            }
+        }
+    }
+
+    #[test]
+    fn test_eliminate_phis_inserts_copies() {
+        let mut func = make_diamond_with_phi();
+        let insts_before = func.insts.len();
+
+        eliminate_phis(&mut func);
+
+        // Copies should have been inserted. The phi had 2 inputs from 2 preds
+        // (v0 from block 1, v1 from block 2). Since v0 != v2 and v1 != v2,
+        // two copies should be inserted.
+        let copy_count = func.insts.iter().filter(|i| i.opcode == PSEUDO_COPY).count();
+        assert!(copy_count >= 2, "should insert at least 2 copies, got {}", copy_count);
+        assert!(func.insts.len() > insts_before, "should have more instructions after phi elim");
+    }
+
+    #[test]
+    fn test_parallel_copy_correctness_swap() {
+        // Verify that resolving a swap (v0 <- v1, v1 <- v0) produces
+        // a sequence that correctly implements parallel semantics.
+        let mut func = MachFunction {
+            name: "test".into(),
+            insts: Vec::new(),
+            blocks: Vec::new(),
+            block_order: Vec::new(),
+            entry_block: BlockId(0),
+            next_vreg: 10,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        };
+
+        let v0 = VReg { id: 0, class: RegClass::Gpr64 };
+        let v1 = VReg { id: 1, class: RegClass::Gpr64 };
+
+        let copies = vec![(v0, v1), (v1, v0)];
+        let result = resolve_parallel_copies(&copies, &mut func);
+
+        // Simulate the copy sequence with a register file.
+        let mut regs: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
+        regs.insert(0, 100); // v0 = 100
+        regs.insert(1, 200); // v1 = 200
+        // Also initialize any temporaries the resolver may have created.
+        for &(dst, src) in &result {
+            regs.entry(dst.id).or_insert(0);
+            regs.entry(src.id).or_insert(0);
+        }
+
+        // Reset to initial values (temps start as 0, v0=100, v1=200).
+        regs.insert(0, 100);
+        regs.insert(1, 200);
+
+        // Execute copies sequentially.
+        for &(dst, src) in &result {
+            let val = regs[&src.id];
+            regs.insert(dst.id, val);
+        }
+
+        // After parallel swap: v0 should have old v1 value, v1 should have old v0 value.
+        assert_eq!(regs[&0], 200, "v0 should be 200 (old v1)");
+        assert_eq!(regs[&1], 100, "v1 should be 100 (old v0)");
+    }
 }
