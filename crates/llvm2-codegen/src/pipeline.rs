@@ -350,6 +350,11 @@ fn classify_def_use(
             IrOperand::FImm(f) => RaOp::FImm(*f),
             IrOperand::Block(b) => RaOp::Block(*b),
             IrOperand::StackSlot(s) => RaOp::StackSlot(*s),
+            // Symbol operands (call targets) are non-register and don't
+            // participate in register allocation. Map to Imm(0) so they
+            // pass through liveness analysis without effect. The actual
+            // symbol name is preserved in the IR operand for encoding.
+            IrOperand::Symbol(_) => RaOp::Imm(0),
             // FrameIndex, MemOp, and Special should not appear pre-regalloc.
             // Silently mapping them to Imm(0) produces wrong code (#94).
             IrOperand::FrameIndex(fi) => panic!(
