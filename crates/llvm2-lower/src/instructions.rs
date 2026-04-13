@@ -74,6 +74,7 @@ pub enum Opcode {
     Jump { dest: Block },
     Brif { cond: Value, then_dest: Block, else_dest: Block },
     Return,
+    Call { name: String },          // Direct function call by symbol name
 
     // Memory
     Load { ty: Type },

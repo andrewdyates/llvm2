@@ -524,6 +524,9 @@ impl InstructionSelector {
                 self.select_brif(inst, *then_dest, *else_dest, block);
             }
             Opcode::Return => self.select_return(inst, block),
+            Opcode::Call { name } => {
+                self.select_call_from_lir(name, inst, block);
+            }
 
             // Memory
             Opcode::Load { ty } => self.select_load(*ty, inst, block),
@@ -909,14 +912,12 @@ impl InstructionSelector {
             }
         }
 
-        // Emit BL (direct call)
-        // The callee name is stored as an immediate placeholder; the linker
-        // will resolve it to a BRANCH26 relocation.
+        // Emit BL (direct call) with the callee symbol for relocation.
         self.func.push_inst(
             block,
             MachInst::new(
                 AArch64Opcode::BL,
-                vec![MachOperand::Imm(0)], // placeholder, resolved by relocation
+                vec![MachOperand::Symbol(callee_name.to_string())],
             ),
         );
 
@@ -953,8 +954,20 @@ impl InstructionSelector {
             }
         }
 
-        // Mark callee_name usage to suppress unused warning
-        let _ = callee_name;
+    }
+
+    /// Select a call instruction from the LIR `Opcode::Call { name }`.
+    ///
+    /// This bridges the adapter's `Call` opcode to the existing `select_call`
+    /// method by extracting the callee name, argument values, result values,
+    /// and result types from the LIR instruction.
+    fn select_call_from_lir(&mut self, name: &str, inst: &Instruction, block: Block) {
+        let result_types: Vec<Type> = inst
+            .results
+            .iter()
+            .map(|v| self.value_type(v))
+            .collect();
+        self.select_call(name, &inst.args, &inst.results, &result_types, block);
     }
 
     // -----------------------------------------------------------------------
@@ -2889,5 +2902,97 @@ mod tests {
         assert_eq!(mblock.insts[1].opcode, AArch64Opcode::COPY);
         assert_eq!(mblock.insts[2].opcode, AArch64Opcode::FADDDrr);
         assert_eq!(mblock.insts[4].opcode, AArch64Opcode::RET);
+    }
+
+    // =======================================================================
+    // Call with Symbol operand (issue #69)
+    // =======================================================================
+
+    #[test]
+    fn select_call_emits_symbol_operand() {
+        // Test that Call { name } from the adapter produces a BL with Symbol operand.
+        let (mut isel, entry) = make_empty_isel();
+
+        // Define an arg value (simulating a function parameter).
+        let vreg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I32);
+
+        // Select a Call instruction.
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Call { name: "my_callee".to_string() },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // Should contain at least: MOV (arg to X0) + BL + MOV (X0 to result)
+        // Find the BL instruction and verify it has a Symbol operand.
+        let bl_inst = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::BL);
+        assert!(bl_inst.is_some(), "Expected BL instruction for function call");
+        let bl = bl_inst.unwrap();
+        assert_eq!(
+            bl.operands[0],
+            MachOperand::Symbol("my_callee".to_string()),
+            "BL should have Symbol operand with callee name"
+        );
+    }
+
+    // =======================================================================
+    // CondCode operand preserved through Brif (issue #69)
+    // =======================================================================
+
+    #[test]
+    fn select_brif_emits_condcode_operand() {
+        // Test that Brif from the adapter produces B.cond with CondCode operand.
+        let (mut isel, entry) = make_empty_isel();
+
+        // Define a boolean condition value.
+        let vreg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::B1);
+
+        let then_block = Block(1);
+        let else_block = Block(2);
+        isel.func.ensure_block(then_block);
+        isel.func.ensure_block(else_block);
+
+        // Select a Brif instruction.
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Brif {
+                    cond: Value(0),
+                    then_dest: then_block,
+                    else_dest: else_block,
+                },
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        );
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // Expected: CMP W, #0 + B.NE then + B else
+        assert!(mblock.insts.len() >= 3, "Brif should emit CMP + B.cond + B");
+
+        // Find B.cond and verify CondCode operand.
+        let bcc_inst = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::Bcc);
+        assert!(bcc_inst.is_some(), "Expected B.cond instruction");
+        let bcc = bcc_inst.unwrap();
+        assert_eq!(
+            bcc.operands[0],
+            MachOperand::CondCode(AArch64CC::NE),
+            "B.cond should have NE condition code (branch if nonzero)"
+        );
+        assert_eq!(
+            bcc.operands[1],
+            MachOperand::Block(then_block),
+            "B.cond should target the then block"
+        );
     }
 }
