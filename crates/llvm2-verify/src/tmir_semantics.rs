@@ -16,7 +16,7 @@
 //! output expression representing the instruction's semantics.
 
 use crate::smt::SmtExpr;
-use llvm2_lower::instructions::Opcode;
+use llvm2_lower::instructions::{IntCC, Opcode};
 use llvm2_lower::types::Type;
 
 /// Encode a tMIR binary arithmetic operation as an SMT bitvector expression.
@@ -71,6 +71,30 @@ pub fn symbolic_binary_inputs(ty: Type) -> (SmtExpr, SmtExpr) {
 /// Create a symbolic input variable for a unary operation.
 pub fn symbolic_unary_input(ty: Type) -> SmtExpr {
     SmtExpr::var("a", ty.bits())
+}
+
+/// Encode a tMIR integer comparison as an SMT expression.
+///
+/// `Icmp(cond, a, b)` returns a 1-bit bitvector: `bv1(1)` if the condition
+/// holds, `bv1(0)` otherwise. This matches the AArch64 CSET output format.
+///
+/// # Supported conditions
+///
+/// All 10 `IntCC` variants (see `llvm2_lower::instructions::IntCC`).
+pub fn encode_tmir_icmp(cond: &IntCC, _ty: Type, lhs: SmtExpr, rhs: SmtExpr) -> SmtExpr {
+    let cmp_bool = match cond {
+        IntCC::Equal => lhs.eq_expr(rhs),
+        IntCC::NotEqual => lhs.eq_expr(rhs).not_expr(),
+        IntCC::SignedLessThan => lhs.bvslt(rhs),
+        IntCC::SignedGreaterThanOrEqual => lhs.bvsge(rhs),
+        IntCC::SignedGreaterThan => lhs.bvsgt(rhs),
+        IntCC::SignedLessThanOrEqual => lhs.bvsle(rhs),
+        IntCC::UnsignedLessThan => lhs.bvult(rhs),
+        IntCC::UnsignedGreaterThanOrEqual => lhs.bvuge(rhs),
+        IntCC::UnsignedGreaterThan => lhs.bvugt(rhs),
+        IntCC::UnsignedLessThanOrEqual => lhs.bvule(rhs),
+    };
+    SmtExpr::ite(cmp_bool, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1))
 }
 
 /// Return the precondition for a tMIR opcode, if any.
@@ -138,6 +162,50 @@ mod tests {
         // b=0 should fail precondition
         let result = pre.unwrap().eval(&env(&[("a", 1), ("b", 0)]));
         assert_eq!(result, EvalResult::Bool(false));
+    }
+
+    #[test]
+    fn test_encode_icmp_eq_true() {
+        let (a, b) = symbolic_binary_inputs(Type::I32);
+        let expr = encode_tmir_icmp(&IntCC::Equal, Type::I32, a, b);
+        let result = expr.eval(&env(&[("a", 42), ("b", 42)]));
+        assert_eq!(result, EvalResult::Bv(1));
+    }
+
+    #[test]
+    fn test_encode_icmp_eq_false() {
+        let (a, b) = symbolic_binary_inputs(Type::I32);
+        let expr = encode_tmir_icmp(&IntCC::Equal, Type::I32, a, b);
+        let result = expr.eval(&env(&[("a", 42), ("b", 43)]));
+        assert_eq!(result, EvalResult::Bv(0));
+    }
+
+    #[test]
+    fn test_encode_icmp_slt() {
+        let (a, b) = symbolic_binary_inputs(Type::I32);
+        let expr = encode_tmir_icmp(&IntCC::SignedLessThan, Type::I32, a, b);
+        // -1 < 0 (signed)
+        let neg1 = 0xFFFF_FFFFu64;
+        let result = expr.eval(&env(&[("a", neg1), ("b", 0)]));
+        assert_eq!(result, EvalResult::Bv(1));
+    }
+
+    #[test]
+    fn test_encode_icmp_ult() {
+        let (a, b) = symbolic_binary_inputs(Type::I32);
+        let expr = encode_tmir_icmp(&IntCC::UnsignedLessThan, Type::I32, a, b);
+        // 3 <_u 10
+        let result = expr.eval(&env(&[("a", 3), ("b", 10)]));
+        assert_eq!(result, EvalResult::Bv(1));
+    }
+
+    #[test]
+    fn test_encode_icmp_ult_not_less() {
+        let (a, b) = symbolic_binary_inputs(Type::I32);
+        let expr = encode_tmir_icmp(&IntCC::UnsignedLessThan, Type::I32, a, b);
+        // 0xFFFFFFFF is NOT <_u 0 (it's the biggest unsigned value)
+        let result = expr.eval(&env(&[("a", 0xFFFF_FFFF), ("b", 0)]));
+        assert_eq!(result, EvalResult::Bv(0));
     }
 
     #[test]
