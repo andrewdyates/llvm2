@@ -116,7 +116,13 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         FaddRR | FsubRR | FmulRR | FdivRR | FnegRR => MemoryEffect::Pure,
 
         // FP conversion
-        FcvtzsRR | ScvtfRR => MemoryEffect::Pure,
+        FcvtzsRR | FcvtzuRR | ScvtfRR | UcvtfRR => MemoryEffect::Pure,
+
+        // Float precision conversion
+        FcvtSD | FcvtDS => MemoryEffect::Pure,
+
+        // Bitcast (FMOV between GPR/FPR)
+        FmovGprFpr | FmovFprGpr => MemoryEffect::Pure,
 
         // Address computation (no memory access)
         Adrp | AddPCRel => MemoryEffect::Pure,

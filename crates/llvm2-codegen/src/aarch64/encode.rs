@@ -886,6 +886,68 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             Ok(enc)
         }
 
+        // FCVTZU Rd, Rn (FP to unsigned integer, round toward zero)
+        AArch64Opcode::FcvtzuRR => {
+            let sf_64 = true;
+            let fp_size = fp_size_from_source(inst, 1);
+            let enc = encoding_fp::encode_fp_int_conv(
+                sf_64, fp_size, FpConvOp::FcvtzuToInt,
+                preg_hw(inst, 1) as u8, preg_hw(inst, 0) as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // UCVTF Rd, Rn (unsigned integer to FP)
+        AArch64Opcode::UcvtfRR => {
+            let sf_64 = true;
+            let fp_size = fp_size_from_source(inst, 0);
+            let enc = encoding_fp::encode_fp_int_conv(
+                sf_64, fp_size, FpConvOp::UcvtfToFp,
+                preg_hw(inst, 1) as u8, preg_hw(inst, 0) as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // FCVT Dd, Sn (float precision widen: f32 -> f64)
+        AArch64Opcode::FcvtSD => {
+            let enc = encoding_fp::encode_fp_precision_cvt(
+                FpSize::Single, FpSize::Double,
+                preg_hw(inst, 1) as u8, preg_hw(inst, 0) as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // FCVT Ss, Dn (float precision narrow: f64 -> f32)
+        AArch64Opcode::FcvtDS => {
+            let enc = encoding_fp::encode_fp_precision_cvt(
+                FpSize::Double, FpSize::Single,
+                preg_hw(inst, 1) as u8, preg_hw(inst, 0) as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // FMOV Sd, Wn / FMOV Dd, Xn (GPR to FPR bitcast)
+        AArch64Opcode::FmovGprFpr => {
+            let sf_64 = true; // conservative default
+            let fp_size = fp_size_from_source(inst, 0);
+            let enc = encoding_fp::encode_fp_int_conv(
+                sf_64, fp_size, FpConvOp::FmovToFp,
+                preg_hw(inst, 1) as u8, preg_hw(inst, 0) as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // FMOV Wn, Sd / FMOV Xn, Dd (FPR to GPR bitcast)
+        AArch64Opcode::FmovFprGpr => {
+            let sf_64 = true;
+            let fp_size = fp_size_from_source(inst, 1);
+            let enc = encoding_fp::encode_fp_int_conv(
+                sf_64, fp_size, FpConvOp::FmovToGp,
+                preg_hw(inst, 1) as u8, preg_hw(inst, 0) as u8,
+            )?;
+            Ok(enc)
+        }
+
         // =================================================================
         // Checked arithmetic (flag-setting variants)
         // =================================================================
