@@ -124,6 +124,12 @@ pub enum AArch64Opcode {
     /// Trap on null pointer.
     /// Operands: [Block(panic_target)].
     TrapNull,
+    /// Trap on division by zero: branch to trap block if divisor is zero.
+    /// Operands: [Block(panic_target)].
+    TrapDivZero,
+    /// Trap on out-of-range shift amount: branch to trap block if shift >= bitwidth.
+    /// Operands: [Block(panic_target)].
+    TrapShiftRange,
 
     // -- Reference counting pseudo-instructions --
     /// Retain (increment reference count). Operands: [ptr].
@@ -182,6 +188,8 @@ impl AArch64Opcode {
             TrapOverflow => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR).union(InstFlags::HAS_SIDE_EFFECTS),
             TrapBoundsCheck => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR).union(InstFlags::HAS_SIDE_EFFECTS),
             TrapNull => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR).union(InstFlags::HAS_SIDE_EFFECTS),
+            TrapDivZero => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR).union(InstFlags::HAS_SIDE_EFFECTS),
+            TrapShiftRange => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR).union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Reference counting: side effects (modify refcount in memory)
             Retain => InstFlags::HAS_SIDE_EFFECTS.union(InstFlags::READS_MEMORY).union(InstFlags::WRITES_MEMORY),
@@ -202,6 +210,8 @@ impl AArch64Opcode {
                 | Self::TrapOverflow
                 | Self::TrapBoundsCheck
                 | Self::TrapNull
+                | Self::TrapDivZero
+                | Self::TrapShiftRange
                 | Self::Retain
                 | Self::Release
         )
@@ -352,6 +362,8 @@ impl core::fmt::Debug for InstFlags {
 /// - `NotNull` → eliminate null pointer checks
 /// - `ValidBorrow` → enable load/store reordering (refined alias analysis)
 /// - `PositiveRefCount` → eliminate redundant retain/release pairs
+/// - `NonZeroDivisor` → eliminate division-by-zero checks
+/// - `ValidShift` → eliminate shift-amount range checks
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProofAnnotation {
     /// tMIR has proven this arithmetic operation cannot overflow.
@@ -373,6 +385,14 @@ pub enum ProofAnnotation {
     /// tMIR has proven the reference count is positive (object is live).
     /// Enables: eliminate redundant retain/release pairs.
     PositiveRefCount,
+
+    /// tMIR has proven the divisor is non-zero.
+    /// Enables: remove CBZ divisor / TrapDivZero guard before UDIV/SDIV.
+    NonZeroDivisor,
+
+    /// tMIR has proven the shift amount is in [0, bitwidth).
+    /// Enables: remove CMP+B.GE range check before LSL/LSR/ASR.
+    ValidShift,
 }
 
 impl ProofAnnotation {
@@ -1036,6 +1056,8 @@ mod tests {
             ProofAnnotation::NotNull,
             ProofAnnotation::ValidBorrow,
             ProofAnnotation::PositiveRefCount,
+            ProofAnnotation::NonZeroDivisor,
+            ProofAnnotation::ValidShift,
         ];
         for v in &variants {
             assert_eq!(

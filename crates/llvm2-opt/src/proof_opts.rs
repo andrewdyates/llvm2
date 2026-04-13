@@ -20,6 +20,8 @@
 //! | `NotNull`        | `cbz ptr, panic_label` → remove guard |
 //! | `ValidBorrow`    | Refines memory aliasing (enables reordering) |
 //! | `PositiveRefCount` | `retain + release` → remove pair |
+//! | `NonZeroDivisor` | `cbz divisor, trap + udiv/sdiv` → plain `udiv/sdiv` |
+//! | `ValidShift`     | `cmp amt, #64 + b.ge trap + lsl/lsr/asr` → plain shift |
 //!
 //! # Safety
 //!
@@ -62,6 +64,10 @@ pub struct ProofOptStats {
     pub refcount_pairs_eliminated: u32,
     /// Number of memory reordering opportunities enabled (ValidBorrow).
     pub alias_refinements: u32,
+    /// Number of division-by-zero checks eliminated (NonZeroDivisor).
+    pub divzero_checks_eliminated: u32,
+    /// Number of shift-range checks eliminated (ValidShift).
+    pub shift_checks_eliminated: u32,
 }
 
 /// Proof-consuming optimization pass.
@@ -134,6 +140,26 @@ impl MachinePass for ProofOptimization {
                     }
                     Some(ProofAnnotation::PositiveRefCount) => {
                         if self.apply_positive_refcount(
+                            func,
+                            &block_insts,
+                            pos,
+                            &mut to_delete,
+                        ) {
+                            changed = true;
+                        }
+                    }
+                    Some(ProofAnnotation::NonZeroDivisor) => {
+                        if self.apply_non_zero_divisor(
+                            func,
+                            &block_insts,
+                            pos,
+                            &mut to_delete,
+                        ) {
+                            changed = true;
+                        }
+                    }
+                    Some(ProofAnnotation::ValidShift) => {
+                        if self.apply_valid_shift(
                             func,
                             &block_insts,
                             pos,
@@ -423,6 +449,141 @@ impl ProofOptimization {
         }
 
         false
+    }
+
+    /// NonZeroDivisor optimization: when tMIR proves the divisor is non-zero,
+    /// eliminate the division-by-zero guard.
+    ///
+    /// Pattern 1: `CBZ divisor, trap_block` [NonZeroDivisor]
+    /// Result:    instruction removed
+    ///
+    /// Pattern 2: `TrapDivZero trap_block` [NonZeroDivisor]
+    /// Result:    instruction removed
+    ///
+    /// Pattern 3: `CMP divisor, #0` [NonZeroDivisor] + `BCond EQ, trap_block`/`TrapDivZero`
+    /// Result:    both instructions removed
+    ///
+    /// On AArch64, division by zero yields zero (not a fault), but the
+    /// tMIR runtime model may still insert guards when the source language
+    /// semantics require a trap. With the NonZeroDivisor proof, the guard
+    /// is provably dead code.
+    fn apply_non_zero_divisor(
+        &mut self,
+        func: &mut MachFunction,
+        block_insts: &[InstId],
+        pos: usize,
+        to_delete: &mut HashSet<InstId>,
+    ) -> bool {
+        let inst_id = block_insts[pos];
+        let opcode = func.inst(inst_id).opcode;
+
+        match opcode {
+            AArch64Opcode::Cbz => {
+                // CBZ branches to trap if divisor == 0.
+                // With NonZeroDivisor proof, divisor is never zero. Remove.
+                to_delete.insert(inst_id);
+                self.stats.divzero_checks_eliminated += 1;
+                true
+            }
+            AArch64Opcode::TrapDivZero => {
+                // Pseudo-instruction: trap if divisor is zero. Remove with proof.
+                to_delete.insert(inst_id);
+                self.stats.divzero_checks_eliminated += 1;
+                true
+            }
+            AArch64Opcode::CmpRI => {
+                // Check if comparing against zero (div-zero check pattern).
+                let is_zero_check = func
+                    .inst(inst_id)
+                    .operands
+                    .last()
+                    .map(|op| matches!(op, MachOperand::Imm(0)))
+                    .unwrap_or(false);
+
+                if is_zero_check {
+                    // Look for trailing BCond or TrapDivZero.
+                    if pos + 1 < block_insts.len() {
+                        let next_id = block_insts[pos + 1];
+                        let next_opcode = func.inst(next_id).opcode;
+                        if matches!(
+                            next_opcode,
+                            AArch64Opcode::BCond | AArch64Opcode::TrapDivZero
+                        ) {
+                            to_delete.insert(inst_id);
+                            to_delete.insert(next_id);
+                            self.stats.divzero_checks_eliminated += 1;
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// ValidShift optimization: when tMIR proves the shift amount is in
+    /// [0, bitwidth), eliminate the shift-amount range check.
+    ///
+    /// Pattern 1: `CMP shift_amt, #64` [ValidShift] + `TrapShiftRange trap_block`
+    /// Result:    both instructions removed
+    ///
+    /// Pattern 2: `CMP shift_amt, #32/#64` [ValidShift] + `BCond GE, trap_block`
+    /// Result:    both instructions removed
+    ///
+    /// Pattern 3: `TrapShiftRange trap_block` [ValidShift]
+    /// Result:    instruction removed
+    ///
+    /// On AArch64, shift amounts outside [0, bitwidth) produce
+    /// implementation-defined results. The tMIR runtime model inserts
+    /// range checks when required by source-language semantics. With
+    /// the ValidShift proof, the check is provably dead.
+    fn apply_valid_shift(
+        &mut self,
+        func: &mut MachFunction,
+        block_insts: &[InstId],
+        pos: usize,
+        to_delete: &mut HashSet<InstId>,
+    ) -> bool {
+        let inst_id = block_insts[pos];
+        let opcode = func.inst(inst_id).opcode;
+
+        match opcode {
+            AArch64Opcode::CmpRI => {
+                // Check if comparing against a bitwidth (32 or 64).
+                let is_shift_range_check = func
+                    .inst(inst_id)
+                    .operands
+                    .last()
+                    .map(|op| matches!(op, MachOperand::Imm(32) | MachOperand::Imm(64)))
+                    .unwrap_or(false);
+
+                if is_shift_range_check {
+                    // Look for trailing BCond or TrapShiftRange.
+                    if pos + 1 < block_insts.len() {
+                        let next_id = block_insts[pos + 1];
+                        let next_opcode = func.inst(next_id).opcode;
+                        if matches!(
+                            next_opcode,
+                            AArch64Opcode::BCond | AArch64Opcode::TrapShiftRange
+                        ) {
+                            to_delete.insert(inst_id);
+                            to_delete.insert(next_id);
+                            self.stats.shift_checks_eliminated += 1;
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            AArch64Opcode::TrapShiftRange => {
+                // Pseudo-instruction: trap if shift amount out of range. Remove.
+                to_delete.insert(inst_id);
+                self.stats.shift_checks_eliminated += 1;
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -980,5 +1141,406 @@ mod tests {
 
         assert_eq!(pass.stats().overflow_checks_eliminated, 1);
         assert_eq!(pass.stats().null_checks_eliminated, 1);
+    }
+
+    // --- NonZeroDivisor tests ---
+
+    #[test]
+    fn test_non_zero_divisor_eliminates_cbz() {
+        // Pattern: cbz divisor, trap_block [NonZeroDivisor] + udiv result, dividend, divisor
+        // Expected: cbz removed, udiv preserved
+        let cbz = MachInst::new(
+            AArch64Opcode::Cbz,
+            vec![vreg(1), MachOperand::Block(BlockId(1))],
+        )
+        .with_proof(ProofAnnotation::NonZeroDivisor);
+
+        let udiv = MachInst::new(
+            AArch64Opcode::UDiv,
+            vec![vreg(2), vreg(0), vreg(1)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cbz, udiv, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        // CBZ should be removed, UDIV and RET remain.
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 2); // udiv + ret
+        assert_eq!(func.inst(InstId(1)).opcode, AArch64Opcode::UDiv);
+
+        assert_eq!(pass.stats().divzero_checks_eliminated, 1);
+    }
+
+    #[test]
+    fn test_non_zero_divisor_eliminates_trap_divzero() {
+        // Pattern: trap_divzero panic_block [NonZeroDivisor]
+        // Expected: removed
+        let trap = MachInst::new(
+            AArch64Opcode::TrapDivZero,
+            vec![MachOperand::Block(BlockId(1))],
+        )
+        .with_proof(ProofAnnotation::NonZeroDivisor);
+
+        let sdiv = MachInst::new(
+            AArch64Opcode::SDiv,
+            vec![vreg(2), vreg(0), vreg(1)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![trap, sdiv, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 2); // sdiv + ret
+
+        assert_eq!(pass.stats().divzero_checks_eliminated, 1);
+    }
+
+    #[test]
+    fn test_non_zero_divisor_cmp_zero_bcond_eliminated() {
+        // Pattern: cmp divisor, #0 [NonZeroDivisor] + bcond EQ, trap_block
+        // Expected: both removed
+        let cmp = MachInst::new(
+            AArch64Opcode::CmpRI,
+            vec![vreg(1), imm(0)],
+        )
+        .with_proof(ProofAnnotation::NonZeroDivisor);
+
+        let bcond = MachInst::new(
+            AArch64Opcode::BCond,
+            vec![imm(0x00), MachOperand::Block(BlockId(1))],
+        );
+
+        let udiv = MachInst::new(
+            AArch64Opcode::UDiv,
+            vec![vreg(2), vreg(0), vreg(1)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cmp, bcond, udiv, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        // CMP and BCond removed, UDIV and RET remain.
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 2); // udiv + ret
+
+        assert_eq!(pass.stats().divzero_checks_eliminated, 1);
+    }
+
+    #[test]
+    fn test_non_zero_divisor_no_proof_no_change() {
+        // CBZ without proof annotation should not be optimized.
+        let cbz = MachInst::new(
+            AArch64Opcode::Cbz,
+            vec![vreg(1), MachOperand::Block(BlockId(1))],
+        );
+
+        let udiv = MachInst::new(
+            AArch64Opcode::UDiv,
+            vec![vreg(2), vreg(0), vreg(1)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cbz, udiv, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(!pass.run(&mut func));
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 3); // all preserved
+    }
+
+    #[test]
+    fn test_non_zero_divisor_sdiv_pattern() {
+        // Same as cbz test but with SDIV instead of UDIV.
+        let cbz = MachInst::new(
+            AArch64Opcode::Cbz,
+            vec![vreg(1), MachOperand::Block(BlockId(1))],
+        )
+        .with_proof(ProofAnnotation::NonZeroDivisor);
+
+        let sdiv = MachInst::new(
+            AArch64Opcode::SDiv,
+            vec![vreg(2), vreg(0), vreg(1)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cbz, sdiv, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 2); // sdiv + ret
+
+        assert_eq!(pass.stats().divzero_checks_eliminated, 1);
+    }
+
+    // --- ValidShift tests ---
+
+    #[test]
+    fn test_valid_shift_eliminates_cmp_trap() {
+        // Pattern: cmp shift_amt, #64 [ValidShift] + trap_shift_range panic_block
+        // Expected: both removed, LSL preserved
+        let cmp = MachInst::new(
+            AArch64Opcode::CmpRI,
+            vec![vreg(1), imm(64)],
+        )
+        .with_proof(ProofAnnotation::ValidShift);
+
+        let trap = MachInst::new(
+            AArch64Opcode::TrapShiftRange,
+            vec![MachOperand::Block(BlockId(1))],
+        );
+
+        let lsl = MachInst::new(
+            AArch64Opcode::LslRR,
+            vec![vreg(2), vreg(0), vreg(1)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cmp, trap, lsl, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        // CMP and TrapShiftRange removed, LSL and RET remain.
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 2); // lsl + ret
+
+        assert_eq!(pass.stats().shift_checks_eliminated, 1);
+    }
+
+    #[test]
+    fn test_valid_shift_eliminates_cmp_bcond() {
+        // Pattern: cmp shift_amt, #64 [ValidShift] + bcond GE, trap_block
+        // Expected: both removed
+        let cmp = MachInst::new(
+            AArch64Opcode::CmpRI,
+            vec![vreg(1), imm(64)],
+        )
+        .with_proof(ProofAnnotation::ValidShift);
+
+        let bcond = MachInst::new(
+            AArch64Opcode::BCond,
+            vec![imm(0x0A), MachOperand::Block(BlockId(1))], // 0x0A = GE condition
+        );
+
+        let lsr = MachInst::new(
+            AArch64Opcode::LsrRR,
+            vec![vreg(2), vreg(0), vreg(1)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cmp, bcond, lsr, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 2); // lsr + ret
+
+        assert_eq!(pass.stats().shift_checks_eliminated, 1);
+    }
+
+    #[test]
+    fn test_valid_shift_32bit() {
+        // Pattern: cmp shift_amt, #32 [ValidShift] + trap_shift_range
+        // Expected: both removed (32-bit shift width)
+        let cmp = MachInst::new(
+            AArch64Opcode::CmpRI,
+            vec![vreg(1), imm(32)],
+        )
+        .with_proof(ProofAnnotation::ValidShift);
+
+        let trap = MachInst::new(
+            AArch64Opcode::TrapShiftRange,
+            vec![MachOperand::Block(BlockId(1))],
+        );
+
+        let asr = MachInst::new(
+            AArch64Opcode::AsrRR,
+            vec![vreg(2), vreg(0), vreg(1)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cmp, trap, asr, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 2); // asr + ret
+
+        assert_eq!(pass.stats().shift_checks_eliminated, 1);
+    }
+
+    #[test]
+    fn test_valid_shift_trap_only() {
+        // Pattern: trap_shift_range panic_block [ValidShift]
+        // Expected: removed
+        let trap = MachInst::new(
+            AArch64Opcode::TrapShiftRange,
+            vec![MachOperand::Block(BlockId(1))],
+        )
+        .with_proof(ProofAnnotation::ValidShift);
+
+        let lsl = MachInst::new(
+            AArch64Opcode::LslRR,
+            vec![vreg(2), vreg(0), vreg(1)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![trap, lsl, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 2); // lsl + ret
+
+        assert_eq!(pass.stats().shift_checks_eliminated, 1);
+    }
+
+    #[test]
+    fn test_valid_shift_no_proof_no_change() {
+        // CMP with #64 but no ValidShift proof should not be optimized.
+        let cmp = MachInst::new(
+            AArch64Opcode::CmpRI,
+            vec![vreg(1), imm(64)],
+        );
+
+        let trap = MachInst::new(
+            AArch64Opcode::TrapShiftRange,
+            vec![MachOperand::Block(BlockId(1))],
+        );
+
+        let lsl = MachInst::new(
+            AArch64Opcode::LslRR,
+            vec![vreg(2), vreg(0), vreg(1)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cmp, trap, lsl, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(!pass.run(&mut func));
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 4); // all preserved
+    }
+
+    #[test]
+    fn test_valid_shift_cmp_without_trap_no_change() {
+        // CMP with ValidShift but no TrapShiftRange or BCond following.
+        let cmp = MachInst::new(
+            AArch64Opcode::CmpRI,
+            vec![vreg(1), imm(64)],
+        )
+        .with_proof(ProofAnnotation::ValidShift);
+
+        let lsl = MachInst::new(
+            AArch64Opcode::LslRR,
+            vec![vreg(2), vreg(0), vreg(1)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cmp, lsl, ret]);
+
+        let mut pass = ProofOptimization::new();
+        assert!(!pass.run(&mut func));
+    }
+
+    // --- Combined new + existing proof opts ---
+
+    #[test]
+    fn test_combined_divzero_and_shift_opts() {
+        // Two blocks: one with NonZeroDivisor, one with ValidShift.
+        let mut func = MachFunction::new(
+            "test_combined_new_opts".to_string(),
+            Signature::new(vec![], vec![]),
+        );
+
+        // Block 0: div-zero check
+        let cbz = MachInst::new(
+            AArch64Opcode::Cbz,
+            vec![vreg(1), MachOperand::Block(BlockId(2))],
+        )
+        .with_proof(ProofAnnotation::NonZeroDivisor);
+        let udiv = MachInst::new(
+            AArch64Opcode::UDiv,
+            vec![vreg(2), vreg(0), vreg(1)],
+        );
+        let branch = MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(BlockId(1))],
+        );
+
+        let cbz_id = func.push_inst(cbz);
+        let udiv_id = func.push_inst(udiv);
+        let branch_id = func.push_inst(branch);
+        func.append_inst(BlockId(0), cbz_id);
+        func.append_inst(BlockId(0), udiv_id);
+        func.append_inst(BlockId(0), branch_id);
+
+        // Block 1: shift range check
+        let bb1 = func.create_block();
+        let cmp = MachInst::new(
+            AArch64Opcode::CmpRI,
+            vec![vreg(3), imm(64)],
+        )
+        .with_proof(ProofAnnotation::ValidShift);
+        let trap_shift = MachInst::new(
+            AArch64Opcode::TrapShiftRange,
+            vec![MachOperand::Block(BlockId(2))],
+        );
+        let lsl = MachInst::new(
+            AArch64Opcode::LslRR,
+            vec![vreg(4), vreg(0), vreg(3)],
+        );
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+
+        let cmp_id = func.push_inst(cmp);
+        let trap_shift_id = func.push_inst(trap_shift);
+        let lsl_id = func.push_inst(lsl);
+        let ret_id = func.push_inst(ret);
+        func.append_inst(bb1, cmp_id);
+        func.append_inst(bb1, trap_shift_id);
+        func.append_inst(bb1, lsl_id);
+        func.append_inst(bb1, ret_id);
+
+        // Block 2: panic (unused)
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        // Block 0: cbz removed → udiv + b
+        let block0 = func.block(BlockId(0));
+        assert_eq!(block0.insts.len(), 2);
+
+        // Block 1: cmp + trap removed → lsl + ret
+        let block1 = func.block(bb1);
+        assert_eq!(block1.insts.len(), 2);
+
+        assert_eq!(pass.stats().divzero_checks_eliminated, 1);
+        assert_eq!(pass.stats().shift_checks_eliminated, 1);
     }
 }

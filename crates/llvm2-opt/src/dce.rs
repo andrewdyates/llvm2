@@ -162,7 +162,7 @@ fn produces_value(inst: &llvm2_ir::MachInst) -> bool {
         // Branches and returns: control flow, no register def
         B | BCond | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => false,
         // Trap pseudo-instructions: control flow, no register def
-        TrapOverflow | TrapBoundsCheck | TrapNull => false,
+        TrapOverflow | TrapBoundsCheck | TrapNull | TrapDivZero | TrapShiftRange => false,
         // Reference counting: side effects, no register def
         Retain | Release => false,
         // Nop: no def

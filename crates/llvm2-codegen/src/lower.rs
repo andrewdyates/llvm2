@@ -876,7 +876,9 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
         // --- Trap pseudo-instructions: emit BRK #1 ---
         AArch64Opcode::TrapOverflow
         | AArch64Opcode::TrapBoundsCheck
-        | AArch64Opcode::TrapNull => {
+        | AArch64Opcode::TrapNull
+        | AArch64Opcode::TrapDivZero
+        | AArch64Opcode::TrapShiftRange => {
             Ok(0xD4200020) // BRK #1
         }
 
