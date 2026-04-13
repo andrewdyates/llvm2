@@ -12,6 +12,7 @@ members = [
     "crates/llvm2-opt",
     "crates/llvm2-verify",
     "crates/llvm2-codegen",
+    "crates/llvm2-regalloc",
 ]
 
 [workspace.package]
@@ -45,3 +46,4 @@ llvm2-lower = { path = "crates/llvm2-lower" }
 llvm2-opt = { path = "crates/llvm2-opt" }
 llvm2-verify = { path = "crates/llvm2-verify" }
 llvm2-codegen = { path = "crates/llvm2-codegen" }
+llvm2-regalloc = { path = "crates/llvm2-regalloc" }
