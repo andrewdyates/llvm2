@@ -42,8 +42,8 @@
 //! in the object file's single unnamed segment alongside `__text` and `__data`.
 
 use crate::frame::{encode_compact_unwind, FrameLayout};
-use crate::macho::constants::{ARM64_RELOC_UNSIGNED, RELOC_LENGTH_QUAD};
-use crate::macho::writer::{MachOWriter, Relocation};
+use crate::macho::reloc::Relocation;
+use crate::macho::writer::MachOWriter;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -293,14 +293,7 @@ pub fn add_compact_unwind_to_writer(
     for reloc in &relocs {
         writer.add_relocation(
             section_index,
-            Relocation {
-                offset: reloc.offset,
-                symbol_index: reloc.symbol_index,
-                pcrel: false,
-                length: RELOC_LENGTH_QUAD,
-                is_extern: true,
-                reloc_type: ARM64_RELOC_UNSIGNED,
-            },
+            Relocation::unsigned_ptr(reloc.offset, reloc.symbol_index),
         );
     }
 

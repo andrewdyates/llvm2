@@ -7,8 +7,7 @@
 // that macOS system tools (otool, nm) can parse.
 
 use llvm2_codegen::macho::constants::*;
-use llvm2_codegen::macho::MachOWriter;
-use llvm2_codegen::macho::writer::Relocation;
+use llvm2_codegen::macho::{MachOWriter, Relocation};
 
 use std::io::Write;
 use std::process::Command;
@@ -217,14 +216,7 @@ fn test_relocation_entries() {
     // Add a BRANCH26 relocation at offset 0 referencing symbol index 1 (_callee)
     writer.add_relocation(
         0,
-        Relocation {
-            offset: 0,
-            symbol_index: 1,
-            pcrel: true,
-            length: RELOC_LENGTH_LONG,
-            is_extern: true,
-            reloc_type: ARM64_RELOC_BRANCH26,
-        },
+        Relocation::branch26(0, 1),
     );
 
     let bytes = writer.write();
