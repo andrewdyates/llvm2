@@ -13,6 +13,7 @@
 
 pub mod aarch64;
 pub mod dwarf_cfi;
+pub mod error;
 pub mod frame;
 pub mod layout;
 pub mod lower;
@@ -23,5 +24,7 @@ pub mod target;
 pub mod unwind;
 pub mod x86_64;
 
+pub use error::CodegenError;
 pub use pipeline::{Pipeline, PipelineConfig, PipelineError, compile_to_object};
+pub use relax::RelaxError;
 pub use target::{CallingConvention, Target};

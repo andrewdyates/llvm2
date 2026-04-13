@@ -19,7 +19,31 @@
 //!
 //! Reference: LLVM `BranchRelaxation.cpp`.
 
+use thiserror::Error;
+
 use llvm2_ir::{AArch64Opcode, BlockId, InstId, MachFunction, MachInst, MachOperand};
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Errors from branch relaxation.
+#[derive(Debug, Error)]
+pub enum RelaxError {
+    /// Unconditional branch target is beyond the +/- 128 MB range.
+    ///
+    /// This means the function has more than ~32 million instructions. The
+    /// fix would be an indirect branch via IP0 (X16), which is not yet
+    /// implemented.
+    #[error(
+        "unconditional B to block {target_block:?} is out of the +/-128 MB range \
+         in function '{func_name}'"
+    )]
+    BranchOutOfRange {
+        target_block: BlockId,
+        func_name: String,
+    },
+}
 
 // ---------------------------------------------------------------------------
 // Constants: branch ranges in bytes
@@ -75,7 +99,7 @@ pub struct RelaxedCode {
 /// 3. Relax any out-of-range branches by splitting them.
 /// 4. Repeat until no changes.
 /// 5. Build the final instruction sequence with resolved offsets.
-pub fn relax_branches(func: &mut MachFunction) -> RelaxedCode {
+pub fn relax_branches(func: &mut MachFunction) -> Result<RelaxedCode, RelaxError> {
     // Fixed-point relaxation loop.
     let max_iterations = 32; // safety bound
     for _ in 0..max_iterations {
@@ -104,7 +128,7 @@ pub fn relax_branches(func: &mut MachFunction) -> RelaxedCode {
                             target_offset as i64 - inst_byte_offset as i64;
 
                         if !in_range(inst.opcode, displacement) {
-                            relax_one_branch(func, block_id, inst_pos);
+                            relax_one_branch(func, block_id, inst_pos)?;
                             changed = true;
                             break; // restart scan for this block
                         }
@@ -121,7 +145,7 @@ pub fn relax_branches(func: &mut MachFunction) -> RelaxedCode {
     }
 
     // Build the final instruction sequence with resolved offsets.
-    build_final_code(func)
+    Ok(build_final_code(func))
 }
 
 // ---------------------------------------------------------------------------
@@ -219,16 +243,19 @@ fn get_branch_target_block(inst: &MachInst) -> Option<BlockId> {
 /// After:  `BCond_inv +8 ; B far_target`
 ///
 /// The inverted conditional branches to the next instruction (+8 = skip the B).
-fn relax_one_branch(func: &mut MachFunction, block_id: BlockId, inst_pos: usize) {
+fn relax_one_branch(
+    func: &mut MachFunction,
+    block_id: BlockId,
+    inst_pos: usize,
+) -> Result<(), RelaxError> {
     let blk = func.block(block_id);
     let inst_id = blk.insts[inst_pos];
     let inst = func.inst(inst_id).clone();
 
-    let far_target = get_branch_target_block(&inst);
-    if far_target.is_none() {
-        return;
-    }
-    let far_target = far_target.unwrap();
+    let far_target = match get_branch_target_block(&inst) {
+        Some(target) => target,
+        None => return Ok(()),
+    };
 
     match inst.opcode {
         AArch64Opcode::BCond => {
@@ -382,26 +409,23 @@ fn relax_one_branch(func: &mut MachFunction, block_id: BlockId, inst_pos: usize)
 
         AArch64Opcode::B => {
             // Unconditional B out of range: >128MB of code in a single
-            // function. This is unreachable in practice — 128MB is ~32
-            // million instructions. Panic with a clear diagnostic rather
-            // than silently emitting an out-of-range branch offset that
-            // would produce incorrect machine code.
+            // function. This means ~32 million instructions — practically
+            // unreachable, but we return an error instead of panicking.
             //
             // If this ever becomes reachable, the fix is to emit an
             // indirect branch via IP0 (X16): ADRP X16, target ; ADD X16,
             // X16, :lo12:target ; BR X16. This requires absolute address
             // materialization which is not yet implemented.
-            panic!(
-                "branch relaxation: unconditional B to block {:?} is out of \
-                 the ±128MB range. Function '{}' is too large for direct \
-                 branch encoding.",
-                far_target,
-                func.name,
-            );
+            return Err(RelaxError::BranchOutOfRange {
+                target_block: far_target,
+                func_name: func.name.clone(),
+            });
         }
 
         _ => {}
     }
+
+    Ok(())
 }
 
 /// Invert an AArch64 condition code (as a u8).
@@ -579,7 +603,7 @@ mod tests {
             MachInst::new(AArch64Opcode::Ret, vec![]),
         );
 
-        let result = relax_branches(&mut func);
+        let result = relax_branches(&mut func).unwrap();
 
         // 6 non-pseudo instructions total.
         assert_eq!(result.instructions.len(), 6);
@@ -687,7 +711,7 @@ mod tests {
         );
 
         // Manually call relax_one_branch to test the pattern.
-        relax_one_branch(&mut func, bb0, 0);
+        relax_one_branch(&mut func, bb0, 0).unwrap();
 
         let blk = func.block(bb0);
         // Should now have 2 instructions: CBNZ +8, B bb1.
@@ -731,7 +755,7 @@ mod tests {
             MachInst::new(AArch64Opcode::Ret, vec![]),
         );
 
-        relax_one_branch(&mut func, bb0, 0);
+        relax_one_branch(&mut func, bb0, 0).unwrap();
 
         let blk = func.block(bb0);
         assert_eq!(blk.insts.len(), 2);
@@ -775,7 +799,7 @@ mod tests {
             MachInst::new(AArch64Opcode::Ret, vec![]),
         );
 
-        relax_one_branch(&mut func, bb0, 0);
+        relax_one_branch(&mut func, bb0, 0).unwrap();
 
         let blk = func.block(bb0);
         assert_eq!(blk.insts.len(), 2);
@@ -827,7 +851,7 @@ mod tests {
         // bb2: Ret
         add_inst(&mut func, bb2, MachInst::new(AArch64Opcode::Ret, vec![]));
 
-        let result = relax_branches(&mut func);
+        let result = relax_branches(&mut func).unwrap();
 
         // bb0 at offset 0, bb1 at offset 4, bb2 at offset 12.
         // B bb2 at offset 0: displacement = (12 - 0) / 4 = 3.
@@ -868,7 +892,7 @@ mod tests {
         );
 
         // Should not panic or loop infinitely.
-        let result = relax_branches(&mut func);
+        let result = relax_branches(&mut func).unwrap();
         assert_eq!(result.instructions.len(), 3);
     }
 
@@ -919,7 +943,7 @@ mod tests {
             MachInst::new(AArch64Opcode::Ret, vec![]),
         );
 
-        let result = relax_branches(&mut func);
+        let result = relax_branches(&mut func).unwrap();
 
         // After relaxation: TBZ -> TBNZ +8 ; B bb2.
         // Total: 1 (TBNZ) + 1 (B) + 9000 (filler) + 1 (Ret) = 9003.
@@ -990,7 +1014,7 @@ mod tests {
             MachInst::new(AArch64Opcode::Ret, vec![]),
         );
 
-        let result = relax_branches(&mut func);
+        let result = relax_branches(&mut func).unwrap();
 
         // After relaxation: bb0 (9000) + TBNZ +8 (1) + B bb0 (1) + Ret (1) = 9003.
         // Wait: the original bb1 had [TBZ, Ret]. After relaxation: [TBNZ, B, Ret] = 3.
@@ -1052,7 +1076,7 @@ mod tests {
             MachInst::new(AArch64Opcode::Ret, vec![]),
         );
 
-        let result = relax_branches(&mut func);
+        let result = relax_branches(&mut func).unwrap();
 
         // No relaxation needed: 1 (B) + 100 (filler) + 1 (Ret) = 102.
         assert_eq!(result.instructions.len(), 102);
@@ -1097,7 +1121,7 @@ mod tests {
             MachInst::new(AArch64Opcode::Ret, vec![]),
         );
 
-        let result = relax_branches(&mut func);
+        let result = relax_branches(&mut func).unwrap();
 
         // After relaxation: CBZ +8 (1) + B (1) + count filler + Ret (1) = count + 3.
         assert_eq!(result.instructions.len(), (count + 3) as usize);
@@ -1151,7 +1175,7 @@ mod tests {
             MachInst::new(AArch64Opcode::Ret, vec![]),
         );
 
-        let result = relax_branches(&mut func);
+        let result = relax_branches(&mut func).unwrap();
 
         // bb0 offset should be 0.
         assert_eq!(result.block_offsets[0], 0);
