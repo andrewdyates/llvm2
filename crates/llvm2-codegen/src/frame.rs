@@ -670,7 +670,17 @@ pub fn encode_compact_unwind(layout: &FrameLayout) -> CompactUnwindEncoding {
                 (23, 24) => UNWIND_ARM64_FRAME_X23_X24_PAIR,
                 (25, 26) => UNWIND_ARM64_FRAME_X25_X26_PAIR,
                 (27, 28) => UNWIND_ARM64_FRAME_X27_X28_PAIR,
-                _ => 0, // Unknown pair — should not happen
+                (r1, r2) => {
+                    // Unrecognized GPR callee-saved pair — compact unwind cannot
+                    // encode it. Fall back to DWARF mode so the unwinder uses
+                    // full CFI instead of producing wrong unwind info.
+                    eprintln!(
+                        "WARNING: unrecognized callee-saved GPR pair ({}, {}) in \
+                         compact unwind encoding, falling back to DWARF mode",
+                        r1, r2
+                    );
+                    return CompactUnwindEncoding { encoding: UNWIND_ARM64_MODE_DWARF };
+                }
             };
             encoding |= flag;
         } else {
@@ -681,7 +691,17 @@ pub fn encode_compact_unwind(layout: &FrameLayout) -> CompactUnwindEncoding {
                 (74, 75) => UNWIND_ARM64_FRAME_D10_D11_PAIR, // V10/V11
                 (76, 77) => UNWIND_ARM64_FRAME_D12_D13_PAIR, // V12/V13
                 (78, 79) => UNWIND_ARM64_FRAME_D14_D15_PAIR, // V14/V15
-                _ => 0,
+                (r1, r2) => {
+                    // Unrecognized FPR callee-saved pair — compact unwind cannot
+                    // encode it. Fall back to DWARF mode so the unwinder uses
+                    // full CFI instead of producing wrong unwind info.
+                    eprintln!(
+                        "WARNING: unrecognized callee-saved FPR pair ({}, {}) in \
+                         compact unwind encoding, falling back to DWARF mode",
+                        r1, r2
+                    );
+                    return CompactUnwindEncoding { encoding: UNWIND_ARM64_MODE_DWARF };
+                }
             };
             encoding |= flag;
         }
@@ -1459,5 +1479,109 @@ mod tests {
     fn test_encoding_zero_register_pair_flags_for_dwarf() {
         let encoding = CompactUnwindEncoding { encoding: UNWIND_ARM64_MODE_DWARF };
         assert_eq!(encoding.register_pair_flags(), 0);
+    }
+
+    // --- Unrecognized register pair fallback tests (#97) ---
+
+    #[test]
+    fn test_compact_unwind_unrecognized_gpr_pair_falls_back_to_dwarf() {
+        // Create a frame layout with a GPR pair that isn't a standard AArch64
+        // callee-saved pair. This tests that encode_compact_unwind falls back
+        // to DWARF mode instead of silently dropping the pair.
+        let layout = FrameLayout {
+            callee_saved_pairs: vec![
+                CalleeSavedPair { reg1: X29, reg2: X30, fp_offset: 0, is_fpr: false },
+                // X0/X1 is not a valid callee-saved pair
+                CalleeSavedPair {
+                    reg1: PReg::new(0),  // X0
+                    reg2: PReg::new(1),  // X1
+                    fp_offset: -16,
+                    is_fpr: false,
+                },
+            ],
+            callee_saved_area_size: 32,
+            spill_area_size: 0,
+            local_area_size: 0,
+            outgoing_arg_area_size: 0,
+            total_frame_size: 32,
+            uses_frame_pointer: true,
+            is_leaf: true,
+            uses_red_zone: false,
+            fp_to_spill_offset: -32,
+            has_dynamic_alloc: false,
+        };
+
+        let cu = encode_compact_unwind(&layout);
+        assert_eq!(cu.encoding, UNWIND_ARM64_MODE_DWARF,
+            "Unrecognized GPR pair must trigger DWARF fallback, not be silently dropped");
+        assert!(cu.needs_dwarf_fallback());
+    }
+
+    #[test]
+    fn test_compact_unwind_unrecognized_fpr_pair_falls_back_to_dwarf() {
+        // Create a frame layout with an FPR pair that isn't a standard AArch64
+        // callee-saved pair. Tests fallback for unrecognized FPR pairs.
+        let layout = FrameLayout {
+            callee_saved_pairs: vec![
+                CalleeSavedPair { reg1: X29, reg2: X30, fp_offset: 0, is_fpr: false },
+                // V0/V1 (encoding 64,65) is not a callee-saved FPR pair
+                CalleeSavedPair {
+                    reg1: PReg::new(64), // V0
+                    reg2: PReg::new(65), // V1
+                    fp_offset: -16,
+                    is_fpr: true,
+                },
+            ],
+            callee_saved_area_size: 32,
+            spill_area_size: 0,
+            local_area_size: 0,
+            outgoing_arg_area_size: 0,
+            total_frame_size: 32,
+            uses_frame_pointer: true,
+            is_leaf: true,
+            uses_red_zone: false,
+            fp_to_spill_offset: -32,
+            has_dynamic_alloc: false,
+        };
+
+        let cu = encode_compact_unwind(&layout);
+        assert_eq!(cu.encoding, UNWIND_ARM64_MODE_DWARF,
+            "Unrecognized FPR pair must trigger DWARF fallback, not be silently dropped");
+        assert!(cu.needs_dwarf_fallback());
+    }
+
+    #[test]
+    fn test_compact_unwind_valid_pair_after_unrecognized_not_reached() {
+        // If the first non-FP/LR pair is unrecognized, we should fall back to
+        // DWARF immediately. The valid X19/X20 pair after it should not be
+        // reached — verifying early return behavior.
+        let layout = FrameLayout {
+            callee_saved_pairs: vec![
+                CalleeSavedPair { reg1: X29, reg2: X30, fp_offset: 0, is_fpr: false },
+                // Bogus GPR pair
+                CalleeSavedPair {
+                    reg1: PReg::new(5),  // X5
+                    reg2: PReg::new(6),  // X6
+                    fp_offset: -16,
+                    is_fpr: false,
+                },
+                // Valid pair that should never be reached
+                CalleeSavedPair { reg1: X19, reg2: X20, fp_offset: -32, is_fpr: false },
+            ],
+            callee_saved_area_size: 48,
+            spill_area_size: 0,
+            local_area_size: 0,
+            outgoing_arg_area_size: 0,
+            total_frame_size: 48,
+            uses_frame_pointer: true,
+            is_leaf: true,
+            uses_red_zone: false,
+            fp_to_spill_offset: -48,
+            has_dynamic_alloc: false,
+        };
+
+        let cu = encode_compact_unwind(&layout);
+        assert_eq!(cu.encoding, UNWIND_ARM64_MODE_DWARF,
+            "Early DWARF fallback on unrecognized pair");
     }
 }
