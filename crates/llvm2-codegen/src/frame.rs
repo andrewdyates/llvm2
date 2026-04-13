@@ -611,7 +611,7 @@ pub fn encode_compact_unwind(layout: &FrameLayout) -> CompactUnwindEncoding {
 /// STP Rt, Rt2, [SP, #-imm]! (pre-index, allocates stack space)
 fn make_stp_pre_index(reg1: PReg, reg2: PReg, offset: i64) -> MachInst {
     MachInst::new(
-        AArch64Opcode::StpRI,
+        AArch64Opcode::StpPreIndex,
         vec![
             MachOperand::PReg(reg1),
             MachOperand::PReg(reg2),
@@ -650,7 +650,7 @@ fn make_ldp_offset(reg1: PReg, reg2: PReg, offset: i64) -> MachInst {
 /// LDP Rt, Rt2, [SP], #imm (post-index, deallocates stack space)
 fn make_ldp_post_index(reg1: PReg, reg2: PReg, offset: i64) -> MachInst {
     MachInst::new(
-        AArch64Opcode::LdpRI,
+        AArch64Opcode::LdpPostIndex,
         vec![
             MachOperand::PReg(reg1),
             MachOperand::PReg(reg2),
@@ -661,12 +661,16 @@ fn make_ldp_post_index(reg1: PReg, reg2: PReg, offset: i64) -> MachInst {
 }
 
 /// MOV X29, SP (establish frame pointer)
+///
+/// Encoded as ADD X29, SP, #0 because register 31 in ADD context is SP,
+/// whereas in ORR (logical) context register 31 is XZR.
 fn make_mov_sp_to_fp() -> MachInst {
     MachInst::new(
-        AArch64Opcode::MovR,
+        AArch64Opcode::AddRI,
         vec![
             MachOperand::PReg(X29),
             MachOperand::Special(SpecialReg::SP),
+            MachOperand::Imm(0),
         ],
     )
 }
@@ -966,10 +970,10 @@ mod tests {
         let layout = compute_frame_layout(&func, 0, false);
         let prologue = emit_prologue(&layout);
 
-        // Expect: STP X29, X30, [SP, #-16]!; MOV X29, SP
+        // Expect: STP X29, X30, [SP, #-16]!; ADD X29, SP, #0 (MOV X29, SP)
         assert_eq!(prologue.len(), 2);
-        assert_eq!(prologue[0].opcode, AArch64Opcode::StpRI);
-        assert_eq!(prologue[1].opcode, AArch64Opcode::MovR);
+        assert_eq!(prologue[0].opcode, AArch64Opcode::StpPreIndex);
+        assert_eq!(prologue[1].opcode, AArch64Opcode::AddRI);
     }
 
     #[test]
@@ -980,14 +984,14 @@ mod tests {
         let layout = compute_frame_layout(&func, 0, false);
         let prologue = emit_prologue(&layout);
 
-        // STP X29, X30, [SP, #-48]!  (3 pairs * 16 = 48)
-        // MOV X29, SP
-        // STP X19, X20, [SP, #16]
-        // STP X21, X22, [SP, #32]
-        // SUB SP, SP, #16  (spill area, aligned)
+        // STP X29, X30, [SP, #-48]!  (3 pairs * 16 = 48, pre-index)
+        // ADD X29, SP, #0            (MOV X29, SP)
+        // STP X19, X20, [SP, #16]    (signed offset)
+        // STP X21, X22, [SP, #32]    (signed offset)
+        // SUB SP, SP, #16            (spill area, aligned)
         assert_eq!(prologue.len(), 5);
-        assert_eq!(prologue[0].opcode, AArch64Opcode::StpRI);
-        assert_eq!(prologue[1].opcode, AArch64Opcode::MovR);
+        assert_eq!(prologue[0].opcode, AArch64Opcode::StpPreIndex);
+        assert_eq!(prologue[1].opcode, AArch64Opcode::AddRI);
         assert_eq!(prologue[2].opcode, AArch64Opcode::StpRI);
         assert_eq!(prologue[3].opcode, AArch64Opcode::StpRI);
         assert_eq!(prologue[4].opcode, AArch64Opcode::SubRI);
@@ -1001,9 +1005,9 @@ mod tests {
         let layout = compute_frame_layout(&func, 0, false);
         let epilogue = emit_epilogue(&layout);
 
-        // LDP X29, X30, [SP], #16; RET
+        // LDP X29, X30, [SP], #16 (post-index); RET
         assert_eq!(epilogue.len(), 2);
-        assert_eq!(epilogue[0].opcode, AArch64Opcode::LdpRI);
+        assert_eq!(epilogue[0].opcode, AArch64Opcode::LdpPostIndex);
         assert_eq!(epilogue[1].opcode, AArch64Opcode::Ret);
     }
 
@@ -1016,15 +1020,15 @@ mod tests {
         let epilogue = emit_epilogue(&layout);
 
         // ADD SP, SP, #16
-        // LDP X21, X22, [SP, #32]
-        // LDP X19, X20, [SP, #16]
-        // LDP X29, X30, [SP], #48
+        // LDP X21, X22, [SP, #32]   (signed offset)
+        // LDP X19, X20, [SP, #16]   (signed offset)
+        // LDP X29, X30, [SP], #48   (post-index)
         // RET
         assert_eq!(epilogue.len(), 5);
         assert_eq!(epilogue[0].opcode, AArch64Opcode::AddRI);
         assert_eq!(epilogue[1].opcode, AArch64Opcode::LdpRI);
         assert_eq!(epilogue[2].opcode, AArch64Opcode::LdpRI);
-        assert_eq!(epilogue[3].opcode, AArch64Opcode::LdpRI);
+        assert_eq!(epilogue[3].opcode, AArch64Opcode::LdpPostIndex);
         assert_eq!(epilogue[4].opcode, AArch64Opcode::Ret);
     }
 
@@ -1037,12 +1041,12 @@ mod tests {
         let prologue = emit_prologue(&layout);
         let epilogue = emit_epilogue(&layout);
 
-        // Count STP in prologue vs LDP in epilogue (excluding FP/LR post-index).
-        let stp_count = prologue.iter().filter(|i| i.opcode == AArch64Opcode::StpRI).count();
-        let ldp_count = epilogue.iter().filter(|i| i.opcode == AArch64Opcode::LdpRI).count();
+        // Count STP in prologue vs LDP in epilogue.
+        // STP: StpPreIndex (FP/LR) + StpRI (X19/X20) + StpRI (X25/X26) = 1 pre-index + 2 offset = 3 total
+        // LDP: LdpRI (X25/X26) + LdpRI (X19/X20) + LdpPostIndex (FP/LR) = 2 offset + 1 post-index = 3 total
+        let stp_count = prologue.iter().filter(|i| i.opcode == AArch64Opcode::StpRI || i.opcode == AArch64Opcode::StpPreIndex).count();
+        let ldp_count = epilogue.iter().filter(|i| i.opcode == AArch64Opcode::LdpRI || i.opcode == AArch64Opcode::LdpPostIndex).count();
 
-        // STP: FP/LR + X19/X20 + X25/X26 = 3
-        // LDP: X25/X26 + X19/X20 + FP/LR = 3
         assert_eq!(stp_count, 3);
         assert_eq!(ldp_count, 3);
     }
@@ -1212,8 +1216,8 @@ mod tests {
         let entry_insts = &func.blocks[0].insts;
         assert!(entry_insts.len() >= 3, "Expected at least prologue + NOP + epilogue");
 
-        // First instruction should be STP (prologue start).
-        assert_eq!(func.inst(entry_insts[0]).opcode, AArch64Opcode::StpRI);
+        // First instruction should be STP pre-index (prologue start).
+        assert_eq!(func.inst(entry_insts[0]).opcode, AArch64Opcode::StpPreIndex);
 
         // Last instruction should be RET (from epilogue).
         let last_id = *entry_insts.last().unwrap();

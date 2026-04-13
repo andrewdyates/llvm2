@@ -158,7 +158,7 @@ fn produces_value(inst: &llvm2_ir::MachInst) -> bool {
         // Compare/test: set flags, no register def
         CmpRR | CmpRI | Tst | Fcmp => false,
         // Stores: write to memory, no register def
-        StrRI | StpRI => false,
+        StrRI | StpRI | StpPreIndex => false,
         // Branches and returns: control flow, no register def
         B | BCond | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => false,
         // Trap pseudo-instructions: control flow, no register def

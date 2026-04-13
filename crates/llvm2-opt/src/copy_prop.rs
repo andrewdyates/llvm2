@@ -132,7 +132,7 @@ fn is_def_inst(inst: &llvm2_ir::MachInst) -> bool {
     use AArch64Opcode::*;
     match inst.opcode {
         CmpRR | CmpRI | Tst | Fcmp => false,
-        StrRI | StpRI => false,
+        StrRI | StpRI | StpPreIndex => false,
         B | BCond | Cbz | Cbnz | Br | Ret => false,
         Nop => false,
         Bl | Blr => false,
