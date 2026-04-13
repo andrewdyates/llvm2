@@ -139,6 +139,14 @@ pub struct FrameLayout {
     /// On AArch64: FP points at the saved FP/LR pair, so spills start
     /// at FP - callee_saved_area_size.
     pub fp_to_spill_offset: i32,
+
+    /// Whether this function uses dynamic stack allocation (alloca).
+    ///
+    /// Dynamic allocation means the stack pointer moves by an amount unknown
+    /// at compile time, so compact unwind cannot describe the frame. When true,
+    /// `encode_compact_unwind` returns `UNWIND_ARM64_MODE_DWARF` to request
+    /// DWARF CFI fallback.
+    pub has_dynamic_alloc: bool,
 }
 
 impl FrameLayout {
@@ -236,6 +244,28 @@ pub fn compute_frame_layout(
     outgoing_arg_size: u32,
     enable_red_zone: bool,
 ) -> FrameLayout {
+    compute_frame_layout_inner(func, outgoing_arg_size, enable_red_zone, false)
+}
+
+/// Compute the complete frame layout for a function with dynamic allocation.
+///
+/// Like [`compute_frame_layout`] but explicitly marks the frame as having
+/// dynamic stack allocation (alloca), which forces DWARF CFI fallback for
+/// unwind encoding since compact unwind cannot describe variable-size frames.
+pub fn compute_frame_layout_dynamic(
+    func: &MachFunction,
+    outgoing_arg_size: u32,
+    enable_red_zone: bool,
+) -> FrameLayout {
+    compute_frame_layout_inner(func, outgoing_arg_size, enable_red_zone, true)
+}
+
+fn compute_frame_layout_inner(
+    func: &MachFunction,
+    outgoing_arg_size: u32,
+    enable_red_zone: bool,
+    has_dynamic_alloc: bool,
+) -> FrameLayout {
     let is_leaf = !has_calls(func);
 
     // On Apple AArch64, frame pointer is ALWAYS required.
@@ -332,6 +362,7 @@ pub fn compute_frame_layout(
         is_leaf,
         uses_red_zone,
         fp_to_spill_offset,
+        has_dynamic_alloc,
     }
 }
 
@@ -560,15 +591,48 @@ pub struct CompactUnwindEncoding {
     pub encoding: u32,
 }
 
+impl CompactUnwindEncoding {
+    /// Returns true if this encoding requires DWARF CFI fallback.
+    ///
+    /// When `UNWIND_ARM64_MODE_DWARF` is set, the linker expects a
+    /// corresponding FDE in `__eh_frame` to describe how to unwind this
+    /// function. The compact unwind entry still exists but its encoding
+    /// tells the unwinder to look up the DWARF info instead.
+    pub fn needs_dwarf_fallback(&self) -> bool {
+        (self.encoding & 0x0F00_0000) == UNWIND_ARM64_MODE_DWARF
+    }
+
+    /// Returns the mode bits (top nibble of the encoding).
+    pub fn mode(&self) -> u32 {
+        self.encoding & 0x0F00_0000
+    }
+
+    /// Returns the register-pair flags (low 12 bits for FRAME mode).
+    pub fn register_pair_flags(&self) -> u32 {
+        self.encoding & 0x0000_0FFF
+    }
+}
+
 /// Encode the Darwin compact unwind for a frame layout.
 ///
-/// For standard FP-based frames, this produces UNWIND_ARM64_MODE_FRAME
+/// For standard FP-based frames, this produces `UNWIND_ARM64_MODE_FRAME`
 /// with register-pair flags indicating which callee-saved registers are saved.
+///
+/// Falls back to `UNWIND_ARM64_MODE_DWARF` when the frame cannot be
+/// described by compact unwind:
+/// - Frameless functions (no FP — not possible on Apple AArch64 but handled)
+/// - Variable-size frames (dynamic alloca — SP moves by runtime amount)
 ///
 /// Reference: AArch64AsmBackend.cpp `generateCompactUnwindEncoding()` (line 576)
 pub fn encode_compact_unwind(layout: &FrameLayout) -> CompactUnwindEncoding {
     if !layout.uses_frame_pointer {
         // Frameless functions use DWARF fallback for now.
+        return CompactUnwindEncoding { encoding: UNWIND_ARM64_MODE_DWARF };
+    }
+
+    if layout.has_dynamic_alloc {
+        // Variable-size frames cannot be described by compact unwind.
+        // The unwinder needs full DWARF CFI to handle the dynamic SP offsets.
         return CompactUnwindEncoding { encoding: UNWIND_ARM64_MODE_DWARF };
     }
 
@@ -1274,5 +1338,79 @@ mod tests {
         assert!(mask & (1 << 3) != 0); // V11
         assert!(mask & (1 << 7) != 0); // V15
         assert!(mask & (1 << 1) == 0); // V9 not used
+    }
+
+    // --- has_dynamic_alloc field tests ---
+
+    #[test]
+    fn test_layout_default_no_dynamic_alloc() {
+        let func = make_func("no_alloca", vec![
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        let layout = compute_frame_layout(&func, 0, false);
+        assert!(!layout.has_dynamic_alloc);
+    }
+
+    #[test]
+    fn test_layout_dynamic_alloc_flag() {
+        let func = make_func("with_alloca", vec![
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        let layout = compute_frame_layout_dynamic(&func, 0, false);
+        assert!(layout.has_dynamic_alloc);
+    }
+
+    #[test]
+    fn test_compact_unwind_dynamic_alloc_dwarf_fallback() {
+        let func = make_func("alloca_func", vec![
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        let layout = compute_frame_layout_dynamic(&func, 0, false);
+        let cu = encode_compact_unwind(&layout);
+
+        assert_eq!(cu.encoding, UNWIND_ARM64_MODE_DWARF);
+        assert!(cu.needs_dwarf_fallback());
+    }
+
+    // --- CompactUnwindEncoding method tests ---
+
+    #[test]
+    fn test_encoding_needs_dwarf_fallback() {
+        let frame = CompactUnwindEncoding { encoding: UNWIND_ARM64_MODE_FRAME };
+        assert!(!frame.needs_dwarf_fallback());
+
+        let dwarf = CompactUnwindEncoding { encoding: UNWIND_ARM64_MODE_DWARF };
+        assert!(dwarf.needs_dwarf_fallback());
+
+        let frameless = CompactUnwindEncoding { encoding: UNWIND_ARM64_MODE_FRAMELESS };
+        assert!(!frameless.needs_dwarf_fallback());
+    }
+
+    #[test]
+    fn test_encoding_mode() {
+        let frame = CompactUnwindEncoding { encoding: UNWIND_ARM64_MODE_FRAME | UNWIND_ARM64_FRAME_X19_X20_PAIR };
+        assert_eq!(frame.mode(), UNWIND_ARM64_MODE_FRAME);
+
+        let dwarf = CompactUnwindEncoding { encoding: UNWIND_ARM64_MODE_DWARF };
+        assert_eq!(dwarf.mode(), UNWIND_ARM64_MODE_DWARF);
+    }
+
+    #[test]
+    fn test_encoding_register_pair_flags() {
+        let encoding = CompactUnwindEncoding {
+            encoding: UNWIND_ARM64_MODE_FRAME
+                | UNWIND_ARM64_FRAME_X19_X20_PAIR
+                | UNWIND_ARM64_FRAME_D8_D9_PAIR,
+        };
+        let flags = encoding.register_pair_flags();
+        assert_ne!(flags & UNWIND_ARM64_FRAME_X19_X20_PAIR, 0);
+        assert_ne!(flags & UNWIND_ARM64_FRAME_D8_D9_PAIR, 0);
+        assert_eq!(flags & UNWIND_ARM64_FRAME_X21_X22_PAIR, 0);
+    }
+
+    #[test]
+    fn test_encoding_zero_register_pair_flags_for_dwarf() {
+        let encoding = CompactUnwindEncoding { encoding: UNWIND_ARM64_MODE_DWARF };
+        assert_eq!(encoding.register_pair_flags(), 0);
     }
 }
