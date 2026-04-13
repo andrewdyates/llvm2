@@ -29,6 +29,7 @@
 
 use super::constants::*;
 use super::header::MachHeader;
+use super::reloc::{encode_relocation, Relocation};
 use super::section::{Section64, SegmentCommand64};
 
 /// A symbol to be emitted in the object file.
@@ -42,40 +43,6 @@ pub struct Symbol {
     pub value: u64,
     /// Whether the symbol is externally visible.
     pub is_global: bool,
-}
-
-/// A relocation entry to be emitted.
-#[derive(Debug, Clone)]
-pub struct Relocation {
-    /// Offset within the section where the relocation applies.
-    pub offset: u32,
-    /// Symbol index in the symbol table (for r_extern=1).
-    pub symbol_index: u32,
-    /// Whether this is a PC-relative relocation.
-    pub pcrel: bool,
-    /// Length: 0=byte, 1=word, 2=long, 3=quad.
-    pub length: u32,
-    /// Whether the relocation is external (references a symbol).
-    pub is_extern: bool,
-    /// Relocation type (e.g., ARM64_RELOC_BRANCH26).
-    pub reloc_type: u32,
-}
-
-impl Relocation {
-    /// Encode as a Mach-O relocation_info (8 bytes, little-endian).
-    fn encode(&self) -> [u8; 8] {
-        let mut result = [0u8; 8];
-        // r_address: 4 bytes (signed, but we use unsigned offset here)
-        result[0..4].copy_from_slice(&(self.offset as i32).to_le_bytes());
-        // Packed bitfield: r_symbolnum:24, r_pcrel:1, r_length:2, r_extern:1, r_type:4
-        let packed: u32 = (self.symbol_index & 0x00FF_FFFF)
-            | (if self.pcrel { 1 } else { 0 } << 24)
-            | ((self.length & 0x3) << 25)
-            | (if self.is_extern { 1 } else { 0 } << 27)
-            | ((self.reloc_type & 0xF) << 28);
-        result[4..8].copy_from_slice(&packed.to_le_bytes());
-        result
-    }
 }
 
 /// Internal section data held by the writer.
@@ -388,7 +355,7 @@ impl MachOWriter {
         // 8. Relocation entries
         for sec in &self.sections {
             for reloc in &sec.relocations {
-                buf.extend_from_slice(&reloc.encode());
+                buf.extend_from_slice(&encode_relocation(reloc));
             }
         }
 
@@ -553,17 +520,12 @@ mod tests {
 
     #[test]
     fn test_relocation_encoding() {
-        let reloc = Relocation {
-            offset: 0x10,
-            symbol_index: 1,
-            pcrel: true,
-            length: RELOC_LENGTH_LONG,
-            is_extern: true,
-            reloc_type: ARM64_RELOC_BRANCH26,
-        };
-        let encoded = reloc.encode();
+        use super::super::reloc::encode_relocation;
+
+        let reloc = Relocation::branch26(0x10, 1);
+        let encoded = encode_relocation(&reloc);
         // r_address = 0x10
-        assert_eq!(&encoded[0..4], &0x10i32.to_le_bytes());
+        assert_eq!(&encoded[0..4], &0x10u32.to_le_bytes());
         // Packed: symbolnum=1, pcrel=1, length=2, extern=1, type=2
         // = 1 | (1<<24) | (2<<25) | (1<<27) | (2<<28)
         let expected: u32 = 1 | (1 << 24) | (2 << 25) | (1 << 27) | (2 << 28);
