@@ -38,6 +38,8 @@ pub enum AArch64Opcode {
     AndRR,
     OrrRR,
     EorRR,
+    /// ORN Rd, XZR, Rm — bitwise NOT (MVN alias, when first source is zero register).
+    OrnRR,
 
     // -- Shifts --
     LslRR,
@@ -109,6 +111,8 @@ pub enum AArch64Opcode {
     FsubRR,
     FmulRR,
     FdivRR,
+    /// FNEG Dd, Dn — floating-point negate.
+    FnegRR,
     Fcmp,
     FcvtzsRR,
     ScvtfRR,
@@ -691,6 +695,8 @@ mod tests {
             AArch64Opcode::AndRR,
             AArch64Opcode::OrrRR,
             AArch64Opcode::EorRR,
+            AArch64Opcode::OrnRR,
+            AArch64Opcode::FnegRR,
             AArch64Opcode::MovR,
             AArch64Opcode::MovI,
         ];

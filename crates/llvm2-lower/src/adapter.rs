@@ -563,7 +563,7 @@ impl<'a> TmirAdapter<'a> {
     fn translate_unop(
         &mut self,
         op: &UnOp,
-        ty: &Ty,
+        _ty: &Ty,
         operand: &ValueId,
         results: &[ValueId],
     ) -> Result<Vec<Instruction>, AdapterError> {
@@ -572,59 +572,34 @@ impl<'a> TmirAdapter<'a> {
 
         match op {
             UnOp::Neg => {
-                // Neg: result = 0 - operand
-                let lir_ty = translate_type(ty)?;
-                let zero = self.fresh_value();
-                let zero_inst = Instruction {
-                    opcode: Opcode::Iconst { ty: lir_ty, imm: 0 },
-                    args: vec![],
-                    results: vec![zero],
-                };
-                let sub_inst = Instruction {
-                    opcode: Opcode::Isub,
-                    args: vec![zero, src],
+                // Neg: result = -operand
+                // Directly emit Ineg; ISel lowers to SUB Xd, XZR, Xn (NEG alias).
+                let neg_inst = Instruction {
+                    opcode: Opcode::Ineg,
+                    args: vec![src],
                     results: vec![dst],
                 };
-                Ok(vec![zero_inst, sub_inst])
+                Ok(vec![neg_inst])
             }
             UnOp::Not => {
-                // Bitwise NOT: result = operand XOR -1 (all ones)
-                let lir_ty = translate_type(ty)?;
-                let all_ones = self.fresh_value();
-                let ones_inst = Instruction {
-                    opcode: Opcode::Iconst {
-                        ty: lir_ty,
-                        imm: -1,
-                    },
-                    args: vec![],
-                    results: vec![all_ones],
-                };
-                let xor_inst = Instruction {
-                    opcode: Opcode::Bxor,
-                    args: vec![src, all_ones],
+                // Bitwise NOT: result = ~operand
+                // Directly emit Bnot; ISel lowers to ORN Xd, XZR, Xn (MVN alias).
+                let not_inst = Instruction {
+                    opcode: Opcode::Bnot,
+                    args: vec![src],
                     results: vec![dst],
                 };
-                Ok(vec![ones_inst, xor_inst])
+                Ok(vec![not_inst])
             }
             UnOp::FNeg => {
-                // FNeg: result = 0.0 - operand
-                // The ISel should pattern-match this into FNEG.
-                let lir_ty = translate_type(ty)?;
-                let zero = self.fresh_value();
-                let zero_inst = Instruction {
-                    opcode: Opcode::Fconst {
-                        ty: lir_ty,
-                        imm: 0.0,
-                    },
-                    args: vec![],
-                    results: vec![zero],
-                };
-                let sub_inst = Instruction {
-                    opcode: Opcode::Fsub,
-                    args: vec![zero, src],
+                // FNeg: result = -operand
+                // Directly emit Fneg; ISel lowers to FNEG Dd, Dn.
+                let fneg_inst = Instruction {
+                    opcode: Opcode::Fneg,
+                    args: vec![src],
                     results: vec![dst],
                 };
-                Ok(vec![zero_inst, sub_inst])
+                Ok(vec![fneg_inst])
             }
         }
     }
@@ -1722,13 +1697,10 @@ mod tests {
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
         let entry = &lir_func.blocks[&lir_func.entry_block];
 
-        // Neg is lowered as: const 0, sub(0, operand), then return
-        assert_eq!(entry.instructions.len(), 3); // iconst(0), isub, return
-        assert!(matches!(
-            entry.instructions[0].opcode,
-            Opcode::Iconst { ty: Type::I32, imm: 0 }
-        ));
-        assert!(matches!(entry.instructions[1].opcode, Opcode::Isub));
+        // Neg is lowered directly as: Ineg, return
+        assert_eq!(entry.instructions.len(), 2); // Ineg, return
+        assert!(matches!(entry.instructions[0].opcode, Opcode::Ineg));
+        assert_eq!(entry.instructions[0].args.len(), 1);
     }
 
     #[test]
@@ -1766,12 +1738,10 @@ mod tests {
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
         let entry = &lir_func.blocks[&lir_func.entry_block];
 
-        // Not is lowered as: iconst(-1), bxor(operand, -1)
-        assert!(matches!(
-            entry.instructions[0].opcode,
-            Opcode::Iconst { imm: -1, .. }
-        ));
-        assert!(matches!(entry.instructions[1].opcode, Opcode::Bxor));
+        // Not is lowered directly as: Bnot, return
+        assert_eq!(entry.instructions.len(), 2); // Bnot, return
+        assert!(matches!(entry.instructions[0].opcode, Opcode::Bnot));
+        assert_eq!(entry.instructions[0].args.len(), 1);
     }
 
     #[test]

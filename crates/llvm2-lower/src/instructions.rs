@@ -31,6 +31,13 @@ pub enum Opcode {
     Sdiv,
     Urem,
     Srem,
+    Ineg,   // Integer negate: result = -operand
+
+    // Bitwise unary
+    Bnot,   // Bitwise NOT: result = ~operand
+
+    // Floating-point unary
+    Fneg,   // Floating-point negate: result = -operand
 
     // Shift operations
     Ishl,   // Logical shift left
