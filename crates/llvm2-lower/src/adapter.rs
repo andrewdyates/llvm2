@@ -264,10 +264,13 @@ struct TmirAdapter<'a> {
 
     /// Reference to the tMIR function being translated (for block lookups).
     tmir_func: Option<&'a TmirFunction>,
+
+    /// Function name table: FuncId -> name, for resolving call targets.
+    func_names: HashMap<FuncId, String>,
 }
 
 impl<'a> TmirAdapter<'a> {
-    fn new(structs: &'a [StructDef]) -> Self {
+    fn new(structs: &'a [StructDef], func_names: HashMap<FuncId, String>) -> Self {
         Self {
             _structs: structs,
             value_map: HashMap::new(),
@@ -276,6 +279,7 @@ impl<'a> TmirAdapter<'a> {
             next_block: 0,
             proof_ctx: ProofContext::default(),
             tmir_func: None,
+            func_names,
         }
     }
 
@@ -890,22 +894,25 @@ impl<'a> TmirAdapter<'a> {
 
     fn translate_call(
         &mut self,
-        _func: &FuncId,
+        func: &FuncId,
         args: &[ValueId],
         _ret_ty: &[Ty],
         results: &[ValueId],
     ) -> Result<Vec<Instruction>, AdapterError> {
-        // For MVP, calls are represented as Return-like instructions.
-        // Full call lowering with ABI handling is done by the ISel.
         let arg_vals: Vec<Value> = args.iter().map(|vid| self.map_value(*vid)).collect();
         let result_vals = self.map_results(results);
 
-        // Emit the call as a sequence of arg moves + call opcode.
-        // The ISel handles the ABI details (register assignment, stack args).
-        // For now, use Jump as a placeholder for the call target.
-        // A proper Call opcode should be added to the internal LIR.
+        // Resolve the callee function name from the FuncId.
+        // Fall back to a synthetic name if the function is not in the module
+        // (e.g., an external/imported function).
+        let callee_name = self
+            .func_names
+            .get(func)
+            .cloned()
+            .unwrap_or_else(|| format!("__func_{}", func.0));
+
         Ok(vec![Instruction {
-            opcode: Opcode::Return, // placeholder: real Call opcode needed
+            opcode: Opcode::Call { name: callee_name },
             args: arg_vals,
             results: result_vals,
         }])
@@ -1034,20 +1041,42 @@ impl<'a> TmirAdapter<'a> {
 pub fn translate_module(
     module: &TmirModule,
 ) -> Result<Vec<(Function, ProofContext)>, AdapterError> {
+    // Build function name table for resolving call targets.
+    let func_names: HashMap<FuncId, String> = module
+        .functions
+        .iter()
+        .map(|f| (f.id, f.name.clone()))
+        .collect();
+
     let mut results = Vec::new();
     for func in &module.functions {
-        let (lir_func, proofs) = translate_function(func, &module.structs)?;
+        let (lir_func, proofs) = translate_function_with_names(func, &module.structs, &func_names)?;
         results.push((lir_func, proofs));
     }
     Ok(results)
 }
 
 /// Translate a single tMIR function to internal LIR + proof context.
+///
+/// When called standalone (not from `translate_module`), call targets are
+/// resolved to synthetic names (`__func_N`). For proper symbol resolution,
+/// prefer `translate_module` which builds a function name table.
 pub fn translate_function(
     func: &TmirFunction,
     structs: &[StructDef],
 ) -> Result<(Function, ProofContext), AdapterError> {
-    let mut adapter = TmirAdapter::new(structs);
+    let func_names = HashMap::new();
+    let mut adapter = TmirAdapter::new(structs, func_names);
+    adapter.translate(func)
+}
+
+/// Translate a single tMIR function with an explicit function name table.
+pub fn translate_function_with_names(
+    func: &TmirFunction,
+    structs: &[StructDef],
+    func_names: &HashMap<FuncId, String>,
+) -> Result<(Function, ProofContext), AdapterError> {
+    let mut adapter = TmirAdapter::new(structs, func_names.clone());
     adapter.translate(func)
 }
 
@@ -2081,5 +2110,330 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0.name, "foo");
         assert_eq!(results[1].0.name, "bar");
+    }
+
+    #[test]
+    fn test_translate_call_preserves_symbol() {
+        // Module with two functions: "callee" and "caller" which calls "callee".
+        let module = Module {
+            name: "call_test".to_string(),
+            functions: vec![
+                TmirFunc {
+                    id: FuncId(0),
+                    name: "callee".to_string(),
+                    ty: FuncTy {
+                        params: vec![Ty::Int(32)],
+                        returns: vec![Ty::Int(32)],
+                    },
+                    entry: BlockId(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId(0),
+                        params: vec![(ValueId(0), Ty::Int(32))],
+                        body: vec![InstrNode {
+                            instr: Instr::Return {
+                                values: vec![ValueId(0)],
+                            },
+                            results: vec![],
+                        }],
+                    }],
+                },
+                TmirFunc {
+                    id: FuncId(1),
+                    name: "caller".to_string(),
+                    ty: FuncTy {
+                        params: vec![Ty::Int(32)],
+                        returns: vec![Ty::Int(32)],
+                    },
+                    entry: BlockId(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId(0),
+                        params: vec![(ValueId(0), Ty::Int(32))],
+                        body: vec![
+                            InstrNode {
+                                instr: Instr::Call {
+                                    func: FuncId(0), // calls "callee"
+                                    args: vec![ValueId(0)],
+                                    ret_ty: vec![Ty::Int(32)],
+                                },
+                                results: vec![ValueId(1)],
+                            },
+                            InstrNode {
+                                instr: Instr::Return {
+                                    values: vec![ValueId(1)],
+                                },
+                                results: vec![],
+                            },
+                        ],
+                    }],
+                },
+            ],
+            structs: vec![],
+        };
+
+        let results = translate_module(&module).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // The caller function's first instruction should be Call with "callee" name.
+        let (caller_func, _) = &results[1];
+        assert_eq!(caller_func.name, "caller");
+        let entry = &caller_func.blocks[&caller_func.entry_block];
+
+        // First instruction should be Call with the resolved callee name.
+        match &entry.instructions[0].opcode {
+            Opcode::Call { name } => {
+                assert_eq!(name, "callee", "Call target should resolve to 'callee'");
+            }
+            other => panic!("expected Call opcode, got {:?}", other),
+        }
+
+        // Call should have 1 arg (the parameter passed to callee).
+        assert_eq!(entry.instructions[0].args.len(), 1);
+        // Call should have 1 result (the return value).
+        assert_eq!(entry.instructions[0].results.len(), 1);
+    }
+
+    #[test]
+    fn test_translate_call_unknown_func_gets_synthetic_name() {
+        // Single function that calls a FuncId not in the module (external call).
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "main".to_string(),
+            ty: FuncTy {
+                params: vec![],
+                returns: vec![Ty::Int(32)],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Call {
+                            func: FuncId(99), // not in module
+                            args: vec![],
+                            ret_ty: vec![Ty::Int(32)],
+                        },
+                        results: vec![ValueId(0)],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(0)],
+                        },
+                        results: vec![],
+                    },
+                ],
+            }],
+        };
+
+        // translate_function (standalone) has empty func_names, so gets synthetic name.
+        let (lir_func, _) = translate_function(&func, &[]).unwrap();
+        let entry = &lir_func.blocks[&lir_func.entry_block];
+
+        match &entry.instructions[0].opcode {
+            Opcode::Call { name } => {
+                assert_eq!(name, "__func_99", "Unknown FuncId should get synthetic name");
+            }
+            other => panic!("expected Call opcode, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_translate_condbr_preserves_condition_value() {
+        // Build: fn choose(cond: bool, a: i32, b: i32) -> i32
+        // entry: cmp a < b -> cond_val, condbr cond_val -> then, else
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "choose".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::Int(32), Ty::Int(32)],
+                returns: vec![Ty::Int(32)],
+            },
+            entry: BlockId(0),
+            blocks: vec![
+                TmirBlockDef {
+                    id: BlockId(0),
+                    params: vec![
+                        (ValueId(0), Ty::Int(32)),
+                        (ValueId(1), Ty::Int(32)),
+                    ],
+                    body: vec![
+                        // Compare: cond = a < b
+                        InstrNode {
+                            instr: Instr::Cmp {
+                                op: CmpOp::Slt,
+                                ty: Ty::Int(32),
+                                lhs: ValueId(0),
+                                rhs: ValueId(1),
+                            },
+                            results: vec![ValueId(2)],
+                        },
+                        // CondBr: branch on comparison result
+                        InstrNode {
+                            instr: Instr::CondBr {
+                                cond: ValueId(2),
+                                then_target: BlockId(1),
+                                then_args: vec![],
+                                else_target: BlockId(2),
+                                else_args: vec![],
+                            },
+                            results: vec![],
+                        },
+                    ],
+                },
+                TmirBlockDef {
+                    id: BlockId(1),
+                    params: vec![],
+                    body: vec![InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(0)],
+                        },
+                        results: vec![],
+                    }],
+                },
+                TmirBlockDef {
+                    id: BlockId(2),
+                    params: vec![],
+                    body: vec![InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(1)],
+                        },
+                        results: vec![],
+                    }],
+                },
+            ],
+        };
+
+        let (lir_func, _) = translate_function(&func, &[]).unwrap();
+        let entry = &lir_func.blocks[&lir_func.entry_block];
+
+        // First: Icmp with SignedLessThan condition
+        match &entry.instructions[0].opcode {
+            Opcode::Icmp { cond } => {
+                assert_eq!(*cond, IntCC::SignedLessThan,
+                    "CondCode should be preserved through adapter");
+            }
+            other => panic!("expected Icmp, got {:?}", other),
+        }
+
+        // Second: Brif with condition value referencing the Icmp result
+        match &entry.instructions[1].opcode {
+            Opcode::Brif { cond, then_dest, else_dest } => {
+                // The cond value in Brif should match the result of the Icmp.
+                let icmp_result = entry.instructions[0].results[0];
+                assert_eq!(*cond, icmp_result,
+                    "Brif cond should reference the Icmp result value");
+                // Both destinations should be mapped.
+                assert_ne!(then_dest, else_dest,
+                    "Then and else destinations should be different blocks");
+            }
+            other => panic!("expected Brif, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_translate_call_with_module_resolves_names() {
+        // Module with 3 functions: a, b, c. Function c calls both a and b.
+        let module = Module {
+            name: "multi_call".to_string(),
+            functions: vec![
+                TmirFunc {
+                    id: FuncId(0),
+                    name: "func_a".to_string(),
+                    ty: FuncTy {
+                        params: vec![],
+                        returns: vec![Ty::Int(32)],
+                    },
+                    entry: BlockId(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId(0),
+                        params: vec![],
+                        body: vec![
+                            InstrNode {
+                                instr: Instr::Const { ty: Ty::Int(32), value: 1 },
+                                results: vec![ValueId(0)],
+                            },
+                            InstrNode {
+                                instr: Instr::Return { values: vec![ValueId(0)] },
+                                results: vec![],
+                            },
+                        ],
+                    }],
+                },
+                TmirFunc {
+                    id: FuncId(1),
+                    name: "func_b".to_string(),
+                    ty: FuncTy {
+                        params: vec![],
+                        returns: vec![Ty::Int(32)],
+                    },
+                    entry: BlockId(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId(0),
+                        params: vec![],
+                        body: vec![
+                            InstrNode {
+                                instr: Instr::Const { ty: Ty::Int(32), value: 2 },
+                                results: vec![ValueId(0)],
+                            },
+                            InstrNode {
+                                instr: Instr::Return { values: vec![ValueId(0)] },
+                                results: vec![],
+                            },
+                        ],
+                    }],
+                },
+                TmirFunc {
+                    id: FuncId(2),
+                    name: "func_c".to_string(),
+                    ty: FuncTy {
+                        params: vec![],
+                        returns: vec![Ty::Int(32)],
+                    },
+                    entry: BlockId(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId(0),
+                        params: vec![],
+                        body: vec![
+                            InstrNode {
+                                instr: Instr::Call {
+                                    func: FuncId(0), // calls func_a
+                                    args: vec![],
+                                    ret_ty: vec![Ty::Int(32)],
+                                },
+                                results: vec![ValueId(0)],
+                            },
+                            InstrNode {
+                                instr: Instr::Call {
+                                    func: FuncId(1), // calls func_b
+                                    args: vec![],
+                                    ret_ty: vec![Ty::Int(32)],
+                                },
+                                results: vec![ValueId(1)],
+                            },
+                            InstrNode {
+                                instr: Instr::Return { values: vec![ValueId(1)] },
+                                results: vec![],
+                            },
+                        ],
+                    }],
+                },
+            ],
+            structs: vec![],
+        };
+
+        let results = translate_module(&module).unwrap();
+        let (func_c, _) = &results[2];
+        let entry = &func_c.blocks[&func_c.entry_block];
+
+        // First call should resolve to "func_a"
+        match &entry.instructions[0].opcode {
+            Opcode::Call { name } => assert_eq!(name, "func_a"),
+            other => panic!("expected Call, got {:?}", other),
+        }
+        // Second call should resolve to "func_b"
+        match &entry.instructions[1].opcode {
+            Opcode::Call { name } => assert_eq!(name, "func_b"),
+            other => panic!("expected Call, got {:?}", other),
+        }
     }
 }
