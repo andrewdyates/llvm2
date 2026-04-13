@@ -43,7 +43,7 @@
 
 use std::collections::HashMap;
 
-use llvm2_ir::{AArch64Opcode, BlockId, InstId, MachFunction, MachOperand, VReg};
+use llvm2_ir::{AArch64Opcode, BlockId, InstId, MachFunction, MachOperand, ProofAnnotation, VReg};
 
 use crate::dom::DomTree;
 use crate::effects::{opcode_effect, MemoryEffect};
@@ -86,8 +86,6 @@ impl From<&MachOperand> for CanonOperand {
 #[derive(Debug, Clone)]
 struct AvailExpr {
     /// The instruction that first computed this expression.
-    /// Retained for diagnostic/debugging purposes.
-    #[allow(dead_code)]
     inst_id: InstId,
     /// The block containing the instruction.
     block: BlockId,
@@ -116,6 +114,10 @@ fn run_cse(func: &mut MachFunction, dom: &DomTree) -> bool {
 
     // Instructions to remove (marked dead).
     let mut dead_insts: Vec<InstId> = Vec::new();
+
+    // Proof annotations to merge onto surviving instructions.
+    // Maps surviving inst_id -> proof from eliminated duplicate.
+    let mut proof_merges: Vec<(InstId, Option<ProofAnnotation>)> = Vec::new();
 
     // Walk in dominator-tree preorder to see definitions before uses.
     let preorder = dom_preorder(dom, func.entry);
@@ -156,6 +158,11 @@ fn run_cse(func: &mut MachFunction, dom: &DomTree) -> bool {
                     // CSE: replace all uses of def_vreg with avail.def_vreg.
                     replacements.insert(def_vreg.id, avail.def_vreg);
                     dead_insts.push(inst_id);
+
+                    // Merge proof annotation from eliminated instruction
+                    // onto the surviving one.
+                    let eliminated_proof = inst.proof;
+                    proof_merges.push((avail.inst_id, eliminated_proof));
                     continue;
                 }
                 // If the available doesn't dominate, we could update the table
@@ -177,6 +184,13 @@ fn run_cse(func: &mut MachFunction, dom: &DomTree) -> bool {
 
     if replacements.is_empty() {
         return false;
+    }
+
+    // Apply proof merges: for each surviving instruction, merge in the
+    // proof annotation from the eliminated duplicate.
+    for (surviving_id, eliminated_proof) in proof_merges {
+        let surviving = func.inst_mut(surviving_id);
+        surviving.proof = ProofAnnotation::merge(surviving.proof, eliminated_proof);
     }
 
     // Apply replacements: rewrite all uses of eliminated vregs.
@@ -287,7 +301,8 @@ mod tests {
     use super::*;
     use crate::pass_manager::MachinePass;
     use llvm2_ir::{
-        AArch64Opcode, MachFunction, MachInst, MachOperand, RegClass, Signature, VReg,
+        AArch64Opcode, MachFunction, MachInst, MachOperand, ProofAnnotation, RegClass,
+        Signature, VReg,
     };
 
     fn vreg(id: u32) -> MachOperand {
@@ -581,5 +596,86 @@ mod tests {
 
         let block = func.block(func.entry);
         assert_eq!(block.insts.len(), 2); // a1, ret
+    }
+
+    // ---- Proof annotation preservation tests ----
+
+    #[test]
+    fn test_cse_preserves_surviving_proof() {
+        // v2 = add v0, v1 [NoOverflow]
+        // v3 = add v0, v1 (no proof) → eliminated, v3 → v2
+        // Surviving instruction keeps its proof.
+        let a1 = MachInst::new(AArch64Opcode::AddRR, vec![vreg(2), vreg(0), vreg(1)])
+            .with_proof(ProofAnnotation::NoOverflow);
+        let a2 = MachInst::new(AArch64Opcode::AddRR, vec![vreg(3), vreg(0), vreg(1)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![a1, a2, ret]);
+
+        let mut cse = CommonSubexprElim;
+        assert!(cse.run(&mut func));
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 2); // a1, ret
+        let surviving = func.inst(block.insts[0]);
+        assert_eq!(surviving.proof, Some(ProofAnnotation::NoOverflow));
+    }
+
+    #[test]
+    fn test_cse_merges_proof_from_eliminated() {
+        // v2 = add v0, v1 (no proof)
+        // v3 = add v0, v1 [InBounds] → eliminated, proof merged onto v2
+        // Surviving instruction gets the eliminated instruction's proof.
+        let a1 = MachInst::new(AArch64Opcode::AddRR, vec![vreg(2), vreg(0), vreg(1)]);
+        let a2 = MachInst::new(AArch64Opcode::AddRR, vec![vreg(3), vreg(0), vreg(1)])
+            .with_proof(ProofAnnotation::InBounds);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![a1, a2, ret]);
+
+        let mut cse = CommonSubexprElim;
+        assert!(cse.run(&mut func));
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 2); // a1, ret
+        let surviving = func.inst(block.insts[0]);
+        assert_eq!(surviving.proof, Some(ProofAnnotation::InBounds));
+    }
+
+    #[test]
+    fn test_cse_merges_same_proof() {
+        // Both instructions have the same proof → surviving keeps it.
+        let a1 = MachInst::new(AArch64Opcode::AddRR, vec![vreg(2), vreg(0), vreg(1)])
+            .with_proof(ProofAnnotation::NotNull);
+        let a2 = MachInst::new(AArch64Opcode::AddRR, vec![vreg(3), vreg(0), vreg(1)])
+            .with_proof(ProofAnnotation::NotNull);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![a1, a2, ret]);
+
+        let mut cse = CommonSubexprElim;
+        assert!(cse.run(&mut func));
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 2);
+        let surviving = func.inst(block.insts[0]);
+        assert_eq!(surviving.proof, Some(ProofAnnotation::NotNull));
+    }
+
+    #[test]
+    fn test_cse_drops_conflicting_proofs() {
+        // Different proofs → conservative merge returns None.
+        let a1 = MachInst::new(AArch64Opcode::AddRR, vec![vreg(2), vreg(0), vreg(1)])
+            .with_proof(ProofAnnotation::NoOverflow);
+        let a2 = MachInst::new(AArch64Opcode::AddRR, vec![vreg(3), vreg(0), vreg(1)])
+            .with_proof(ProofAnnotation::InBounds);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![a1, a2, ret]);
+
+        let mut cse = CommonSubexprElim;
+        assert!(cse.run(&mut func));
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 2);
+        let surviving = func.inst(block.insts[0]);
+        // Different proofs → conservatively dropped
+        assert!(surviving.proof.is_none());
     }
 }

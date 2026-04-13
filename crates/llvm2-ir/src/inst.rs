@@ -367,6 +367,29 @@ pub enum ProofAnnotation {
     PositiveRefCount,
 }
 
+impl ProofAnnotation {
+    /// Conservatively merge two optional proof annotations.
+    ///
+    /// Used by optimization passes to combine proof annotations when
+    /// instructions are replaced or eliminated:
+    /// - If both are `None`, returns `None`.
+    /// - If one is `Some` and the other is `None`, returns the `Some`.
+    /// - If both are `Some` and equal, returns that annotation.
+    /// - If both are `Some` but different, returns `None` (conservative:
+    ///   we cannot combine proofs of different properties).
+    pub fn merge(
+        a: Option<ProofAnnotation>,
+        b: Option<ProofAnnotation>,
+    ) -> Option<ProofAnnotation> {
+        match (a, b) {
+            (None, None) => None,
+            (Some(proof), None) | (None, Some(proof)) => Some(proof),
+            (Some(x), Some(y)) if x == y => Some(x),
+            (Some(_), Some(_)) => None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MachInst
 // ---------------------------------------------------------------------------
@@ -953,5 +976,64 @@ mod tests {
         assert_eq!(inst2.opcode, inst.opcode);
         assert_eq!(inst2.operands.len(), inst.operands.len());
         assert_eq!(inst2.flags, inst.flags);
+    }
+
+    // ---- ProofAnnotation::merge tests ----
+
+    #[test]
+    fn proof_merge_none_none() {
+        assert_eq!(ProofAnnotation::merge(None, None), None);
+    }
+
+    #[test]
+    fn proof_merge_some_and_none() {
+        assert_eq!(
+            ProofAnnotation::merge(Some(ProofAnnotation::NoOverflow), None),
+            Some(ProofAnnotation::NoOverflow),
+        );
+        assert_eq!(
+            ProofAnnotation::merge(None, Some(ProofAnnotation::InBounds)),
+            Some(ProofAnnotation::InBounds),
+        );
+    }
+
+    #[test]
+    fn proof_merge_equal() {
+        assert_eq!(
+            ProofAnnotation::merge(
+                Some(ProofAnnotation::NotNull),
+                Some(ProofAnnotation::NotNull),
+            ),
+            Some(ProofAnnotation::NotNull),
+        );
+    }
+
+    #[test]
+    fn proof_merge_different_returns_none() {
+        assert_eq!(
+            ProofAnnotation::merge(
+                Some(ProofAnnotation::ValidBorrow),
+                Some(ProofAnnotation::PositiveRefCount),
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn proof_merge_all_variants_with_self() {
+        let variants = [
+            ProofAnnotation::NoOverflow,
+            ProofAnnotation::InBounds,
+            ProofAnnotation::NotNull,
+            ProofAnnotation::ValidBorrow,
+            ProofAnnotation::PositiveRefCount,
+        ];
+        for v in &variants {
+            assert_eq!(
+                ProofAnnotation::merge(Some(*v), Some(*v)),
+                Some(*v),
+                "{:?} merged with itself should be Some({:?})", v, v,
+            );
+        }
     }
 }
