@@ -883,7 +883,9 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
         // Trap pseudo-instructions — emit BRK #1 (debug breakpoint).
         AArch64Opcode::TrapOverflow
         | AArch64Opcode::TrapBoundsCheck
-        | AArch64Opcode::TrapNull => {
+        | AArch64Opcode::TrapNull
+        | AArch64Opcode::TrapDivZero
+        | AArch64Opcode::TrapShiftRange => {
             Ok(0xD4200020) // BRK #1
         }
 
@@ -1477,6 +1479,8 @@ mod tests {
             (AArch64Opcode::TrapOverflow, vec![]),
             (AArch64Opcode::TrapBoundsCheck, vec![]),
             (AArch64Opcode::TrapNull, vec![]),
+            (AArch64Opcode::TrapDivZero, vec![]),
+            (AArch64Opcode::TrapShiftRange, vec![]),
             (AArch64Opcode::Retain, vec![]),
             (AArch64Opcode::Release, vec![]),
             (AArch64Opcode::Phi, vec![]),

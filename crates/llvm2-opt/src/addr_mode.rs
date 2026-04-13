@@ -214,7 +214,7 @@ fn produces_value(inst: &MachInst) -> bool {
         CmpRR | CmpRI | Tst | Fcmp => false,
         StrRI | StpRI | StpPreIndex => false,
         B | BCond | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => false,
-        TrapOverflow | TrapBoundsCheck | TrapNull => false,
+        TrapOverflow | TrapBoundsCheck | TrapNull | TrapDivZero | TrapShiftRange => false,
         Retain | Release => false,
         Nop => false,
         Bl | Blr => false,

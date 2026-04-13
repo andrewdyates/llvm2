@@ -119,7 +119,7 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         AddsRR | AddsRI | SubsRR | SubsRI => MemoryEffect::Pure,
 
         // Trap pseudo-instructions: control flow, not memory ops
-        TrapOverflow | TrapBoundsCheck | TrapNull => MemoryEffect::Pure,
+        TrapOverflow | TrapBoundsCheck | TrapNull | TrapDivZero | TrapShiftRange => MemoryEffect::Pure,
 
         // Reference counting: read and write memory (refcount field)
         Retain | Release => MemoryEffect::Store,
