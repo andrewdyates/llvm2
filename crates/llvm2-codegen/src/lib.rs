@@ -13,7 +13,8 @@
 //! - AArch64
 //! - RISC-V
 
-pub mod target;
 pub mod lower;
+pub mod macho;
+pub mod target;
 
 pub use target::Target;
