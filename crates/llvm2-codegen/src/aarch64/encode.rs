@@ -1099,9 +1099,34 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
 
         AArch64Opcode::Phi
         | AArch64Opcode::StackAlloc
+        | AArch64Opcode::Copy
         | AArch64Opcode::Nop
         | AArch64Opcode::Retain
         | AArch64Opcode::Release => Ok(NOP),
+
+        // New opcodes added for ISel unification (issue #73).
+        // These are encodable hardware instructions that don't yet have
+        // dedicated encoding logic. Emit NOP as a safe placeholder —
+        // the pipeline should not produce these until encoding is implemented.
+        AArch64Opcode::AndRI
+        | AArch64Opcode::OrrRI
+        | AArch64Opcode::EorRI
+        | AArch64Opcode::BicRR
+        | AArch64Opcode::Csinc
+        | AArch64Opcode::Csinv
+        | AArch64Opcode::Csneg
+        | AArch64Opcode::Movn
+        | AArch64Opcode::FmovImm
+        | AArch64Opcode::LdrRO
+        | AArch64Opcode::StrRO
+        | AArch64Opcode::LdrGot
+        | AArch64Opcode::LdrTlvp
+        | AArch64Opcode::Ubfm
+        | AArch64Opcode::Sbfm
+        | AArch64Opcode::Bfm => {
+            // TODO(#73): Implement proper encoding for these opcodes.
+            Err(EncodeError::UnsupportedOpcode(inst.opcode))
+        }
     }
 }
 

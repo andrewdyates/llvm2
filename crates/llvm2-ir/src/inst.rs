@@ -36,10 +36,16 @@ pub enum AArch64Opcode {
 
     // -- Logical --
     AndRR,
+    AndRI,
     OrrRR,
+    OrrRI,
     EorRR,
-    /// ORN Rd, XZR, Rm — bitwise NOT (MVN alias, when first source is zero register).
+    EorRI,
+    /// ORN Rd, Rn, Rm — bitwise OR-NOT.
+    /// When Rn=XZR, this is MVN (bitwise NOT).
     OrnRR,
+    /// BIC Rd, Rn, Rm — bitwise AND-NOT (bit clear).
+    BicRR,
 
     // -- Shifts --
     LslRR,
@@ -60,14 +66,27 @@ pub enum AArch64Opcode {
     /// Operands: [dst, Imm(cond_code_encoding)].
     /// Semantically: Xd = (cond) ? 1 : 0.
     Cset,
+    /// CSINC Xd, Xn, Xm, cond — conditional select increment.
+    /// Semantically: Xd = cond ? Xn : (Xm + 1).
+    Csinc,
+    /// CSINV Xd, Xn, Xm, cond — conditional select invert.
+    /// Semantically: Xd = cond ? Xn : ~Xm.
+    Csinv,
+    /// CSNEG Xd, Xn, Xm, cond — conditional select negate.
+    /// Semantically: Xd = cond ? Xn : -Xm.
+    Csneg,
 
     // -- Move --
     MovR,
     MovI,
     Movz,
+    /// MOVN: move wide with NOT (for small negative constants).
+    Movn,
     Movk,
+    /// FMOV immediate to FPR (e.g., FMOV Sd, #imm8 or FMOV Dd, #imm8).
+    FmovImm,
 
-    // -- Memory --
+    // -- Memory (immediate offset) --
     LdrRI,
     StrRI,
     /// LDRB (unsigned offset): load byte, zero-extend to 32-bit.
@@ -100,6 +119,18 @@ pub enum AArch64Opcode {
     /// Operands: [PReg(Rt), PReg(Rt2), Special(SP)|PReg(Rn), Imm(offset)]
     LdpPostIndex,
 
+    // -- Memory (register offset) --
+    /// LDR Wt, [Xn, Xm] — load 32-bit, base + register offset.
+    LdrRO,
+    /// STR Wt, [Xn, Xm] — store 32-bit/64-bit, base + register offset.
+    StrRO,
+
+    // -- Memory (GOT / TLV) --
+    /// LDR Xd, [Xn, #got_pageoff] — load from GOT slot.
+    LdrGot,
+    /// LDR Xd, [Xn, #tlvp_pageoff] — load from TLV descriptor.
+    LdrTlvp,
+
     // -- Branch --
     B,
     BCond,
@@ -123,6 +154,17 @@ pub enum AArch64Opcode {
     Uxtw,
     Sxtb,
     Sxth,
+
+    // -- Bitfield operations --
+    /// UBFM Rd, Rn, #immr, #imms — unsigned bitfield move.
+    /// Aliases: LSL/LSR (imm), UBFX, UXTB, UXTH.
+    Ubfm,
+    /// SBFM Rd, Rn, #immr, #imms — signed bitfield move.
+    /// Aliases: ASR (imm), SBFX, SXTB, SXTH, SXTW.
+    Sbfm,
+    /// BFM Rd, Rn, #immr, #imms — bitfield move (insert).
+    /// Aliases: BFI, BFXIL.
+    Bfm,
 
     // -- Floating-point --
     FaddRR,
@@ -187,6 +229,8 @@ pub enum AArch64Opcode {
     // -- Pseudo-instructions (no hardware encoding) --
     Phi,
     StackAlloc,
+    /// COPY: register-to-register copy pseudo (resolved by regalloc).
+    Copy,
     Nop,
 }
 
@@ -212,17 +256,18 @@ impl AArch64Opcode {
             Ret => InstFlags::IS_RETURN.union(InstFlags::IS_TERMINATOR),
 
             // Memory loads
-            LdrRI | LdrbRI | LdrhRI | LdrsbRI | LdrshRI => InstFlags::READS_MEMORY,
-            LdrLiteral => InstFlags::READS_MEMORY,
+            LdrRI | LdrbRI | LdrhRI | LdrsbRI | LdrshRI | LdrRO => InstFlags::READS_MEMORY,
+            LdrLiteral | LdrGot | LdrTlvp => InstFlags::READS_MEMORY,
             LdpRI | LdpPostIndex => InstFlags::READS_MEMORY,
 
             // Memory stores
-            StrRI | StrbRI | StrhRI => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
+            StrRI | StrbRI | StrhRI | StrRO => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
             StpRI | StpPreIndex => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Pseudo-instructions
             Phi => InstFlags::IS_PSEUDO,
             StackAlloc => InstFlags::IS_PSEUDO.union(InstFlags::HAS_SIDE_EFFECTS),
+            Copy => InstFlags::IS_PSEUDO,
             Nop => InstFlags::IS_PSEUDO,
 
             // Compare/test (set condition flags = side effect)
@@ -253,6 +298,7 @@ impl AArch64Opcode {
             self,
             Self::Phi
                 | Self::StackAlloc
+                | Self::Copy
                 | Self::Nop
                 | Self::TrapOverflow
                 | Self::TrapBoundsCheck

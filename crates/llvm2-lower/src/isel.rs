@@ -74,222 +74,18 @@ pub enum ISelError {
 }
 
 // ---------------------------------------------------------------------------
-// ISel-level AArch64 opcode enumeration
+// AArch64 opcode — re-exported from llvm2-ir (unified, issue #73)
 // ---------------------------------------------------------------------------
 //
-// NOTE: These ISel-level types (AArch64Opcode, MachOperand, AArch64CC,
-// MachInst, MachBlock, MachFunction) intentionally shadow the types in
-// `llvm2-ir`. The ISel types represent the *instruction selection* output
-// with LLVM-style per-width opcode naming (ADDWrr, ADDXrr) and HashMap-
-// based block storage, while `llvm2-ir` types represent the canonical
-// machine IR with abstract opcodes (AddRR) and arena-indexed storage.
+// ISel now uses the canonical `llvm2_ir::AArch64Opcode` directly instead of
+// its own per-width opcode enum. Width information (32-bit vs 64-bit) is
+// conveyed by the register class of the operands, not the opcode name.
 //
-// The pipeline flow is:
-//   tMIR -> isel::MachFunction (this module)
-//        -> llvm2_ir::MachFunction (canonical IR for opt/regalloc/codegen)
-//
-// A translation pass (not yet implemented) will lower isel output to the
-// canonical llvm2-ir representation. See issue #37 for unification tracking.
+// The pipeline no longer needs `map_isel_opcode()` to translate between
+// ISel opcodes and IR opcodes — they are the same type.
 // ---------------------------------------------------------------------------
 
-/// AArch64 machine opcodes for instruction selection output.
-///
-/// Uses LLVM-style per-width naming (ADDWrr = 32-bit ADD, ADDXrr = 64-bit ADD)
-/// to distinguish width variants at ISel time. These are separate from
-/// `llvm2_ir::AArch64Opcode` which uses abstract names (AddRR, AddRI).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AArch64Opcode {
-    // Arithmetic (register forms)
-    ADDWrr,   // 32-bit add, reg+reg
-    ADDXrr,   // 64-bit add, reg+reg
-    ADDWri,   // 32-bit add, reg+imm12
-    ADDXri,   // 64-bit add, reg+imm12
-    SUBWrr,   // 32-bit sub, reg+reg
-    SUBXrr,   // 64-bit sub, reg+reg
-    SUBWri,   // 32-bit sub, reg+imm12
-    SUBXri,   // 64-bit sub, reg+imm12
-    MULWrrr,  // 32-bit multiply (MADD Wd, Wn, Wm, WZR)
-    MULXrrr,  // 64-bit multiply (MADD Xd, Xn, Xm, XZR)
-    SDIVWrr,  // 32-bit signed divide
-    SDIVXrr,  // 64-bit signed divide
-    UDIVWrr,  // 32-bit unsigned divide
-    UDIVXrr,  // 64-bit unsigned divide
-    MSUBWrrr, // 32-bit multiply-subtract: Wd = Wa - Wn * Wm
-    MSUBXrrr, // 64-bit multiply-subtract: Xd = Xa - Xn * Xm
-
-    // Comparison
-    CMPWrr,   // 32-bit compare (SUBS WZR, Wn, Wm)
-    CMPXrr,   // 64-bit compare (SUBS XZR, Xn, Xm)
-    CMPWri,   // 32-bit compare, reg+imm12
-    CMPXri,   // 64-bit compare, reg+imm12
-    CSETWcc,  // Conditional set (CSET Wd, cc)
-
-    // Move / materialization
-    MOVWrr,   // 32-bit register move (ORR Wd, WZR, Wm)
-    MOVXrr,   // 64-bit register move (ORR Xd, XZR, Xm)
-    MOVZWi,   // 32-bit move wide with zero
-    MOVZXi,   // 64-bit move wide with zero
-    MOVNWi,   // 32-bit move wide with NOT
-    MOVNXi,   // 64-bit move wide with NOT
-    MOVKXi,   // Move keep (16-bit insert)
-    FMOVSri,  // Move immediate to FPR (32-bit)
-    FMOVDri,  // Move immediate to FPR (64-bit)
-
-    // Load / store
-    LDRWui,   // Load 32-bit, unsigned offset
-    LDRXui,   // Load 64-bit, unsigned offset
-    LDRSui,   // Load 32-bit float, unsigned offset
-    LDRDui,   // Load 64-bit float, unsigned offset
-    LDRBui,   // Load byte (zero-extend to 32-bit), unsigned offset
-    LDRHui,   // Load halfword (zero-extend to 32-bit), unsigned offset
-    LDRSBui,  // Load byte (sign-extend to 32-bit), unsigned offset
-    LDRSHui,  // Load halfword (sign-extend to 32-bit), unsigned offset
-    STRWui,   // Store 32-bit, unsigned offset
-    STRXui,   // Store 64-bit, unsigned offset
-    STRSui,   // Store 32-bit float, unsigned offset
-    STRDui,   // Store 64-bit float, unsigned offset
-    STRBui,   // Store byte (truncating), unsigned offset
-    STRHui,   // Store halfword (truncating), unsigned offset
-
-    // Branch
-    B,        // Unconditional branch
-    Bcc,      // Conditional branch (B.cond)
-    BL,       // Branch with link (call)
-    BLR,      // Branch with link to register (indirect call)
-    RET,      // Return (BR X30)
-
-    // Shift (register forms)
-    LSLVWr,   // 32-bit logical shift left by register
-    LSLVXr,   // 64-bit logical shift left by register
-    LSRVWr,   // 32-bit logical shift right by register
-    LSRVXr,   // 64-bit logical shift right by register
-    ASRVWr,   // 32-bit arithmetic shift right by register
-    ASRVXr,   // 64-bit arithmetic shift right by register
-
-    // Shift (immediate forms - encoded via UBFM/SBFM)
-    LSLWi,    // 32-bit LSL immediate (UBFM alias)
-    LSLXi,    // 64-bit LSL immediate
-    LSRWi,    // 32-bit LSR immediate (UBFM alias)
-    LSRXi,    // 64-bit LSR immediate
-    ASRWi,    // 32-bit ASR immediate (SBFM alias)
-    ASRXi,    // 64-bit ASR immediate
-
-    // Logical (register forms)
-    ANDWrr,   // 32-bit bitwise AND
-    ANDXrr,   // 64-bit bitwise AND
-    ORRWrr,   // 32-bit bitwise OR
-    ORRXrr,   // 64-bit bitwise OR
-    EORWrr,   // 32-bit bitwise XOR
-    EORXrr,   // 64-bit bitwise XOR
-    BICWrr,   // 32-bit AND-NOT (bit clear)
-    BICXrr,   // 64-bit AND-NOT
-    ORNWrr,   // 32-bit OR-NOT
-    ORNXrr,   // 64-bit OR-NOT
-
-    // Logical (immediate forms - uses bitmask immediate encoding)
-    ANDWri,   // 32-bit AND immediate
-    ANDXri,   // 64-bit AND immediate
-    ORRWri,   // 32-bit OR immediate
-    ORRXri,   // 64-bit OR immediate
-    EORWri,   // 32-bit XOR immediate
-    EORXri,   // 64-bit XOR immediate
-
-    // Conditional select
-    CSELWr,   // 32-bit CSEL Wd, Wn, Wm, cond
-    CSELXr,   // 64-bit CSEL Xd, Xn, Xm, cond
-    CSINCWr,  // 32-bit CSINC (conditional increment)
-    CSINCXr,  // 64-bit CSINC
-    CSINVWr,  // 32-bit CSINV (conditional invert)
-    CSINVXr,  // 64-bit CSINV
-    CSNEGWr,  // 32-bit CSNEG (conditional negate)
-    CSNEGXr,  // 64-bit CSNEG
-
-    // Extension instructions
-    SXTBWr,   // Sign-extend byte to 32-bit (SBFM Wd, Wn, #0, #7)
-    SXTBXr,   // Sign-extend byte to 64-bit (SBFM Xd, Xn, #0, #7)
-    SXTHWr,   // Sign-extend halfword to 32-bit (SBFM Wd, Wn, #0, #15)
-    SXTHXr,   // Sign-extend halfword to 64-bit
-    SXTWXr,   // Sign-extend word to 64-bit (SBFM Xd, Wn, #0, #31)
-    UXTBWr,   // Zero-extend byte to 32-bit (AND Wd, Wn, #0xFF)
-    UXTHWr,   // Zero-extend halfword to 32-bit (AND Wd, Wn, #0xFFFF)
-
-    // Bitfield operations
-    UBFMWri,  // Unsigned bitfield move, 32-bit
-    UBFMXri,  // Unsigned bitfield move, 64-bit
-    SBFMWri,  // Signed bitfield move, 32-bit
-    SBFMXri,  // Signed bitfield move, 64-bit
-    BFMWri,   // Bitfield move (insert), 32-bit
-    BFMXri,   // Bitfield move (insert), 64-bit
-
-    // Unary integer operations
-    NEGWr,    // 32-bit negate (SUB Wd, WZR, Wm)
-    NEGXr,    // 64-bit negate (SUB Xd, XZR, Xm)
-    MVNWr,    // 32-bit bitwise NOT (ORN Wd, WZR, Wm)
-    MVNXr,    // 64-bit bitwise NOT (ORN Xd, XZR, Xm)
-
-    // Floating-point unary operations
-    FNEGSr,   // 32-bit float negate (FNEG Sd, Sn)
-    FNEGDr,   // 64-bit float negate (FNEG Dd, Dn)
-
-    // Floating-point arithmetic
-    FADDSrr,  // 32-bit float add
-    FADDDrr,  // 64-bit float add
-    FSUBSrr,  // 32-bit float sub
-    FSUBDrr,  // 64-bit float sub
-    FMULSrr,  // 32-bit float mul
-    FMULDrr,  // 64-bit float mul
-    FDIVSrr,  // 32-bit float div
-    FDIVDrr,  // 64-bit float div
-
-    // Floating-point comparison
-    FCMPSrr,  // 32-bit float compare
-    FCMPDrr,  // 64-bit float compare
-
-    // Floating-point conversion (signed)
-    FCVTZSWr, // Float to signed int, 32-bit result (FCVTZS Wd, Sn/Dn)
-    FCVTZSXr, // Float to signed int, 64-bit result (FCVTZS Xd, Sn/Dn)
-    SCVTFSWr, // Signed int to float, from 32-bit (SCVTF Sd, Wn)
-    SCVTFDWr, // Signed int to double, from 32-bit (SCVTF Dd, Wn)
-    SCVTFSXr, // Signed int to float, from 64-bit (SCVTF Sd, Xn)
-    SCVTFDXr, // Signed int to double, from 64-bit (SCVTF Dd, Xn)
-
-    // Floating-point conversion (unsigned)
-    FCVTZUWr, // Float to unsigned int, 32-bit result (FCVTZU Wd, Sn/Dn)
-    FCVTZUXr, // Float to unsigned int, 64-bit result (FCVTZU Xd, Sn/Dn)
-    UCVTFSWr, // Unsigned int to float, from 32-bit (UCVTF Sd, Wn)
-    UCVTFDWr, // Unsigned int to double, from 32-bit (UCVTF Dd, Wn)
-    UCVTFSXr, // Unsigned int to float, from 64-bit (UCVTF Sd, Xn)
-    UCVTFDXr, // Unsigned int to double, from 64-bit (UCVTF Dd, Xn)
-
-    // Float precision conversion
-    FCVTDSr,  // Widen f32 -> f64 (FCVT Dd, Sn)
-    FCVTSDr,  // Narrow f64 -> f32 (FCVT Ss, Dn)
-
-    // Bitcast: FMOV between GPR and FPR (reinterpret bits)
-    FMOVSWr,  // GPR 32-bit to FPR 32-bit (FMOV Sd, Wn)
-    FMOVDXr,  // GPR 64-bit to FPR 64-bit (FMOV Dd, Xn)
-    FMOVWSr,  // FPR 32-bit to GPR 32-bit (FMOV Wd, Sn)
-    FMOVXDr,  // FPR 64-bit to GPR 64-bit (FMOV Xd, Dn)
-
-    // Address generation
-    ADRP,     // PC-relative page address (ADRP Xd, #page)
-    ADDXriPCRel, // Add page offset for global (ADD Xd, Xn, #pageoff)
-    LDRXuiGot,   // Load 64-bit from GOT slot (LDR Xd, [Xn, #gotpageoff])
-    LDRXuiTlvp,  // Load 64-bit from TLV descriptor (LDR Xd, [Xn, #tlvppageoff])
-
-    // Stack / frame operations
-    ADDXriSP, // SP-relative add for stack slot address
-
-    // Load/store with register offset
-    LDRWro,   // Load 32-bit, base + register offset
-    LDRXro,   // Load 64-bit, base + register offset
-    STRWro,   // Store 32-bit, base + register offset
-    STRXro,   // Store 64-bit, base + register offset
-
-    // Pseudo-ops (expanded later by frame lowering / regalloc)
-    COPY,     // Pseudo: reg-to-reg copy (resolved by regalloc)
-    PHI,      // Pseudo: SSA phi (eliminated before regalloc)
-}
+pub use llvm2_ir::AArch64Opcode;
 
 // ---------------------------------------------------------------------------
 // Machine operand
@@ -716,9 +512,9 @@ impl InstructionSelector {
         if imm >= 0 && imm <= 0xFFFF {
             // Simple MOVZ
             let opc = if Self::is_32bit(&ty) {
-                AArch64Opcode::MOVZWi
+                AArch64Opcode::Movz
             } else {
-                AArch64Opcode::MOVZXi
+                AArch64Opcode::Movz
             };
             self.func.push_inst(
                 block,
@@ -727,9 +523,9 @@ impl InstructionSelector {
         } else if imm < 0 && imm >= -0x10000 {
             // MOVN for small negative values
             let opc = if Self::is_32bit(&ty) {
-                AArch64Opcode::MOVNWi
+                AArch64Opcode::Movn
             } else {
-                AArch64Opcode::MOVNXi
+                AArch64Opcode::Movn
             };
             // MOVN encodes ~(imm16 << shift), so for -1 we encode MOVN Xd, #0
             let encoded = (!imm) as u64 & 0xFFFF;
@@ -744,9 +540,9 @@ impl InstructionSelector {
             // Large immediate: MOVZ + MOVK sequence
             // Start with lowest 16 bits via MOVZ
             let opc_z = if Self::is_32bit(&ty) {
-                AArch64Opcode::MOVZWi
+                AArch64Opcode::Movz
             } else {
-                AArch64Opcode::MOVZXi
+                AArch64Opcode::Movz
             };
             let low16 = (imm as u64) & 0xFFFF;
             self.func.push_inst(
@@ -765,7 +561,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::MOVKXi,
+                            AArch64Opcode::Movk,
                             vec![
                                 MachOperand::VReg(dst),
                                 MachOperand::Imm(chunk as i64),
@@ -789,8 +585,8 @@ impl InstructionSelector {
         let result = &inst.results[0];
 
         let opc = match ty {
-            Type::F32 => AArch64Opcode::FMOVSri,
-            Type::F64 => AArch64Opcode::FMOVDri,
+            Type::F32 => AArch64Opcode::FmovImm,
+            Type::F64 => AArch64Opcode::FmovImm,
             _ => return Err(ISelError::UnsupportedFconstType(ty)),
         };
 
@@ -843,9 +639,9 @@ impl InstructionSelector {
         };
 
         let opc = if Self::is_32bit(&ty) {
-            AArch64Opcode::MOVWrr
+            AArch64Opcode::MovR
         } else {
-            AArch64Opcode::MOVXrr
+            AArch64Opcode::MovR
         };
 
         self.func.push_inst(
@@ -882,16 +678,16 @@ impl InstructionSelector {
         let rhs = self.use_value(&rhs_val)?;
 
         let opc = match (op, is_32) {
-            (AArch64BinOp::Add, true) => AArch64Opcode::ADDWrr,
-            (AArch64BinOp::Add, false) => AArch64Opcode::ADDXrr,
-            (AArch64BinOp::Sub, true) => AArch64Opcode::SUBWrr,
-            (AArch64BinOp::Sub, false) => AArch64Opcode::SUBXrr,
-            (AArch64BinOp::Mul, true) => AArch64Opcode::MULWrrr,
-            (AArch64BinOp::Mul, false) => AArch64Opcode::MULXrrr,
-            (AArch64BinOp::Sdiv, true) => AArch64Opcode::SDIVWrr,
-            (AArch64BinOp::Sdiv, false) => AArch64Opcode::SDIVXrr,
-            (AArch64BinOp::Udiv, true) => AArch64Opcode::UDIVWrr,
-            (AArch64BinOp::Udiv, false) => AArch64Opcode::UDIVXrr,
+            (AArch64BinOp::Add, true) => AArch64Opcode::AddRR,
+            (AArch64BinOp::Add, false) => AArch64Opcode::AddRR,
+            (AArch64BinOp::Sub, true) => AArch64Opcode::SubRR,
+            (AArch64BinOp::Sub, false) => AArch64Opcode::SubRR,
+            (AArch64BinOp::Mul, true) => AArch64Opcode::MulRR,
+            (AArch64BinOp::Mul, false) => AArch64Opcode::MulRR,
+            (AArch64BinOp::Sdiv, true) => AArch64Opcode::SDiv,
+            (AArch64BinOp::Sdiv, false) => AArch64Opcode::SDiv,
+            (AArch64BinOp::Udiv, true) => AArch64Opcode::UDiv,
+            (AArch64BinOp::Udiv, false) => AArch64Opcode::UDiv,
         };
 
         self.func.push_inst(
@@ -929,10 +725,10 @@ impl InstructionSelector {
         // Step 1: tmp = a / b
         let tmp = self.new_vreg(class);
         let div_opc = match (signed, is_32) {
-            (true, true) => AArch64Opcode::SDIVWrr,
-            (true, false) => AArch64Opcode::SDIVXrr,
-            (false, true) => AArch64Opcode::UDIVWrr,
-            (false, false) => AArch64Opcode::UDIVXrr,
+            (true, true) => AArch64Opcode::SDiv,
+            (true, false) => AArch64Opcode::SDiv,
+            (false, true) => AArch64Opcode::UDiv,
+            (false, false) => AArch64Opcode::UDiv,
         };
         self.func.push_inst(
             block,
@@ -943,9 +739,9 @@ impl InstructionSelector {
         // Operands: [dst, Rn=tmp, Rm=b, Ra=a]
         let dst = self.new_vreg(class);
         let msub_opc = if is_32 {
-            AArch64Opcode::MSUBWrrr
+            AArch64Opcode::Msub
         } else {
-            AArch64Opcode::MSUBXrrr
+            AArch64Opcode::Msub
         };
         self.func.push_inst(
             block,
@@ -988,10 +784,10 @@ impl InstructionSelector {
         let src = self.use_value(&src_val)?;
 
         let opc = match (op, is_32) {
-            (AArch64IntUnaryOp::Neg, true) => AArch64Opcode::NEGWr,
-            (AArch64IntUnaryOp::Neg, false) => AArch64Opcode::NEGXr,
-            (AArch64IntUnaryOp::Mvn, true) => AArch64Opcode::MVNWr,
-            (AArch64IntUnaryOp::Mvn, false) => AArch64Opcode::MVNXr,
+            (AArch64IntUnaryOp::Neg, true) => AArch64Opcode::Neg,
+            (AArch64IntUnaryOp::Neg, false) => AArch64Opcode::Neg,
+            (AArch64IntUnaryOp::Mvn, true) => AArch64Opcode::OrnRR,
+            (AArch64IntUnaryOp::Mvn, false) => AArch64Opcode::OrnRR,
         };
 
         self.func.push_inst(
@@ -1019,9 +815,9 @@ impl InstructionSelector {
         let src = self.use_value(&src_val)?;
 
         let opc = if is_f32 {
-            AArch64Opcode::FNEGSr
+            AArch64Opcode::FnegRR
         } else {
-            AArch64Opcode::FNEGDr
+            AArch64Opcode::FnegRR
         };
 
         self.func.push_inst(
@@ -1058,9 +854,9 @@ impl InstructionSelector {
 
         // CMP (subtract setting flags, discard result)
         let cmp_opc = if is_32 {
-            AArch64Opcode::CMPWrr
+            AArch64Opcode::CmpRR
         } else {
-            AArch64Opcode::CMPXrr
+            AArch64Opcode::CmpRR
         };
         self.func.push_inst(
             block,
@@ -1078,7 +874,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::CSETWcc,
+                AArch64Opcode::CSet,
                 vec![MachOperand::VReg(dst), MachOperand::CondCode(cc)],
             ),
         );
@@ -1128,7 +924,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::CMPXri,
+                AArch64Opcode::CmpRI,
                 vec![cond_op, MachOperand::Imm(0)],
             ),
         );
@@ -1137,7 +933,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::Bcc,
+                AArch64Opcode::BCond,
                 vec![
                     MachOperand::CondCode(AArch64CC::NE),
                     MachOperand::Block(then_dest),
@@ -1175,9 +971,9 @@ impl InstructionSelector {
                 ArgLocation::Reg(preg) => {
                     let ty = ret_types[i].clone();
                     let opc = if Self::is_32bit(&ty) {
-                        AArch64Opcode::MOVWrr
+                        AArch64Opcode::MovR
                     } else {
-                        AArch64Opcode::MOVXrr
+                        AArch64Opcode::MovR
                     };
                     // COPY pseudo: move value to physical register
                     self.func.push_inst(
@@ -1203,7 +999,7 @@ impl InstructionSelector {
         // Emit RET (branches to LR)
         self.func.push_inst(
             block,
-            MachInst::new(AArch64Opcode::RET, vec![MachOperand::PReg(gpr::LR)]),
+            MachInst::new(AArch64Opcode::Ret, vec![MachOperand::PReg(gpr::LR)]),
         );
         Ok(())
     }
@@ -1243,9 +1039,9 @@ impl InstructionSelector {
             match loc {
                 ArgLocation::Reg(preg) => {
                     let opc = if Self::is_32bit(&ty) {
-                        AArch64Opcode::MOVWrr
+                        AArch64Opcode::MovR
                     } else {
-                        AArch64Opcode::MOVXrr
+                        AArch64Opcode::MovR
                     };
                     self.func.push_inst(
                         block,
@@ -1255,9 +1051,9 @@ impl InstructionSelector {
                 ArgLocation::Stack { offset, size: _ } => {
                     // STR to [SP + offset]
                     let opc = if Self::is_32bit(&ty) {
-                        AArch64Opcode::STRWui
+                        AArch64Opcode::StrRI
                     } else {
-                        AArch64Opcode::STRXui
+                        AArch64Opcode::StrRI
                     };
                     self.func.push_inst(
                         block,
@@ -1272,7 +1068,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::MOVXrr,
+                            AArch64Opcode::MovR,
                             vec![MachOperand::PReg(*ptr_reg), src],
                         ),
                     );
@@ -1284,7 +1080,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::BL,
+                AArch64Opcode::Bl,
                 vec![MachOperand::Symbol(callee_name.to_string())],
             ),
         );
@@ -1298,9 +1094,9 @@ impl InstructionSelector {
                     let class = reg_class_for_type(&ty);
                     let dst = self.new_vreg(class);
                     let opc = if Self::is_32bit(&ty) {
-                        AArch64Opcode::MOVWrr
+                        AArch64Opcode::MovR
                     } else {
-                        AArch64Opcode::MOVXrr
+                        AArch64Opcode::MovR
                     };
                     self.func.push_inst(
                         block,
@@ -1318,7 +1114,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::MOVXrr,
+                            AArch64Opcode::MovR,
                             vec![MachOperand::VReg(dst), MachOperand::PReg(*ptr_reg)],
                         ),
                     );
@@ -1367,13 +1163,13 @@ impl InstructionSelector {
         // would be selected when the load feeds into an Sextend, but that
         // optimization is deferred to late combines (Phase 2).
         let opc = match ty {
-            Type::I8 => AArch64Opcode::LDRBui,
-            Type::I16 => AArch64Opcode::LDRHui,
-            Type::I32 => AArch64Opcode::LDRWui,
-            Type::I64 => AArch64Opcode::LDRXui,
-            Type::F32 => AArch64Opcode::LDRSui,
-            Type::F64 => AArch64Opcode::LDRDui,
-            _ => AArch64Opcode::LDRXui,
+            Type::I8 => AArch64Opcode::LdrbRI,
+            Type::I16 => AArch64Opcode::LdrhRI,
+            Type::I32 => AArch64Opcode::LdrRI,
+            Type::I64 => AArch64Opcode::LdrRI,
+            Type::F32 => AArch64Opcode::LdrRI,
+            Type::F64 => AArch64Opcode::LdrRI,
+            _ => AArch64Opcode::LdrRI,
         };
 
         self.func.push_inst(
@@ -1400,13 +1196,13 @@ impl InstructionSelector {
         let ty = self.value_type(&value_val);
 
         let opc = match ty {
-            Type::I8 => AArch64Opcode::STRBui,
-            Type::I16 => AArch64Opcode::STRHui,
-            Type::I32 => AArch64Opcode::STRWui,
-            Type::I64 => AArch64Opcode::STRXui,
-            Type::F32 => AArch64Opcode::STRSui,
-            Type::F64 => AArch64Opcode::STRDui,
-            _ => AArch64Opcode::STRXui,
+            Type::I8 => AArch64Opcode::StrbRI,
+            Type::I16 => AArch64Opcode::StrhRI,
+            Type::I32 => AArch64Opcode::StrRI,
+            Type::I64 => AArch64Opcode::StrRI,
+            Type::F32 => AArch64Opcode::StrRI,
+            Type::F64 => AArch64Opcode::StrRI,
+            _ => AArch64Opcode::StrRI,
         };
 
         self.func.push_inst(
@@ -1462,7 +1258,7 @@ impl InstructionSelector {
             self.func.push_inst(
                 block,
                 MachInst::new(
-                    AArch64Opcode::MOVXrr,
+                    AArch64Opcode::MovR,
                     vec![MachOperand::VReg(dst), base],
                 ),
             );
@@ -1471,7 +1267,7 @@ impl InstructionSelector {
             self.func.push_inst(
                 block,
                 MachInst::new(
-                    AArch64Opcode::ADDXri,
+                    AArch64Opcode::AddRI,
                     vec![
                         MachOperand::VReg(dst),
                         base,
@@ -1509,7 +1305,7 @@ impl InstructionSelector {
             self.func.push_inst(
                 block,
                 MachInst::new(
-                    AArch64Opcode::LDRXui,
+                    AArch64Opcode::LdrRI,
                     vec![MachOperand::PReg(gpr::X0), src, MachOperand::Imm(0)],
                 ),
             );
@@ -1519,7 +1315,7 @@ impl InstructionSelector {
             self.func.push_inst(
                 block,
                 MachInst::new(
-                    AArch64Opcode::LDRXui,
+                    AArch64Opcode::LdrRI,
                     vec![
                         MachOperand::PReg(gpr::X0),
                         src.clone(),
@@ -1531,7 +1327,7 @@ impl InstructionSelector {
             self.func.push_inst(
                 block,
                 MachInst::new(
-                    AArch64Opcode::LDRXui,
+                    AArch64Opcode::LdrRI,
                     vec![MachOperand::PReg(gpr::X1), src, MachOperand::Imm(8)],
                 ),
             );
@@ -1547,7 +1343,7 @@ impl InstructionSelector {
                 self.func.push_inst(
                     block,
                     MachInst::new(
-                        AArch64Opcode::LDRXui,
+                        AArch64Opcode::LdrRI,
                         vec![
                             MachOperand::VReg(tmp),
                             src.clone(),
@@ -1559,7 +1355,7 @@ impl InstructionSelector {
                 self.func.push_inst(
                     block,
                     MachInst::new(
-                        AArch64Opcode::STRXui,
+                        AArch64Opcode::StrRI,
                         vec![
                             MachOperand::VReg(tmp),
                             MachOperand::PReg(gpr::X8),
@@ -1575,7 +1371,7 @@ impl InstructionSelector {
                 self.func.push_inst(
                     block,
                     MachInst::new(
-                        AArch64Opcode::LDRWui,
+                        AArch64Opcode::LdrRI,
                         vec![
                             MachOperand::VReg(tmp),
                             src.clone(),
@@ -1586,7 +1382,7 @@ impl InstructionSelector {
                 self.func.push_inst(
                     block,
                     MachInst::new(
-                        AArch64Opcode::STRWui,
+                        AArch64Opcode::StrRI,
                         vec![
                             MachOperand::VReg(tmp),
                             MachOperand::PReg(gpr::X8),
@@ -1602,7 +1398,7 @@ impl InstructionSelector {
                 self.func.push_inst(
                     block,
                     MachInst::new(
-                        AArch64Opcode::LDRHui,
+                        AArch64Opcode::LdrhRI,
                         vec![
                             MachOperand::VReg(tmp),
                             src.clone(),
@@ -1613,7 +1409,7 @@ impl InstructionSelector {
                 self.func.push_inst(
                     block,
                     MachInst::new(
-                        AArch64Opcode::STRHui,
+                        AArch64Opcode::StrhRI,
                         vec![
                             MachOperand::VReg(tmp),
                             MachOperand::PReg(gpr::X8),
@@ -1629,7 +1425,7 @@ impl InstructionSelector {
                 self.func.push_inst(
                     block,
                     MachInst::new(
-                        AArch64Opcode::LDRBui,
+                        AArch64Opcode::LdrbRI,
                         vec![
                             MachOperand::VReg(tmp),
                             src.clone(),
@@ -1640,7 +1436,7 @@ impl InstructionSelector {
                 self.func.push_inst(
                     block,
                     MachInst::new(
-                        AArch64Opcode::STRBui,
+                        AArch64Opcode::StrbRI,
                         vec![
                             MachOperand::VReg(tmp),
                             MachOperand::PReg(gpr::X8),
@@ -1678,7 +1474,7 @@ impl InstructionSelector {
                 self.func.push_inst(
                     block,
                     MachInst::new(
-                        AArch64Opcode::LDRXui,
+                        AArch64Opcode::LdrRI,
                         vec![MachOperand::PReg(*preg), src, MachOperand::Imm(0)],
                     ),
                 );
@@ -1691,7 +1487,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::LDRXui,
+                            AArch64Opcode::LdrRI,
                             vec![
                                 MachOperand::PReg(*ptr_reg),
                                 src.clone(),
@@ -1705,7 +1501,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::LDRXui,
+                            AArch64Opcode::LdrRI,
                             vec![
                                 MachOperand::PReg(next_reg),
                                 src,
@@ -1720,7 +1516,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::MOVXrr,
+                            AArch64Opcode::MovR,
                             vec![MachOperand::PReg(*ptr_reg), src],
                         ),
                     );
@@ -1734,7 +1530,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::LDRXui,
+                            AArch64Opcode::LdrRI,
                             vec![
                                 MachOperand::VReg(tmp),
                                 src.clone(),
@@ -1745,7 +1541,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::STRXui,
+                            AArch64Opcode::StrRI,
                             vec![
                                 MachOperand::VReg(tmp),
                                 MachOperand::PReg(SP),
@@ -1760,7 +1556,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::LDRWui,
+                            AArch64Opcode::LdrRI,
                             vec![
                                 MachOperand::VReg(tmp),
                                 src.clone(),
@@ -1771,7 +1567,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::STRWui,
+                            AArch64Opcode::StrRI,
                             vec![
                                 MachOperand::VReg(tmp),
                                 MachOperand::PReg(SP),
@@ -1787,7 +1583,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::LDRHui,
+                            AArch64Opcode::LdrhRI,
                             vec![
                                 MachOperand::VReg(tmp),
                                 src.clone(),
@@ -1798,7 +1594,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::STRHui,
+                            AArch64Opcode::StrhRI,
                             vec![
                                 MachOperand::VReg(tmp),
                                 MachOperand::PReg(SP),
@@ -1814,7 +1610,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::LDRBui,
+                            AArch64Opcode::LdrbRI,
                             vec![
                                 MachOperand::VReg(tmp),
                                 src.clone(),
@@ -1825,7 +1621,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::STRBui,
+                            AArch64Opcode::StrbRI,
                             vec![
                                 MachOperand::VReg(tmp),
                                 MachOperand::PReg(SP),
@@ -1867,7 +1663,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         entry_block,
                         MachInst::new(
-                            AArch64Opcode::COPY,
+                            AArch64Opcode::Copy,
                             vec![MachOperand::VReg(vreg), MachOperand::PReg(*preg)],
                         ),
                     );
@@ -1875,9 +1671,9 @@ impl InstructionSelector {
                 ArgLocation::Stack { offset, size: _ } => {
                     // Load from stack: LDR vreg, [SP, #offset]
                     let opc = if Self::is_32bit(ty) {
-                        AArch64Opcode::LDRWui
+                        AArch64Opcode::LdrRI
                     } else {
-                        AArch64Opcode::LDRXui
+                        AArch64Opcode::LdrRI
                     };
                     // SP is register 31 in the encoding
                     self.func.push_inst(
@@ -1898,7 +1694,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         entry_block,
                         MachInst::new(
-                            AArch64Opcode::COPY,
+                            AArch64Opcode::Copy,
                             vec![MachOperand::VReg(vreg), MachOperand::PReg(*ptr_reg)],
                         ),
                     );
@@ -1940,12 +1736,12 @@ impl InstructionSelector {
         if is_imm {
             // Immediate shift form
             let opc = match (op, is_32) {
-                (AArch64ShiftOp::Lsl, true) => AArch64Opcode::LSLWi,
-                (AArch64ShiftOp::Lsl, false) => AArch64Opcode::LSLXi,
-                (AArch64ShiftOp::Lsr, true) => AArch64Opcode::LSRWi,
-                (AArch64ShiftOp::Lsr, false) => AArch64Opcode::LSRXi,
-                (AArch64ShiftOp::Asr, true) => AArch64Opcode::ASRWi,
-                (AArch64ShiftOp::Asr, false) => AArch64Opcode::ASRXi,
+                (AArch64ShiftOp::Lsl, true) => AArch64Opcode::LslRI,
+                (AArch64ShiftOp::Lsl, false) => AArch64Opcode::LslRI,
+                (AArch64ShiftOp::Lsr, true) => AArch64Opcode::LsrRI,
+                (AArch64ShiftOp::Lsr, false) => AArch64Opcode::LsrRI,
+                (AArch64ShiftOp::Asr, true) => AArch64Opcode::AsrRI,
+                (AArch64ShiftOp::Asr, false) => AArch64Opcode::AsrRI,
             };
             self.func.push_inst(
                 block,
@@ -1954,12 +1750,12 @@ impl InstructionSelector {
         } else {
             // Register shift form
             let opc = match (op, is_32) {
-                (AArch64ShiftOp::Lsl, true) => AArch64Opcode::LSLVWr,
-                (AArch64ShiftOp::Lsl, false) => AArch64Opcode::LSLVXr,
-                (AArch64ShiftOp::Lsr, true) => AArch64Opcode::LSRVWr,
-                (AArch64ShiftOp::Lsr, false) => AArch64Opcode::LSRVXr,
-                (AArch64ShiftOp::Asr, true) => AArch64Opcode::ASRVWr,
-                (AArch64ShiftOp::Asr, false) => AArch64Opcode::ASRVXr,
+                (AArch64ShiftOp::Lsl, true) => AArch64Opcode::LslRR,
+                (AArch64ShiftOp::Lsl, false) => AArch64Opcode::LslRR,
+                (AArch64ShiftOp::Lsr, true) => AArch64Opcode::LsrRR,
+                (AArch64ShiftOp::Lsr, false) => AArch64Opcode::LsrRR,
+                (AArch64ShiftOp::Asr, true) => AArch64Opcode::AsrRR,
+                (AArch64ShiftOp::Asr, false) => AArch64Opcode::AsrRR,
             };
             self.func.push_inst(
                 block,
@@ -1993,16 +1789,16 @@ impl InstructionSelector {
         let rhs = self.use_value(&rhs_val)?;
 
         let opc = match (op, is_32) {
-            (AArch64LogicOp::And, true) => AArch64Opcode::ANDWrr,
-            (AArch64LogicOp::And, false) => AArch64Opcode::ANDXrr,
-            (AArch64LogicOp::Orr, true) => AArch64Opcode::ORRWrr,
-            (AArch64LogicOp::Orr, false) => AArch64Opcode::ORRXrr,
-            (AArch64LogicOp::Eor, true) => AArch64Opcode::EORWrr,
-            (AArch64LogicOp::Eor, false) => AArch64Opcode::EORXrr,
-            (AArch64LogicOp::Bic, true) => AArch64Opcode::BICWrr,
-            (AArch64LogicOp::Bic, false) => AArch64Opcode::BICXrr,
-            (AArch64LogicOp::Orn, true) => AArch64Opcode::ORNWrr,
-            (AArch64LogicOp::Orn, false) => AArch64Opcode::ORNXrr,
+            (AArch64LogicOp::And, true) => AArch64Opcode::AndRR,
+            (AArch64LogicOp::And, false) => AArch64Opcode::AndRR,
+            (AArch64LogicOp::Orr, true) => AArch64Opcode::OrrRR,
+            (AArch64LogicOp::Orr, false) => AArch64Opcode::OrrRR,
+            (AArch64LogicOp::Eor, true) => AArch64Opcode::EorRR,
+            (AArch64LogicOp::Eor, false) => AArch64Opcode::EorRR,
+            (AArch64LogicOp::Bic, true) => AArch64Opcode::BicRR,
+            (AArch64LogicOp::Bic, false) => AArch64Opcode::BicRR,
+            (AArch64LogicOp::Orn, true) => AArch64Opcode::OrnRR,
+            (AArch64LogicOp::Orn, false) => AArch64Opcode::OrnRR,
         };
 
         self.func.push_inst(
@@ -2046,17 +1842,17 @@ impl InstructionSelector {
 
         let opc = if signed {
             match (from_ty, to_64) {
-                (Type::I8, false) => AArch64Opcode::SXTBWr,
-                (Type::I8, true) => AArch64Opcode::SXTBXr,
-                (Type::I16, false) => AArch64Opcode::SXTHWr,
-                (Type::I16, true) => AArch64Opcode::SXTHXr,
-                (Type::I32, true) => AArch64Opcode::SXTWXr,
+                (Type::I8, false) => AArch64Opcode::Sxtb,
+                (Type::I8, true) => AArch64Opcode::Sxtb,
+                (Type::I16, false) => AArch64Opcode::Sxth,
+                (Type::I16, true) => AArch64Opcode::Sxth,
+                (Type::I32, true) => AArch64Opcode::Sxtw,
                 _ => {
                     // Same-width or unsupported: just copy
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::COPY,
+                            AArch64Opcode::Copy,
                             vec![MachOperand::VReg(dst), src],
                         ),
                     );
@@ -2067,8 +1863,8 @@ impl InstructionSelector {
         } else {
             // Unsigned extension
             match from_ty {
-                Type::I8 => AArch64Opcode::UXTBWr,
-                Type::I16 => AArch64Opcode::UXTHWr,
+                Type::I8 => AArch64Opcode::Uxtw,
+                Type::I16 => AArch64Opcode::Uxtw,
                 Type::I32 if to_64 => {
                     // UXTW: zero-extend W to X. On AArch64, writing a W register
                     // implicitly zero-extends to X, so a MOV Wd, Wn suffices.
@@ -2076,7 +1872,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::MOVWrr,
+                            AArch64Opcode::MovR,
                             vec![MachOperand::VReg(dst), src],
                         ),
                     );
@@ -2087,7 +1883,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::COPY,
+                            AArch64Opcode::Copy,
                             vec![MachOperand::VReg(dst), src],
                         ),
                     );
@@ -2140,10 +1936,10 @@ impl InstructionSelector {
         let imms = (lsb + width - 1) as i64;
 
         let opc = match (signed, is_32) {
-            (false, true) => AArch64Opcode::UBFMWri,
-            (false, false) => AArch64Opcode::UBFMXri,
-            (true, true) => AArch64Opcode::SBFMWri,
-            (true, false) => AArch64Opcode::SBFMXri,
+            (false, true) => AArch64Opcode::Ubfm,
+            (false, false) => AArch64Opcode::Ubfm,
+            (true, true) => AArch64Opcode::Sbfm,
+            (true, false) => AArch64Opcode::Sbfm,
         };
 
         self.func.push_inst(
@@ -2195,7 +1991,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::COPY,
+                AArch64Opcode::Copy,
                 vec![MachOperand::VReg(result), dst_op],
             ),
         );
@@ -2208,9 +2004,9 @@ impl InstructionSelector {
         let imms = (width - 1) as i64;
 
         let opc = if is_32 {
-            AArch64Opcode::BFMWri
+            AArch64Opcode::Bfm
         } else {
-            AArch64Opcode::BFMXri
+            AArch64Opcode::Bfm
         };
 
         self.func.push_inst(
@@ -2261,7 +2057,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::CMPWri,
+                AArch64Opcode::CmpRI,
                 vec![cond_op, MachOperand::Imm(0)],
             ),
         );
@@ -2269,9 +2065,9 @@ impl InstructionSelector {
         // CSEL based on the IntCC condition
         let cc = AArch64CC::from_intcc(cond);
         let opc = if is_32 {
-            AArch64Opcode::CSELWr
+            AArch64Opcode::Csel
         } else {
-            AArch64Opcode::CSELXr
+            AArch64Opcode::Csel
         };
 
         self.func.push_inst(
@@ -2313,14 +2109,14 @@ impl InstructionSelector {
         let rhs = self.use_value(&rhs_val)?;
 
         let opc = match (op, is_f32) {
-            (AArch64FpBinOp::Fadd, true) => AArch64Opcode::FADDSrr,
-            (AArch64FpBinOp::Fadd, false) => AArch64Opcode::FADDDrr,
-            (AArch64FpBinOp::Fsub, true) => AArch64Opcode::FSUBSrr,
-            (AArch64FpBinOp::Fsub, false) => AArch64Opcode::FSUBDrr,
-            (AArch64FpBinOp::Fmul, true) => AArch64Opcode::FMULSrr,
-            (AArch64FpBinOp::Fmul, false) => AArch64Opcode::FMULDrr,
-            (AArch64FpBinOp::Fdiv, true) => AArch64Opcode::FDIVSrr,
-            (AArch64FpBinOp::Fdiv, false) => AArch64Opcode::FDIVDrr,
+            (AArch64FpBinOp::Fadd, true) => AArch64Opcode::FaddRR,
+            (AArch64FpBinOp::Fadd, false) => AArch64Opcode::FaddRR,
+            (AArch64FpBinOp::Fsub, true) => AArch64Opcode::FsubRR,
+            (AArch64FpBinOp::Fsub, false) => AArch64Opcode::FsubRR,
+            (AArch64FpBinOp::Fmul, true) => AArch64Opcode::FmulRR,
+            (AArch64FpBinOp::Fmul, false) => AArch64Opcode::FmulRR,
+            (AArch64FpBinOp::Fdiv, true) => AArch64Opcode::FdivRR,
+            (AArch64FpBinOp::Fdiv, false) => AArch64Opcode::FdivRR,
         };
 
         self.func.push_inst(
@@ -2349,9 +2145,9 @@ impl InstructionSelector {
 
         // FCMP sets NZCV
         let cmp_opc = if is_f32 {
-            AArch64Opcode::FCMPSrr
+            AArch64Opcode::Fcmp
         } else {
-            AArch64Opcode::FCMPDrr
+            AArch64Opcode::Fcmp
         };
         self.func.push_inst(
             block,
@@ -2364,7 +2160,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::CSETWcc,
+                AArch64Opcode::CSet,
                 vec![MachOperand::VReg(dst), MachOperand::CondCode(cc)],
             ),
         );
@@ -2392,9 +2188,9 @@ impl InstructionSelector {
         // Select based on destination integer width. The source float
         // precision is encoded in the operand register class.
         let opc = if Self::is_32bit(&dst_ty) {
-            AArch64Opcode::FCVTZSWr
+            AArch64Opcode::FcvtzsRR
         } else {
-            AArch64Opcode::FCVTZSXr
+            AArch64Opcode::FcvtzsRR
         };
 
         // Operands: [dst, src, src_type_hint]
@@ -2442,10 +2238,10 @@ impl InstructionSelector {
         let dst = self.new_vreg(dst_class);
 
         let opc = match (Self::is_32bit(&src_ty), matches!(dst_ty, Type::F32)) {
-            (true, true) => AArch64Opcode::SCVTFSWr,    // SCVTF Sd, Wn
-            (true, false) => AArch64Opcode::SCVTFDWr,   // SCVTF Dd, Wn
-            (false, true) => AArch64Opcode::SCVTFSXr,   // SCVTF Sd, Xn
-            (false, false) => AArch64Opcode::SCVTFDXr,  // SCVTF Dd, Xn
+            (true, true) => AArch64Opcode::ScvtfRR,    // SCVTF Sd, Wn
+            (true, false) => AArch64Opcode::ScvtfRR,   // SCVTF Dd, Wn
+            (false, true) => AArch64Opcode::ScvtfRR,   // SCVTF Sd, Xn
+            (false, false) => AArch64Opcode::ScvtfRR,  // SCVTF Dd, Xn
         };
 
         self.func.push_inst(
@@ -2478,9 +2274,9 @@ impl InstructionSelector {
         let dst = self.new_vreg(dst_class);
 
         let opc = if Self::is_32bit(&dst_ty) {
-            AArch64Opcode::FCVTZUWr
+            AArch64Opcode::FcvtzuRR
         } else {
-            AArch64Opcode::FCVTZUXr
+            AArch64Opcode::FcvtzuRR
         };
 
         let src_hint = if matches!(src_ty, Type::F32) { 32i64 } else { 64 };
@@ -2521,10 +2317,10 @@ impl InstructionSelector {
         let dst = self.new_vreg(dst_class);
 
         let opc = match (Self::is_32bit(&src_ty), matches!(dst_ty, Type::F32)) {
-            (true, true) => AArch64Opcode::UCVTFSWr,    // UCVTF Sd, Wn
-            (true, false) => AArch64Opcode::UCVTFDWr,   // UCVTF Dd, Wn
-            (false, true) => AArch64Opcode::UCVTFSXr,   // UCVTF Sd, Xn
-            (false, false) => AArch64Opcode::UCVTFDXr,  // UCVTF Dd, Xn
+            (true, true) => AArch64Opcode::UcvtfRR,    // UCVTF Sd, Wn
+            (true, false) => AArch64Opcode::UcvtfRR,   // UCVTF Dd, Wn
+            (false, true) => AArch64Opcode::UcvtfRR,   // UCVTF Sd, Xn
+            (false, false) => AArch64Opcode::UcvtfRR,  // UCVTF Dd, Xn
         };
 
         self.func.push_inst(
@@ -2555,7 +2351,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::FCVTDSr,
+                AArch64Opcode::FcvtSD,
                 vec![MachOperand::VReg(dst), src],
             ),
         );
@@ -2579,7 +2375,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::FCVTSDr,
+                AArch64Opcode::FcvtDS,
                 vec![MachOperand::VReg(dst), src],
             ),
         );
@@ -2615,9 +2411,9 @@ impl InstructionSelector {
         // For sub-32-bit targets (I8, I16), we use a 32-bit MOV since
         // AArch64 W registers naturally zero-extend the upper bits.
         let opc = if Self::is_32bit(to_ty) {
-            AArch64Opcode::MOVWrr
+            AArch64Opcode::MovR
         } else {
-            AArch64Opcode::MOVXrr
+            AArch64Opcode::MovR
         };
 
         self.func.push_inst(
@@ -2659,25 +2455,25 @@ impl InstructionSelector {
             // GPR -> FPR (integer bits reinterpreted as float)
             (false, true) => {
                 if Self::is_32bit(to_ty) {
-                    AArch64Opcode::FMOVSWr  // FMOV Sd, Wn
+                    AArch64Opcode::FmovGprFpr  // FMOV Sd, Wn
                 } else {
-                    AArch64Opcode::FMOVDXr  // FMOV Dd, Xn
+                    AArch64Opcode::FmovGprFpr  // FMOV Dd, Xn
                 }
             }
             // FPR -> GPR (float bits reinterpreted as integer)
             (true, false) => {
                 if Self::is_32bit(&src_ty) {
-                    AArch64Opcode::FMOVWSr  // FMOV Wd, Sn
+                    AArch64Opcode::FmovFprGpr  // FMOV Wd, Sn
                 } else {
-                    AArch64Opcode::FMOVXDr  // FMOV Xd, Dn
+                    AArch64Opcode::FmovFprGpr  // FMOV Xd, Dn
                 }
             }
             // Same class: plain MOV
             _ => {
                 if Self::is_32bit(to_ty) {
-                    AArch64Opcode::MOVWrr
+                    AArch64Opcode::MovR
                 } else {
-                    AArch64Opcode::MOVXrr
+                    AArch64Opcode::MovR
                 }
             }
         };
@@ -2715,7 +2511,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::ADRP,
+                AArch64Opcode::Adrp,
                 vec![MachOperand::VReg(dst), MachOperand::Symbol(name.to_string())],
             ),
         );
@@ -2724,7 +2520,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::ADDXriPCRel,
+                AArch64Opcode::AddPCRel,
                 vec![
                     MachOperand::VReg(dst),
                     MachOperand::VReg(dst),
@@ -2762,7 +2558,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::ADRP,
+                AArch64Opcode::Adrp,
                 vec![MachOperand::VReg(dst), MachOperand::Symbol(name.to_string())],
             ),
         );
@@ -2771,7 +2567,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::LDRXuiGot,
+                AArch64Opcode::LdrGot,
                 vec![
                     MachOperand::VReg(dst),
                     MachOperand::VReg(dst),
@@ -2808,7 +2604,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::ADRP,
+                AArch64Opcode::Adrp,
                 vec![MachOperand::VReg(dst), MachOperand::Symbol(name.to_string())],
             ),
         );
@@ -2817,7 +2613,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::LDRXuiTlvp,
+                AArch64Opcode::LdrTlvp,
                 vec![
                     MachOperand::VReg(dst),
                     MachOperand::VReg(dst),
@@ -2843,7 +2639,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::ADDXriSP,
+                AArch64Opcode::AddPCRel,
                 vec![
                     MachOperand::VReg(dst),
                     MachOperand::PReg(SP), // SP
@@ -3019,8 +2815,8 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
 
         assert_eq!(mblock.insts.len(), 2);
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::COPY);
-        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::COPY);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Copy);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::Copy);
         assert_eq!(mblock.insts[0].operands[1], MachOperand::PReg(PReg::new(0))); // X0
         assert_eq!(mblock.insts[1].operands[1], MachOperand::PReg(PReg::new(1))); // X1
     }
@@ -3039,7 +2835,7 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 3);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::ADDWrr);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::AddRR);
     }
 
     #[test]
@@ -3054,7 +2850,7 @@ mod tests {
             entry,
         ).unwrap();
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::SUBXrr);
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::SubRR);
     }
 
     #[test]
@@ -3083,10 +2879,10 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 7);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::CMPWrr);
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::CSETWcc);
-        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::CMPXri);
-        assert_eq!(mblock.insts[5].opcode, AArch64Opcode::Bcc);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::CmpRR);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::CSet);
+        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::CmpRI);
+        assert_eq!(mblock.insts[5].opcode, AArch64Opcode::BCond);
         assert_eq!(mblock.insts[6].opcode, AArch64Opcode::B);
         assert_eq!(mblock.successors.len(), 2);
     }
@@ -3106,7 +2902,7 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 4);
         assert_eq!(mblock.insts[2].operands[0], MachOperand::PReg(PReg::new(0))); // X0
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::RET);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::Ret);
     }
 
     #[test]
@@ -3123,7 +2919,7 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 1);
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::MOVZWi);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Movz);
     }
 
     #[test]
@@ -3138,7 +2934,7 @@ mod tests {
             entry,
         ).unwrap();
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[0].opcode, AArch64Opcode::MOVNXi);
+        assert_eq!(mfunc.blocks[&entry].insts[0].opcode, AArch64Opcode::Movn);
     }
 
     #[test]
@@ -3177,11 +2973,11 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 5);
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::COPY);
-        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::COPY);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::ADDWrr);
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::MOVWrr);
-        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::RET);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Copy);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::Copy);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::AddRR);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::MovR);
+        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::Ret);
         assert_eq!(mfunc.name, "add");
         assert_eq!(mfunc.next_vreg, 3);
     }
@@ -3206,7 +3002,7 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // 2 COPY + 1 LSLVWr
         assert_eq!(mblock.insts.len(), 3);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::LSLVWr);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::LslRR);
     }
 
     #[test]
@@ -3221,7 +3017,7 @@ mod tests {
             entry,
         ).unwrap();
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::LSRVXr);
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::LsrRR);
     }
 
     #[test]
@@ -3236,7 +3032,7 @@ mod tests {
             entry,
         ).unwrap();
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::ASRVWr);
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::AsrRR);
     }
 
     #[test]
@@ -3281,7 +3077,7 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // 1 MOVZWi + 1 MOVZWi + 1 LSLVWr (register form because value mapped as vreg)
         assert_eq!(mblock.insts.len(), 3);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::LSLVWr);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::LslRR);
     }
 
     // =======================================================================
@@ -3300,7 +3096,7 @@ mod tests {
             entry,
         ).unwrap();
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::ANDWrr);
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::AndRR);
     }
 
     #[test]
@@ -3315,7 +3111,7 @@ mod tests {
             entry,
         ).unwrap();
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::ORRXrr);
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::OrrRR);
     }
 
     #[test]
@@ -3330,7 +3126,7 @@ mod tests {
             entry,
         ).unwrap();
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::EORWrr);
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::EorRR);
     }
 
     #[test]
@@ -3345,7 +3141,7 @@ mod tests {
             entry,
         ).unwrap();
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::BICXrr);
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::BicRR);
     }
 
     #[test]
@@ -3360,7 +3156,7 @@ mod tests {
             entry,
         ).unwrap();
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::ORNWrr);
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::OrnRR);
     }
 
     // =======================================================================
@@ -3394,7 +3190,7 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // 1 COPY (formal arg) + 1 SXTBWr
         assert_eq!(mblock.insts.len(), 2);
-        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::SXTBWr);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::Sxtb);
     }
 
     #[test]
@@ -3420,7 +3216,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::SXTHXr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::Sxth);
     }
 
     #[test]
@@ -3446,7 +3242,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::SXTWXr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::Sxtw);
     }
 
     #[test]
@@ -3472,7 +3268,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::UXTBWr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::Uxtw);
     }
 
     #[test]
@@ -3498,7 +3294,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::UXTHWr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::Uxtw);
     }
 
     #[test]
@@ -3526,7 +3322,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::MOVWrr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::MovR);
     }
 
     // =======================================================================
@@ -3555,7 +3351,7 @@ mod tests {
 
         let mfunc = isel.finalize();
         let inst = &mfunc.blocks[&entry].insts[1];
-        assert_eq!(inst.opcode, AArch64Opcode::UBFMWri);
+        assert_eq!(inst.opcode, AArch64Opcode::Ubfm);
         // immr = 4, imms = 11
         assert_eq!(inst.operands[2], MachOperand::Imm(4));
         assert_eq!(inst.operands[3], MachOperand::Imm(11));
@@ -3583,7 +3379,7 @@ mod tests {
 
         let mfunc = isel.finalize();
         let inst = &mfunc.blocks[&entry].insts[1];
-        assert_eq!(inst.opcode, AArch64Opcode::SBFMXri);
+        assert_eq!(inst.opcode, AArch64Opcode::Sbfm);
         assert_eq!(inst.operands[2], MachOperand::Imm(0));
         assert_eq!(inst.operands[3], MachOperand::Imm(15));
     }
@@ -3606,8 +3402,8 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // 2 COPY (args) + 1 COPY (dst to result) + 1 BFMWri
         assert_eq!(mblock.insts.len(), 4);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::COPY);
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::BFMWri);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::Copy);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::Bfm);
         // immr = (32 - 4) % 32 = 28, imms = 7
         assert_eq!(mblock.insts[3].operands[2], MachOperand::Imm(28));
         assert_eq!(mblock.insts[3].operands[3], MachOperand::Imm(7));
@@ -3642,8 +3438,8 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // 3 COPY (args) + 1 CMPWri + 1 CSELWr
         assert_eq!(mblock.insts.len(), 5);
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::CMPWri);
-        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::CSELWr);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::CmpRI);
+        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::Csel);
         assert_eq!(
             mblock.insts[4].operands[3],
             MachOperand::CondCode(AArch64CC::NE)
@@ -3672,7 +3468,7 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         // 3 COPY + 1 CMPWri + 1 CSELXr (64-bit because true_val is I64)
-        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::CSELXr);
+        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::Csel);
         assert_eq!(
             mblock.insts[4].operands[3],
             MachOperand::CondCode(AArch64CC::GT)
@@ -3702,11 +3498,11 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         // MOVZ (low 16 bits) + 3 MOVK (remaining non-zero chunks)
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::MOVZXi);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Movz);
         assert_eq!(mblock.insts[0].operands[1], MachOperand::Imm(0x0004));
 
         // Should have MOVK for bits [16:31], [32:47], [48:63]
-        let movk_count = mblock.insts.iter().filter(|i| i.opcode == AArch64Opcode::MOVKXi).count();
+        let movk_count = mblock.insts.iter().filter(|i| i.opcode == AArch64Opcode::Movk).count();
         assert_eq!(movk_count, 3);
     }
 
@@ -3728,9 +3524,9 @@ mod tests {
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::MOVZWi);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Movz);
         assert_eq!(mblock.insts[0].operands[1], MachOperand::Imm(0x0002));
-        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::MOVKXi);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::Movk);
         assert_eq!(mblock.insts[1].operands[1], MachOperand::Imm(0x0001));
         assert_eq!(mblock.insts[1].operands[2], MachOperand::Imm(16)); // shift=16
     }
@@ -3751,7 +3547,7 @@ mod tests {
             entry,
         ).unwrap();
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FADDDrr);
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FaddRR);
     }
 
     #[test]
@@ -3766,7 +3562,7 @@ mod tests {
             entry,
         ).unwrap();
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FSUBSrr);
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FsubRR);
     }
 
     #[test]
@@ -3781,7 +3577,7 @@ mod tests {
             entry,
         ).unwrap();
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FMULDrr);
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FmulRR);
     }
 
     #[test]
@@ -3796,7 +3592,7 @@ mod tests {
             entry,
         ).unwrap();
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FDIVSrr);
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FdivRR);
     }
 
     #[test]
@@ -3813,8 +3609,8 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         // 2 COPY + 1 FCMPDrr + 1 CSETWcc
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::FCMPDrr);
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::CSETWcc);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::Fcmp);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::CSet);
         assert_eq!(
             mblock.insts[3].operands[1],
             MachOperand::CondCode(AArch64CC::MI)
@@ -3841,7 +3637,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FCVTZSWr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FcvtzsRR);
     }
 
     #[test]
@@ -3864,7 +3660,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::SCVTFSWr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::ScvtfRR);
     }
 
     #[test]
@@ -3887,7 +3683,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::SCVTFDXr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::ScvtfRR);
     }
 
     // =======================================================================
@@ -3910,9 +3706,9 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // ADRP + ADD
         assert_eq!(mblock.insts.len(), 2);
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADRP);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Adrp);
         assert_eq!(mblock.insts[0].operands[1], MachOperand::Symbol("my_global".to_string()));
-        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::ADDXriPCRel);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::AddPCRel);
         assert_eq!(mblock.insts[1].operands[2], MachOperand::Symbol("my_global".to_string()));
     }
 
@@ -3932,9 +3728,9 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // ADRP + LDR (GOT-indirect, not ADD)
         assert_eq!(mblock.insts.len(), 2);
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADRP);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Adrp);
         assert_eq!(mblock.insts[0].operands[1], MachOperand::Symbol("printf".to_string()));
-        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::LDRXuiGot);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::LdrGot);
         assert_eq!(mblock.insts[1].operands[2], MachOperand::Symbol("printf".to_string()));
     }
 
@@ -3954,9 +3750,9 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // ADRP + LDR (TLV-indirect)
         assert_eq!(mblock.insts.len(), 2);
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADRP);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Adrp);
         assert_eq!(mblock.insts[0].operands[1], MachOperand::Symbol("thread_local_var".to_string()));
-        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::LDRXuiTlvp);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::LdrTlvp);
         assert_eq!(mblock.insts[1].operands[2], MachOperand::Symbol("thread_local_var".to_string()));
     }
 
@@ -3975,7 +3771,7 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 1);
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADDXriSP);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::AddPCRel);
         // Should reference SP (PReg(31)) and StackSlot(3)
         assert_eq!(mblock.insts[0].operands[1], MachOperand::PReg(SP));
         assert_eq!(mblock.insts[0].operands[2], MachOperand::StackSlot(3));
@@ -4073,11 +3869,11 @@ mod tests {
         // 5: MOVWrr X0 <- vreg4
         // 6: RET
         assert_eq!(mblock.insts.len(), 7);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::LSLVWr);
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::MOVZWi);
-        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::ANDWrr);
-        assert_eq!(mblock.insts[5].opcode, AArch64Opcode::MOVWrr);
-        assert_eq!(mblock.insts[6].opcode, AArch64Opcode::RET);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::LslRR);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::Movz);
+        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::AndRR);
+        assert_eq!(mblock.insts[5].opcode, AArch64Opcode::MovR);
+        assert_eq!(mblock.insts[6].opcode, AArch64Opcode::Ret);
     }
 
     #[test]
@@ -4112,10 +3908,10 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // 2 COPY + 1 FADDDrr + 1 MOVXrr (to V0) + 1 RET
         assert_eq!(mblock.insts.len(), 5);
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::COPY);
-        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::COPY);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::FADDDrr);
-        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::RET);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Copy);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::Copy);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::FaddRR);
+        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::Ret);
     }
 
     // =======================================================================
@@ -4146,7 +3942,7 @@ mod tests {
 
         // Should contain at least: MOV (arg to X0) + BL + MOV (X0 to result)
         // Find the BL instruction and verify it has a Symbol operand.
-        let bl_inst = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::BL);
+        let bl_inst = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::Bl);
         assert!(bl_inst.is_some(), "Expected BL instruction for function call");
         let bl = bl_inst.unwrap();
         assert_eq!(
@@ -4195,7 +3991,7 @@ mod tests {
         assert!(mblock.insts.len() >= 3, "Brif should emit CMP + B.cond + B");
 
         // Find B.cond and verify CondCode operand.
-        let bcc_inst = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::Bcc);
+        let bcc_inst = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::BCond);
         assert!(bcc_inst.is_some(), "Expected B.cond instruction");
         let bcc = bcc_inst.unwrap();
         assert_eq!(
@@ -4229,8 +4025,8 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // 2 COPYs for args + UDIV + MSUB = 4 instructions
         assert_eq!(mblock.insts.len(), 4);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::UDIVWrr);
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::MSUBWrrr);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::UDiv);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::Msub);
         // MSUB operands: [dst, tmp(quotient), divisor, dividend]
         assert_eq!(mblock.insts[3].operands.len(), 4);
     }
@@ -4249,8 +4045,8 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 4);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::SDIVWrr);
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::MSUBWrrr);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::SDiv);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::Msub);
     }
 
     #[test]
@@ -4267,8 +4063,8 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 4);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::UDIVXrr);
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::MSUBXrrr);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::UDiv);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::Msub);
     }
 
     #[test]
@@ -4285,8 +4081,8 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 4);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::SDIVXrr);
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::MSUBXrrr);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::SDiv);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::Msub);
     }
 
     #[test]
@@ -4309,13 +4105,13 @@ mod tests {
         let msub_inst = &mblock.insts[3];
 
         // SDIV dst=tmp, lhs=dividend, rhs=divisor
-        assert_eq!(div_inst.opcode, AArch64Opcode::SDIVWrr);
+        assert_eq!(div_inst.opcode, AArch64Opcode::SDiv);
         let div_dst = &div_inst.operands[0]; // tmp vreg
         let dividend_op = &div_inst.operands[1]; // dividend
         let divisor_op = &div_inst.operands[2]; // divisor
 
         // MSUB dst, Rn=tmp, Rm=divisor, Ra=dividend
-        assert_eq!(msub_inst.opcode, AArch64Opcode::MSUBWrrr);
+        assert_eq!(msub_inst.opcode, AArch64Opcode::Msub);
         assert_eq!(&msub_inst.operands[1], div_dst, "MSUB Rn should be quotient from SDIV");
         assert_eq!(&msub_inst.operands[2], divisor_op, "MSUB Rm should be divisor");
         assert_eq!(&msub_inst.operands[3], dividend_op, "MSUB Ra should be dividend");
@@ -4349,7 +4145,7 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // 1 COPY (formal arg) + 1 NEGWr
         assert_eq!(mblock.insts.len(), 2);
-        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::NEGWr);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::Neg);
         assert_eq!(mblock.insts[1].operands.len(), 2);
     }
 
@@ -4373,7 +4169,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::NEGXr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::Neg);
     }
 
     #[test]
@@ -4399,7 +4195,7 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // 1 COPY (formal arg) + 1 MVNWr
         assert_eq!(mblock.insts.len(), 2);
-        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::MVNWr);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::OrnRR);
     }
 
     #[test]
@@ -4422,7 +4218,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::MVNXr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::OrnRR);
     }
 
     #[test]
@@ -4448,7 +4244,7 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // 1 COPY (formal arg) + 1 FNEGDr
         assert_eq!(mblock.insts.len(), 2);
-        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FNEGDr);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FnegRR);
     }
 
     #[test]
@@ -4471,7 +4267,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FNEGSr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FnegRR);
     }
 
     #[test]
@@ -4509,10 +4305,10 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // COPY (arg) + NEGWr + MOVWrr (to X0) + RET
         assert_eq!(mblock.insts.len(), 4);
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::COPY);
-        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::NEGWr);
-        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::MOVWrr);
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::RET);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Copy);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::Neg);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::MovR);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::Ret);
     }
 
     #[test]
@@ -4548,9 +4344,9 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // COPY (arg) + FNEGDr + MOV (to V0) + RET
         assert_eq!(mblock.insts.len(), 4);
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::COPY);
-        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FNEGDr);
-        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::RET);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Copy);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FnegRR);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::Ret);
     }
 
     // =======================================================================
@@ -4577,7 +4373,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FCVTZUWr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FcvtzuRR);
     }
 
     #[test]
@@ -4600,7 +4396,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FCVTZUXr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FcvtzuRR);
     }
 
     #[test]
@@ -4623,7 +4419,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::UCVTFSWr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::UcvtfRR);
     }
 
     #[test]
@@ -4646,7 +4442,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::UCVTFDXr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::UcvtfRR);
     }
 
     // =======================================================================
@@ -4673,7 +4469,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FCVTDSr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FcvtSD);
     }
 
     #[test]
@@ -4696,7 +4492,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FCVTSDr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FcvtDS);
     }
 
     // =======================================================================
@@ -4724,7 +4520,7 @@ mod tests {
 
         let mfunc = isel.finalize();
         // On AArch64, truncation is a MOV to narrower register class
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::MOVWrr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::MovR);
     }
 
     #[test]
@@ -4748,7 +4544,7 @@ mod tests {
 
         let mfunc = isel.finalize();
         // I16 is sub-32-bit, still uses MOVWrr
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::MOVWrr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::MovR);
     }
 
     #[test]
@@ -4771,7 +4567,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::MOVWrr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::MovR);
     }
 
     // =======================================================================
@@ -4799,7 +4595,7 @@ mod tests {
 
         let mfunc = isel.finalize();
         // GPR -> FPR: FMOV Sd, Wn
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FMOVSWr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FmovGprFpr);
     }
 
     #[test]
@@ -4823,7 +4619,7 @@ mod tests {
 
         let mfunc = isel.finalize();
         // GPR -> FPR: FMOV Dd, Xn
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FMOVDXr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FmovGprFpr);
     }
 
     #[test]
@@ -4847,7 +4643,7 @@ mod tests {
 
         let mfunc = isel.finalize();
         // FPR -> GPR: FMOV Wd, Sn
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FMOVWSr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FmovFprGpr);
     }
 
     #[test]
@@ -4871,7 +4667,7 @@ mod tests {
 
         let mfunc = isel.finalize();
         // FPR -> GPR: FMOV Xd, Dn
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FMOVXDr);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FmovFprGpr);
     }
 
     #[test]
@@ -4893,7 +4689,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[0].opcode, AArch64Opcode::MOVWrr);
+        assert_eq!(mfunc.blocks[&entry].insts[0].opcode, AArch64Opcode::MovR);
     }
 
     // =======================================================================
@@ -4922,7 +4718,7 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         // Field 0 at offset 0 -> MOVXrr
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::MOVXrr);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::MovR);
     }
 
     #[test]
@@ -4946,7 +4742,7 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         // Field 1 at offset 4 -> ADDXri
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADDXri);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::AddRI);
         // Offset should be 4
         assert_eq!(mblock.insts[0].operands[2], MachOperand::Imm(4));
     }
@@ -4971,7 +4767,7 @@ mod tests {
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADDXri);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::AddRI);
         assert_eq!(mblock.insts[0].operands[2], MachOperand::Imm(4));
     }
 
@@ -5048,12 +4844,12 @@ mod tests {
         let insts = &mblock.insts;
         // Find the LDR X0 instruction
         let ldr_inst = insts.iter().find(|i| {
-            i.opcode == AArch64Opcode::LDRXui
+            i.opcode == AArch64Opcode::LdrRI
                 && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
         });
         assert!(ldr_inst.is_some(), "Expected LDR X0 for small struct return");
         // Must end with RET
-        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::RET);
+        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::Ret);
     }
 
     #[test]
@@ -5088,17 +4884,17 @@ mod tests {
 
         // Should have LDR X0 at offset 0, LDR X1 at offset 8, then RET
         let ldr_x0 = insts.iter().find(|i| {
-            i.opcode == AArch64Opcode::LDRXui
+            i.opcode == AArch64Opcode::LdrRI
                 && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
         });
         assert!(ldr_x0.is_some(), "Expected LDR X0 for medium struct return");
 
         let ldr_x1 = insts.iter().find(|i| {
-            i.opcode == AArch64Opcode::LDRXui
+            i.opcode == AArch64Opcode::LdrRI
                 && i.operands.first() == Some(&MachOperand::PReg(gpr::X1))
         });
         assert!(ldr_x1.is_some(), "Expected LDR X1 for medium struct return");
-        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::RET);
+        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::Ret);
     }
 
     #[test]
@@ -5133,11 +4929,11 @@ mod tests {
 
         // Should have 3 LDR+STR pairs (24 bytes / 8 = 3 chunks) then RET
         let str_to_x8: Vec<_> = insts.iter().filter(|i| {
-            i.opcode == AArch64Opcode::STRXui
+            i.opcode == AArch64Opcode::StrRI
                 && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
         }).collect();
         assert_eq!(str_to_x8.len(), 3, "Expected 3 stores to X8 for 24-byte struct");
-        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::RET);
+        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::Ret);
     }
 
     #[test]
@@ -5165,12 +4961,12 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
 
         // Should have: LDR X0 (aggregate arg), BL, MOV (result)
-        let has_bl = mblock.insts.iter().any(|i| i.opcode == AArch64Opcode::BL);
+        let has_bl = mblock.insts.iter().any(|i| i.opcode == AArch64Opcode::Bl);
         assert!(has_bl, "Expected BL instruction for call");
 
         // The aggregate arg should be loaded into X0 (small struct -> Reg(X0))
         let ldr_x0 = mblock.insts.iter().find(|i| {
-            i.opcode == AArch64Opcode::LDRXui
+            i.opcode == AArch64Opcode::LdrRI
                 && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
         });
         assert!(ldr_x0.is_some(), "Expected LDR X0 for small aggregate arg");
@@ -5200,7 +4996,7 @@ mod tests {
 
         // Large aggregate -> Indirect{X0}, so should emit MOVXrr to X0
         let mov_x0 = mblock.insts.iter().find(|i| {
-            i.opcode == AArch64Opcode::MOVXrr
+            i.opcode == AArch64Opcode::MovR
                 && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
         });
         assert!(mov_x0.is_some(), "Expected MOV X0 for large aggregate indirect pass");
@@ -5226,12 +5022,12 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
 
         // After BL, should copy X8 to a vreg for the result
-        let has_bl = mblock.insts.iter().any(|i| i.opcode == AArch64Opcode::BL);
+        let has_bl = mblock.insts.iter().any(|i| i.opcode == AArch64Opcode::Bl);
         assert!(has_bl);
 
         // Result should be defined (the MOVXrr from X8)
         let mov_from_x8 = mblock.insts.iter().find(|i| {
-            i.opcode == AArch64Opcode::MOVXrr
+            i.opcode == AArch64Opcode::MovR
                 && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
         });
         assert!(mov_from_x8.is_some(), "Expected MOV from X8 for sret result");
@@ -5263,7 +5059,7 @@ mod tests {
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
-        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::ADDXri);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::AddRI);
         assert_eq!(mblock.insts[0].operands[2], MachOperand::Imm(8));
     }
 
@@ -5288,7 +5084,7 @@ mod tests {
 
         let mfunc = isel.finalize();
         let inst = &mfunc.blocks[&entry].insts[0];
-        assert_eq!(inst.opcode, AArch64Opcode::LDRBui,
+        assert_eq!(inst.opcode, AArch64Opcode::LdrbRI,
             "Load I8 should emit LDRBui (zero-extending byte load)");
     }
 
@@ -5309,7 +5105,7 @@ mod tests {
 
         let mfunc = isel.finalize();
         let inst = &mfunc.blocks[&entry].insts[0];
-        assert_eq!(inst.opcode, AArch64Opcode::LDRHui,
+        assert_eq!(inst.opcode, AArch64Opcode::LdrhRI,
             "Load I16 should emit LDRHui (zero-extending halfword load)");
     }
 
@@ -5332,7 +5128,7 @@ mod tests {
 
         let mfunc = isel.finalize();
         let inst = &mfunc.blocks[&entry].insts[0];
-        assert_eq!(inst.opcode, AArch64Opcode::STRBui,
+        assert_eq!(inst.opcode, AArch64Opcode::StrbRI,
             "Store I8 should emit STRBui (truncating byte store)");
     }
 
@@ -5355,7 +5151,7 @@ mod tests {
 
         let mfunc = isel.finalize();
         let inst = &mfunc.blocks[&entry].insts[0];
-        assert_eq!(inst.opcode, AArch64Opcode::STRHui,
+        assert_eq!(inst.opcode, AArch64Opcode::StrhRI,
             "Store I16 should emit STRHui (truncating halfword store)");
     }
 
@@ -5405,13 +5201,13 @@ mod tests {
 
         let mfunc = isel.finalize();
         let insts = &mfunc.blocks[&entry].insts;
-        assert_eq!(insts[0].opcode, AArch64Opcode::LDRBui,
+        assert_eq!(insts[0].opcode, AArch64Opcode::LdrbRI,
             "First instruction should be byte load");
-        assert_eq!(insts[1].opcode, AArch64Opcode::LDRBui,
+        assert_eq!(insts[1].opcode, AArch64Opcode::LdrbRI,
             "Second instruction should be byte load");
-        assert_eq!(insts[2].opcode, AArch64Opcode::ADDWrr,
+        assert_eq!(insts[2].opcode, AArch64Opcode::AddRR,
             "Third instruction should be 32-bit add (I8 uses Gpr32)");
-        assert_eq!(insts[3].opcode, AArch64Opcode::STRBui,
+        assert_eq!(insts[3].opcode, AArch64Opcode::StrbRI,
             "Fourth instruction should be byte store");
     }
 
@@ -5448,7 +5244,7 @@ mod tests {
 
         // Count stores to X8
         let str_to_x8: Vec<_> = insts.iter().filter(|i| {
-            (i.opcode == AArch64Opcode::STRXui || i.opcode == AArch64Opcode::STRBui)
+            (i.opcode == AArch64Opcode::StrRI || i.opcode == AArch64Opcode::StrbRI)
                 && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
         }).collect();
         // 2x STRXui (8-byte each) + 1x STRBui (1-byte tail) = 3 stores
@@ -5456,12 +5252,12 @@ mod tests {
 
         // Verify the tail store is a byte store
         let tail_store = str_to_x8.last().unwrap();
-        assert_eq!(tail_store.opcode, AArch64Opcode::STRBui,
+        assert_eq!(tail_store.opcode, AArch64Opcode::StrbRI,
             "Trailing byte should use STRB");
         assert_eq!(tail_store.operands.get(2), Some(&MachOperand::Imm(16)),
             "Trailing byte store should be at offset 16");
 
-        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::RET);
+        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::Ret);
     }
 
     #[test]
@@ -5501,19 +5297,19 @@ mod tests {
         // 18 bytes: 2x 8-byte STRXui (16), then 1x 2-byte STRHui (18)
         // No 4-byte or 1-byte tails.
         let str_to_x8: Vec<_> = insts.iter().filter(|i| {
-            (i.opcode == AArch64Opcode::STRXui
-                || i.opcode == AArch64Opcode::STRHui)
+            (i.opcode == AArch64Opcode::StrRI
+                || i.opcode == AArch64Opcode::StrhRI)
                 && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
         }).collect();
         assert_eq!(str_to_x8.len(), 3, "Expected 3 stores for 18-byte struct: 2x8 + 1x2");
 
         let tail_store = str_to_x8.last().unwrap();
-        assert_eq!(tail_store.opcode, AArch64Opcode::STRHui,
+        assert_eq!(tail_store.opcode, AArch64Opcode::StrhRI,
             "Trailing halfword should use STRH");
         assert_eq!(tail_store.operands.get(2), Some(&MachOperand::Imm(16)),
             "Trailing halfword store should be at offset 16");
 
-        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::RET);
+        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::Ret);
     }
 
     #[test]
@@ -5550,8 +5346,8 @@ mod tests {
         // Count all stores to X8
         let str_to_x8: Vec<_> = insts.iter().filter(|i| {
             matches!(i.opcode,
-                AArch64Opcode::STRXui | AArch64Opcode::STRWui
-                | AArch64Opcode::STRHui | AArch64Opcode::STRBui)
+                AArch64Opcode::StrRI
+                | AArch64Opcode::StrhRI | AArch64Opcode::StrbRI)
                 && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
         }).collect();
         // 2x STRXui + 1x STRWui + 1x STRHui + 1x STRBui = 5 stores
@@ -5559,11 +5355,11 @@ mod tests {
             "Expected 5 stores for 23-byte struct: 2x8 + 1x4 + 1x2 + 1x1");
 
         // Verify tail opcodes in order
-        assert_eq!(str_to_x8[0].opcode, AArch64Opcode::STRXui);
-        assert_eq!(str_to_x8[1].opcode, AArch64Opcode::STRXui);
-        assert_eq!(str_to_x8[2].opcode, AArch64Opcode::STRWui);
-        assert_eq!(str_to_x8[3].opcode, AArch64Opcode::STRHui);
-        assert_eq!(str_to_x8[4].opcode, AArch64Opcode::STRBui);
+        assert_eq!(str_to_x8[0].opcode, AArch64Opcode::StrRI);
+        assert_eq!(str_to_x8[1].opcode, AArch64Opcode::StrRI);
+        assert_eq!(str_to_x8[2].opcode, AArch64Opcode::StrRI);
+        assert_eq!(str_to_x8[3].opcode, AArch64Opcode::StrhRI);
+        assert_eq!(str_to_x8[4].opcode, AArch64Opcode::StrbRI);
 
         // Verify offsets
         assert_eq!(str_to_x8[0].operands.get(2), Some(&MachOperand::Imm(0)));
@@ -5572,6 +5368,6 @@ mod tests {
         assert_eq!(str_to_x8[3].operands.get(2), Some(&MachOperand::Imm(20)));
         assert_eq!(str_to_x8[4].operands.get(2), Some(&MachOperand::Imm(22)));
 
-        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::RET);
+        assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::Ret);
     }
 }

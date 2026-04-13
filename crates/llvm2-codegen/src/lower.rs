@@ -1096,11 +1096,35 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
         // --- Pseudo-instructions: emit NOP ---
         AArch64Opcode::Phi
         | AArch64Opcode::StackAlloc
+        | AArch64Opcode::Copy
         | AArch64Opcode::Nop
         | AArch64Opcode::Retain
         | AArch64Opcode::Release => {
             // These should have been eliminated, but emit NOP as safe fallback.
             Ok(0xD503201F)
+        }
+
+        // New opcodes added for ISel unification (issue #73).
+        // Encoding not yet implemented — return error if reached.
+        AArch64Opcode::AndRI
+        | AArch64Opcode::OrrRI
+        | AArch64Opcode::EorRI
+        | AArch64Opcode::BicRR
+        | AArch64Opcode::Csinc
+        | AArch64Opcode::Csinv
+        | AArch64Opcode::Csneg
+        | AArch64Opcode::Movn
+        | AArch64Opcode::FmovImm
+        | AArch64Opcode::LdrRO
+        | AArch64Opcode::StrRO
+        | AArch64Opcode::LdrGot
+        | AArch64Opcode::LdrTlvp
+        | AArch64Opcode::Ubfm
+        | AArch64Opcode::Sbfm
+        | AArch64Opcode::Bfm => {
+            Err(LowerError::UnsupportedInstruction(
+                format!("{:?} encoding not yet implemented (issue #73)", inst.opcode),
+            ))
         }
 
     }

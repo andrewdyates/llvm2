@@ -146,8 +146,8 @@ fn test_identity_isel() {
     assert!(!mfunc.blocks.is_empty());
 
     // Should have COPY instructions for the formal arg, plus a RET.
-    assert!(has_opcode(&mfunc, AArch64Opcode::COPY));
-    assert!(has_opcode(&mfunc, AArch64Opcode::RET));
+    assert!(has_opcode(&mfunc, AArch64Opcode::Copy));
+    assert!(has_opcode(&mfunc, AArch64Opcode::Ret));
 }
 
 // ===========================================================================
@@ -214,10 +214,10 @@ fn test_add_isel() {
     assert_eq!(mfunc.name, "add");
     // Must contain ADDWrr (32-bit integer add, register form)
     assert!(
-        has_opcode(&mfunc, AArch64Opcode::ADDWrr),
+        has_opcode(&mfunc, AArch64Opcode::AddRR),
         "Expected ADDWrr for i32 addition"
     );
-    assert!(has_opcode(&mfunc, AArch64Opcode::RET));
+    assert!(has_opcode(&mfunc, AArch64Opcode::Ret));
 }
 
 // ===========================================================================
@@ -279,10 +279,10 @@ fn test_negate_isel() {
 
     // Negation is lowered directly as NEGWr (SUB Wd, WZR, Wn alias).
     assert!(
-        has_opcode(&mfunc, AArch64Opcode::NEGWr),
+        has_opcode(&mfunc, AArch64Opcode::Neg),
         "Expected NEGWr for negation (-x)"
     );
-    assert!(has_opcode(&mfunc, AArch64Opcode::RET));
+    assert!(has_opcode(&mfunc, AArch64Opcode::Ret));
 }
 
 // ===========================================================================
@@ -380,15 +380,15 @@ fn test_max_isel() {
     // Should have a compare (CMPWrr), conditional set (CSETWcc), conditional
     // branch (Bcc), and returns (RET).
     assert!(
-        has_opcode(&mfunc, AArch64Opcode::CMPWrr),
+        has_opcode(&mfunc, AArch64Opcode::CmpRR),
         "Expected CMPWrr for signed comparison"
     );
     assert!(
-        has_opcode(&mfunc, AArch64Opcode::Bcc),
+        has_opcode(&mfunc, AArch64Opcode::BCond),
         "Expected Bcc for conditional branch"
     );
     assert!(
-        count_opcode(&mfunc, AArch64Opcode::RET) >= 2,
+        count_opcode(&mfunc, AArch64Opcode::Ret) >= 2,
         "Expected at least 2 RET instructions (then + else)"
     );
 }
@@ -633,10 +633,10 @@ fn test_sum_isel_body_instructions() {
 
     // Should contain: 2 COPYs (formal args) + ADDWrr + MOVZWi + SUBWrr
     // + MOVZWi + CMPWrr + CSETWcc + (RET logic)
-    assert!(has_opcode(&mfunc, AArch64Opcode::ADDWrr));
-    assert!(has_opcode(&mfunc, AArch64Opcode::SUBWrr));
-    assert!(has_opcode(&mfunc, AArch64Opcode::CMPWrr));
-    assert!(has_opcode(&mfunc, AArch64Opcode::RET));
+    assert!(has_opcode(&mfunc, AArch64Opcode::AddRR));
+    assert!(has_opcode(&mfunc, AArch64Opcode::SubRR));
+    assert!(has_opcode(&mfunc, AArch64Opcode::CmpRR));
+    assert!(has_opcode(&mfunc, AArch64Opcode::Ret));
     assert!(mblock.insts.len() >= 6, "Expected at least 6 instructions");
 }
 
@@ -705,10 +705,10 @@ fn test_load_store_isel() {
 
     // Should have a STRWui (store 32-bit, unsigned offset) and RET
     assert!(
-        has_opcode(&mfunc, AArch64Opcode::STRWui),
+        has_opcode(&mfunc, AArch64Opcode::StrRI),
         "Expected STRWui for 32-bit store"
     );
-    assert!(has_opcode(&mfunc, AArch64Opcode::RET));
+    assert!(has_opcode(&mfunc, AArch64Opcode::Ret));
 }
 
 // ===========================================================================
@@ -758,14 +758,14 @@ fn test_load_then_store_isel() {
     let mfunc = compile_tmir_function(&func);
 
     assert!(
-        has_opcode(&mfunc, AArch64Opcode::LDRWui),
+        has_opcode(&mfunc, AArch64Opcode::LdrRI),
         "Expected LDRWui for 32-bit load"
     );
     assert!(
-        has_opcode(&mfunc, AArch64Opcode::STRWui),
+        has_opcode(&mfunc, AArch64Opcode::StrRI),
         "Expected STRWui for 32-bit store"
     );
-    assert!(has_opcode(&mfunc, AArch64Opcode::RET));
+    assert!(has_opcode(&mfunc, AArch64Opcode::Ret));
 }
 
 // ===========================================================================
@@ -802,7 +802,7 @@ fn test_all_single_block_programs_compile_without_panic() {
 
         // Every function must end with at least one RET
         assert!(
-            has_opcode(&mfunc, AArch64Opcode::RET),
+            has_opcode(&mfunc, AArch64Opcode::Ret),
             "{}: missing RET instruction",
             name
         );
@@ -811,7 +811,7 @@ fn test_all_single_block_programs_compile_without_panic() {
         // (except void-returning functions with no params, but all our test
         // functions have at least one param).
         assert!(
-            has_opcode(&mfunc, AArch64Opcode::COPY),
+            has_opcode(&mfunc, AArch64Opcode::Copy),
             "{}: missing COPY for formal arguments",
             name
         );
