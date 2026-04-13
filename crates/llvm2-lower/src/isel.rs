@@ -199,6 +199,16 @@ pub enum AArch64Opcode {
     BFMWri,   // Bitfield move (insert), 32-bit
     BFMXri,   // Bitfield move (insert), 64-bit
 
+    // Unary integer operations
+    NEGWr,    // 32-bit negate (SUB Wd, WZR, Wm)
+    NEGXr,    // 64-bit negate (SUB Xd, XZR, Xm)
+    MVNWr,    // 32-bit bitwise NOT (ORN Wd, WZR, Wm)
+    MVNXr,    // 64-bit bitwise NOT (ORN Xd, XZR, Xm)
+
+    // Floating-point unary operations
+    FNEGSr,   // 32-bit float negate (FNEG Sd, Sn)
+    FNEGDr,   // 64-bit float negate (FNEG Dd, Dn)
+
     // Floating-point arithmetic
     FADDSrr,  // 32-bit float add
     FADDDrr,  // 64-bit float add
@@ -517,6 +527,11 @@ impl InstructionSelector {
             Opcode::Sdiv => self.select_binop(AArch64BinOp::Sdiv, inst, block)?,
             Opcode::Udiv => self.select_binop(AArch64BinOp::Udiv, inst, block)?,
 
+            // Unary operations
+            Opcode::Ineg => self.select_int_unaryop(AArch64IntUnaryOp::Neg, inst, block)?,
+            Opcode::Bnot => self.select_int_unaryop(AArch64IntUnaryOp::Mvn, inst, block)?,
+            Opcode::Fneg => self.select_fp_unaryop(inst, block)?,
+
             // Shift operations
             Opcode::Ishl => self.select_shift(AArch64ShiftOp::Lsl, inst, block)?,
             Opcode::Ushr => self.select_shift(AArch64ShiftOp::Lsr, inst, block)?,
@@ -737,6 +752,75 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(opc, vec![MachOperand::VReg(dst), lhs, rhs]),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), ty);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Unary operations
+    // -----------------------------------------------------------------------
+
+    /// Select integer unary operation: NEG, MVN (bitwise NOT).
+    ///
+    /// AArch64 lowering:
+    ///   `Ineg(x)` → `SUB Xd, XZR, Xn` (alias: NEG)
+    ///   `Bnot(x)` → `ORN Xd, XZR, Xn` (alias: MVN)
+    fn select_int_unaryop(&mut self, op: AArch64IntUnaryOp, inst: &Instruction, block: Block) -> Result<(), ISelError> {
+        assert!(!inst.args.is_empty(), "Unary op must have 1 arg");
+        assert!(!inst.results.is_empty(), "Unary op must have a result");
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&src_val);
+        let is_32 = Self::is_32bit(&ty);
+        let class = reg_class_for_type(&ty);
+        let dst = self.new_vreg(class);
+
+        let src = self.use_value(&src_val)?;
+
+        let opc = match (op, is_32) {
+            (AArch64IntUnaryOp::Neg, true) => AArch64Opcode::NEGWr,
+            (AArch64IntUnaryOp::Neg, false) => AArch64Opcode::NEGXr,
+            (AArch64IntUnaryOp::Mvn, true) => AArch64Opcode::MVNWr,
+            (AArch64IntUnaryOp::Mvn, false) => AArch64Opcode::MVNXr,
+        };
+
+        self.func.push_inst(
+            block,
+            MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), ty);
+        Ok(())
+    }
+
+    /// Select floating-point unary negate: FNEG Sd/Dd, Sn/Dn.
+    fn select_fp_unaryop(&mut self, inst: &Instruction, block: Block) -> Result<(), ISelError> {
+        assert!(!inst.args.is_empty(), "FP unary op must have 1 arg");
+        assert!(!inst.results.is_empty(), "FP unary op must have a result");
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&src_val);
+        let is_f32 = matches!(ty, Type::F32);
+        let class = reg_class_for_type(&ty);
+        let dst = self.new_vreg(class);
+
+        let src = self.use_value(&src_val)?;
+
+        let opc = if is_f32 {
+            AArch64Opcode::FNEGSr
+        } else {
+            AArch64Opcode::FNEGDr
+        };
+
+        self.func.push_inst(
+            block,
+            MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), ty);
@@ -1838,6 +1922,13 @@ enum AArch64LogicOp {
     Eor,
     Bic,
     Orn,
+}
+
+/// Integer unary operation classification.
+#[derive(Debug, Clone, Copy)]
+enum AArch64IntUnaryOp {
+    Neg,
+    Mvn,
 }
 
 /// FP binop classification.
@@ -3075,5 +3166,237 @@ mod tests {
             MachOperand::Block(then_block),
             "B.cond should target the then block"
         );
+    }
+
+    // =======================================================================
+    // Unary operations: Neg, Not (Bnot), FNeg
+    // =======================================================================
+
+    #[test]
+    fn select_ineg_i32() {
+        // fn(i32) -> i32: return -arg
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("neg32".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Ineg,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 1 COPY (formal arg) + 1 NEGWr
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::NEGWr);
+        assert_eq!(mblock.insts[1].operands.len(), 2);
+    }
+
+    #[test]
+    fn select_ineg_i64() {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("neg64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Ineg,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::NEGXr);
+    }
+
+    #[test]
+    fn select_bnot_i32() {
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("not32".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Bnot,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 1 COPY (formal arg) + 1 MVNWr
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::MVNWr);
+    }
+
+    #[test]
+    fn select_bnot_i64() {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("not64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Bnot,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::MVNXr);
+    }
+
+    #[test]
+    fn select_fneg_f64() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("fneg64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fneg,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 1 COPY (formal arg) + 1 FNEGDr
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FNEGDr);
+    }
+
+    #[test]
+    fn select_fneg_f32() {
+        let sig = Signature {
+            params: vec![Type::F32],
+            returns: vec![Type::F32],
+        };
+        let mut isel = InstructionSelector::new("fneg32".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fneg,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FNEGSr);
+    }
+
+    #[test]
+    fn full_negate_function() {
+        // fn negate(i32) -> i32 { return -arg; }
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("negate".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        // Value(1) = Ineg(Value(0))
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Ineg,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        // Return Value(1)
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Return,
+                args: vec![Value(1)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // COPY (arg) + NEGWr + MOVWrr (to X0) + RET
+        assert_eq!(mblock.insts.len(), 4);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::COPY);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::NEGWr);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::MOVWrr);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::RET);
+    }
+
+    #[test]
+    fn full_fneg_function() {
+        // fn fneg(f64) -> f64 { return -arg; }
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("fneg_fn".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fneg,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Return,
+                args: vec![Value(1)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // COPY (arg) + FNEGDr + MOV (to V0) + RET
+        assert_eq!(mblock.insts.len(), 4);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::COPY);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FNEGDr);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::RET);
     }
 }

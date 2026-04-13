@@ -268,8 +268,8 @@ fn test_negate_adapter() {
     let (lir_func, _) = translate_only(&func).unwrap();
 
     let entry = &lir_func.blocks[&lir_func.entry_block];
-    // Neg lowers to: Iconst(0), Isub(0, x), Return = 3 instructions
-    assert_eq!(entry.instructions.len(), 3);
+    // Neg is lowered directly as: Ineg, Return = 2 instructions
+    assert_eq!(entry.instructions.len(), 2);
 }
 
 #[test]
@@ -277,10 +277,10 @@ fn test_negate_isel() {
     let func = build_negate();
     let mfunc = compile_tmir_function(&func);
 
-    // Negation is lowered as: MOVZ #0, SUBWrr. Check for the SUB.
+    // Negation is lowered directly as NEGWr (SUB Wd, WZR, Wn alias).
     assert!(
-        has_opcode(&mfunc, AArch64Opcode::SUBWrr),
-        "Expected SUBWrr for negation (0 - x)"
+        has_opcode(&mfunc, AArch64Opcode::NEGWr),
+        "Expected NEGWr for negation (-x)"
     );
     assert!(has_opcode(&mfunc, AArch64Opcode::RET));
 }

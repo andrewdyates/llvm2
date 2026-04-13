@@ -106,8 +106,11 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         // Extension
         Sxtw | Uxtw | Sxtb | Sxth => MemoryEffect::Pure,
 
+        // Logical (OR-NOT)
+        OrnRR => MemoryEffect::Pure,
+
         // Floating-point arithmetic
-        FaddRR | FsubRR | FmulRR | FdivRR => MemoryEffect::Pure,
+        FaddRR | FsubRR | FmulRR | FdivRR | FnegRR => MemoryEffect::Pure,
 
         // FP conversion
         FcvtzsRR | ScvtfRR => MemoryEffect::Pure,

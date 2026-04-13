@@ -299,6 +299,15 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             ))
         }
 
+        // ORN Rd, Rn, Rm — bitwise OR-NOT (MVN when Rn=XZR)
+        // Logical shifted register with N=1, opc=01
+        AArch64Opcode::OrnRR => {
+            let sf = sf_from_operand(inst, 0);
+            Ok(encoding::encode_logical_shifted_reg(
+                sf, 0b01, 1, 0, preg_hw(inst, 2), 0, preg_hw(inst, 1), preg_hw(inst, 0),
+            ))
+        }
+
         // =================================================================
         // Shifts — Data-processing (2 source)
         // Variable shifts: LSL/LSR/ASR Rd, Rn, Rm
@@ -801,6 +810,16 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let enc = encoding_fp::encode_fp_arith(
                 fp_size, FpArithOp::Div,
                 preg_hw(inst, 2) as u8, preg_hw(inst, 1) as u8, preg_hw(inst, 0) as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // FNEG Dd, Dn — floating-point negate (1-source FP)
+        AArch64Opcode::FnegRR => {
+            let fp_size = fp_size_from_inst(inst);
+            let enc = encoding_fp::encode_fp_unary(
+                fp_size, encoding_fp::FpUnaryOp::Fneg,
+                preg_hw(inst, 1) as u8, preg_hw(inst, 0) as u8,
             )?;
             Ok(enc)
         }
@@ -1431,6 +1450,7 @@ mod tests {
             (AArch64Opcode::AndRR, vec![preg(X0), preg(X1), preg(X2)]),
             (AArch64Opcode::OrrRR, vec![preg(X0), preg(X1), preg(X2)]),
             (AArch64Opcode::EorRR, vec![preg(X0), preg(X1), preg(X2)]),
+            (AArch64Opcode::OrnRR, vec![preg(X0), preg(X1), preg(X2)]),
             (AArch64Opcode::LslRR, vec![preg(X0), preg(X1), preg(X2)]),
             (AArch64Opcode::LsrRR, vec![preg(X0), preg(X1), preg(X2)]),
             (AArch64Opcode::AsrRR, vec![preg(X0), preg(X1), preg(X2)]),
@@ -1467,6 +1487,7 @@ mod tests {
             (AArch64Opcode::FsubRR, vec![preg(V0), preg(V1), preg(V2)]),
             (AArch64Opcode::FmulRR, vec![preg(V0), preg(V1), preg(V2)]),
             (AArch64Opcode::FdivRR, vec![preg(V0), preg(V1), preg(V2)]),
+            (AArch64Opcode::FnegRR, vec![preg(V0), preg(V1)]),
             (AArch64Opcode::Fcmp, vec![preg(V0), preg(V1)]),
             (AArch64Opcode::FcvtzsRR, vec![preg(X0), preg(V1)]),
             (AArch64Opcode::ScvtfRR, vec![preg(V0), preg(X1)]),

@@ -414,6 +414,20 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 preg_hw(0)?,
             ))
         }
+        AArch64Opcode::OrnRR => {
+            // ORN Rd, Rn, Rm — bitwise OR-NOT (N=1, opc=01)
+            let sf = if is_64bit(0) { 1 } else { 0 };
+            Ok(encoding::encode_logical_shifted_reg(
+                sf,
+                0b01,
+                1, // N=1 for ORN
+                0,
+                preg_hw(2)?,
+                0,
+                preg_hw(1)?,
+                preg_hw(0)?,
+            ))
+        }
 
         // --- Shifts ---
         AArch64Opcode::LslRR => {
@@ -750,6 +764,22 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 | (rm << 16)
                 | (fp_op << 12)
                 | (0b10u32 << 10)
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::FnegRR => {
+            // FNEG Dd, Dn — FP 1-source data-processing
+            // 0 | 00 | 11110 | ftype(2) | 1 | 0000 | opcode(2) | 10000 | Rn | Rd
+            let ftype = 0b01u32; // double precision
+            let fp_op = 0b10u32; // FNEG opcode
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            Ok((0b00011110u32 << 24)
+                | (ftype << 22)
+                | (1u32 << 21)
+                // bits [20:17] = 0000
+                | (fp_op << 15)
+                | (0b10000u32 << 10)
                 | (rn << 5)
                 | rd)
         }
