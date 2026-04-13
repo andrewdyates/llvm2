@@ -116,7 +116,7 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         Adrp | AddPCRel => MemoryEffect::Pure,
 
         // Branches: not memory ops. DCE handles branches via InstFlags.
-        B | BCond | Cbz | Cbnz | Br | Ret => MemoryEffect::Pure,
+        B | BCond | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => MemoryEffect::Pure,
 
         // Pseudo-instructions
         Phi => MemoryEffect::Pure,
