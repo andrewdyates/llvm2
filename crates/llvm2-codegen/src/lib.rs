@@ -11,8 +11,8 @@
 //! Target: AArch64 macOS (Apple Silicon) for MVP.
 //! x86-64 and RISC-V are future targets.
 
-pub mod target;
 pub mod lower;
 pub mod macho;
+pub mod target;
 
 pub use target::Target;
