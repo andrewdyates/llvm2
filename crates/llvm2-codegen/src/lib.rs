@@ -20,6 +20,7 @@ pub mod pipeline;
 pub mod relax;
 pub mod target;
 pub mod unwind;
+pub mod x86_64;
 
 pub use pipeline::{Pipeline, PipelineConfig, PipelineError, compile_to_object};
-pub use target::Target;
+pub use target::{CallingConvention, Target};
