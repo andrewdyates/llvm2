@@ -51,56 +51,54 @@ tC     (C + proofs)     ──► tMIR ──┘
 
 **Dependencies:**
 - **tMIR** (ayates_dbx/tMIR) - Input IR definition
-- **z4** (ayates_dbx/z4) - SMT solver for verification
+- **z4** (ayates_dbx/z4) - SMT solver for verification (optional, feature-gated)
+- **LLVM source** (`~/llvm-project-ref/`) - Reference implementation for algorithm study
 
 **Goals:**
 1. Proven-correct instruction lowering from tMIR to machine code
 2. Verified optimizations (peephole, constant folding, dead code elimination)
-3. Support x86-64, AArch64, RISC-V targets
+3. Support AArch64 (primary), x86-64, RISC-V targets
 4. Universal backend for tRust, tSwift, tC
+5. At least as fast as LLVM in compilation speed and output code quality
+6. 100% Rust, zero external dependencies for core backend
 
 ---
 
 ## Architecture
 
 ```
-                         ┌─────────────────┐
-                         │      tMIR       │
-                         │   (input IR)    │
-                         └────────┬────────┘
-                                  │
-                                  ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                           LLVM2                                  │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────┐ │
-│  │   llvm2-    │    │   llvm2-    │    │      llvm2-         │ │
-│  │   lower     │───►│   opt       │───►│      codegen        │ │
-│  │ (tMIR→LIR)  │    │ (optimize)  │    │  (LIR→machine code) │ │
-│  └─────────────┘    └──────┬──────┘    └──────────┬──────────┘ │
-│                            │                      │             │
-│                            ▼                      ▼             │
-│                     ┌─────────────┐        ┌─────────────┐     │
-│                     │   llvm2-    │        │    z4       │     │
-│                     │   verify    │◄───────│   (SMT)     │     │
-│                     │ (proofs)    │        │             │     │
-│                     └─────────────┘        └─────────────┘     │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-                                  │
-                                  ▼
-                    ┌─────────────────────────┐
-                    │   Verified Machine Code  │
-                    │  (x86-64, AArch64, RISC-V)│
-                    └─────────────────────────┘
+tmir-* ──> llvm2-lower (instruction selection, ABI lowering)
+                |
+                v
+           llvm2-ir (MachineFunction, MachInst, operands, blocks, stack)
+                |
+        +-------+-------+-----------+
+        v       v       v           v
+   llvm2-opt  llvm2-regalloc  llvm2-codegen  llvm2-verify
+   (passes)   (liveness+RA)   (encode+Mach-O)  (z4, optional)
 ```
 
 **Crates:**
-- `llvm2-lower` - tMIR to Low-level IR (LIR) lowering
-- `llvm2-opt` - Verified optimizations
-- `llvm2-verify` - SMT encoding and proof generation
-- `llvm2-codegen` - LIR to machine code emission per target
+- `llvm2-ir` - Shared machine model (MachInst, registers, operands, stack slots)
+- `llvm2-lower` - tMIR to MachIR instruction selection and ABI lowering
+- `llvm2-opt` - Optimization passes (DCE, peephole, address-mode formation, etc.)
+- `llvm2-regalloc` - Liveness analysis and register allocation
+- `llvm2-verify` - SMT encoding and proof generation (optional, z4)
+- `llvm2-codegen` - AArch64 encoding + Mach-O object file emission
+
+**Design doc:** `designs/2026-04-12-aarch64-backend.md`
+
+## LLVM Source Reference
+
+Reference implementation for algorithm study: `~/llvm-project-ref/`
+
+| Area | LLVM Path |
+|------|-----------|
+| AArch64 backend | `llvm/lib/Target/AArch64/` |
+| Machine IR model | `llvm/include/llvm/CodeGen/MachineInstr.h` |
+| Register allocation | `llvm/lib/CodeGen/RegAllocGreedy.cpp` |
+| Mach-O emission | `llvm/lib/MC/MachObjectWriter.cpp` |
+| AArch64 encoding | `llvm/lib/Target/AArch64/MCTargetDesc/AArch64MCCodeEmitter.cpp` |
 
 ---
 

@@ -61,10 +61,12 @@ This follows Alive2 and CompCert approaches, applied systematically to the entir
 
 | Crate | Description |
 |-------|-------------|
-| `llvm2-lower` | Lowering from tMIR to low-level IR |
-| `llvm2-opt` | Verified optimizations |
-| `llvm2-verify` | SMT encoding and semantic equivalence proofs |
-| `llvm2-codegen` | Machine code generation (x86-64, AArch64, RISC-V) |
+| `llvm2-ir` | Shared machine model (MachInst, registers, operands, stack slots) |
+| `llvm2-lower` | tMIR to MachIR instruction selection and ABI lowering |
+| `llvm2-opt` | Optimization passes (DCE, peephole, address-mode formation, etc.) |
+| `llvm2-regalloc` | Liveness analysis and register allocation |
+| `llvm2-verify` | SMT encoding and semantic equivalence proofs (optional, z4) |
+| `llvm2-codegen` | AArch64 encoding + Mach-O object file emission |
 
 ## Quick Start
 
@@ -77,7 +79,7 @@ cargo test
 
 ## Status
 
-**Preview** — Core lowering and verification infrastructure implemented. Active development.
+**Active Development** — Building AArch64 macOS backend. See `designs/2026-04-12-aarch64-backend.md` for full design (codex-reviewed).
 
 ## The t\* Stack
 
