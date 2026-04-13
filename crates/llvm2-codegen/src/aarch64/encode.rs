@@ -14,7 +14,7 @@
 
 use llvm2_ir::inst::{AArch64Opcode, MachInst};
 use llvm2_ir::operand::MachOperand;
-use llvm2_ir::regs::SpecialReg;
+use llvm2_ir::regs::{preg_class, RegClass, SpecialReg};
 
 use super::encoding;
 use super::encoding_fp::{self, FpArithOp, FpCmpOp, FpConvOp, FpSize};
@@ -73,16 +73,25 @@ fn imm_val(inst: &MachInst, idx: usize) -> i64 {
 }
 
 /// Determine sf (size flag): 1 for 64-bit GPR, 0 for 32-bit.
+/// Uses the register's class to determine size:
+///   - Gpr32 (W registers) → sf=0
+///   - Gpr64 (X registers) → sf=1
 /// FPRs are handled separately. Defaults to 1 (64-bit).
 fn sf_from_operand(inst: &MachInst, idx: usize) -> u32 {
     match inst.operands.get(idx) {
         Some(MachOperand::PReg(p)) => {
-            if p.is_gpr() && p.encoding() < 32 {
-                1 // All GPRs default to 64-bit in this model
-            } else {
-                1
+            match preg_class(*p) {
+                RegClass::Gpr32 => 0,
+                RegClass::Gpr64 => 1,
+                // FPRs and system regs: sf not applicable, default to 1
+                _ => 1,
             }
         }
+        Some(MachOperand::Special(s)) => match s {
+            // SP and XZR are 64-bit, WZR is 32-bit
+            SpecialReg::SP | SpecialReg::XZR => 1,
+            SpecialReg::WZR => 0,
+        },
         _ => 1,
     }
 }
@@ -419,7 +428,7 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
 
         // CMP Rn, Rm = SUBS XZR, Rn, Rm
         AArch64Opcode::CmpRR => {
-            let sf = 1u32; // default 64-bit
+            let sf = sf_from_operand(inst, 0);
             Ok(encoding::encode_add_sub_shifted_reg(
                 sf, 1, 1, 0, preg_hw(inst, 1), 0, preg_hw(inst, 0), 31,
             ))
@@ -427,7 +436,7 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
 
         // CMP Rn, #imm = SUBS XZR, Rn, #imm
         AArch64Opcode::CmpRI => {
-            let sf = 1u32;
+            let sf = sf_from_operand(inst, 0);
             let imm = imm_val(inst, 1) as u32 & 0xFFF;
             Ok(encoding::encode_add_sub_imm(
                 sf, 1, 1, 0, imm, preg_hw(inst, 0), 31,
@@ -436,7 +445,7 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
 
         // TST Rn, Rm = ANDS XZR, Rn, Rm
         AArch64Opcode::Tst => {
-            let sf = 1u32;
+            let sf = sf_from_operand(inst, 0);
             Ok(encoding::encode_logical_shifted_reg(
                 sf, 0b11, 0, 0, preg_hw(inst, 1), 0, preg_hw(inst, 0), 31,
             ))
@@ -901,23 +910,41 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
 // FP size helpers
 // ---------------------------------------------------------------------------
 
-/// Determine FP precision from the destination register for FP arithmetic.
-/// FPR encoding: 32-47 = S/D0-D15, etc. We default to Double (64-bit).
-/// A more precise approach would track register class through ISel.
-fn fp_size_from_inst(_inst: &MachInst) -> FpSize {
-    // Default to double precision — the ISel would have attached size info
-    // in a real implementation. For now, all FP ops are double.
-    FpSize::Double
+/// Determine FP precision from a register operand's class.
+fn fp_size_from_preg_class(class: RegClass) -> FpSize {
+    match class {
+        RegClass::Fpr32 => FpSize::Single,
+        RegClass::Fpr64 => FpSize::Double,
+        RegClass::Fpr16 => FpSize::Half,
+        // Fpr128, Fpr8, or GPR/System: default to Double
+        _ => FpSize::Double,
+    }
 }
 
-/// FP size for compare instructions (uses source operands).
-fn fp_size_from_cmp_inst(_inst: &MachInst) -> FpSize {
-    FpSize::Double
+/// Determine FP precision from the destination register for FP arithmetic.
+/// Uses register class: Fpr32 (S registers) → Single, Fpr64 (D registers) → Double.
+/// Defaults to Double if register class is ambiguous (e.g., V/Q registers).
+fn fp_size_from_inst(inst: &MachInst) -> FpSize {
+    match inst.operands.first() {
+        Some(MachOperand::PReg(p)) => fp_size_from_preg_class(preg_class(*p)),
+        _ => FpSize::Double,
+    }
+}
+
+/// FP size for compare instructions (uses first source operand).
+fn fp_size_from_cmp_inst(inst: &MachInst) -> FpSize {
+    match inst.operands.first() {
+        Some(MachOperand::PReg(p)) => fp_size_from_preg_class(preg_class(*p)),
+        _ => FpSize::Double,
+    }
 }
 
 /// FP size derived from a specific source operand index.
-fn fp_size_from_source(_inst: &MachInst, _idx: usize) -> FpSize {
-    FpSize::Double
+fn fp_size_from_source(inst: &MachInst, idx: usize) -> FpSize {
+    match inst.operands.get(idx) {
+        Some(MachOperand::PReg(p)) => fp_size_from_preg_class(preg_class(*p)),
+        _ => FpSize::Double,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -929,7 +956,7 @@ mod tests {
     use super::*;
     use llvm2_ir::inst::{AArch64Opcode, MachInst};
     use llvm2_ir::operand::MachOperand;
-    use llvm2_ir::regs::{PReg, SpecialReg, X0, X1, X2, X9, X30, V0, V1, V2};
+    use llvm2_ir::regs::{PReg, SpecialReg, X0, X1, X2, X9, X30, V0, V1, V2, W0, W1, W2, S0, S1, S2};
 
     /// Helper to build a MachInst with given opcode and operands.
     fn mk(opcode: AArch64Opcode, ops: Vec<MachOperand>) -> MachInst {
@@ -1493,5 +1520,251 @@ mod tests {
             let result = encode_instruction(&inst);
             assert!(result.is_ok(), "Opcode {opcode:?} should encode successfully, got: {result:?}");
         }
+    }
+
+    // =========================================================================
+    // 32-bit encoding tests — verify sf=0 for W-register operands
+    // =========================================================================
+
+    #[test]
+    fn test_sf_from_operand_w_register() {
+        // W0 (encoding 32) should produce sf=0
+        let inst = mk(AArch64Opcode::AddRR, vec![preg(W0), preg(W1), preg(W2)]);
+        assert_eq!(sf_from_operand(&inst, 0), 0, "W0 should produce sf=0");
+
+        // X0 (encoding 0) should produce sf=1
+        let inst = mk(AArch64Opcode::AddRR, vec![preg(X0), preg(X1), preg(X2)]);
+        assert_eq!(sf_from_operand(&inst, 0), 1, "X0 should produce sf=1");
+    }
+
+    #[test]
+    fn test_add_rr_32bit() {
+        // ADD W0, W1, W2 — must have sf=0 (bit 31 = 0)
+        let inst = mk(AArch64Opcode::AddRR, vec![preg(W0), preg(W1), preg(W2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_add_sub_shifted_reg(0, 0, 0, 0, 2, 0, 1, 0);
+        assert_eq!(enc, direct, "ADD W0, W1, W2: unified={enc:#010X}, direct={direct:#010X}");
+        // Verify bit 31 (sf) is 0
+        assert_eq!(enc >> 31, 0, "ADD W0, W1, W2 must have sf=0 (bit 31 = 0)");
+    }
+
+    #[test]
+    fn test_add_rr_64bit_has_sf_1() {
+        // ADD X0, X1, X2 — must have sf=1 (bit 31 = 1)
+        let inst = mk(AArch64Opcode::AddRR, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc >> 31, 1, "ADD X0, X1, X2 must have sf=1 (bit 31 = 1)");
+    }
+
+    #[test]
+    fn test_add_ri_32bit() {
+        // ADD W0, W1, #42 — sf=0
+        let inst = mk(AArch64Opcode::AddRI, vec![preg(W0), preg(W1), imm(42)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_add_sub_imm(0, 0, 0, 0, 42, 1, 0);
+        assert_eq!(enc, direct, "ADD W0, W1, #42");
+        assert_eq!(enc >> 31, 0, "ADD W0, W1, #42 must have sf=0");
+    }
+
+    #[test]
+    fn test_sub_rr_32bit() {
+        // SUB W0, W1, W2 — sf=0
+        let inst = mk(AArch64Opcode::SubRR, vec![preg(W0), preg(W1), preg(W2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_add_sub_shifted_reg(0, 1, 0, 0, 2, 0, 1, 0);
+        assert_eq!(enc, direct, "SUB W0, W1, W2");
+        assert_eq!(enc >> 31, 0, "SUB W0, W1, W2 must have sf=0");
+    }
+
+    #[test]
+    fn test_sub_ri_32bit() {
+        // SUB W0, W1, #10 — sf=0
+        let inst = mk(AArch64Opcode::SubRI, vec![preg(W0), preg(W1), imm(10)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_add_sub_imm(0, 1, 0, 0, 10, 1, 0);
+        assert_eq!(enc, direct, "SUB W0, W1, #10");
+        assert_eq!(enc >> 31, 0, "SUB W0, W1, #10 must have sf=0");
+    }
+
+    #[test]
+    fn test_and_rr_32bit() {
+        // AND W0, W1, W2 — sf=0
+        let inst = mk(AArch64Opcode::AndRR, vec![preg(W0), preg(W1), preg(W2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_logical_shifted_reg(0, 0b00, 0, 0, 2, 0, 1, 0);
+        assert_eq!(enc, direct, "AND W0, W1, W2");
+        assert_eq!(enc >> 31, 0, "AND W0, W1, W2 must have sf=0");
+    }
+
+    #[test]
+    fn test_orr_rr_32bit() {
+        // ORR W0, W1, W2 — sf=0
+        let inst = mk(AArch64Opcode::OrrRR, vec![preg(W0), preg(W1), preg(W2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_logical_shifted_reg(0, 0b01, 0, 0, 2, 0, 1, 0);
+        assert_eq!(enc, direct, "ORR W0, W1, W2");
+        assert_eq!(enc >> 31, 0, "ORR W0, W1, W2 must have sf=0");
+    }
+
+    #[test]
+    fn test_eor_rr_32bit() {
+        // EOR W0, W1, W2 — sf=0
+        let inst = mk(AArch64Opcode::EorRR, vec![preg(W0), preg(W1), preg(W2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_logical_shifted_reg(0, 0b10, 0, 0, 2, 0, 1, 0);
+        assert_eq!(enc, direct, "EOR W0, W1, W2");
+        assert_eq!(enc >> 31, 0, "EOR W0, W1, W2 must have sf=0");
+    }
+
+    #[test]
+    fn test_mul_rr_32bit() {
+        // MUL W0, W1, W2 = MADD W0, W1, W2, WZR — sf=0
+        let inst = mk(AArch64Opcode::MulRR, vec![preg(W0), preg(W1), preg(W2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        // Expected: sf=0, 00 11011 000 Rm=2 0 Ra=31 Rn=1 Rd=0
+        let expected = (0u32 << 31) | (0b11011 << 24) | (2 << 16) | (31 << 10) | (1 << 5) | 0;
+        assert_eq!(enc, expected, "MUL W0, W1, W2 = {enc:#010X}");
+        assert_eq!(enc >> 31, 0, "MUL W0, W1, W2 must have sf=0");
+    }
+
+    #[test]
+    fn test_sdiv_32bit() {
+        // SDIV W0, W1, W2 — sf=0
+        let inst = mk(AArch64Opcode::SDiv, vec![preg(W0), preg(W1), preg(W2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (0u32 << 31) | (0b0_0011010110 << 21) | (2 << 16) | (0b000011 << 10) | (1 << 5) | 0;
+        assert_eq!(enc, expected, "SDIV W0, W1, W2 = {enc:#010X}");
+        assert_eq!(enc >> 31, 0, "SDIV W0, W1, W2 must have sf=0");
+    }
+
+    #[test]
+    fn test_neg_32bit() {
+        // NEG W0, W1 = SUB W0, WZR, W1 — sf=0
+        let inst = mk(AArch64Opcode::Neg, vec![preg(W0), preg(W1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_add_sub_shifted_reg(0, 1, 0, 0, 1, 0, 31, 0);
+        assert_eq!(enc, direct, "NEG W0, W1");
+        assert_eq!(enc >> 31, 0, "NEG W0, W1 must have sf=0");
+    }
+
+    #[test]
+    fn test_mov_r_32bit() {
+        // MOV W0, W1 = ORR W0, WZR, W1 — sf=0
+        let inst = mk(AArch64Opcode::MovR, vec![preg(W0), preg(W1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_logical_shifted_reg(0, 0b01, 0, 0, 1, 0, 31, 0);
+        assert_eq!(enc, direct, "MOV W0, W1");
+        assert_eq!(enc >> 31, 0, "MOV W0, W1 must have sf=0");
+    }
+
+    #[test]
+    fn test_movz_32bit() {
+        // MOVZ W0, #0x1234 — sf=0
+        let inst = mk(AArch64Opcode::Movz, vec![preg(W0), imm(0x1234)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_move_wide(0, 0b10, 0, 0x1234, 0);
+        assert_eq!(enc, direct, "MOVZ W0, #0x1234");
+        assert_eq!(enc >> 31, 0, "MOVZ W0, #0x1234 must have sf=0");
+    }
+
+    #[test]
+    fn test_cmp_rr_32bit() {
+        // CMP W0, W1 = SUBS WZR, W0, W1 — sf=0
+        let inst = mk(AArch64Opcode::CmpRR, vec![preg(W0), preg(W1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_add_sub_shifted_reg(0, 1, 1, 0, 1, 0, 0, 31);
+        assert_eq!(enc, direct, "CMP W0, W1");
+        assert_eq!(enc >> 31, 0, "CMP W0, W1 must have sf=0");
+    }
+
+    #[test]
+    fn test_cmp_ri_32bit() {
+        // CMP W0, #42 = SUBS WZR, W0, #42 — sf=0
+        let inst = mk(AArch64Opcode::CmpRI, vec![preg(W0), imm(42)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_add_sub_imm(0, 1, 1, 0, 42, 0, 31);
+        assert_eq!(enc, direct, "CMP W0, #42");
+        assert_eq!(enc >> 31, 0, "CMP W0, #42 must have sf=0");
+    }
+
+    #[test]
+    fn test_tst_32bit() {
+        // TST W0, W1 = ANDS WZR, W0, W1 — sf=0
+        let inst = mk(AArch64Opcode::Tst, vec![preg(W0), preg(W1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_logical_shifted_reg(0, 0b11, 0, 0, 1, 0, 0, 31);
+        assert_eq!(enc, direct, "TST W0, W1");
+        assert_eq!(enc >> 31, 0, "TST W0, W1 must have sf=0");
+    }
+
+    #[test]
+    fn test_adds_rr_32bit() {
+        // ADDS W0, W1, W2 — sf=0
+        let inst = mk(AArch64Opcode::AddsRR, vec![preg(W0), preg(W1), preg(W2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_add_sub_shifted_reg(0, 0, 1, 0, 2, 0, 1, 0);
+        assert_eq!(enc, direct, "ADDS W0, W1, W2");
+        assert_eq!(enc >> 31, 0, "ADDS W0, W1, W2 must have sf=0");
+    }
+
+    #[test]
+    fn test_subs_rr_32bit() {
+        // SUBS W0, W1, W2 — sf=0
+        let inst = mk(AArch64Opcode::SubsRR, vec![preg(W0), preg(W1), preg(W2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_add_sub_shifted_reg(0, 1, 1, 0, 2, 0, 1, 0);
+        assert_eq!(enc, direct, "SUBS W0, W1, W2");
+        assert_eq!(enc >> 31, 0, "SUBS W0, W1, W2 must have sf=0");
+    }
+
+    #[test]
+    fn test_lsl_rr_32bit() {
+        // LSLV W0, W1, W2 — sf=0
+        let inst = mk(AArch64Opcode::LslRR, vec![preg(W0), preg(W1), preg(W2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (0u32 << 31) | (0b0_0011010110 << 21) | (2 << 16)
+            | (0b001000 << 10) | (1 << 5) | 0;
+        assert_eq!(enc, expected, "LSLV W0, W1, W2 = {enc:#010X}");
+        assert_eq!(enc >> 31, 0, "LSLV W0, W1, W2 must have sf=0");
+    }
+
+    #[test]
+    fn test_cbz_32bit() {
+        // CBZ W0, <+8> — sf=0
+        let inst = mk(AArch64Opcode::Cbz, vec![preg(W0), imm(2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_cmp_branch(0, 0, 2, 0);
+        assert_eq!(enc, direct, "CBZ W0, <+8>");
+        assert_eq!(enc >> 31, 0, "CBZ W0, <+8> must have sf=0");
+    }
+
+    #[test]
+    fn test_cbnz_32bit() {
+        // CBNZ W0, <+8> — sf=0
+        let inst = mk(AArch64Opcode::Cbnz, vec![preg(W0), imm(2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_cmp_branch(0, 1, 2, 0);
+        assert_eq!(enc, direct, "CBNZ W0, <+8>");
+        assert_eq!(enc >> 31, 0, "CBNZ W0, <+8> must have sf=0");
+    }
+
+    #[test]
+    fn test_lsl_ri_32bit() {
+        // LSL W0, W1, #3 — sf=0, regsize=32
+        // UBFM W0, W1, #(-3 MOD 32)=29, #(32-1-3)=28
+        let inst = mk(AArch64Opcode::LslRI, vec![preg(W0), preg(W1), imm(3)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc >> 31, 0, "LSL W0, W1, #3 must have sf=0");
+        // N bit (bit 22) must be 0 for 32-bit
+        assert_eq!((enc >> 22) & 1, 0, "LSL W0 must have N=0 for 32-bit");
+    }
+
+    #[test]
+    fn test_fp_size_from_s_register() {
+        // FADD S0, S1, S2 should use Single precision
+        let inst = mk(AArch64Opcode::FaddRR, vec![preg(S0), preg(S1), preg(S2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding_fp::encode_fp_arith(FpSize::Single, FpArithOp::Add, 2, 1, 0).unwrap();
+        assert_eq!(enc, direct, "FADD S0, S1, S2 should use Single precision");
     }
 }
