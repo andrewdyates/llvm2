@@ -263,6 +263,7 @@ pub fn resolve_parallel_copies(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RegClass;
 
     #[test]
     fn test_parallel_copy_no_cycle() {

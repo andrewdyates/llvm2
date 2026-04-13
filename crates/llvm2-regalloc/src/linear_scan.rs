@@ -66,8 +66,9 @@ pub struct LinearScan {
     /// Indices into `intervals` of currently active (allocated) intervals,
     /// sorted by end position.
     active: Vec<usize>,
-    /// Available physical registers per register class.
-    allocatable: HashMap<RegClass, Vec<PReg>>,
+    /// Available physical registers per register class (retained for future use
+    /// in interval splitting and rematerialization).
+    _allocatable: HashMap<RegClass, Vec<PReg>>,
     /// Current allocation: VReg -> PReg.
     allocation: HashMap<VReg, PReg>,
     /// VRegs that need spilling.
@@ -93,7 +94,7 @@ impl LinearScan {
         Self {
             intervals,
             active: Vec::new(),
-            allocatable: target_regs.clone(),
+            _allocatable: target_regs.clone(),
             allocation: HashMap::new(),
             spills: Vec::new(),
             free_regs,

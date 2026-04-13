@@ -7,7 +7,8 @@
 // that macOS system tools (otool, nm) can parse.
 
 use llvm2_codegen::macho::constants::*;
-use llvm2_codegen::macho::{MachOWriter, Relocation};
+use llvm2_codegen::macho::MachOWriter;
+use llvm2_codegen::macho::writer::Relocation;
 
 use std::io::Write;
 use std::process::Command;
@@ -233,13 +234,13 @@ fn test_relocation_entries() {
     // Section should have 1 relocation
     assert!(
         otool_out.contains("nreloc 1"),
-        "Expected 1 relocation entry"
+        "Expected 1 relocation entry, otool output:\n{}", otool_out
     );
 
-    // reloff should be non-zero
+    // reloff should be non-zero (use leading whitespace to avoid matching "extreloff 0")
     assert!(
-        !otool_out.contains("reloff 0\n"),
-        "reloff should not be 0 when there are relocations"
+        !otool_out.contains("    reloff 0\n"),
+        "reloff should not be 0 when there are relocations, otool output:\n{}", otool_out
     );
 
     std::fs::remove_file(&path).ok();
