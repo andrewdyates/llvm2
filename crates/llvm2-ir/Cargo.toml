@@ -1,11 +1,11 @@
-# llvm2-opt - Verified optimizations
+# llvm2-ir - Shared machine IR model
 #
 # Author: Andrew Yates <ayates@dropbox.com>
 # Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 [package]
-name = "llvm2-opt"
-description = "Verified optimization passes for LLVM2"
+name = "llvm2-ir"
+description = "Shared machine IR types for LLVM2 (MachInst, registers, operands, functions)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,7 +13,3 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-llvm2-ir = { workspace = true }
-llvm2-lower = { workspace = true }
-llvm2-verify = { workspace = true }
-thiserror = { workspace = true }
