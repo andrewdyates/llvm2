@@ -42,6 +42,8 @@ pub enum LowerError {
     MissingOperand { opcode: AArch64Opcode, index: usize },
     #[error("unresolved pseudo-instruction after expansion: {0:?}")]
     UnresolvedPseudo(AArch64Opcode),
+    #[error("branch relaxation failed: {0}")]
+    RelaxationFailed(#[from] relax::RelaxError),
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,7 +1063,7 @@ pub fn lower_function(func: &mut IrMachFunction) -> Result<LowerResult, LowerErr
 
     // Run branch relaxation — this resolves Block operands to immediate
     // offsets and handles out-of-range branches.
-    let relaxed = relax::relax_branches(func);
+    let relaxed = relax::relax_branches(func)?;
 
     // Collect relocations from instructions that reference external symbols.
     let relocations = collect_relocations(&relaxed.instructions);
@@ -1089,7 +1091,7 @@ pub fn lower_function_no_frame(func: &mut IrMachFunction) -> Result<LowerResult,
     expand_pseudos(func);
 
     // Run branch relaxation.
-    let relaxed = relax::relax_branches(func);
+    let relaxed = relax::relax_branches(func)?;
 
     // Collect relocations.
     let relocations = collect_relocations(&relaxed.instructions);

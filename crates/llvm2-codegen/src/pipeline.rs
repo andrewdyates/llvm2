@@ -72,6 +72,8 @@ pub enum PipelineError {
     Encoding(String),
     #[error("unsupported opcode during encoding: {0:?}")]
     UnsupportedOpcode(IrOpcode),
+    #[error("branch relaxation failed: {0}")]
+    Relaxation(#[from] crate::relax::RelaxError),
 }
 
 // ---------------------------------------------------------------------------
