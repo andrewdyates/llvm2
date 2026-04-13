@@ -5866,7 +5866,7 @@ mod tests {
         assert_eq!(str_sp[1].operands.get(2), Some(&MachOperand::Imm(8)));
 
         // BL should be present
-        let bl_inst = insts.iter().find(|i| i.opcode == AArch64Opcode::BL);
+        let bl_inst = insts.iter().find(|i| i.opcode == AArch64Opcode::Bl);
         assert!(bl_inst.is_some(), "Expected BL instruction");
         assert_eq!(
             bl_inst.unwrap().operands[0],
@@ -5944,7 +5944,7 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
 
         // MOV X0 (fixed), STR [SP+0] (variadic), BL NSLog
-        let bl_inst = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::BL);
+        let bl_inst = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::Bl);
         assert!(bl_inst.is_some());
         assert_eq!(
             bl_inst.unwrap().operands[0],
