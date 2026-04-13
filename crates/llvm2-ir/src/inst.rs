@@ -138,6 +138,11 @@ impl AArch64Opcode {
     pub fn is_pseudo(self) -> bool {
         matches!(self, Self::Phi | Self::StackAlloc | Self::Nop)
     }
+
+    /// Returns true if this is a phi instruction.
+    pub fn is_phi(self) -> bool {
+        matches!(self, Self::Phi)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +163,7 @@ impl InstFlags {
     pub const IS_PSEUDO: Self = Self(0x20);
     pub const READS_MEMORY: Self = Self(0x40);
     pub const WRITES_MEMORY: Self = Self(0x80);
+    pub const IS_PHI: Self = Self(0x100);
 
     /// Returns true if all bits in `other` are set in `self`.
     #[inline]
@@ -202,6 +208,12 @@ impl InstFlags {
     }
 }
 
+impl Default for InstFlags {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
 impl core::ops::BitOr for InstFlags {
     type Output = Self;
     #[inline]
@@ -237,6 +249,7 @@ impl core::fmt::Debug for InstFlags {
             (Self::IS_PSEUDO, "IS_PSEUDO"),
             (Self::READS_MEMORY, "READS_MEMORY"),
             (Self::WRITES_MEMORY, "WRITES_MEMORY"),
+            (Self::IS_PHI, "IS_PHI"),
         ];
         write!(f, "InstFlags(")?;
         for (flag, name) in &flags {

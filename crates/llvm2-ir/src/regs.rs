@@ -22,6 +22,12 @@ impl VReg {
     }
 }
 
+impl core::fmt::Display for VReg {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "v{}", self.id)
+    }
+}
+
 /// Physical register — AArch64 hardware register.
 ///
 /// Encoding: 0-30 = GPR (X0-X30), 32-63 = FPR (V0-V31).
@@ -45,6 +51,27 @@ impl PReg {
             self.0
         } else {
             self.0 - 32
+        }
+    }
+
+    /// Alias for `hw_enc()` — returns the register number within its class.
+    pub fn hw_index(&self) -> u8 {
+        self.hw_enc()
+    }
+}
+
+impl core::fmt::Display for PReg {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.is_gpr() {
+            match self.0 {
+                29 => write!(f, "fp"),
+                30 => write!(f, "lr"),
+                n => write!(f, "x{n}"),
+            }
+        } else if self.is_fpr() {
+            write!(f, "v{}", self.0 - 32)
+        } else {
+            write!(f, "?{}", self.0)
         }
     }
 }

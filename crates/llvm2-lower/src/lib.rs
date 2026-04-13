@@ -17,5 +17,5 @@ pub mod isel;
 
 pub use types::Type;
 pub use function::Function;
-pub use abi::{AppleAArch64ABI, ArgLocation, PReg};
+pub use abi::{AppleAArch64ABI, ArgLocation, PReg, gpr};
 pub use isel::InstructionSelector;

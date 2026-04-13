@@ -13,6 +13,9 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+# Shared machine IR model (canonical type definitions)
+llvm2-ir = { workspace = true }
+
 # tMIR (input IR) — stub crates for development
 tmir-types = { workspace = true }
 tmir-instrs = { workspace = true }

@@ -77,9 +77,10 @@ pub mod phi_elim;
 pub use liveness::{compute_live_intervals, LiveInterval, LiveRange, LivenessResult};
 pub use linear_scan::{aarch64_allocatable_regs, AllocError, AllocationResult, LinearScan, SpillInfo};
 pub use machine_types::{
-    BlockId, InstFlags, InstId, MachBlock, MachFunction, MachInst, MachOperand, PReg, RegClass,
-    StackSlotId, VReg,
+    InstFlags, MachBlock, MachFunction, MachInst, MachOperand, StackSlot,
 };
+// Re-export canonical types from llvm2-ir via machine_types.
+pub use machine_types::{BlockId, InstId, PReg, RegClass, StackSlotId, VReg};
 pub use phi_elim::{eliminate_phis, split_critical_edges};
 pub use spill::insert_spill_code;
 
