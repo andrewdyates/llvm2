@@ -100,6 +100,8 @@ pub enum AArch64Opcode {
     SDIVXrr,  // 64-bit signed divide
     UDIVWrr,  // 32-bit unsigned divide
     UDIVXrr,  // 64-bit unsigned divide
+    MSUBWrrr, // 32-bit multiply-subtract: Wd = Wa - Wn * Wm
+    MSUBXrrr, // 64-bit multiply-subtract: Xd = Xa - Xn * Xm
 
     // Comparison
     CMPWrr,   // 32-bit compare (SUBS WZR, Wn, Wm)
@@ -516,6 +518,8 @@ impl InstructionSelector {
             Opcode::Imul => self.select_binop(AArch64BinOp::Mul, inst, block)?,
             Opcode::Sdiv => self.select_binop(AArch64BinOp::Sdiv, inst, block)?,
             Opcode::Udiv => self.select_binop(AArch64BinOp::Udiv, inst, block)?,
+            Opcode::Srem => self.select_remainder(/*signed=*/true, inst, block)?,
+            Opcode::Urem => self.select_remainder(/*signed=*/false, inst, block)?,
 
             // Shift operations
             Opcode::Ishl => self.select_shift(AArch64ShiftOp::Lsl, inst, block)?,
@@ -737,6 +741,67 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(opc, vec![MachOperand::VReg(dst), lhs, rhs]),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), ty);
+        Ok(())
+    }
+
+    /// Select integer remainder: SDIV/UDIV + MSUB.
+    ///
+    /// AArch64 has no hardware remainder instruction. We compute:
+    ///   tmp = a / b         (SDIV or UDIV)
+    ///   result = a - tmp*b  (MSUB: Rd = Ra - Rn * Rm)
+    ///
+    /// MSUB operand order: MSUB Rd, Rn, Rm, Ra  =>  Rd = Ra - Rn * Rm
+    /// So: MSUB result, tmp, b, a  =>  result = a - tmp * b
+    fn select_remainder(&mut self, signed: bool, inst: &Instruction, block: Block) -> Result<(), ISelError> {
+        assert!(inst.args.len() >= 2, "Remainder must have at least 2 args");
+        assert!(!inst.results.is_empty(), "Remainder must have a result");
+
+        let lhs_val = inst.args[0]; // dividend (a)
+        let rhs_val = inst.args[1]; // divisor (b)
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&lhs_val);
+        let is_32 = Self::is_32bit(&ty);
+        let class = reg_class_for_type(&ty);
+
+        let lhs = self.use_value(&lhs_val)?;
+        let rhs = self.use_value(&rhs_val)?;
+
+        // Step 1: tmp = a / b
+        let tmp = self.new_vreg(class);
+        let div_opc = match (signed, is_32) {
+            (true, true) => AArch64Opcode::SDIVWrr,
+            (true, false) => AArch64Opcode::SDIVXrr,
+            (false, true) => AArch64Opcode::UDIVWrr,
+            (false, false) => AArch64Opcode::UDIVXrr,
+        };
+        self.func.push_inst(
+            block,
+            MachInst::new(div_opc, vec![MachOperand::VReg(tmp), lhs.clone(), rhs.clone()]),
+        );
+
+        // Step 2: result = a - tmp * b  (MSUB Rd, Rn, Rm, Ra)
+        // Operands: [dst, Rn=tmp, Rm=b, Ra=a]
+        let dst = self.new_vreg(class);
+        let msub_opc = if is_32 {
+            AArch64Opcode::MSUBWrrr
+        } else {
+            AArch64Opcode::MSUBXrrr
+        };
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                msub_opc,
+                vec![
+                    MachOperand::VReg(dst),
+                    MachOperand::VReg(tmp),
+                    rhs,
+                    lhs,
+                ],
+            ),
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), ty);
@@ -3075,5 +3140,116 @@ mod tests {
             MachOperand::Block(then_block),
             "B.cond should target the then block"
         );
+    }
+
+    // =======================================================================
+    // Integer remainder (SRem/URem) tests
+    // =======================================================================
+
+    #[test]
+    fn select_urem_i32() {
+        let (mut isel, entry) = make_add_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Urem,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 2 COPYs for args + UDIV + MSUB = 4 instructions
+        assert_eq!(mblock.insts.len(), 4);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::UDIVWrr);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::MSUBWrrr);
+        // MSUB operands: [dst, tmp(quotient), divisor, dividend]
+        assert_eq!(mblock.insts[3].operands.len(), 4);
+    }
+
+    #[test]
+    fn select_srem_i32() {
+        let (mut isel, entry) = make_add_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Srem,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 4);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::SDIVWrr);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::MSUBWrrr);
+    }
+
+    #[test]
+    fn select_urem_i64() {
+        let (mut isel, entry) = make_i64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Urem,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 4);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::UDIVXrr);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::MSUBXrrr);
+    }
+
+    #[test]
+    fn select_srem_i64() {
+        let (mut isel, entry) = make_i64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Srem,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 4);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::SDIVXrr);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::MSUBXrrr);
+    }
+
+    #[test]
+    fn select_srem_msub_operand_order() {
+        // Verify MSUB operand order: MSUB dst, tmp(quotient), divisor, dividend
+        // This ensures result = dividend - quotient * divisor
+        let (mut isel, entry) = make_add_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Srem,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        let div_inst = &mblock.insts[2];
+        let msub_inst = &mblock.insts[3];
+
+        // SDIV dst=tmp, lhs=dividend, rhs=divisor
+        assert_eq!(div_inst.opcode, AArch64Opcode::SDIVWrr);
+        let div_dst = &div_inst.operands[0]; // tmp vreg
+        let dividend_op = &div_inst.operands[1]; // dividend
+        let divisor_op = &div_inst.operands[2]; // divisor
+
+        // MSUB dst, Rn=tmp, Rm=divisor, Ra=dividend
+        assert_eq!(msub_inst.opcode, AArch64Opcode::MSUBWrrr);
+        assert_eq!(&msub_inst.operands[1], div_dst, "MSUB Rn should be quotient from SDIV");
+        assert_eq!(&msub_inst.operands[2], divisor_op, "MSUB Rm should be divisor");
+        assert_eq!(&msub_inst.operands[3], dividend_op, "MSUB Ra should be dividend");
     }
 }

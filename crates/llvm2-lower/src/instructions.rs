@@ -29,6 +29,8 @@ pub enum Opcode {
     Imul,
     Udiv,
     Sdiv,
+    Urem,
+    Srem,
 
     // Shift operations
     Ishl,   // Logical shift left

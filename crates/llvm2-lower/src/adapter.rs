@@ -519,7 +519,7 @@ impl<'a> TmirAdapter<'a> {
     fn translate_binop(
         &mut self,
         op: &BinOp,
-        ty: &Ty,
+        _ty: &Ty,
         lhs: &ValueId,
         rhs: &ValueId,
         results: &[ValueId],
@@ -540,10 +540,9 @@ impl<'a> TmirAdapter<'a> {
             BinOp::FSub => Opcode::Fsub,
             BinOp::FMul => Opcode::Fmul,
             BinOp::FDiv => Opcode::Fdiv,
-            // Remainder: AArch64 has no remainder instruction.
-            // Lower as: result = lhs - (lhs / rhs) * rhs
-            BinOp::SRem => return self.translate_remainder(true, ty, lhs, rhs, results),
-            BinOp::URem => return self.translate_remainder(false, ty, lhs, rhs, results),
+            // Remainder: emitted as native LIR opcodes; ISel lowers to SDIV/UDIV + MSUB.
+            BinOp::SRem => Opcode::Srem,
+            BinOp::URem => Opcode::Urem,
         };
 
         let lhs_val = self.map_value(*lhs);
@@ -555,49 +554,6 @@ impl<'a> TmirAdapter<'a> {
             args: vec![lhs_val, rhs_val],
             results: vec![result],
         }])
-    }
-
-    /// Translate remainder (SRem/URem) as a div + mul + sub sequence.
-    ///
-    /// result = lhs - (lhs / rhs) * rhs
-    fn translate_remainder(
-        &mut self,
-        signed: bool,
-        _ty: &Ty,
-        lhs: &ValueId,
-        rhs: &ValueId,
-        results: &[ValueId],
-    ) -> Result<Vec<Instruction>, AdapterError> {
-        let lhs_val = self.map_value(*lhs);
-        let rhs_val = self.map_value(*rhs);
-        let result = self.map_result(results)?;
-
-        let div_opcode = if signed { Opcode::Sdiv } else { Opcode::Udiv };
-
-        // Step 1: quotient = lhs / rhs
-        let quotient = self.fresh_value();
-        let div_inst = Instruction {
-            opcode: div_opcode,
-            args: vec![lhs_val, rhs_val],
-            results: vec![quotient],
-        };
-
-        // Step 2: product = quotient * rhs
-        let product = self.fresh_value();
-        let mul_inst = Instruction {
-            opcode: Opcode::Imul,
-            args: vec![quotient, rhs_val],
-            results: vec![product],
-        };
-
-        // Step 3: result = lhs - product
-        let sub_inst = Instruction {
-            opcode: Opcode::Isub,
-            args: vec![lhs_val, product],
-            results: vec![result],
-        };
-
-        Ok(vec![div_inst, mul_inst, sub_inst])
     }
 
     // -----------------------------------------------------------------------
@@ -1857,12 +1813,10 @@ mod tests {
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
         let entry = &lir_func.blocks[&lir_func.entry_block];
 
-        // SRem lowers to: sdiv, imul, isub, return = 4 instructions
-        assert_eq!(entry.instructions.len(), 4);
-        assert!(matches!(entry.instructions[0].opcode, Opcode::Sdiv));
-        assert!(matches!(entry.instructions[1].opcode, Opcode::Imul));
-        assert!(matches!(entry.instructions[2].opcode, Opcode::Isub));
-        assert!(matches!(entry.instructions[3].opcode, Opcode::Return));
+        // SRem is now a native LIR opcode: srem, return = 2 instructions
+        assert_eq!(entry.instructions.len(), 2);
+        assert!(matches!(entry.instructions[0].opcode, Opcode::Srem));
+        assert!(matches!(entry.instructions[1].opcode, Opcode::Return));
     }
 
     #[test]

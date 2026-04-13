@@ -31,6 +31,8 @@ use llvm2_lower::types::Type;
 /// - `Opcode::Imul` -> `bvmul`
 /// - `Opcode::Sdiv` -> `bvsdiv`
 /// - `Opcode::Udiv` -> `bvudiv`
+/// - `Opcode::Srem` -> `a - bvsdiv(a, b) * b`
+/// - `Opcode::Urem` -> `a - bvudiv(a, b) * b`
 ///
 /// # Panics
 ///
@@ -42,6 +44,16 @@ pub fn encode_tmir_binop(opcode: &Opcode, _ty: Type, lhs: SmtExpr, rhs: SmtExpr)
         Opcode::Imul => lhs.bvmul(rhs),
         Opcode::Sdiv => lhs.bvsdiv(rhs),
         Opcode::Udiv => lhs.bvudiv(rhs),
+        // Remainder: a % b = a - (a / b) * b
+        // Composed from existing SMT operations until native bvsrem/bvurem are added.
+        Opcode::Srem => {
+            let quotient = lhs.clone().bvsdiv(rhs.clone());
+            lhs.bvsub(quotient.bvmul(rhs))
+        }
+        Opcode::Urem => {
+            let quotient = lhs.clone().bvudiv(rhs.clone());
+            lhs.bvsub(quotient.bvmul(rhs))
+        }
         _ => panic!("encode_tmir_binop: unsupported opcode {:?}", opcode),
     }
 }
@@ -99,10 +111,10 @@ pub fn encode_tmir_icmp(cond: &IntCC, _ty: Type, lhs: SmtExpr, rhs: SmtExpr) -> 
 
 /// Return the precondition for a tMIR opcode, if any.
 ///
-/// Division opcodes require `rhs != 0`. Other opcodes have no preconditions.
+/// Division and remainder opcodes require `rhs != 0`. Other opcodes have no preconditions.
 pub fn precondition(opcode: &Opcode, _ty: Type, _lhs: &SmtExpr, rhs: &SmtExpr) -> Option<SmtExpr> {
     match opcode {
-        Opcode::Sdiv | Opcode::Udiv => {
+        Opcode::Sdiv | Opcode::Udiv | Opcode::Srem | Opcode::Urem => {
             // Precondition: divisor != 0
             let zero = SmtExpr::bv_const(0, rhs.bv_width());
             Some(rhs.clone().eq_expr(zero).not_expr())
