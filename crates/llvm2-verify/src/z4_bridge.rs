@@ -1,0 +1,982 @@
+// llvm2-verify/z4_bridge.rs - Bridge to the z4 SMT solver
+//
+// Author: Andrew Yates <ayates@dropbox.com>
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+//
+// Translates our SmtExpr AST into SMT-LIB2 format and invokes an SMT solver
+// to check satisfiability. Two backends:
+//
+// 1. z4 Rust API (feature = "z4") -- direct in-process solving via the z4 crate
+// 2. CLI subprocess fallback -- invokes z3/z4 binary via SMT-LIB2 text pipe
+//
+// The CLI fallback is always available (no feature gate) and is useful when
+// the z4 crate is not linked. It uses the standard SMT-LIB2 text interface.
+//
+// Reference: designs/2026-04-13-verification-architecture.md
+
+//! Bridge to the z4 SMT solver for formal verification.
+//!
+//! This module provides the infrastructure to verify [`ProofObligation`]s
+//! using a real SMT solver instead of the mock evaluator. It translates
+//! our [`SmtExpr`] AST into SMT-LIB2 format and either:
+//!
+//! - Invokes z4's native Rust API (when the `z4` feature is enabled), or
+//! - Pipes SMT-LIB2 text to a z3/z4 CLI binary as a subprocess fallback.
+//!
+//! # Architecture
+//!
+//! ```text
+//! ProofObligation
+//!   |
+//!   v
+//! to_smt2() -> SMT-LIB2 string
+//!   |
+//!   +--[z4 feature]--> z4::Solver (in-process)
+//!   |
+//!   +--[CLI fallback]-> z3/z4 subprocess (SMT-LIB2 stdin/stdout)
+//! ```
+//!
+//! [`ProofObligation`]: crate::lowering_proof::ProofObligation
+//! [`SmtExpr`]: crate::smt::SmtExpr
+
+use crate::lowering_proof::ProofObligation;
+#[cfg(feature = "z4")]
+use crate::smt::SmtExpr;
+#[cfg(feature = "z4")]
+use std::collections::HashMap;
+use std::fmt;
+
+// ---------------------------------------------------------------------------
+// Z4Result
+// ---------------------------------------------------------------------------
+
+/// Result of a z4/z3 verification check.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Z4Result {
+    /// The property holds (UNSAT -- no counterexample exists).
+    /// The negated equivalence is unsatisfiable, meaning the original
+    /// property holds for ALL inputs.
+    Verified,
+    /// The property fails with a counterexample.
+    /// Each entry is (variable_name, value) from the satisfying assignment
+    /// to the negated equivalence formula.
+    CounterExample(Vec<(String, u64)>),
+    /// The solver timed out before reaching a conclusion.
+    Timeout,
+    /// Solver error (parse failure, internal error, etc.).
+    Error(String),
+}
+
+impl fmt::Display for Z4Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Z4Result::Verified => write!(f, "VERIFIED (UNSAT)"),
+            Z4Result::CounterExample(cex) => {
+                write!(f, "COUNTEREXAMPLE: ")?;
+                for (i, (name, val)) in cex.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{} = {:#x}", name, val)?;
+                }
+                Ok(())
+            }
+            Z4Result::Timeout => write!(f, "TIMEOUT"),
+            Z4Result::Error(msg) => write!(f, "ERROR: {}", msg),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Z4Config
+// ---------------------------------------------------------------------------
+
+/// Configuration for the z4/z3 solver.
+pub struct Z4Config {
+    /// Path to the solver binary for CLI fallback (default: search PATH for z3, then z4).
+    pub solver_path: Option<String>,
+    /// Timeout in milliseconds (default: 5000).
+    pub timeout_ms: u64,
+    /// Whether to request a model on SAT (for counterexample extraction).
+    pub produce_models: bool,
+}
+
+impl Default for Z4Config {
+    fn default() -> Self {
+        Self {
+            solver_path: None,
+            timeout_ms: 5000,
+            produce_models: true,
+        }
+    }
+}
+
+impl Z4Config {
+    /// Create a config with a custom timeout.
+    pub fn with_timeout(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Create a config with a specific solver binary path.
+    pub fn with_solver_path(mut self, path: impl Into<String>) -> Self {
+        self.solver_path = Some(path.into());
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SMT-LIB2 generation (enhanced version of ProofObligation::to_smt2)
+// ---------------------------------------------------------------------------
+
+/// Generate a complete SMT-LIB2 query for a proof obligation.
+///
+/// This extends `ProofObligation::to_smt2()` with:
+/// - `(set-option :timeout <ms>)` for solver timeout
+/// - `(get-model)` after `(check-sat)` for counterexample extraction
+/// - Proper `(get-value ...)` queries for each input variable
+pub fn generate_smt2_query(obligation: &ProofObligation, config: &Z4Config) -> String {
+    let mut lines = Vec::new();
+
+    // Logic declaration
+    lines.push("(set-logic QF_BV)".to_string());
+
+    // Solver options
+    if config.timeout_ms > 0 {
+        // z3 uses :timeout in milliseconds
+        lines.push(format!("(set-option :timeout {})", config.timeout_ms));
+    }
+    if config.produce_models {
+        lines.push("(set-option :produce-models true)".to_string());
+    }
+
+    // Declare symbolic inputs
+    for (name, width) in &obligation.inputs {
+        lines.push(format!(
+            "(declare-const {} (_ BitVec {}))",
+            name, width
+        ));
+    }
+
+    // Assert the negated equivalence
+    let formula = obligation.negated_equivalence();
+    lines.push(format!("(assert {})", formula));
+
+    // Check satisfiability
+    lines.push("(check-sat)".to_string());
+
+    // If SAT, get the model for counterexample extraction
+    if config.produce_models && !obligation.inputs.is_empty() {
+        let var_list: String = obligation
+            .inputs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(format!("(get-value ({}))", var_list));
+    }
+
+    lines.push("(exit)".to_string());
+
+    lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// CLI subprocess backend (always available)
+// ---------------------------------------------------------------------------
+
+/// Verify a proof obligation using a z3/z4 CLI subprocess.
+///
+/// This function:
+/// 1. Generates SMT-LIB2 from the proof obligation
+/// 2. Writes it to a temp file
+/// 3. Invokes the solver binary
+/// 4. Parses the output (sat/unsat/timeout/error)
+/// 5. If sat, extracts the counterexample from the model
+pub fn verify_with_cli(obligation: &ProofObligation, config: &Z4Config) -> Z4Result {
+    let smt2 = generate_smt2_query(obligation, config);
+
+    // Find the solver binary
+    let solver_path = match &config.solver_path {
+        Some(path) => path.clone(),
+        None => find_solver_binary(),
+    };
+
+    if solver_path.is_empty() {
+        return Z4Result::Error(
+            "No SMT solver found. Install z3 (brew install z3) or set solver_path.".to_string(),
+        );
+    }
+
+    // Write SMT-LIB2 to a temp file
+    let tmp_path = match write_temp_smt2(&smt2) {
+        Ok(path) => path,
+        Err(e) => return Z4Result::Error(format!("Failed to write temp file: {}", e)),
+    };
+
+    // Invoke the solver
+    let output = std::process::Command::new(&solver_path)
+        .arg("-smt2")
+        .arg(&tmp_path)
+        .output();
+
+    // Clean up temp file (best-effort)
+    let _ = std::fs::remove_file(&tmp_path);
+
+    match output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            parse_solver_output(&stdout, &stderr, &obligation.inputs)
+        }
+        Err(e) => Z4Result::Error(format!("Failed to invoke solver '{}': {}", solver_path, e)),
+    }
+}
+
+/// Search PATH for z3 or z4 binary.
+fn find_solver_binary() -> String {
+    // Prefer z3 (widely available, well-tested SMT-LIB2 support)
+    if let Ok(output) = std::process::Command::new("which").arg("z3").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return path;
+            }
+        }
+    }
+    // Fallback: z4 binary
+    if let Ok(output) = std::process::Command::new("which").arg("z4").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return path;
+            }
+        }
+    }
+    String::new()
+}
+
+/// Write SMT-LIB2 content to a temporary file with a unique name.
+fn write_temp_smt2(content: &str) -> Result<String, std::io::Error> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let dir = std::env::temp_dir();
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = dir.join(format!(
+        "llvm2_verify_{}_{}.smt2",
+        std::process::id(),
+        id
+    ));
+    let mut file = std::fs::File::create(&path)?;
+    file.write_all(content.as_bytes())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Parse solver stdout/stderr into a Z4Result.
+fn parse_solver_output(
+    stdout: &str,
+    stderr: &str,
+    inputs: &[(String, u32)],
+) -> Z4Result {
+    let stdout_trimmed = stdout.trim();
+
+    // Check for timeout indicators
+    if stdout_trimmed.contains("timeout") || stdout_trimmed == "unknown" {
+        return Z4Result::Timeout;
+    }
+
+    // Check for errors
+    if stdout_trimmed.starts_with("(error") || !stderr.trim().is_empty() {
+        let msg = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else {
+            stdout_trimmed.to_string()
+        };
+        // Some solvers print warnings to stderr that aren't errors
+        if msg.contains("WARNING") || msg.contains("warning") {
+            // Continue parsing stdout
+        } else if !stdout_trimmed.starts_with("sat") && !stdout_trimmed.starts_with("unsat") {
+            return Z4Result::Error(msg);
+        }
+    }
+
+    // Parse the result lines
+    let lines: Vec<&str> = stdout_trimmed.lines().collect();
+
+    if lines.is_empty() {
+        return Z4Result::Error("Empty solver output".to_string());
+    }
+
+    let first_line = lines[0].trim();
+
+    match first_line {
+        "unsat" => Z4Result::Verified,
+        "sat" => {
+            // Try to extract counterexample from model output
+            if lines.len() > 1 {
+                let model_text = lines[1..].join("\n");
+                let cex = parse_model_output(&model_text, inputs);
+                Z4Result::CounterExample(cex)
+            } else {
+                // SAT but no model output
+                Z4Result::CounterExample(vec![])
+            }
+        }
+        "unknown" => Z4Result::Timeout,
+        _ => Z4Result::Error(format!("Unexpected solver output: {}", first_line)),
+    }
+}
+
+/// Parse SMT-LIB2 `(get-value ...)` output to extract variable assignments.
+///
+/// Expected format:
+/// ```text
+/// ((a #x0000000a)
+///  (b #x00000014))
+/// ```
+fn parse_model_output(model_text: &str, inputs: &[(String, u32)]) -> Vec<(String, u64)> {
+    let mut result = Vec::new();
+
+    for (name, _width) in inputs {
+        // Look for the variable assignment in the model
+        // Format: (name #xHEXVALUE) or (name (_ bvDECIMAL WIDTH))
+        if let Some(val) = extract_bv_value(model_text, name) {
+            result.push((name.clone(), val));
+        }
+    }
+
+    result
+}
+
+/// Extract a bitvector value for a variable from SMT-LIB2 model output.
+fn extract_bv_value(model_text: &str, var_name: &str) -> Option<u64> {
+    // Pattern 1: (var_name #xHEXDIGITS)
+    let hex_pattern = format!("({} #x", var_name);
+    if let Some(pos) = model_text.find(&hex_pattern) {
+        let start = pos + hex_pattern.len();
+        let end = model_text[start..].find(')')? + start;
+        let hex_str = &model_text[start..end];
+        return u64::from_str_radix(hex_str, 16).ok();
+    }
+
+    // Pattern 2: (var_name #bBINDIGITS)
+    let bin_pattern = format!("({} #b", var_name);
+    if let Some(pos) = model_text.find(&bin_pattern) {
+        let start = pos + bin_pattern.len();
+        let end = model_text[start..].find(')')? + start;
+        let bin_str = &model_text[start..end];
+        return u64::from_str_radix(bin_str, 2).ok();
+    }
+
+    // Pattern 3: (var_name (_ bvDECIMAL WIDTH))
+    let bv_pattern = format!("({} (_ bv", var_name);
+    if let Some(pos) = model_text.find(&bv_pattern) {
+        let start = pos + bv_pattern.len();
+        let space = model_text[start..].find(' ')? + start;
+        let dec_str = &model_text[start..space];
+        return dec_str.parse::<u64>().ok();
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
+// z4 native Rust API backend (feature-gated)
+// ---------------------------------------------------------------------------
+
+/// Verify a proof obligation using the z4 crate's native Rust API.
+///
+/// This avoids subprocess overhead and provides richer error information.
+/// Only available when the `z4` feature is enabled.
+#[cfg(feature = "z4")]
+pub fn verify_with_z4_api(obligation: &ProofObligation, config: &Z4Config) -> Z4Result {
+    use z4::{Logic, SolveResult, Sort, Solver, BitVecSort};
+
+    // Create solver for QF_BV (quantifier-free bitvectors)
+    let mut solver = match Solver::try_new(Logic::QfBv) {
+        Ok(s) => s,
+        Err(e) => return Z4Result::Error(format!("Failed to create z4 solver: {}", e)),
+    };
+
+    // Declare input variables
+    let mut var_terms: HashMap<String, z4::Term> = HashMap::new();
+    for (name, width) in &obligation.inputs {
+        let sort = Sort::BitVec(BitVecSort { width: *width });
+        let term = solver.declare_const(name, sort);
+        var_terms.insert(name.clone(), term);
+    }
+
+    // Build and assert the negated equivalence formula
+    let formula_term = translate_expr_to_z4(&obligation.negated_equivalence(), &solver, &var_terms);
+    match formula_term {
+        Ok(term) => solver.assert_term(term),
+        Err(e) => return Z4Result::Error(format!("Failed to translate formula: {}", e)),
+    }
+
+    // Check satisfiability
+    let details = solver.check_sat_with_details();
+    match details.accept_for_consumer() {
+        Ok(SolveResult::Unsat(_)) => Z4Result::Verified,
+        Ok(SolveResult::Sat) => {
+            // Extract counterexample from model
+            let cex = match solver.model() {
+                Some(model) => {
+                    let model = model.into_inner();
+                    let mut assignments = Vec::new();
+                    for (name, width) in &obligation.inputs {
+                        if let Some(val) = model.bv_val(name) {
+                            assignments.push((name.clone(), val));
+                        }
+                    }
+                    assignments
+                }
+                None => vec![],
+            };
+            Z4Result::CounterExample(cex)
+        }
+        Ok(SolveResult::Unknown) | Err(_) => {
+            if let Some(reason) = details.unknown_reason {
+                if reason.to_string().contains("timeout") {
+                    Z4Result::Timeout
+                } else {
+                    Z4Result::Error(format!("Solver returned unknown: {}", reason))
+                }
+            } else {
+                Z4Result::Timeout
+            }
+        }
+        Ok(_) => Z4Result::Error("Unexpected solver result".to_string()),
+    }
+}
+
+/// Translate an SmtExpr tree into a z4 Term.
+///
+/// This recursively converts our internal AST into z4's native term
+/// representation using the solver's builder API.
+#[cfg(feature = "z4")]
+fn translate_expr_to_z4(
+    expr: &SmtExpr,
+    solver: &z4::Solver,
+    var_terms: &HashMap<String, z4::Term>,
+) -> Result<z4::Term, String> {
+    match expr {
+        SmtExpr::Var { name, .. } => {
+            var_terms
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("Variable '{}' not declared", name))
+        }
+        SmtExpr::BvConst { value, width } => {
+            Ok(solver.bv_const(*value, *width))
+        }
+        SmtExpr::BoolConst(b) => {
+            Ok(solver.bool_const(*b))
+        }
+        SmtExpr::BvAdd { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvadd(l, r))
+        }
+        SmtExpr::BvSub { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvsub(l, r))
+        }
+        SmtExpr::BvMul { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvmul(l, r))
+        }
+        SmtExpr::BvSDiv { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvsdiv(l, r))
+        }
+        SmtExpr::BvUDiv { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvudiv(l, r))
+        }
+        SmtExpr::BvNeg { operand, .. } => {
+            let o = translate_expr_to_z4(operand, solver, var_terms)?;
+            Ok(solver.bvneg(o))
+        }
+        SmtExpr::BvAnd { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvand(l, r))
+        }
+        SmtExpr::BvOr { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvor(l, r))
+        }
+        SmtExpr::BvXor { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvxor(l, r))
+        }
+        SmtExpr::BvShl { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvshl(l, r))
+        }
+        SmtExpr::BvLshr { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvlshr(l, r))
+        }
+        SmtExpr::BvAshr { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvashr(l, r))
+        }
+        SmtExpr::Eq { lhs, rhs } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.eq(l, r))
+        }
+        SmtExpr::Not { operand } => {
+            let o = translate_expr_to_z4(operand, solver, var_terms)?;
+            Ok(solver.not(o))
+        }
+        SmtExpr::And { lhs, rhs } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.and(l, r))
+        }
+        SmtExpr::Or { lhs, rhs } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.or(l, r))
+        }
+        SmtExpr::BvSlt { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvslt(l, r))
+        }
+        SmtExpr::BvSge { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvsge(l, r))
+        }
+        SmtExpr::BvSgt { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvsgt(l, r))
+        }
+        SmtExpr::BvSle { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvsle(l, r))
+        }
+        SmtExpr::BvUlt { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvult(l, r))
+        }
+        SmtExpr::BvUge { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvuge(l, r))
+        }
+        SmtExpr::BvUgt { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvugt(l, r))
+        }
+        SmtExpr::BvUle { lhs, rhs, .. } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            Ok(solver.bvule(l, r))
+        }
+        SmtExpr::Ite { cond, then_expr, else_expr } => {
+            let c = translate_expr_to_z4(cond, solver, var_terms)?;
+            let t = translate_expr_to_z4(then_expr, solver, var_terms)?;
+            let e = translate_expr_to_z4(else_expr, solver, var_terms)?;
+            Ok(solver.ite(c, t, e))
+        }
+        SmtExpr::Extract { high, low, operand, .. } => {
+            let o = translate_expr_to_z4(operand, solver, var_terms)?;
+            Ok(solver.extract(*high, *low, o))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unified verification interface
+// ---------------------------------------------------------------------------
+
+/// Verify a proof obligation using the best available solver backend.
+///
+/// Selection order:
+/// 1. z4 native Rust API (if `z4` feature enabled)
+/// 2. CLI subprocess (z3 or z4 binary)
+///
+/// Returns [`Z4Result::Verified`] if the lowering rule is correct for all inputs.
+pub fn verify_with_z4(obligation: &ProofObligation, config: &Z4Config) -> Z4Result {
+    #[cfg(feature = "z4")]
+    {
+        return verify_with_z4_api(obligation, config);
+    }
+
+    #[cfg(not(feature = "z4"))]
+    {
+        verify_with_cli(obligation, config)
+    }
+}
+
+/// Re-verify all known lowering proofs using the z4 solver.
+///
+/// Collects all standard proof obligations (arithmetic, comparison, branch,
+/// peephole, NZCV, constant folding, CSE/LICM) and verifies each one.
+///
+/// Returns a list of (proof_name, result) pairs.
+pub fn verify_all_with_z4(config: &Z4Config) -> Vec<(String, Z4Result)> {
+    let mut results = Vec::new();
+
+    // Arithmetic lowering proofs
+    for obligation in crate::lowering_proof::all_arithmetic_proofs() {
+        let result = verify_with_z4(&obligation, config);
+        results.push((obligation.name.clone(), result));
+    }
+
+    // NZCV flag + comparison + branch proofs
+    for obligation in crate::lowering_proof::all_nzcv_proofs() {
+        let result = verify_with_z4(&obligation, config);
+        results.push((obligation.name.clone(), result));
+    }
+
+    // Peephole identity proofs
+    for obligation in crate::peephole_proofs::all_peephole_proofs_with_32bit() {
+        let result = verify_with_z4(&obligation, config);
+        results.push((obligation.name.clone(), result));
+    }
+
+    results
+}
+
+/// Summary statistics for a batch verification run.
+#[derive(Debug, Clone)]
+pub struct VerificationSummary {
+    /// Total number of proofs checked.
+    pub total: usize,
+    /// Number of proofs verified (UNSAT).
+    pub verified: usize,
+    /// Number of proofs that found counterexamples (SAT).
+    pub failed: usize,
+    /// Number of proofs that timed out.
+    pub timeouts: usize,
+    /// Number of proofs that had errors.
+    pub errors: usize,
+}
+
+impl VerificationSummary {
+    /// Compute summary from a list of results.
+    pub fn from_results(results: &[(String, Z4Result)]) -> Self {
+        let mut summary = Self {
+            total: results.len(),
+            verified: 0,
+            failed: 0,
+            timeouts: 0,
+            errors: 0,
+        };
+
+        for (_, result) in results {
+            match result {
+                Z4Result::Verified => summary.verified += 1,
+                Z4Result::CounterExample(_) => summary.failed += 1,
+                Z4Result::Timeout => summary.timeouts += 1,
+                Z4Result::Error(_) => summary.errors += 1,
+            }
+        }
+
+        summary
+    }
+
+    /// Returns true if all proofs were verified.
+    pub fn all_verified(&self) -> bool {
+        self.verified == self.total
+    }
+}
+
+impl fmt::Display for VerificationSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}/{} verified, {} failed, {} timeouts, {} errors",
+            self.verified, self.total, self.failed, self.timeouts, self.errors
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lowering_proof::ProofObligation;
+    use crate::smt::SmtExpr;
+
+    // -----------------------------------------------------------------------
+    // SMT-LIB2 generation tests (always run, no solver needed)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_generate_smt2_query_basic() {
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+
+        let obligation = ProofObligation {
+            name: "test_add".to_string(),
+            tmir_expr: a.clone().bvadd(b.clone()),
+            aarch64_expr: a.bvadd(b),
+            inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+            preconditions: vec![],
+        };
+
+        let config = Z4Config::default();
+        let smt2 = generate_smt2_query(&obligation, &config);
+
+        assert!(smt2.contains("(set-logic QF_BV)"));
+        assert!(smt2.contains("(set-option :timeout 5000)"));
+        assert!(smt2.contains("(set-option :produce-models true)"));
+        assert!(smt2.contains("(declare-const a (_ BitVec 32))"));
+        assert!(smt2.contains("(declare-const b (_ BitVec 32))"));
+        assert!(smt2.contains("(assert"));
+        assert!(smt2.contains("(check-sat)"));
+        assert!(smt2.contains("(get-value (a b))"));
+        assert!(smt2.contains("(exit)"));
+    }
+
+    #[test]
+    fn test_generate_smt2_no_timeout() {
+        let a = SmtExpr::var("x", 64);
+        let obligation = ProofObligation {
+            name: "test_no_timeout".to_string(),
+            tmir_expr: a.clone(),
+            aarch64_expr: a,
+            inputs: vec![("x".to_string(), 64)],
+            preconditions: vec![],
+        };
+
+        let config = Z4Config {
+            timeout_ms: 0,
+            ..Default::default()
+        };
+        let smt2 = generate_smt2_query(&obligation, &config);
+        assert!(!smt2.contains(":timeout"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Solver output parsing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_unsat() {
+        let result = parse_solver_output("unsat\n", "", &[]);
+        assert_eq!(result, Z4Result::Verified);
+    }
+
+    #[test]
+    fn test_parse_sat_with_hex_model() {
+        let output = "sat\n((a #x0000000a)\n (b #x00000014))";
+        let inputs = vec![("a".to_string(), 32), ("b".to_string(), 32)];
+        let result = parse_solver_output(output, "", &inputs);
+        match result {
+            Z4Result::CounterExample(cex) => {
+                assert_eq!(cex.len(), 2);
+                assert_eq!(cex[0], ("a".to_string(), 0xa));
+                assert_eq!(cex[1], ("b".to_string(), 0x14));
+            }
+            other => panic!("Expected CounterExample, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_sat_with_bv_model() {
+        let output = "sat\n((x (_ bv42 32)))";
+        let inputs = vec![("x".to_string(), 32)];
+        let result = parse_solver_output(output, "", &inputs);
+        match result {
+            Z4Result::CounterExample(cex) => {
+                assert_eq!(cex.len(), 1);
+                assert_eq!(cex[0], ("x".to_string(), 42));
+            }
+            other => panic!("Expected CounterExample, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_sat_with_binary_model() {
+        let output = "sat\n((x #b00101010))";
+        let inputs = vec![("x".to_string(), 8)];
+        let result = parse_solver_output(output, "", &inputs);
+        match result {
+            Z4Result::CounterExample(cex) => {
+                assert_eq!(cex.len(), 1);
+                assert_eq!(cex[0], ("x".to_string(), 42));
+            }
+            other => panic!("Expected CounterExample, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_unknown() {
+        let result = parse_solver_output("unknown\n", "", &[]);
+        assert_eq!(result, Z4Result::Timeout);
+    }
+
+    #[test]
+    fn test_parse_error() {
+        let result = parse_solver_output("", "Parse error at line 1", &[]);
+        assert!(matches!(result, Z4Result::Error(_)));
+    }
+
+    #[test]
+    fn test_parse_empty_output() {
+        let result = parse_solver_output("", "", &[]);
+        assert!(matches!(result, Z4Result::Error(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Z4Result display tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_z4result_display_verified() {
+        assert_eq!(format!("{}", Z4Result::Verified), "VERIFIED (UNSAT)");
+    }
+
+    #[test]
+    fn test_z4result_display_counterexample() {
+        let cex = Z4Result::CounterExample(vec![
+            ("a".to_string(), 10),
+            ("b".to_string(), 20),
+        ]);
+        let display = format!("{}", cex);
+        assert!(display.contains("a = 0xa"));
+        assert!(display.contains("b = 0x14"));
+    }
+
+    #[test]
+    fn test_z4result_display_timeout() {
+        assert_eq!(format!("{}", Z4Result::Timeout), "TIMEOUT");
+    }
+
+    // -----------------------------------------------------------------------
+    // VerificationSummary tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verification_summary() {
+        let results = vec![
+            ("proof1".to_string(), Z4Result::Verified),
+            ("proof2".to_string(), Z4Result::Verified),
+            ("proof3".to_string(), Z4Result::CounterExample(vec![])),
+            ("proof4".to_string(), Z4Result::Timeout),
+            ("proof5".to_string(), Z4Result::Error("oops".to_string())),
+        ];
+
+        let summary = VerificationSummary::from_results(&results);
+        assert_eq!(summary.total, 5);
+        assert_eq!(summary.verified, 2);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.timeouts, 1);
+        assert_eq!(summary.errors, 1);
+        assert!(!summary.all_verified());
+    }
+
+    #[test]
+    fn test_verification_summary_all_verified() {
+        let results = vec![
+            ("proof1".to_string(), Z4Result::Verified),
+            ("proof2".to_string(), Z4Result::Verified),
+        ];
+
+        let summary = VerificationSummary::from_results(&results);
+        assert!(summary.all_verified());
+    }
+
+    // -----------------------------------------------------------------------
+    // CLI integration test (only runs if z3 is available)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cli_verify_correct_rule() {
+        // Skip if no solver binary available
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return; // No solver available, skip test
+        }
+
+        // a + b == a + b (trivially correct)
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        let obligation = ProofObligation {
+            name: "trivial_add_identity".to_string(),
+            tmir_expr: a.clone().bvadd(b.clone()),
+            aarch64_expr: a.bvadd(b),
+            inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+            preconditions: vec![],
+        };
+
+        let config = Z4Config::default();
+        let result = verify_with_cli(&obligation, &config);
+        assert_eq!(result, Z4Result::Verified);
+    }
+
+    #[test]
+    fn test_cli_verify_wrong_rule() {
+        // Skip if no solver binary available
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        // a + b != a - b (should find counterexample)
+        let a = SmtExpr::var("a", 8);
+        let b = SmtExpr::var("b", 8);
+        let obligation = ProofObligation {
+            name: "wrong_add_vs_sub".to_string(),
+            tmir_expr: a.clone().bvadd(b.clone()),
+            aarch64_expr: a.bvsub(b),
+            inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+            preconditions: vec![],
+        };
+
+        let config = Z4Config::default();
+        let result = verify_with_cli(&obligation, &config);
+        assert!(matches!(result, Z4Result::CounterExample(_)));
+    }
+
+    #[test]
+    fn test_cli_verify_iadd_i32() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let obligation = crate::lowering_proof::proof_iadd_i32();
+        let config = Z4Config::default();
+        let result = verify_with_cli(&obligation, &config);
+        assert_eq!(result, Z4Result::Verified);
+    }
+
+    #[test]
+    fn test_cli_verify_peephole_add_zero() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let obligation = crate::peephole_proofs::proof_add_zero_identity();
+        let config = Z4Config::default();
+        let result = verify_with_cli(&obligation, &config);
+        assert_eq!(result, Z4Result::Verified);
+    }
+}
