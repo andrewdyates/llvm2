@@ -57,6 +57,14 @@ pub enum ISelError {
     UnsupportedFconstType(Type),
     #[error("unsupported ABI location for return value: stack-passed returns are not supported")]
     UnsupportedReturnLocation,
+    #[error("malformed instruction: expected at least {expected} args, got {actual} (opcode context: {context})")]
+    InsufficientArgs {
+        expected: usize,
+        actual: usize,
+        context: &'static str,
+    },
+    #[error("malformed instruction: expected at least 1 result (opcode context: {0})")]
+    MissingResult(&'static str),
 }
 
 // ---------------------------------------------------------------------------
@@ -468,6 +476,26 @@ impl InstructionSelector {
         }
     }
 
+    /// Require that `inst` has at least `n` arguments.
+    fn require_args(inst: &Instruction, n: usize, context: &'static str) -> Result<(), ISelError> {
+        if inst.args.len() < n {
+            return Err(ISelError::InsufficientArgs {
+                expected: n,
+                actual: inst.args.len(),
+                context,
+            });
+        }
+        Ok(())
+    }
+
+    /// Require that `inst` has at least one result.
+    fn require_result(inst: &Instruction, context: &'static str) -> Result<(), ISelError> {
+        if inst.results.is_empty() {
+            return Err(ISelError::MissingResult(context));
+        }
+        Ok(())
+    }
+
     /// Allocate a fresh virtual register.
     fn new_vreg(&mut self, class: RegClass) -> VReg {
         let id = self.func.next_vreg;
@@ -639,9 +667,10 @@ impl InstructionSelector {
     /// Negative small values: MOVN
     /// Large values: MOVZ + MOVK sequence (TODO: full sequence)
     fn select_iconst(&mut self, ty: Type, imm: i64, inst: &Instruction, block: Block) -> Result<(), ISelError> {
+        Self::require_result(inst, "Iconst")?;
         let class = reg_class_for_type(&ty);
         let dst = self.new_vreg(class);
-        let result = inst.results.first().expect("Iconst must have a result");
+        let result = &inst.results[0];
 
         if imm >= 0 && imm <= 0xFFFF {
             // Simple MOVZ
@@ -713,9 +742,10 @@ impl InstructionSelector {
 
     /// Select float constant materialization.
     fn select_fconst(&mut self, ty: Type, imm: f64, inst: &Instruction, block: Block) -> Result<(), ISelError> {
+        Self::require_result(inst, "Fconst")?;
         let class = reg_class_for_type(&ty);
         let dst = self.new_vreg(class);
-        let result = inst.results.first().expect("Fconst must have a result");
+        let result = &inst.results[0];
 
         let opc = match ty {
             Type::F32 => AArch64Opcode::FMOVSri,
@@ -745,8 +775,8 @@ impl InstructionSelector {
     /// register copies (block argument passing, phi resolution). We emit a
     /// MOV (register-to-register copy) instruction.
     fn select_copy(&mut self, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(inst.args.len() == 1, "copy must have exactly 1 arg");
-        assert!(!inst.results.is_empty(), "copy must have a result");
+        Self::require_args(inst, 1, "Copy")?;
+        Self::require_result(inst, "Copy")?;
 
         let src_val = inst.args[0];
         let result_val = inst.results[0];
@@ -793,8 +823,8 @@ impl InstructionSelector {
     /// Internal enum for selecting the right opcode variant.
     #[allow(dead_code)]
     fn select_binop(&mut self, op: AArch64BinOp, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(inst.args.len() >= 2, "BinOp must have at least 2 args");
-        assert!(!inst.results.is_empty(), "BinOp must have a result");
+        Self::require_args(inst, 2, "BinOp")?;
+        Self::require_result(inst, "BinOp")?;
 
         let lhs_val = inst.args[0];
         let rhs_val = inst.args[1];
@@ -841,8 +871,8 @@ impl InstructionSelector {
     /// MSUB operand order: MSUB Rd, Rn, Rm, Ra  =>  Rd = Ra - Rn * Rm
     /// So: MSUB result, tmp, b, a  =>  result = a - tmp * b
     fn select_remainder(&mut self, signed: bool, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(inst.args.len() >= 2, "Remainder must have at least 2 args");
-        assert!(!inst.results.is_empty(), "Remainder must have a result");
+        Self::require_args(inst, 2, "Remainder")?;
+        Self::require_result(inst, "Remainder")?;
 
         let lhs_val = inst.args[0]; // dividend (a)
         let rhs_val = inst.args[1]; // divisor (b)
@@ -903,8 +933,8 @@ impl InstructionSelector {
     ///   `Ineg(x)` → `SUB Xd, XZR, Xn` (alias: NEG)
     ///   `Bnot(x)` → `ORN Xd, XZR, Xn` (alias: MVN)
     fn select_int_unaryop(&mut self, op: AArch64IntUnaryOp, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(!inst.args.is_empty(), "Unary op must have 1 arg");
-        assert!(!inst.results.is_empty(), "Unary op must have a result");
+        Self::require_args(inst, 1, "IntUnaryOp")?;
+        Self::require_result(inst, "IntUnaryOp")?;
 
         let src_val = inst.args[0];
         let result_val = inst.results[0];
@@ -934,8 +964,8 @@ impl InstructionSelector {
 
     /// Select floating-point unary negate: FNEG Sd/Dd, Sn/Dn.
     fn select_fp_unaryop(&mut self, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(!inst.args.is_empty(), "FP unary op must have 1 arg");
-        assert!(!inst.results.is_empty(), "FP unary op must have a result");
+        Self::require_args(inst, 1, "FpUnaryOp")?;
+        Self::require_result(inst, "FpUnaryOp")?;
 
         let src_val = inst.args[0];
         let result_val = inst.results[0];
@@ -972,8 +1002,8 @@ impl InstructionSelector {
     ///   CMP Wn/Xn, Wm/Xm        (sets NZCV flags)
     ///   CSET Wd, <cond_code>     (materializes flag into register)
     fn select_cmp(&mut self, cond: IntCC, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(inst.args.len() >= 2, "Icmp must have 2 args");
-        assert!(!inst.results.is_empty(), "Icmp must have a result");
+        Self::require_args(inst, 2, "Icmp")?;
+        Self::require_result(inst, "Icmp")?;
 
         let lhs_val = inst.args[0];
         let rhs_val = inst.args[1];
@@ -1266,8 +1296,8 @@ impl InstructionSelector {
 
     /// Select a memory load.
     fn select_load(&mut self, ty: Type, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(!inst.args.is_empty(), "Load must have address arg");
-        assert!(!inst.results.is_empty(), "Load must have result");
+        Self::require_args(inst, 1, "Load")?;
+        Self::require_result(inst, "Load")?;
 
         let addr_val = inst.args[0];
         let result_val = inst.results[0];
@@ -1300,10 +1330,7 @@ impl InstructionSelector {
 
     /// Select a memory store.
     fn select_store(&mut self, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(
-            inst.args.len() >= 2,
-            "Store must have value and address args"
-        );
+        Self::require_args(inst, 2, "Store")?;
 
         let value_val = inst.args[0];
         let addr_val = inst.args[1];
@@ -1407,8 +1434,8 @@ impl InstructionSelector {
     /// If the shift amount is a constant (tracked as an Iconst in the value
     /// map), we emit the immediate form; otherwise, the register form.
     fn select_shift(&mut self, op: AArch64ShiftOp, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(inst.args.len() >= 2, "Shift must have 2 args (value, amount)");
-        assert!(!inst.results.is_empty(), "Shift must have a result");
+        Self::require_args(inst, 2, "Shift")?;
+        Self::require_result(inst, "Shift")?;
 
         let src_val = inst.args[0];
         let amt_val = inst.args[1];
@@ -1465,8 +1492,8 @@ impl InstructionSelector {
 
     /// Select logical operation: AND, ORR, EOR, BIC, ORN.
     fn select_logic(&mut self, op: AArch64LogicOp, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(inst.args.len() >= 2, "Logic op must have 2 args");
-        assert!(!inst.results.is_empty(), "Logic op must have a result");
+        Self::require_args(inst, 2, "LogicOp")?;
+        Self::require_result(inst, "LogicOp")?;
 
         let lhs_val = inst.args[0];
         let rhs_val = inst.args[1];
@@ -1519,8 +1546,8 @@ impl InstructionSelector {
         inst: &Instruction,
         block: Block,
     ) -> Result<(), ISelError> {
-        assert!(!inst.args.is_empty(), "Extend must have 1 arg");
-        assert!(!inst.results.is_empty(), "Extend must have a result");
+        Self::require_args(inst, 1, "Extend")?;
+        Self::require_result(inst, "Extend")?;
 
         let src_val = inst.args[0];
         let result_val = inst.results[0];
@@ -1612,8 +1639,8 @@ impl InstructionSelector {
         inst: &Instruction,
         block: Block,
     ) -> Result<(), ISelError> {
-        assert!(!inst.args.is_empty(), "BitfieldExtract must have 1 arg");
-        assert!(!inst.results.is_empty(), "BitfieldExtract must have a result");
+        Self::require_args(inst, 1, "BitfieldExtract")?;
+        Self::require_result(inst, "BitfieldExtract")?;
 
         let src_val = inst.args[0];
         let result_val = inst.results[0];
@@ -1662,11 +1689,8 @@ impl InstructionSelector {
         inst: &Instruction,
         block: Block,
     ) -> Result<(), ISelError> {
-        assert!(
-            inst.args.len() >= 2,
-            "BitfieldInsert must have 2 args (dst, src)"
-        );
-        assert!(!inst.results.is_empty(), "BitfieldInsert must have a result");
+        Self::require_args(inst, 2, "BitfieldInsert")?;
+        Self::require_result(inst, "BitfieldInsert")?;
 
         let dst_val = inst.args[0]; // destination (also source of unmodified bits)
         let src_val = inst.args[1]; // source of bits to insert
@@ -1731,11 +1755,8 @@ impl InstructionSelector {
     /// The cc_val is a comparison result (must have set NZCV flags first).
     /// We emit: CMP cc_val, #0; CSEL Wd/Xd, Wn/Xn, Wm/Xm, NE
     fn select_csel(&mut self, cond: IntCC, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(
-            inst.args.len() >= 3,
-            "Select must have 3 args (cond_val, true_val, false_val)"
-        );
-        assert!(!inst.results.is_empty(), "Select must have a result");
+        Self::require_args(inst, 3, "Select")?;
+        Self::require_result(inst, "Select")?;
 
         let cond_val = inst.args[0];
         let true_val = inst.args[1];
@@ -1791,8 +1812,8 @@ impl InstructionSelector {
 
     /// Select floating-point binary operation.
     fn select_fp_binop(&mut self, op: AArch64FpBinOp, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(inst.args.len() >= 2, "FP binop must have 2 args");
-        assert!(!inst.results.is_empty(), "FP binop must have a result");
+        Self::require_args(inst, 2, "FpBinOp")?;
+        Self::require_result(inst, "FpBinOp")?;
 
         let lhs_val = inst.args[0];
         let rhs_val = inst.args[1];
@@ -1828,8 +1849,8 @@ impl InstructionSelector {
 
     /// Select floating-point comparison: FCMP + CSET.
     fn select_fcmp(&mut self, cond: FloatCC, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(inst.args.len() >= 2, "Fcmp must have 2 args");
-        assert!(!inst.results.is_empty(), "Fcmp must have a result");
+        Self::require_args(inst, 2, "Fcmp")?;
+        Self::require_result(inst, "Fcmp")?;
 
         let lhs_val = inst.args[0];
         let rhs_val = inst.args[1];
@@ -1871,8 +1892,8 @@ impl InstructionSelector {
     ///
     /// FCVTZS rounds toward zero (truncation), matching C cast semantics.
     fn select_fcvt_to_int(&mut self, dst_ty: Type, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(!inst.args.is_empty(), "FcvtToInt must have 1 arg");
-        assert!(!inst.results.is_empty(), "FcvtToInt must have a result");
+        Self::require_args(inst, 1, "FcvtToInt")?;
+        Self::require_result(inst, "FcvtToInt")?;
 
         let src_val = inst.args[0];
         let result_val = inst.results[0];
@@ -1912,8 +1933,8 @@ impl InstructionSelector {
 
     /// Select integer-to-float conversion (SCVTF).
     fn select_fcvt_from_int(&mut self, src_ty: Type, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(!inst.args.is_empty(), "FcvtFromInt must have 1 arg");
-        assert!(!inst.results.is_empty(), "FcvtFromInt must have a result");
+        Self::require_args(inst, 1, "FcvtFromInt")?;
+        Self::require_result(inst, "FcvtFromInt")?;
 
         let src_val = inst.args[0];
         let result_val = inst.results[0];
@@ -1966,7 +1987,7 @@ impl InstructionSelector {
         inst: &Instruction,
         block: Block,
     ) -> Result<(), ISelError> {
-        assert!(!inst.results.is_empty(), "GlobalRef must have a result");
+        Self::require_result(inst, "GlobalRef")?;
 
         let result_val = inst.results[0];
         let dst = self.new_vreg(RegClass::Gpr64);
@@ -2002,7 +2023,7 @@ impl InstructionSelector {
     /// Emits ADD Xd, SP, #offset (the actual offset is resolved during
     /// frame lowering; we emit a placeholder StackSlot operand).
     fn select_stack_addr(&mut self, slot: u32, inst: &Instruction, block: Block) -> Result<(), ISelError> {
-        assert!(!inst.results.is_empty(), "StackAddr must have a result");
+        Self::require_result(inst, "StackAddr")?;
 
         let result_val = inst.results[0];
         let dst = self.new_vreg(RegClass::Gpr64);

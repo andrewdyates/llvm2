@@ -133,14 +133,22 @@ impl Type {
     /// Returns the semantic width in bits.
     ///
     /// Note: B1 returns 1 (semantic bit-width), not 8 (storage size).
-    /// Use `bytes()` for the storage size.
-    /// Returns None for aggregate types (use `bytes()` instead).
+    /// Use `storage_bits()` or `bytes()` for the storage/register size.
+    /// Aggregate types return their total storage size in bits.
     pub fn bits(&self) -> u32 {
         match self {
             Type::B1 => 1,
-            Type::Struct(_) | Type::Array(_, _) => self.bytes() * 8,
             _ => self.bytes() * 8,
         }
+    }
+
+    /// Returns the storage width in bits (register/memory size).
+    ///
+    /// Unlike `bits()`, this always returns the physical storage size.
+    /// B1 returns 8 (stored in a byte), not 1 (its semantic width).
+    /// This is equivalent to `self.bytes() * 8`.
+    pub fn storage_bits(&self) -> u32 {
+        self.bytes() * 8
     }
 
     /// Returns true if this is an aggregate type.
@@ -151,5 +159,78 @@ impl Type {
     /// Returns true if this is a scalar (non-aggregate) type.
     pub fn is_scalar(&self) -> bool {
         !self.is_aggregate()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn b1_bits_returns_1() {
+        // Issue #39: B1.bits() must return 1 (semantic bit-width), not 8.
+        assert_eq!(Type::B1.bits(), 1);
+    }
+
+    #[test]
+    fn b1_storage_bits_returns_8() {
+        // B1 is stored in a byte (8 bits) even though its semantic width is 1.
+        assert_eq!(Type::B1.storage_bits(), 8);
+    }
+
+    #[test]
+    fn b1_bytes_returns_1() {
+        assert_eq!(Type::B1.bytes(), 1);
+    }
+
+    #[test]
+    fn integer_bits() {
+        assert_eq!(Type::I8.bits(), 8);
+        assert_eq!(Type::I16.bits(), 16);
+        assert_eq!(Type::I32.bits(), 32);
+        assert_eq!(Type::I64.bits(), 64);
+        assert_eq!(Type::I128.bits(), 128);
+    }
+
+    #[test]
+    fn integer_storage_bits_equals_bits() {
+        // For integer types, storage_bits == bits.
+        for ty in &[Type::I8, Type::I16, Type::I32, Type::I64, Type::I128] {
+            assert_eq!(ty.bits(), ty.storage_bits(), "mismatch for {:?}", ty);
+        }
+    }
+
+    #[test]
+    fn float_bits() {
+        assert_eq!(Type::F32.bits(), 32);
+        assert_eq!(Type::F64.bits(), 64);
+    }
+
+    #[test]
+    fn float_storage_bits_equals_bits() {
+        assert_eq!(Type::F32.bits(), Type::F32.storage_bits());
+        assert_eq!(Type::F64.bits(), Type::F64.storage_bits());
+    }
+
+    #[test]
+    fn struct_bytes_with_padding() {
+        // struct { I8, I32 } -> 1 byte + 3 padding + 4 bytes = 8 bytes
+        let s = Type::Struct(vec![Type::I8, Type::I32]);
+        assert_eq!(s.bytes(), 8);
+        assert_eq!(s.bits(), 64);
+        assert_eq!(s.storage_bits(), 64);
+    }
+
+    #[test]
+    fn array_bytes() {
+        let a = Type::Array(Box::new(Type::I32), 4);
+        assert_eq!(a.bytes(), 16);
+        assert_eq!(a.bits(), 128);
+    }
+
+    #[test]
+    fn b1_differs_from_storage() {
+        // The key distinction: bits() != storage_bits() only for B1.
+        assert_ne!(Type::B1.bits(), Type::B1.storage_bits());
     }
 }
