@@ -370,3 +370,478 @@ impl MachInst {
         self.flags.contains(InstFlags::WRITES_MEMORY)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::operand::MachOperand;
+    use crate::regs::{PReg, RegClass, VReg, X0, X1, X30};
+    use crate::types::BlockId;
+
+    // ---- AArch64Opcode flag tests ----
+
+    #[test]
+    fn branch_opcodes_have_branch_and_terminator_flags() {
+        let branch_ops = [
+            AArch64Opcode::B,
+            AArch64Opcode::BCond,
+            AArch64Opcode::Cbz,
+            AArch64Opcode::Cbnz,
+            AArch64Opcode::Tbz,
+            AArch64Opcode::Tbnz,
+            AArch64Opcode::Br,
+        ];
+        for op in &branch_ops {
+            let flags = op.default_flags();
+            assert!(
+                flags.contains(InstFlags::IS_BRANCH),
+                "{:?} should have IS_BRANCH", op
+            );
+            assert!(
+                flags.contains(InstFlags::IS_TERMINATOR),
+                "{:?} should have IS_TERMINATOR", op
+            );
+        }
+    }
+
+    #[test]
+    fn call_opcodes_have_call_and_side_effect_flags() {
+        let call_ops = [AArch64Opcode::Bl, AArch64Opcode::Blr];
+        for op in &call_ops {
+            let flags = op.default_flags();
+            assert!(
+                flags.contains(InstFlags::IS_CALL),
+                "{:?} should have IS_CALL", op
+            );
+            assert!(
+                flags.contains(InstFlags::HAS_SIDE_EFFECTS),
+                "{:?} should have HAS_SIDE_EFFECTS", op
+            );
+            assert!(
+                !flags.contains(InstFlags::IS_BRANCH),
+                "{:?} should NOT have IS_BRANCH", op
+            );
+        }
+    }
+
+    #[test]
+    fn ret_opcode_has_return_and_terminator_flags() {
+        let flags = AArch64Opcode::Ret.default_flags();
+        assert!(flags.contains(InstFlags::IS_RETURN));
+        assert!(flags.contains(InstFlags::IS_TERMINATOR));
+        assert!(!flags.contains(InstFlags::IS_CALL));
+        assert!(!flags.contains(InstFlags::IS_BRANCH));
+    }
+
+    #[test]
+    fn load_opcodes_have_reads_memory() {
+        let load_ops = [
+            AArch64Opcode::LdrRI,
+            AArch64Opcode::LdrLiteral,
+            AArch64Opcode::LdpRI,
+        ];
+        for op in &load_ops {
+            let flags = op.default_flags();
+            assert!(
+                flags.contains(InstFlags::READS_MEMORY),
+                "{:?} should have READS_MEMORY", op
+            );
+            assert!(
+                !flags.contains(InstFlags::WRITES_MEMORY),
+                "{:?} should NOT have WRITES_MEMORY", op
+            );
+        }
+    }
+
+    #[test]
+    fn store_opcodes_have_writes_memory_and_side_effects() {
+        let store_ops = [AArch64Opcode::StrRI, AArch64Opcode::StpRI];
+        for op in &store_ops {
+            let flags = op.default_flags();
+            assert!(
+                flags.contains(InstFlags::WRITES_MEMORY),
+                "{:?} should have WRITES_MEMORY", op
+            );
+            assert!(
+                flags.contains(InstFlags::HAS_SIDE_EFFECTS),
+                "{:?} should have HAS_SIDE_EFFECTS", op
+            );
+        }
+    }
+
+    #[test]
+    fn pseudo_opcodes_have_pseudo_flag() {
+        let pseudo_ops = [
+            AArch64Opcode::Phi,
+            AArch64Opcode::StackAlloc,
+            AArch64Opcode::Nop,
+        ];
+        for op in &pseudo_ops {
+            let flags = op.default_flags();
+            assert!(
+                flags.contains(InstFlags::IS_PSEUDO),
+                "{:?} should have IS_PSEUDO", op
+            );
+        }
+    }
+
+    #[test]
+    fn is_pseudo_method() {
+        assert!(AArch64Opcode::Phi.is_pseudo());
+        assert!(AArch64Opcode::StackAlloc.is_pseudo());
+        assert!(AArch64Opcode::Nop.is_pseudo());
+        assert!(!AArch64Opcode::AddRR.is_pseudo());
+        assert!(!AArch64Opcode::B.is_pseudo());
+        assert!(!AArch64Opcode::Ret.is_pseudo());
+    }
+
+    #[test]
+    fn is_phi_method() {
+        assert!(AArch64Opcode::Phi.is_phi());
+        assert!(!AArch64Opcode::Nop.is_phi());
+        assert!(!AArch64Opcode::AddRR.is_phi());
+    }
+
+    #[test]
+    fn pure_arithmetic_has_empty_flags() {
+        let pure_ops = [
+            AArch64Opcode::AddRR,
+            AArch64Opcode::AddRI,
+            AArch64Opcode::SubRR,
+            AArch64Opcode::SubRI,
+            AArch64Opcode::MulRR,
+            AArch64Opcode::SDiv,
+            AArch64Opcode::UDiv,
+            AArch64Opcode::Neg,
+            AArch64Opcode::AndRR,
+            AArch64Opcode::OrrRR,
+            AArch64Opcode::EorRR,
+            AArch64Opcode::MovR,
+            AArch64Opcode::MovI,
+        ];
+        for op in &pure_ops {
+            let flags = op.default_flags();
+            assert!(
+                flags.is_empty(),
+                "{:?} should have EMPTY flags but has {:?}", op, flags
+            );
+        }
+    }
+
+    #[test]
+    fn compare_opcodes_have_side_effects() {
+        let cmp_ops = [
+            AArch64Opcode::CmpRR,
+            AArch64Opcode::CmpRI,
+            AArch64Opcode::Tst,
+            AArch64Opcode::Fcmp,
+        ];
+        for op in &cmp_ops {
+            let flags = op.default_flags();
+            assert!(
+                flags.contains(InstFlags::HAS_SIDE_EFFECTS),
+                "{:?} should have HAS_SIDE_EFFECTS", op
+            );
+        }
+    }
+
+    // ---- InstFlags bitwise operation tests ----
+
+    #[test]
+    fn instflags_empty() {
+        let f = InstFlags::EMPTY;
+        assert!(f.is_empty());
+        assert_eq!(f.bits(), 0);
+    }
+
+    #[test]
+    fn instflags_single_flag() {
+        let f = InstFlags::IS_CALL;
+        assert!(!f.is_empty());
+        assert!(f.contains(InstFlags::IS_CALL));
+        assert!(!f.contains(InstFlags::IS_BRANCH));
+    }
+
+    #[test]
+    fn instflags_union() {
+        let f = InstFlags::IS_CALL.union(InstFlags::HAS_SIDE_EFFECTS);
+        assert!(f.contains(InstFlags::IS_CALL));
+        assert!(f.contains(InstFlags::HAS_SIDE_EFFECTS));
+        assert!(!f.contains(InstFlags::IS_BRANCH));
+    }
+
+    #[test]
+    fn instflags_intersection() {
+        let a = InstFlags::IS_CALL.union(InstFlags::HAS_SIDE_EFFECTS);
+        let b = InstFlags::IS_CALL.union(InstFlags::IS_BRANCH);
+        let c = a.intersection(b);
+        assert!(c.contains(InstFlags::IS_CALL));
+        assert!(!c.contains(InstFlags::HAS_SIDE_EFFECTS));
+        assert!(!c.contains(InstFlags::IS_BRANCH));
+    }
+
+    #[test]
+    fn instflags_insert() {
+        let mut f = InstFlags::EMPTY;
+        assert!(f.is_empty());
+        f.insert(InstFlags::IS_CALL);
+        assert!(f.contains(InstFlags::IS_CALL));
+        f.insert(InstFlags::IS_BRANCH);
+        assert!(f.contains(InstFlags::IS_CALL));
+        assert!(f.contains(InstFlags::IS_BRANCH));
+    }
+
+    #[test]
+    fn instflags_remove() {
+        let mut f = InstFlags::IS_CALL.union(InstFlags::IS_BRANCH);
+        f.remove(InstFlags::IS_CALL);
+        assert!(!f.contains(InstFlags::IS_CALL));
+        assert!(f.contains(InstFlags::IS_BRANCH));
+    }
+
+    #[test]
+    fn instflags_bitor_operator() {
+        let f = InstFlags::IS_CALL | InstFlags::IS_BRANCH;
+        assert!(f.contains(InstFlags::IS_CALL));
+        assert!(f.contains(InstFlags::IS_BRANCH));
+    }
+
+    #[test]
+    fn instflags_bitand_operator() {
+        let a = InstFlags::IS_CALL | InstFlags::IS_BRANCH;
+        let b = InstFlags::IS_CALL | InstFlags::IS_RETURN;
+        let c = a & b;
+        assert!(c.contains(InstFlags::IS_CALL));
+        assert!(!c.contains(InstFlags::IS_BRANCH));
+        assert!(!c.contains(InstFlags::IS_RETURN));
+    }
+
+    #[test]
+    fn instflags_bitor_assign() {
+        let mut f = InstFlags::IS_CALL;
+        f |= InstFlags::IS_BRANCH;
+        assert!(f.contains(InstFlags::IS_CALL));
+        assert!(f.contains(InstFlags::IS_BRANCH));
+    }
+
+    #[test]
+    fn instflags_default_is_empty() {
+        let f = InstFlags::default();
+        assert!(f.is_empty());
+        assert_eq!(f, InstFlags::EMPTY);
+    }
+
+    #[test]
+    fn instflags_contains_self() {
+        let flags = [
+            InstFlags::IS_CALL,
+            InstFlags::IS_BRANCH,
+            InstFlags::IS_RETURN,
+            InstFlags::IS_TERMINATOR,
+            InstFlags::HAS_SIDE_EFFECTS,
+            InstFlags::IS_PSEUDO,
+            InstFlags::READS_MEMORY,
+            InstFlags::WRITES_MEMORY,
+            InstFlags::IS_PHI,
+        ];
+        for f in &flags {
+            assert!(f.contains(*f), "{:?} should contain itself", f);
+        }
+    }
+
+    #[test]
+    fn instflags_empty_contains_nothing() {
+        let flags = [
+            InstFlags::IS_CALL,
+            InstFlags::IS_BRANCH,
+            InstFlags::IS_RETURN,
+            InstFlags::IS_TERMINATOR,
+            InstFlags::HAS_SIDE_EFFECTS,
+            InstFlags::IS_PSEUDO,
+            InstFlags::READS_MEMORY,
+            InstFlags::WRITES_MEMORY,
+            InstFlags::IS_PHI,
+        ];
+        for f in &flags {
+            assert!(!InstFlags::EMPTY.contains(*f));
+        }
+    }
+
+    #[test]
+    fn instflags_bit_values_are_distinct() {
+        let flags = [
+            InstFlags::IS_CALL,
+            InstFlags::IS_BRANCH,
+            InstFlags::IS_RETURN,
+            InstFlags::IS_TERMINATOR,
+            InstFlags::HAS_SIDE_EFFECTS,
+            InstFlags::IS_PSEUDO,
+            InstFlags::READS_MEMORY,
+            InstFlags::WRITES_MEMORY,
+            InstFlags::IS_PHI,
+        ];
+        for i in 0..flags.len() {
+            for j in (i + 1)..flags.len() {
+                assert_ne!(
+                    flags[i].bits(), flags[j].bits(),
+                    "flags {:?} and {:?} have same bits", flags[i], flags[j]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn instflags_debug_empty() {
+        let f = InstFlags::EMPTY;
+        let s = format!("{:?}", f);
+        assert!(s.contains("EMPTY"));
+    }
+
+    #[test]
+    fn instflags_debug_single() {
+        let f = InstFlags::IS_CALL;
+        let s = format!("{:?}", f);
+        assert!(s.contains("IS_CALL"));
+        assert!(!s.contains("IS_BRANCH"));
+    }
+
+    #[test]
+    fn instflags_debug_multiple() {
+        let f = InstFlags::IS_CALL | InstFlags::HAS_SIDE_EFFECTS;
+        let s = format!("{:?}", f);
+        assert!(s.contains("IS_CALL"));
+        assert!(s.contains("HAS_SIDE_EFFECTS"));
+    }
+
+    // ---- MachInst construction tests ----
+
+    #[test]
+    fn machinst_new_uses_default_flags() {
+        let inst = MachInst::new(AArch64Opcode::AddRR, vec![]);
+        assert_eq!(inst.opcode, AArch64Opcode::AddRR);
+        assert!(inst.flags.is_empty()); // AddRR has empty default flags
+        assert!(inst.operands.is_empty());
+        assert!(inst.implicit_defs.is_empty());
+        assert!(inst.implicit_uses.is_empty());
+    }
+
+    #[test]
+    fn machinst_new_branch_has_correct_flags() {
+        let inst = MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(BlockId(1))],
+        );
+        assert!(inst.is_branch());
+        assert!(inst.is_terminator());
+        assert!(!inst.is_call());
+        assert!(!inst.is_return());
+    }
+
+    #[test]
+    fn machinst_new_ret_has_correct_flags() {
+        let inst = MachInst::new(AArch64Opcode::Ret, vec![]);
+        assert!(inst.is_return());
+        assert!(inst.is_terminator());
+        assert!(!inst.is_branch());
+        assert!(!inst.is_call());
+    }
+
+    #[test]
+    fn machinst_with_flags_overrides_defaults() {
+        let inst = MachInst::with_flags(
+            AArch64Opcode::AddRR,
+            vec![],
+            InstFlags::HAS_SIDE_EFFECTS,
+        );
+        assert!(inst.has_side_effects());
+        assert!(!inst.is_call());
+    }
+
+    #[test]
+    fn machinst_with_implicit_defs() {
+        static DEFS: &[PReg] = &[X0, X1];
+        let inst = MachInst::new(AArch64Opcode::Bl, vec![])
+            .with_implicit_defs(DEFS);
+        assert_eq!(inst.implicit_defs, DEFS);
+        assert!(inst.implicit_uses.is_empty());
+    }
+
+    #[test]
+    fn machinst_with_implicit_uses() {
+        static USES: &[PReg] = &[X0];
+        let inst = MachInst::new(AArch64Opcode::Ret, vec![])
+            .with_implicit_uses(USES);
+        assert_eq!(inst.implicit_uses, USES);
+        assert!(inst.implicit_defs.is_empty());
+    }
+
+    #[test]
+    fn machinst_builder_chain() {
+        static DEFS: &[PReg] = &[X0, X1];
+        static USES: &[PReg] = &[X30];
+        let inst = MachInst::new(AArch64Opcode::Blr, vec![MachOperand::PReg(X30)])
+            .with_implicit_defs(DEFS)
+            .with_implicit_uses(USES);
+        assert!(inst.is_call());
+        assert!(inst.has_side_effects());
+        assert_eq!(inst.implicit_defs.len(), 2);
+        assert_eq!(inst.implicit_uses.len(), 1);
+        assert_eq!(inst.operands.len(), 1);
+    }
+
+    #[test]
+    fn machinst_with_operands() {
+        let v0 = VReg::new(0, RegClass::Gpr64);
+        let v1 = VReg::new(1, RegClass::Gpr64);
+        let inst = MachInst::new(
+            AArch64Opcode::AddRR,
+            vec![
+                MachOperand::VReg(v0),
+                MachOperand::VReg(v1),
+                MachOperand::VReg(v0),
+            ],
+        );
+        assert_eq!(inst.operands.len(), 3);
+        assert_eq!(inst.operands[0].as_vreg(), Some(v0));
+        assert_eq!(inst.operands[1].as_vreg(), Some(v1));
+    }
+
+    // ---- MachInst flag query convenience methods ----
+
+    #[test]
+    fn machinst_flag_queries_match_flags() {
+        let inst_call = MachInst::new(AArch64Opcode::Bl, vec![]);
+        assert!(inst_call.is_call());
+        assert!(inst_call.has_side_effects());
+        assert!(!inst_call.is_branch());
+        assert!(!inst_call.is_return());
+        assert!(!inst_call.is_terminator());
+        assert!(!inst_call.is_pseudo());
+        assert!(!inst_call.reads_memory());
+        assert!(!inst_call.writes_memory());
+
+        let inst_load = MachInst::new(AArch64Opcode::LdrRI, vec![]);
+        assert!(inst_load.reads_memory());
+        assert!(!inst_load.writes_memory());
+
+        let inst_store = MachInst::new(AArch64Opcode::StrRI, vec![]);
+        assert!(inst_store.writes_memory());
+        assert!(inst_store.has_side_effects());
+        assert!(!inst_store.reads_memory());
+
+        let inst_phi = MachInst::new(AArch64Opcode::Phi, vec![]);
+        assert!(inst_phi.is_pseudo());
+    }
+
+    #[test]
+    fn machinst_clone() {
+        let inst = MachInst::new(
+            AArch64Opcode::AddRR,
+            vec![MachOperand::Imm(42)],
+        );
+        let inst2 = inst.clone();
+        assert_eq!(inst2.opcode, inst.opcode);
+        assert_eq!(inst2.operands.len(), inst.operands.len());
+        assert_eq!(inst2.flags, inst.flags);
+    }
+}
