@@ -12,6 +12,7 @@
 //! x86-64 and RISC-V are future targets.
 
 pub mod aarch64;
+pub mod frame;
 pub mod lower;
 pub mod macho;
 pub mod target;
