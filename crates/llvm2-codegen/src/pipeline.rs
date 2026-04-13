@@ -409,8 +409,23 @@ fn classify_def_use(
             IrOperand::FImm(f) => RaOp::FImm(*f),
             IrOperand::Block(b) => RaOp::Block(*b),
             IrOperand::StackSlot(s) => RaOp::StackSlot(*s),
-            // FrameIndex, MemOp, Special are not used pre-regalloc in this adapter
-            _ => RaOp::Imm(0),
+            // FrameIndex, MemOp, and Special should not appear pre-regalloc.
+            // Silently mapping them to Imm(0) produces wrong code (#94).
+            IrOperand::FrameIndex(fi) => panic!(
+                "FrameIndex({:?}) operand reached regalloc adapter; \
+                 frame indices must be eliminated before register allocation",
+                fi
+            ),
+            IrOperand::MemOp { base, offset } => panic!(
+                "MemOp(base={:?}, offset={}) operand reached regalloc adapter; \
+                 memory operands must be lowered before register allocation",
+                base, offset
+            ),
+            IrOperand::Special(s) => panic!(
+                "Special({:?}) operand reached regalloc adapter; \
+                 special registers must be lowered to PReg before register allocation",
+                s
+            ),
         }
     };
 
