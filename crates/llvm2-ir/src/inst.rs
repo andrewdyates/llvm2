@@ -92,6 +92,12 @@ pub enum AArch64Opcode {
     Blr,
     Ret,
 
+    // -- Conditional --
+    /// CSET Wd, <cond> — set register to 1 if condition is true, 0 otherwise.
+    /// Encoded as CSINC Wd, WZR, WZR, invert(cond) per ARM ARM.
+    /// Operands: [PReg(Wd), Imm(cond_encoding)]
+    CSet,
+
     // -- Extension --
     Sxtw,
     Uxtw,
