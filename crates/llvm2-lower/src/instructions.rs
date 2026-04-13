@@ -98,6 +98,11 @@ pub enum Opcode {
     // Memory
     Load { ty: Type },
     Store,
+
+    // Aggregate operations
+    /// Compute address of a struct field: base_ptr + offset_of(struct_ty, field_index).
+    /// args[0] = base pointer (pointer to struct), result = pointer to field.
+    StructGep { struct_ty: Type, field_index: u32 },
 }
 
 /// Floating-point comparison conditions.
