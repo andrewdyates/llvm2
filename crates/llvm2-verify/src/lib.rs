@@ -48,6 +48,7 @@ pub mod lowering_proof;
 pub mod peephole_proofs;
 pub mod opt_proofs;
 pub mod const_fold_proofs;
+pub mod cse_licm_proofs;
 pub mod memory_model;
 pub mod verify;
 
