@@ -2252,7 +2252,7 @@ mod tests {
         assert_eq!(mblock.insts.len(), 7);
         assert_eq!(mblock.insts[2].opcode, AArch64Opcode::CMPWrr);
         assert_eq!(mblock.insts[3].opcode, AArch64Opcode::CSETWcc);
-        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::CMPWri);
+        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::CMPXri);
         assert_eq!(mblock.insts[5].opcode, AArch64Opcode::Bcc);
         assert_eq!(mblock.insts[6].opcode, AArch64Opcode::B);
         assert_eq!(mblock.successors.len(), 2);
