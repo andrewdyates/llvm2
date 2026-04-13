@@ -648,7 +648,6 @@ int main(void) {
     let driver_path = write_c_driver(&dir, "driver.c", driver_src);
     let binary = link_with_cc(&dir, &driver_path, &obj_path, "test_factorial");
     let (exit_code, stdout) = run_binary_with_output(&binary);
-<<<<<<< HEAD
     eprintln!("test_e2e_factorial stdout: {}", stdout);
     assert_eq!(
         exit_code, 0,
