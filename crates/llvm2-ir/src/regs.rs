@@ -158,6 +158,25 @@ pub enum RegClass {
     Vec128,
 }
 
+impl RegClass {
+    /// Return the register class appropriate for the given LIR type.
+    ///
+    /// Accepts `llvm2_ir::function::Type` (the machine-IR type enum).
+    pub fn for_type(ty: crate::function::Type) -> Self {
+        match ty {
+            crate::function::Type::B1
+            | crate::function::Type::I8
+            | crate::function::Type::I16
+            | crate::function::Type::I32 => RegClass::Gpr32,
+            crate::function::Type::I64
+            | crate::function::Type::I128
+            | crate::function::Type::Ptr => RegClass::Gpr64,
+            crate::function::Type::F32 => RegClass::Fpr32,
+            crate::function::Type::F64 => RegClass::Fpr64,
+        }
+    }
+}
+
 /// Special AArch64 registers that are not allocatable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpecialReg {

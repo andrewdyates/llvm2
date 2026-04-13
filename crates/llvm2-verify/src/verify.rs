@@ -11,11 +11,11 @@ use thiserror::Error;
 /// Verification result.
 #[derive(Debug, Clone)]
 pub enum VerificationResult {
-    /// Verification succeeded - property holds.
+    /// Verification succeeded - property holds for all inputs.
     Valid,
     /// Verification failed - counterexample found.
     Invalid { counterexample: String },
-    /// Verification inconclusive (timeout, unknown).
+    /// Verification inconclusive (timeout, unknown, z4 not available).
     Unknown { reason: String },
 }
 
@@ -28,7 +28,7 @@ pub enum VerifyError {
     Solver(String),
 }
 
-/// Function verifier.
+/// Function verifier (whole-function verification, future use).
 pub struct Verifier {
     timeout_ms: u64,
 }
@@ -45,15 +45,24 @@ impl Verifier {
         self
     }
 
+    /// Get the configured timeout.
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+
     /// Verify that a transformation is semantics-preserving.
+    ///
+    /// This is a placeholder for whole-function verification.
+    /// For per-rule verification, use [`crate::lowering_proof`] directly.
     pub fn verify_transformation(
         &self,
         _original: &Function,
         _transformed: &Function,
     ) -> Result<VerificationResult, VerifyError> {
-        // TODO: Implement verification using z4
+        // TODO: Implement whole-function verification using z4.
+        // For now, per-rule verification is in lowering_proof.rs.
         Ok(VerificationResult::Unknown {
-            reason: "not yet implemented".to_string(),
+            reason: "whole-function verification not yet implemented; use lowering_proof::verify_by_evaluation for per-rule proofs".to_string(),
         })
     }
 }
