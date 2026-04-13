@@ -314,6 +314,68 @@ impl AppleAArch64ABI {
             .max()
             .unwrap_or(0)
     }
+
+    /// Classify parameters for a variadic function call (Apple AArch64 ABI).
+    ///
+    /// Apple arm64 variadic convention:
+    /// - Fixed params (`params[0..fixed_count]`) follow normal ABI classification
+    ///   (GPR X0-X7, FPR V0-V7, then stack overflow).
+    /// - Variadic params (`params[fixed_count..]`) are ALL placed on the stack,
+    ///   each 8-byte aligned, regardless of type. This differs from standard
+    ///   AAPCS64 which allows variadic args in registers.
+    ///
+    /// Reference: Apple ARM64 Function Calling Conventions, "Variadic Functions"
+    /// Reference: LLVM AArch64ISelLowering.cpp CC_AArch64_DarwinPCS_VarArg
+    pub fn classify_params_variadic(fixed_count: usize, params: &[Type]) -> Vec<ArgLocation> {
+        let fixed_params = if fixed_count <= params.len() {
+            &params[..fixed_count]
+        } else {
+            params
+        };
+
+        // Classify fixed params normally.
+        let mut result = Self::classify_params(fixed_params);
+
+        // Determine the stack offset after fixed parameter overflow.
+        let mut stack_offset: i64 = result
+            .iter()
+            .filter_map(|loc| {
+                if let ArgLocation::Stack { offset, size } = loc {
+                    Some(offset + align_up(*size as i64, 8))
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(0);
+
+        // All variadic arguments go on the stack, 8-byte aligned.
+        for ty in params.iter().skip(fixed_count) {
+            let size = if ty.bytes() < 8 { 8 } else { ty.bytes() };
+            result.push(ArgLocation::Stack {
+                offset: stack_offset,
+                size,
+            });
+            stack_offset += align_up(size as i64, 8);
+        }
+
+        result
+    }
+
+    /// Total stack space consumed by overflow arguments in a variadic call.
+    pub fn stack_args_size_variadic(fixed_count: usize, params: &[Type]) -> i64 {
+        let locs = Self::classify_params_variadic(fixed_count, params);
+        locs.iter()
+            .filter_map(|loc| {
+                if let ArgLocation::Stack { offset, size } = loc {
+                    Some(offset + align_up(*size as i64, 8))
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 /// Align `value` up to the next multiple of `align`.
@@ -408,5 +470,104 @@ mod tests {
         let params: Vec<Type> = (0..10).map(|_| Type::I64).collect();
         let size = AppleAArch64ABI::stack_args_size(&params);
         assert_eq!(size, 16); // two 8-byte slots
+    }
+
+    // ===================================================================
+    // Variadic call ABI tests (Apple AArch64)
+    // ===================================================================
+
+    #[test]
+    fn variadic_fixed_args_in_registers() {
+        // printf(const char* fmt, ...) called with printf(fmt, 42, 3.14)
+        // fixed_count=1: fmt -> X0 (register)
+        // variadic: 42(I32) -> stack[0], 3.14(F64) -> stack[8]
+        let params = vec![Type::I64, Type::I32, Type::F64];
+        let locs = AppleAArch64ABI::classify_params_variadic(1, &params);
+
+        assert_eq!(locs.len(), 3);
+        // Fixed arg: fmt in X0
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+        // Variadic arg 1: i32 on stack at offset 0, stored as 8 bytes
+        assert!(matches!(locs[1], ArgLocation::Stack { offset: 0, size: 8 }));
+        // Variadic arg 2: f64 on stack at offset 8
+        assert!(matches!(locs[2], ArgLocation::Stack { offset: 8, size: 8 }));
+    }
+
+    #[test]
+    fn variadic_two_fixed_two_varargs() {
+        // fn(i64, i64, ...) called with (a, b, c, d) where c,d are variadic
+        let params = vec![Type::I64, Type::I64, Type::I64, Type::I64];
+        let locs = AppleAArch64ABI::classify_params_variadic(2, &params);
+
+        assert_eq!(locs.len(), 4);
+        // Fixed args in registers
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+        assert_eq!(locs[1], ArgLocation::Reg(gpr::X1));
+        // Variadic args on stack
+        assert!(matches!(locs[2], ArgLocation::Stack { offset: 0, size: 8 }));
+        assert!(matches!(locs[3], ArgLocation::Stack { offset: 8, size: 8 }));
+    }
+
+    #[test]
+    fn variadic_no_varargs_is_same_as_normal() {
+        // Variadic function called with only fixed args (no variadic args)
+        let params = vec![Type::I32, Type::I64];
+        let normal_locs = AppleAArch64ABI::classify_params(&params);
+        let variadic_locs = AppleAArch64ABI::classify_params_variadic(2, &params);
+
+        assert_eq!(normal_locs, variadic_locs);
+    }
+
+    #[test]
+    fn variadic_fixed_overflow_then_varargs() {
+        // 9 fixed integer args (8 in regs, 1 on stack), then 1 variadic
+        let mut params: Vec<Type> = vec![Type::I64; 9];
+        params.push(Type::I64); // variadic
+        let locs = AppleAArch64ABI::classify_params_variadic(9, &params);
+
+        assert_eq!(locs.len(), 10);
+        // X0-X7 in registers
+        for i in 0..8 {
+            assert_eq!(locs[i], ArgLocation::Reg(GPR_ARG_REGS[i]));
+        }
+        // 9th fixed arg on stack
+        assert!(matches!(locs[8], ArgLocation::Stack { offset: 0, size: 8 }));
+        // variadic arg on stack after fixed overflow
+        assert!(matches!(locs[9], ArgLocation::Stack { offset: 8, size: 8 }));
+    }
+
+    #[test]
+    fn variadic_float_args_on_stack() {
+        // Apple ABI: variadic floats go on stack, NOT in FPR registers.
+        // fn(i64, ...) called with (ptr, 1.0f32, 2.0f64)
+        let params = vec![Type::I64, Type::F32, Type::F64];
+        let locs = AppleAArch64ABI::classify_params_variadic(1, &params);
+
+        assert_eq!(locs.len(), 3);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+        // F32 variadic -> stack (8-byte slot)
+        assert!(matches!(locs[1], ArgLocation::Stack { offset: 0, size: 8 }));
+        // F64 variadic -> stack
+        assert!(matches!(locs[2], ArgLocation::Stack { offset: 8, size: 8 }));
+    }
+
+    #[test]
+    fn variadic_stack_args_size() {
+        // printf(fmt, 42, 3.14) -> fmt in X0, two varargs on stack
+        let params = vec![Type::I64, Type::I32, Type::F64];
+        let size = AppleAArch64ABI::stack_args_size_variadic(1, &params);
+        assert_eq!(size, 16); // two 8-byte slots
+    }
+
+    #[test]
+    fn variadic_zero_fixed_all_on_stack() {
+        // Degenerate case: 0 fixed params, all args are variadic
+        let params = vec![Type::I64, Type::I32];
+        let locs = AppleAArch64ABI::classify_params_variadic(0, &params);
+
+        assert_eq!(locs.len(), 2);
+        // Both on stack
+        assert!(matches!(locs[0], ArgLocation::Stack { offset: 0, size: 8 }));
+        assert!(matches!(locs[1], ArgLocation::Stack { offset: 8, size: 8 }));
     }
 }

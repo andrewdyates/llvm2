@@ -672,6 +672,9 @@ impl InstructionSelector {
             Opcode::Call { name } => {
                 self.select_call_from_lir(name, inst, block)?;
             }
+            Opcode::CallVariadic { name, fixed_args } => {
+                self.select_variadic_call_from_lir(name, *fixed_args, inst, block)?;
+            }
 
             // Type conversions (unsigned FP <-> int)
             Opcode::FcvtToUint { dst_ty } => {
@@ -1344,6 +1347,157 @@ impl InstructionSelector {
             .map(|v| self.value_type(v))
             .collect();
         self.select_call(name, &inst.args, &inst.results, &result_types, block)
+    }
+
+    // -----------------------------------------------------------------------
+    // Variadic calls (Apple AArch64 ABI)
+    // -----------------------------------------------------------------------
+
+    /// Select a variadic function call (e.g., printf, NSLog).
+    ///
+    /// Apple AArch64 ABI variadic convention:
+    /// - Fixed args (0..fixed_count) use normal register/stack classification
+    /// - ALL variadic args (fixed_count..) go on the stack, 8-byte aligned
+    ///
+    /// This differs from standard AAPCS64, where variadic args can use registers.
+    pub fn select_variadic_call(
+        &mut self,
+        callee_name: &str,
+        fixed_count: usize,
+        arg_vals: &[Value],
+        result_vals: &[Value],
+        result_types: &[Type],
+        block: Block,
+    ) -> Result<(), ISelError> {
+        // Classify argument locations using variadic ABI rules
+        let arg_types: Vec<Type> = arg_vals.iter().map(|v| self.value_type(v)).collect();
+        let arg_locs = AppleAArch64ABI::classify_params_variadic(fixed_count, &arg_types);
+
+        // Move arguments to ABI locations
+        for (i, (val, loc)) in arg_vals.iter().zip(arg_locs.iter()).enumerate() {
+            let src = self.use_value(val)?;
+            let ty = arg_types[i].clone();
+
+            // Dispatch aggregate arguments to specialized handler
+            if ty.is_aggregate() {
+                self.select_aggregate_arg(src, &ty, loc, block)?;
+                continue;
+            }
+
+            match loc {
+                ArgLocation::Reg(preg) => {
+                    let opc = if Self::is_32bit(&ty) {
+                        AArch64Opcode::MOVWrr
+                    } else {
+                        AArch64Opcode::MOVXrr
+                    };
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(opc, vec![MachOperand::PReg(*preg), src]),
+                    );
+                }
+                ArgLocation::Stack { offset, size: _ } => {
+                    // STR to [SP + offset] — used for both fixed overflow and
+                    // variadic arguments (Apple ABI puts all varargs on stack).
+                    let opc = if matches!(ty, Type::F32) {
+                        AArch64Opcode::STRSui
+                    } else if matches!(ty, Type::F64) {
+                        AArch64Opcode::STRDui
+                    } else if Self::is_32bit(&ty) {
+                        AArch64Opcode::STRWui
+                    } else {
+                        AArch64Opcode::STRXui
+                    };
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            opc,
+                            vec![src, MachOperand::PReg(SP), MachOperand::Imm(*offset)],
+                        ),
+                    );
+                }
+                ArgLocation::Indirect { ptr_reg } => {
+                    // Non-aggregate indirect (I128): pass pointer in register
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::MOVXrr,
+                            vec![MachOperand::PReg(*ptr_reg), src],
+                        ),
+                    );
+                }
+            }
+        }
+
+        // Emit BL (direct call) with the callee symbol for relocation.
+        self.func.push_inst(
+            block,
+            MachInst::new(
+                AArch64Opcode::BL,
+                vec![MachOperand::Symbol(callee_name.to_string())],
+            ),
+        );
+
+        // Copy results from ABI return registers to vregs
+        let ret_locs = AppleAArch64ABI::classify_returns(result_types);
+        for (i, (val, loc)) in result_vals.iter().zip(ret_locs.iter()).enumerate() {
+            match loc {
+                ArgLocation::Reg(preg) => {
+                    let ty = result_types[i].clone();
+                    let class = reg_class_for_type(&ty);
+                    let dst = self.new_vreg(class);
+                    let opc = if Self::is_32bit(&ty) {
+                        AArch64Opcode::MOVWrr
+                    } else {
+                        AArch64Opcode::MOVXrr
+                    };
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(opc, vec![MachOperand::VReg(dst), MachOperand::PReg(*preg)]),
+                    );
+                    self.define_value(*val, MachOperand::VReg(dst), ty);
+                }
+                ArgLocation::Indirect { ptr_reg } => {
+                    let ty = result_types[i].clone();
+                    let dst = self.new_vreg(RegClass::Gpr64);
+                    self.func.push_inst(
+                        block,
+                        MachInst::new(
+                            AArch64Opcode::MOVXrr,
+                            vec![MachOperand::VReg(dst), MachOperand::PReg(*ptr_reg)],
+                        ),
+                    );
+                    self.define_value(*val, MachOperand::VReg(dst), ty);
+                }
+                ArgLocation::Stack { .. } => {
+                    return Err(ISelError::UnsupportedReturnLocation);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Select a variadic call from LIR `Opcode::CallVariadic`.
+    fn select_variadic_call_from_lir(
+        &mut self,
+        name: &str,
+        fixed_args: u32,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        let result_types: Vec<Type> = inst
+            .results
+            .iter()
+            .map(|v| self.value_type(v))
+            .collect();
+        self.select_variadic_call(
+            name,
+            fixed_args as usize,
+            &inst.args,
+            &inst.results,
+            &result_types,
+            block,
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -5573,5 +5727,188 @@ mod tests {
         assert_eq!(str_to_x8[4].operands.get(2), Some(&MachOperand::Imm(22)));
 
         assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::RET);
+    }
+
+    // =======================================================================
+    // Variadic call ISel tests (Apple AArch64 ABI, issue #79)
+    // =======================================================================
+
+    #[test]
+    fn select_variadic_call_printf_like() {
+        // printf(const char* fmt, ...) called as printf(fmt, 42, 100)
+        // fixed_count=1: fmt -> X0 (register)
+        // variadic: 42(I32) -> stack[0], 100(I64) -> stack[8]
+        let (mut isel, entry) = make_empty_isel();
+
+        // Define arg values
+        let v0_reg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(v0_reg), Type::I64); // fmt
+        let v1_reg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(1), MachOperand::VReg(v1_reg), Type::I32); // 42
+        let v2_reg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(2), MachOperand::VReg(v2_reg), Type::I64); // 100
+
+        let result_types = vec![Type::I32]; // printf returns int
+        isel.select_variadic_call(
+            "printf",
+            1, // 1 fixed arg (fmt)
+            &[Value(0), Value(1), Value(2)],
+            &[Value(3)],
+            &result_types,
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        let insts = &mblock.insts;
+
+        // Should have: MOV X0 (fmt), STR [SP+0] (42), STR [SP+8] (100), BL, MOV (result)
+        // First: MOV to X0 for fixed arg
+        let mov_x0 = insts.iter().find(|i| {
+            i.opcode == AArch64Opcode::MOVXrr
+                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+        });
+        assert!(mov_x0.is_some(), "Fixed arg should go to X0");
+
+        // Variadic args should be STR to stack
+        let str_sp: Vec<_> = insts.iter().filter(|i| {
+            matches!(i.opcode, AArch64Opcode::STRWui | AArch64Opcode::STRXui)
+                && i.operands.get(1) == Some(&MachOperand::PReg(SP))
+        }).collect();
+        assert_eq!(str_sp.len(), 2, "Two variadic args should be stored to stack");
+
+        // Verify offsets: first at 0, second at 8
+        assert_eq!(str_sp[0].operands.get(2), Some(&MachOperand::Imm(0)));
+        assert_eq!(str_sp[1].operands.get(2), Some(&MachOperand::Imm(8)));
+
+        // BL should be present
+        let bl_inst = insts.iter().find(|i| i.opcode == AArch64Opcode::BL);
+        assert!(bl_inst.is_some(), "Expected BL instruction");
+        assert_eq!(
+            bl_inst.unwrap().operands[0],
+            MachOperand::Symbol("printf".to_string()),
+        );
+    }
+
+    #[test]
+    fn select_variadic_call_float_on_stack() {
+        // Apple ABI: variadic floats go on stack, NOT in FPR.
+        // fn(i64, ...) called with (ptr, 1.0f64)
+        let (mut isel, entry) = make_empty_isel();
+
+        let v0_reg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(v0_reg), Type::I64);
+        let v1_reg = isel.new_vreg(RegClass::Fpr64);
+        isel.define_value(Value(1), MachOperand::VReg(v1_reg), Type::F64);
+
+        let result_types = vec![Type::I32];
+        isel.select_variadic_call(
+            "my_varfn",
+            1,
+            &[Value(0), Value(1)],
+            &[Value(2)],
+            &result_types,
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        let insts = &mblock.insts;
+
+        // The variadic F64 should be stored to stack using STRDui (not MOV to V0)
+        let str_d_sp = insts.iter().find(|i| {
+            i.opcode == AArch64Opcode::STRDui
+                && i.operands.get(1) == Some(&MachOperand::PReg(SP))
+        });
+        assert!(str_d_sp.is_some(), "Variadic f64 should use STRDui to stack");
+        assert_eq!(
+            str_d_sp.unwrap().operands.get(2),
+            Some(&MachOperand::Imm(0)),
+            "Variadic f64 at stack offset 0"
+        );
+
+        // V0 should NOT be used (no MOV to V0 for variadic float)
+        let mov_v0 = insts.iter().find(|i| {
+            i.operands.first() == Some(&MachOperand::PReg(gpr::V0))
+        });
+        assert!(mov_v0.is_none(), "Variadic float should NOT go in V0 (Apple ABI)");
+    }
+
+    #[test]
+    fn select_variadic_call_via_opcode() {
+        // Test the CallVariadic opcode dispatch through select_instruction.
+        let (mut isel, entry) = make_empty_isel();
+
+        let v0_reg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(v0_reg), Type::I64); // fmt
+        let v1_reg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(1), MachOperand::VReg(v1_reg), Type::I32); // vararg
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::CallVariadic {
+                    name: "NSLog".to_string(),
+                    fixed_args: 1,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // MOV X0 (fixed), STR [SP+0] (variadic), BL NSLog
+        let bl_inst = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::BL);
+        assert!(bl_inst.is_some());
+        assert_eq!(
+            bl_inst.unwrap().operands[0],
+            MachOperand::Symbol("NSLog".to_string()),
+        );
+
+        let str_sp = mblock.insts.iter().find(|i| {
+            matches!(i.opcode, AArch64Opcode::STRWui)
+                && i.operands.get(1) == Some(&MachOperand::PReg(SP))
+        });
+        assert!(str_sp.is_some(), "Variadic i32 arg should be on stack");
+    }
+
+    #[test]
+    fn select_variadic_call_no_varargs() {
+        // Variadic function called with only fixed args (no varargs passed).
+        // Should behave identically to a normal call.
+        let (mut isel, entry) = make_empty_isel();
+
+        let v0_reg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), MachOperand::VReg(v0_reg), Type::I64);
+
+        let result_types = vec![Type::I32];
+        isel.select_variadic_call(
+            "printf",
+            1,
+            &[Value(0)],
+            &[Value(1)],
+            &result_types,
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+
+        // Fixed arg in X0, BL, result from X0
+        let mov_x0 = mblock.insts.iter().find(|i| {
+            i.opcode == AArch64Opcode::MOVXrr
+                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+        });
+        assert!(mov_x0.is_some(), "Fixed arg should go to X0");
+
+        // No stack stores (no varargs)
+        let str_sp = mblock.insts.iter().any(|i| {
+            i.operands.get(1) == Some(&MachOperand::PReg(SP))
+                && matches!(i.opcode, AArch64Opcode::STRWui | AArch64Opcode::STRXui
+                    | AArch64Opcode::STRSui | AArch64Opcode::STRDui)
+        });
+        assert!(!str_sp, "No stack stores when no varargs passed");
     }
 }

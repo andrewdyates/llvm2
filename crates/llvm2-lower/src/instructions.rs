@@ -94,6 +94,12 @@ pub enum Opcode {
     Brif { cond: Value, then_dest: Block, else_dest: Block },
     Return,
     Call { name: String },          // Direct function call by symbol name
+    /// Variadic function call (e.g., printf, NSLog).
+    ///
+    /// Apple AArch64 ABI: fixed args use normal register/stack classification,
+    /// ALL variadic args are placed on the stack (8-byte aligned).
+    /// `fixed_args` is the count of non-variadic parameters.
+    CallVariadic { name: String, fixed_args: u32 },
 
     // Memory
     Load { ty: Type },
