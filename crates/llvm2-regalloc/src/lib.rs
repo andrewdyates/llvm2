@@ -59,6 +59,11 @@
 //! +--------+----------+
 //!          |
 //!          v
+//! +-------------------+
+//! | Post-RA Coalesce   |  post_ra_coalesce()
+//! +--------+----------+
+//!          |
+//!          v
 //! MachFunction (output, VRegs replaced with PRegs)
 //! ```
 //!
@@ -81,6 +86,7 @@ pub mod greedy;
 pub mod spill;
 pub mod phi_elim;
 pub mod coalesce;
+pub mod post_ra_coalesce;
 pub mod split;
 pub mod remat;
 pub mod spill_slot_reuse;
@@ -97,6 +103,7 @@ pub use machine_types::{BlockId, InstId, PReg, RegClass, StackSlotId, VReg};
 pub use phi_elim::{eliminate_phis, split_critical_edges};
 pub use spill::insert_spill_code;
 pub use coalesce::{coalesce_copies, apply_coalescing, CoalesceResult};
+pub use post_ra_coalesce::{post_ra_coalesce, PostRACoalesceResult};
 pub use split::{split_interval, find_optimal_split_point, SplitDecision, SplitResult};
 pub use remat::{classify_remat_cost, find_remat_candidates, RematCost, RematCandidate};
 pub use spill_slot_reuse::{compute_spill_slot_reuse, SpillSlotReuseResult};
