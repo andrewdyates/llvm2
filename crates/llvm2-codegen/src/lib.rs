@@ -15,6 +15,8 @@ pub mod aarch64;
 pub mod frame;
 pub mod lower;
 pub mod macho;
+pub mod pipeline;
 pub mod target;
 
+pub use pipeline::{Pipeline, PipelineConfig, PipelineError, compile_to_object};
 pub use target::Target;
