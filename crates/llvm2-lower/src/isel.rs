@@ -215,13 +215,31 @@ pub enum AArch64Opcode {
     FCMPSrr,  // 32-bit float compare
     FCMPDrr,  // 64-bit float compare
 
-    // Floating-point conversion
+    // Floating-point conversion (signed)
     FCVTZSWr, // Float to signed int, 32-bit result (FCVTZS Wd, Sn/Dn)
     FCVTZSXr, // Float to signed int, 64-bit result (FCVTZS Xd, Sn/Dn)
     SCVTFSWr, // Signed int to float, from 32-bit (SCVTF Sd, Wn)
     SCVTFDWr, // Signed int to double, from 32-bit (SCVTF Dd, Wn)
     SCVTFSXr, // Signed int to float, from 64-bit (SCVTF Sd, Xn)
     SCVTFDXr, // Signed int to double, from 64-bit (SCVTF Dd, Xn)
+
+    // Floating-point conversion (unsigned)
+    FCVTZUWr, // Float to unsigned int, 32-bit result (FCVTZU Wd, Sn/Dn)
+    FCVTZUXr, // Float to unsigned int, 64-bit result (FCVTZU Xd, Sn/Dn)
+    UCVTFSWr, // Unsigned int to float, from 32-bit (UCVTF Sd, Wn)
+    UCVTFDWr, // Unsigned int to double, from 32-bit (UCVTF Dd, Wn)
+    UCVTFSXr, // Unsigned int to float, from 64-bit (UCVTF Sd, Xn)
+    UCVTFDXr, // Unsigned int to double, from 64-bit (UCVTF Dd, Xn)
+
+    // Floating-point precision conversion
+    FCVTDSr,  // FCVT Dd, Sn — single to double (FPExt)
+    FCVTSDr,  // FCVT Sd, Dn — double to single (FPTrunc)
+
+    // Bitcast (move between integer and FP registers, same-size reinterpret)
+    FMOVXDr,  // FMOV Xd, Dn — copy 64-bit FP reg to GPR
+    FMOVDXr,  // FMOV Dd, Xn — copy 64-bit GPR to FP reg
+    FMOVWSr,  // FMOV Wd, Sn — copy 32-bit FP reg to GPR
+    FMOVSWr,  // FMOV Sd, Wn — copy 32-bit GPR to FP reg
 
     // Address generation
     ADRP,     // PC-relative page address (ADRP Xd, #page)
@@ -565,10 +583,26 @@ impl InstructionSelector {
             Opcode::Fdiv => self.select_fp_binop(AArch64FpBinOp::Fdiv, inst, block)?,
             Opcode::Fcmp { cond } => self.select_fcmp(*cond, inst, block)?,
             Opcode::FcvtToInt { dst_ty } => {
-                self.select_fcvt_to_int(dst_ty.clone(), inst, block)?;
+                self.select_fcvt_to_int(dst_ty.clone(), /*unsigned=*/false, inst, block)?;
+            }
+            Opcode::FcvtToUint { dst_ty } => {
+                self.select_fcvt_to_int(dst_ty.clone(), /*unsigned=*/true, inst, block)?;
             }
             Opcode::FcvtFromInt { src_ty } => {
-                self.select_fcvt_from_int(src_ty.clone(), inst, block)?;
+                self.select_fcvt_from_int(src_ty.clone(), /*unsigned=*/false, inst, block)?;
+            }
+            Opcode::FcvtFromUint { src_ty } => {
+                self.select_fcvt_from_int(src_ty.clone(), /*unsigned=*/true, inst, block)?;
+            }
+            Opcode::FPExt => self.select_fp_ext(inst, block)?,
+            Opcode::FPTrunc => self.select_fp_trunc(inst, block)?,
+
+            // Type conversions
+            Opcode::Trunc { to_ty } => {
+                self.select_trunc(to_ty.clone(), inst, block)?;
+            }
+            Opcode::Bitcast { to_ty } => {
+                self.select_bitcast(to_ty.clone(), inst, block)?;
             }
 
             // Addressing
@@ -1707,10 +1741,11 @@ impl InstructionSelector {
         Ok(())
     }
 
-    /// Select float-to-integer conversion (FCVTZS).
+    /// Select float-to-integer conversion (FCVTZS / FCVTZU).
     ///
-    /// FCVTZS rounds toward zero (truncation), matching C cast semantics.
-    fn select_fcvt_to_int(&mut self, dst_ty: Type, inst: &Instruction, block: Block) -> Result<(), ISelError> {
+    /// FCVTZS/FCVTZU round toward zero (truncation), matching C cast semantics.
+    /// When `unsigned` is true, uses FCVTZU (unsigned conversion).
+    fn select_fcvt_to_int(&mut self, dst_ty: Type, unsigned: bool, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(!inst.args.is_empty(), "FcvtToInt must have 1 arg");
         assert!(!inst.results.is_empty(), "FcvtToInt must have a result");
 
@@ -1723,12 +1758,12 @@ impl InstructionSelector {
         let dst_class = reg_class_for_type(&dst_ty);
         let dst = self.new_vreg(dst_class);
 
-        // Select based on destination integer width. The source float
-        // precision is encoded in the operand register class.
-        let opc = if Self::is_32bit(&dst_ty) {
-            AArch64Opcode::FCVTZSWr
-        } else {
-            AArch64Opcode::FCVTZSXr
+        // Select based on signedness and destination integer width.
+        let opc = match (unsigned, Self::is_32bit(&dst_ty)) {
+            (false, true) => AArch64Opcode::FCVTZSWr,   // FCVTZS Wd, Sn/Dn
+            (false, false) => AArch64Opcode::FCVTZSXr,  // FCVTZS Xd, Sn/Dn
+            (true, true) => AArch64Opcode::FCVTZUWr,    // FCVTZU Wd, Sn/Dn
+            (true, false) => AArch64Opcode::FCVTZUXr,   // FCVTZU Xd, Sn/Dn
         };
 
         // Operands: [dst, src, src_type_hint]
@@ -1750,8 +1785,10 @@ impl InstructionSelector {
         Ok(())
     }
 
-    /// Select integer-to-float conversion (SCVTF).
-    fn select_fcvt_from_int(&mut self, src_ty: Type, inst: &Instruction, block: Block) -> Result<(), ISelError> {
+    /// Select integer-to-float conversion (SCVTF / UCVTF).
+    ///
+    /// When `unsigned` is true, uses UCVTF (unsigned conversion).
+    fn select_fcvt_from_int(&mut self, src_ty: Type, unsigned: bool, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(!inst.args.is_empty(), "FcvtFromInt must have 1 arg");
         assert!(!inst.results.is_empty(), "FcvtFromInt must have a result");
 
@@ -1775,11 +1812,20 @@ impl InstructionSelector {
         let dst_class = reg_class_for_type(&dst_ty);
         let dst = self.new_vreg(dst_class);
 
-        let opc = match (Self::is_32bit(&src_ty), matches!(dst_ty, Type::F32)) {
-            (true, true) => AArch64Opcode::SCVTFSWr,    // SCVTF Sd, Wn
-            (true, false) => AArch64Opcode::SCVTFDWr,   // SCVTF Dd, Wn
-            (false, true) => AArch64Opcode::SCVTFSXr,   // SCVTF Sd, Xn
-            (false, false) => AArch64Opcode::SCVTFDXr,  // SCVTF Dd, Xn
+        let opc = if unsigned {
+            match (Self::is_32bit(&src_ty), matches!(dst_ty, Type::F32)) {
+                (true, true) => AArch64Opcode::UCVTFSWr,    // UCVTF Sd, Wn
+                (true, false) => AArch64Opcode::UCVTFDWr,   // UCVTF Dd, Wn
+                (false, true) => AArch64Opcode::UCVTFSXr,   // UCVTF Sd, Xn
+                (false, false) => AArch64Opcode::UCVTFDXr,  // UCVTF Dd, Xn
+            }
+        } else {
+            match (Self::is_32bit(&src_ty), matches!(dst_ty, Type::F32)) {
+                (true, true) => AArch64Opcode::SCVTFSWr,    // SCVTF Sd, Wn
+                (true, false) => AArch64Opcode::SCVTFDWr,   // SCVTF Dd, Wn
+                (false, true) => AArch64Opcode::SCVTFSXr,   // SCVTF Sd, Xn
+                (false, false) => AArch64Opcode::SCVTFDXr,  // SCVTF Dd, Xn
+            }
         };
 
         self.func.push_inst(
@@ -1788,6 +1834,184 @@ impl InstructionSelector {
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), dst_ty);
+        Ok(())
+    }
+
+    /// Select floating-point precision extension (f32 -> f64).
+    ///
+    /// AArch64: FCVT Dd, Sn
+    fn select_fp_ext(&mut self, inst: &Instruction, block: Block) -> Result<(), ISelError> {
+        assert!(!inst.args.is_empty(), "FPExt must have 1 arg");
+        assert!(!inst.results.is_empty(), "FPExt must have a result");
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+        let src = self.use_value(&src_val)?;
+
+        let dst = self.new_vreg(RegClass::Fpr64);
+        self.func.push_inst(
+            block,
+            MachInst::new(AArch64Opcode::FCVTDSr, vec![MachOperand::VReg(dst), src]),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), Type::F64);
+        Ok(())
+    }
+
+    /// Select floating-point precision truncation (f64 -> f32).
+    ///
+    /// AArch64: FCVT Sd, Dn
+    fn select_fp_trunc(&mut self, inst: &Instruction, block: Block) -> Result<(), ISelError> {
+        assert!(!inst.args.is_empty(), "FPTrunc must have 1 arg");
+        assert!(!inst.results.is_empty(), "FPTrunc must have a result");
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+        let src = self.use_value(&src_val)?;
+
+        let dst = self.new_vreg(RegClass::Fpr32);
+        self.func.push_inst(
+            block,
+            MachInst::new(AArch64Opcode::FCVTSDr, vec![MachOperand::VReg(dst), src]),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), Type::F32);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Type conversions
+    // -----------------------------------------------------------------------
+
+    /// Select integer truncation (narrow: i64->i32, i32->i16, etc.).
+    ///
+    /// On AArch64, truncation is typically free — writing to a W register
+    /// implicitly discards the upper 32 bits. For sub-32-bit types (I8, I16),
+    /// we AND with a mask to ensure correct value range. For I64->I32,
+    /// a MOV Wd, Wn suffices (implicit zero of upper 32 bits).
+    fn select_trunc(&mut self, to_ty: Type, inst: &Instruction, block: Block) -> Result<(), ISelError> {
+        assert!(!inst.args.is_empty(), "Trunc must have 1 arg");
+        assert!(!inst.results.is_empty(), "Trunc must have a result");
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+        let src = self.use_value(&src_val)?;
+
+        let dst_class = reg_class_for_type(&to_ty);
+        let dst = self.new_vreg(dst_class);
+
+        match &to_ty {
+            Type::I32 => {
+                // i64 -> i32: MOV Wd, Wn (writing W discards upper 32 bits)
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        AArch64Opcode::MOVWrr,
+                        vec![MachOperand::VReg(dst), src],
+                    ),
+                );
+            }
+            Type::I16 => {
+                // Truncate to 16-bit: AND with 0xFFFF
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        AArch64Opcode::ANDWri,
+                        vec![MachOperand::VReg(dst), src, MachOperand::Imm(0xFFFF)],
+                    ),
+                );
+            }
+            Type::I8 => {
+                // Truncate to 8-bit: AND with 0xFF
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        AArch64Opcode::ANDWri,
+                        vec![MachOperand::VReg(dst), src, MachOperand::Imm(0xFF)],
+                    ),
+                );
+            }
+            Type::B1 => {
+                // Truncate to boolean: AND with 1
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        AArch64Opcode::ANDWri,
+                        vec![MachOperand::VReg(dst), src, MachOperand::Imm(1)],
+                    ),
+                );
+            }
+            _ => {
+                // For other cases (shouldn't happen in practice), just copy.
+                self.func.push_inst(
+                    block,
+                    MachInst::new(
+                        AArch64Opcode::COPY,
+                        vec![MachOperand::VReg(dst), src],
+                    ),
+                );
+            }
+        }
+
+        self.define_value(result_val, MachOperand::VReg(dst), to_ty);
+        Ok(())
+    }
+
+    /// Select bitcast (reinterpret bits between types of same size).
+    ///
+    /// On AArch64, bitcast between integer and float registers uses FMOV:
+    ///   i64 <-> f64: FMOV Xd, Dn / FMOV Dd, Xn
+    ///   i32 <-> f32: FMOV Wd, Sn / FMOV Sd, Wn
+    /// For same-class bitcasts (e.g. i32 -> i32), emit a COPY.
+    fn select_bitcast(&mut self, to_ty: Type, inst: &Instruction, block: Block) -> Result<(), ISelError> {
+        assert!(!inst.args.is_empty(), "Bitcast must have 1 arg");
+        assert!(!inst.results.is_empty(), "Bitcast must have a result");
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+        let src_ty = self.value_type(&src_val);
+        let src = self.use_value(&src_val)?;
+
+        let dst_class = reg_class_for_type(&to_ty);
+        let dst = self.new_vreg(dst_class);
+
+        let src_is_fp = matches!(src_ty, Type::F32 | Type::F64);
+        let dst_is_fp = matches!(to_ty, Type::F32 | Type::F64);
+
+        if src_is_fp == dst_is_fp {
+            // Same register class: just copy.
+            self.func.push_inst(
+                block,
+                MachInst::new(
+                    AArch64Opcode::COPY,
+                    vec![MachOperand::VReg(dst), src],
+                ),
+            );
+        } else if src_is_fp && !dst_is_fp {
+            // FP -> Int: FMOV Xd, Dn or FMOV Wd, Sn
+            let opc = match src_ty {
+                Type::F64 => AArch64Opcode::FMOVXDr,  // FMOV Xd, Dn
+                Type::F32 => AArch64Opcode::FMOVWSr,  // FMOV Wd, Sn
+                _ => AArch64Opcode::FMOVXDr,           // default 64-bit
+            };
+            self.func.push_inst(
+                block,
+                MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
+            );
+        } else {
+            // Int -> FP: FMOV Dd, Xn or FMOV Sd, Wn
+            let opc = match to_ty {
+                Type::F64 => AArch64Opcode::FMOVDXr,  // FMOV Dd, Xn
+                Type::F32 => AArch64Opcode::FMOVSWr,  // FMOV Sd, Wn
+                _ => AArch64Opcode::FMOVDXr,           // default 64-bit
+            };
+            self.func.push_inst(
+                block,
+                MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
+            );
+        }
+
+        self.define_value(result_val, MachOperand::VReg(dst), to_ty);
         Ok(())
     }
 
@@ -3251,5 +3475,542 @@ mod tests {
         assert_eq!(&msub_inst.operands[1], div_dst, "MSUB Rn should be quotient from SDIV");
         assert_eq!(&msub_inst.operands[2], divisor_op, "MSUB Rm should be divisor");
         assert_eq!(&msub_inst.operands[3], dividend_op, "MSUB Ra should be dividend");
+    }
+
+    // =======================================================================
+    // Type conversion instruction lowering (issue #85)
+    // =======================================================================
+
+    // ---- Trunc ----
+
+    #[test]
+    fn select_trunc_i64_to_i32() {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("trunc64to32".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Trunc { to_ty: Type::I32 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 1 COPY (formal arg) + 1 MOVWrr (truncation)
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::MOVWrr);
+    }
+
+    #[test]
+    fn select_trunc_i32_to_i16() {
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::I16],
+        };
+        let mut isel = InstructionSelector::new("trunc32to16".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Trunc { to_ty: Type::I16 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 1 COPY + 1 ANDWri (mask to 0xFFFF)
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::ANDWri);
+        assert_eq!(mblock.insts[1].operands[2], MachOperand::Imm(0xFFFF));
+    }
+
+    #[test]
+    fn select_trunc_i32_to_i8() {
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::I8],
+        };
+        let mut isel = InstructionSelector::new("trunc32to8".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Trunc { to_ty: Type::I8 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::ANDWri);
+        assert_eq!(mblock.insts[1].operands[2], MachOperand::Imm(0xFF));
+    }
+
+    #[test]
+    fn select_trunc_i64_to_b1() {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::B1],
+        };
+        let mut isel = InstructionSelector::new("trunc64tob1".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Trunc { to_ty: Type::B1 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::ANDWri);
+        assert_eq!(mblock.insts[1].operands[2], MachOperand::Imm(1));
+    }
+
+    // ---- FPToUI / FPToSI (unsigned float-to-int) ----
+
+    #[test]
+    fn select_fcvt_to_uint_i32() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("f2ui".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtToUint { dst_ty: Type::I32 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FCVTZUWr);
+    }
+
+    #[test]
+    fn select_fcvt_to_uint_i64() {
+        let sig = Signature {
+            params: vec![Type::F32],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("f2ui64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtToUint { dst_ty: Type::I64 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FCVTZUXr);
+    }
+
+    // ---- UIToFP / SIToFP (unsigned int-to-float) ----
+
+    #[test]
+    fn select_fcvt_from_uint_i32_to_f32() {
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::F32],
+        };
+        let mut isel = InstructionSelector::new("ui2f".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtFromUint { src_ty: Type::I32 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::UCVTFSWr);
+    }
+
+    #[test]
+    fn select_fcvt_from_uint_i64_to_f64() {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("ui642f64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtFromUint { src_ty: Type::I64 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::UCVTFDXr);
+    }
+
+    // ---- FPExt (f32 -> f64) ----
+
+    #[test]
+    fn select_fp_ext_f32_to_f64() {
+        let sig = Signature {
+            params: vec![Type::F32],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("fpext".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FPExt,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 1 COPY (formal arg) + 1 FCVTDSr
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FCVTDSr);
+    }
+
+    // ---- FPTrunc (f64 -> f32) ----
+
+    #[test]
+    fn select_fp_trunc_f64_to_f32() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::F32],
+        };
+        let mut isel = InstructionSelector::new("fptrunc".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FPTrunc,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FCVTSDr);
+    }
+
+    // ---- Bitcast ----
+
+    #[test]
+    fn select_bitcast_f64_to_i64() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("bc_f2i".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Bitcast { to_ty: Type::I64 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FMOVXDr);
+    }
+
+    #[test]
+    fn select_bitcast_i64_to_f64() {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("bc_i2f".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Bitcast { to_ty: Type::F64 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FMOVDXr);
+    }
+
+    #[test]
+    fn select_bitcast_f32_to_i32() {
+        let sig = Signature {
+            params: vec![Type::F32],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("bc_f32i32".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Bitcast { to_ty: Type::I32 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FMOVWSr);
+    }
+
+    #[test]
+    fn select_bitcast_i32_to_f32() {
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::F32],
+        };
+        let mut isel = InstructionSelector::new("bc_i32f32".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Bitcast { to_ty: Type::F32 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FMOVSWr);
+    }
+
+    #[test]
+    fn select_bitcast_same_class_is_copy() {
+        // Bitcast i32 -> i32 (same class) should emit a COPY.
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("bc_same".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Bitcast { to_ty: Type::I32 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::COPY);
+    }
+
+    // ---- End-to-end: conversion pipeline ----
+
+    #[test]
+    fn full_fp_conversion_pipeline() {
+        // fn convert(i32) -> i32 { return (i32)(float)x; }
+        // i32 -> f32 (SIToFP) -> f64 (FPExt) -> f32 (FPTrunc) -> i32 (FPToSI)
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("convert_pipe".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        // Value(1) = scvtf Value(0) [i32 -> f32]
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtFromInt { src_ty: Type::I32 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        // Value(2) = fpext Value(1) [f32 -> f64]
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FPExt,
+                args: vec![Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+
+        // Value(3) = fptrunc Value(2) [f64 -> f32]
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FPTrunc,
+                args: vec![Value(2)],
+                results: vec![Value(3)],
+            },
+            entry,
+        ).unwrap();
+
+        // Value(4) = fcvtzs Value(3) [f32 -> i32]
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtToInt { dst_ty: Type::I32 },
+                args: vec![Value(3)],
+                results: vec![Value(4)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 1 COPY + 1 SCVTFSWr + 1 FCVTDSr + 1 FCVTSDr + 1 FCVTZSWr
+        assert_eq!(mblock.insts.len(), 5);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::COPY);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::SCVTFSWr);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::FCVTDSr);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::FCVTSDr);
+        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::FCVTZSWr);
+    }
+
+    #[test]
+    fn full_trunc_and_extend_roundtrip() {
+        // fn trunc_ext(i64) -> i64 { return (i64)(i32)x; }
+        // i64 -> i32 (Trunc) -> i64 (Sextend)
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("trunc_ext".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        // Value(1) = trunc Value(0) [i64 -> i32]
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Trunc { to_ty: Type::I32 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        // Value(2) = sextend Value(1) [i32 -> i64]
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Sextend {
+                    from_ty: Type::I32,
+                    to_ty: Type::I64,
+                },
+                args: vec![Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 1 COPY + 1 MOVWrr (trunc) + 1 SXTWXr (sextend)
+        assert_eq!(mblock.insts.len(), 3);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::MOVWrr);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::SXTWXr);
+    }
+
+    #[test]
+    fn full_bitcast_roundtrip() {
+        // fn roundtrip(f64) -> f64 { return bitcast<f64>(bitcast<i64>(x)); }
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("bc_rt".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        // Value(1) = bitcast<i64> Value(0) [f64 -> i64]
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Bitcast { to_ty: Type::I64 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        // Value(2) = bitcast<f64> Value(1) [i64 -> f64]
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Bitcast { to_ty: Type::F64 },
+                args: vec![Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 1 COPY + 1 FMOVXDr + 1 FMOVDXr
+        assert_eq!(mblock.insts.len(), 3);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FMOVXDr);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::FMOVDXr);
     }
 }
