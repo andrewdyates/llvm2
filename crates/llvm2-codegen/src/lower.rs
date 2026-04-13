@@ -213,7 +213,7 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
     // Helper: determine if the instruction operates on 64-bit registers.
     let is_64bit = |idx: usize| -> bool {
         match inst.operands.get(idx) {
-            Some(MachOperand::PReg(p)) => p.is_gpr() && p.0 < 32,
+            Some(MachOperand::PReg(p)) => p.is_gpr() && p.encoding() < 32,
             _ => true,
         }
     };
@@ -762,8 +762,47 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 | rd)
         }
 
+        // --- Flag-setting arithmetic (ADDS/SUBS) ---
+        AArch64Opcode::AddsRR => {
+            let sf = if is_64bit(0) { 1 } else { 0 };
+            Ok(encoding::encode_add_sub_shifted_reg(
+                sf, 0, 1, 0, preg_hw(2)?, 0, preg_hw(1)?, preg_hw(0)?,
+            ))
+        }
+        AArch64Opcode::AddsRI => {
+            let sf = if is_64bit(0) { 1 } else { 0 };
+            let imm = imm_val(2) as u32 & 0xFFF;
+            Ok(encoding::encode_add_sub_imm(
+                sf, 0, 1, 0, imm, preg_hw(1)?, preg_hw(0)?,
+            ))
+        }
+        AArch64Opcode::SubsRR => {
+            let sf = if is_64bit(0) { 1 } else { 0 };
+            Ok(encoding::encode_add_sub_shifted_reg(
+                sf, 1, 1, 0, preg_hw(2)?, 0, preg_hw(1)?, preg_hw(0)?,
+            ))
+        }
+        AArch64Opcode::SubsRI => {
+            let sf = if is_64bit(0) { 1 } else { 0 };
+            let imm = imm_val(2) as u32 & 0xFFF;
+            Ok(encoding::encode_add_sub_imm(
+                sf, 1, 1, 0, imm, preg_hw(1)?, preg_hw(0)?,
+            ))
+        }
+
+        // --- Trap pseudo-instructions: emit BRK #1 ---
+        AArch64Opcode::TrapOverflow
+        | AArch64Opcode::TrapBoundsCheck
+        | AArch64Opcode::TrapNull => {
+            Ok(0xD4200020) // BRK #1
+        }
+
         // --- Pseudo-instructions: emit NOP ---
-        AArch64Opcode::Phi | AArch64Opcode::StackAlloc | AArch64Opcode::Nop => {
+        AArch64Opcode::Phi
+        | AArch64Opcode::StackAlloc
+        | AArch64Opcode::Nop
+        | AArch64Opcode::Retain
+        | AArch64Opcode::Release => {
             // These should have been eliminated, but emit NOP as safe fallback.
             Ok(0xD503201F)
         }

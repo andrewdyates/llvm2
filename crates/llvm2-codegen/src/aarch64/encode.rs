@@ -77,7 +77,7 @@ fn imm_val(inst: &MachInst, idx: usize) -> i64 {
 fn sf_from_operand(inst: &MachInst, idx: usize) -> u32 {
     match inst.operands.get(idx) {
         Some(MachOperand::PReg(p)) => {
-            if p.is_gpr() && p.0 < 32 {
+            if p.is_gpr() && p.encoding() < 32 {
                 1 // All GPRs default to 64-bit in this model
             } else {
                 1
@@ -732,6 +732,57 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
         // =================================================================
 
         AArch64Opcode::Phi | AArch64Opcode::StackAlloc | AArch64Opcode::Nop => Ok(NOP),
+
+        // =================================================================
+        // Flag-setting arithmetic (ADDS/SUBS) — proof-carrying opcodes
+        // =================================================================
+
+        // ADDS Rd, Rn, Rm (shifted register, sets NZCV)
+        AArch64Opcode::AddsRR => {
+            let sf = sf_from_operand(inst, 0);
+            Ok(encoding::encode_add_sub_shifted_reg(
+                sf, 0, 1, 0, preg_hw(inst, 2), 0, preg_hw(inst, 1), preg_hw(inst, 0),
+            ))
+        }
+
+        // ADDS Rd, Rn, #imm12 (sets NZCV)
+        AArch64Opcode::AddsRI => {
+            let sf = sf_from_operand(inst, 0);
+            let imm = imm_val(inst, 2) as u32 & 0xFFF;
+            Ok(encoding::encode_add_sub_imm(
+                sf, 0, 1, 0, imm, preg_hw(inst, 1), preg_hw(inst, 0),
+            ))
+        }
+
+        // SUBS Rd, Rn, Rm (shifted register, sets NZCV)
+        AArch64Opcode::SubsRR => {
+            let sf = sf_from_operand(inst, 0);
+            Ok(encoding::encode_add_sub_shifted_reg(
+                sf, 1, 1, 0, preg_hw(inst, 2), 0, preg_hw(inst, 1), preg_hw(inst, 0),
+            ))
+        }
+
+        // SUBS Rd, Rn, #imm12 (sets NZCV)
+        AArch64Opcode::SubsRI => {
+            let sf = sf_from_operand(inst, 0);
+            let imm = imm_val(inst, 2) as u32 & 0xFFF;
+            Ok(encoding::encode_add_sub_imm(
+                sf, 1, 1, 0, imm, preg_hw(inst, 1), preg_hw(inst, 0),
+            ))
+        }
+
+        // Trap pseudo-instructions and runtime calls — expanded before encoding.
+        // If they reach the encoder, emit BRK #1 (debug breakpoint).
+        AArch64Opcode::TrapOverflow
+        | AArch64Opcode::TrapBoundsCheck
+        | AArch64Opcode::TrapNull => {
+            // BRK #1: 1101_0100_001 imm16=1 000_00
+            Ok(0xD4200020)
+        }
+
+        // Retain/Release are runtime calls — expanded before encoding.
+        // Emit NOP as safe fallback.
+        AArch64Opcode::Retain | AArch64Opcode::Release => Ok(NOP),
     }
 }
 
