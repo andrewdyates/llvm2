@@ -15,5 +15,7 @@ authors.workspace = true
 [dependencies]
 llvm2-ir = { workspace = true }
 llvm2-lower = { workspace = true }
+llvm2-opt = { workspace = true }
+llvm2-regalloc = { workspace = true }
 llvm2-verify = { workspace = true }
 thiserror = { workspace = true }
