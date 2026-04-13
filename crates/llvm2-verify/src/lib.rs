@@ -45,6 +45,7 @@ pub mod tmir_semantics;
 pub mod aarch64_semantics;
 pub mod nzcv;
 pub mod lowering_proof;
+pub mod peephole_proofs;
 pub mod verify;
 
 pub use verify::{VerificationResult, Verifier};

@@ -139,6 +139,28 @@ pub enum SmtExpr {
 
     /// `extract(high, low, operand)` -- bit extraction `operand[high:low]`.
     Extract { high: u32, low: u32, operand: Box<SmtExpr>, width: u32 },
+
+    // -- Bitwise operations --
+
+    /// `bvand(lhs, rhs)` -- bitwise AND.
+    BvAnd { lhs: Box<SmtExpr>, rhs: Box<SmtExpr>, width: u32 },
+
+    /// `bvor(lhs, rhs)` -- bitwise OR.
+    BvOr { lhs: Box<SmtExpr>, rhs: Box<SmtExpr>, width: u32 },
+
+    /// `bvxor(lhs, rhs)` -- bitwise XOR.
+    BvXor { lhs: Box<SmtExpr>, rhs: Box<SmtExpr>, width: u32 },
+
+    // -- Shift operations --
+
+    /// `bvshl(lhs, rhs)` -- logical shift left.
+    BvShl { lhs: Box<SmtExpr>, rhs: Box<SmtExpr>, width: u32 },
+
+    /// `bvlshr(lhs, rhs)` -- logical shift right.
+    BvLshr { lhs: Box<SmtExpr>, rhs: Box<SmtExpr>, width: u32 },
+
+    /// `bvashr(lhs, rhs)` -- arithmetic shift right.
+    BvAshr { lhs: Box<SmtExpr>, rhs: Box<SmtExpr>, width: u32 },
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +296,42 @@ impl SmtExpr {
         }
     }
 
+    /// `bvand` -- bitwise AND.
+    pub fn bvand(self, other: Self) -> Self {
+        let w = self.bv_width();
+        SmtExpr::BvAnd { lhs: Box::new(self), rhs: Box::new(other), width: w }
+    }
+
+    /// `bvor` -- bitwise OR.
+    pub fn bvor(self, other: Self) -> Self {
+        let w = self.bv_width();
+        SmtExpr::BvOr { lhs: Box::new(self), rhs: Box::new(other), width: w }
+    }
+
+    /// `bvxor` -- bitwise XOR.
+    pub fn bvxor(self, other: Self) -> Self {
+        let w = self.bv_width();
+        SmtExpr::BvXor { lhs: Box::new(self), rhs: Box::new(other), width: w }
+    }
+
+    /// `bvshl` -- logical shift left.
+    pub fn bvshl(self, other: Self) -> Self {
+        let w = self.bv_width();
+        SmtExpr::BvShl { lhs: Box::new(self), rhs: Box::new(other), width: w }
+    }
+
+    /// `bvlshr` -- logical shift right.
+    pub fn bvlshr(self, other: Self) -> Self {
+        let w = self.bv_width();
+        SmtExpr::BvLshr { lhs: Box::new(self), rhs: Box::new(other), width: w }
+    }
+
+    /// `bvashr` -- arithmetic shift right.
+    pub fn bvashr(self, other: Self) -> Self {
+        let w = self.bv_width();
+        SmtExpr::BvAshr { lhs: Box::new(self), rhs: Box::new(other), width: w }
+    }
+
     /// `extract(high, low)` -- bit extraction.
     pub fn extract(self, high: u32, low: u32) -> Self {
         let result_width = high - low + 1;
@@ -297,6 +355,12 @@ impl SmtExpr {
             SmtExpr::BvUDiv { width, .. } => *width,
             SmtExpr::BvNeg { width, .. } => *width,
             SmtExpr::Extract { width, .. } => *width,
+            SmtExpr::BvAnd { width, .. } => *width,
+            SmtExpr::BvOr { width, .. } => *width,
+            SmtExpr::BvXor { width, .. } => *width,
+            SmtExpr::BvShl { width, .. } => *width,
+            SmtExpr::BvLshr { width, .. } => *width,
+            SmtExpr::BvAshr { width, .. } => *width,
             SmtExpr::Ite { then_expr, .. } => then_expr.bv_width(),
             SmtExpr::BoolConst(_)
             | SmtExpr::Eq { .. }
@@ -354,6 +418,12 @@ impl SmtExpr {
             | SmtExpr::BvMul { lhs, rhs, .. }
             | SmtExpr::BvSDiv { lhs, rhs, .. }
             | SmtExpr::BvUDiv { lhs, rhs, .. }
+            | SmtExpr::BvAnd { lhs, rhs, .. }
+            | SmtExpr::BvOr { lhs, rhs, .. }
+            | SmtExpr::BvXor { lhs, rhs, .. }
+            | SmtExpr::BvShl { lhs, rhs, .. }
+            | SmtExpr::BvLshr { lhs, rhs, .. }
+            | SmtExpr::BvAshr { lhs, rhs, .. }
             | SmtExpr::Eq { lhs, rhs }
             | SmtExpr::BvSlt { lhs, rhs, .. }
             | SmtExpr::BvSge { lhs, rhs, .. }
@@ -489,6 +559,54 @@ impl SmtExpr {
                     EvalResult::Bv(mask(a / b, *width))
                 }
             }
+            SmtExpr::BvAnd { lhs, rhs, width } => {
+                let a = lhs.eval(env).as_u64();
+                let b = rhs.eval(env).as_u64();
+                EvalResult::Bv(mask(a & b, *width))
+            }
+            SmtExpr::BvOr { lhs, rhs, width } => {
+                let a = lhs.eval(env).as_u64();
+                let b = rhs.eval(env).as_u64();
+                EvalResult::Bv(mask(a | b, *width))
+            }
+            SmtExpr::BvXor { lhs, rhs, width } => {
+                let a = lhs.eval(env).as_u64();
+                let b = rhs.eval(env).as_u64();
+                EvalResult::Bv(mask(a ^ b, *width))
+            }
+            SmtExpr::BvShl { lhs, rhs, width } => {
+                let a = lhs.eval(env).as_u64();
+                let b = rhs.eval(env).as_u64();
+                // SMT-LIB: if shift amount >= width, result is 0.
+                if b >= *width as u64 {
+                    EvalResult::Bv(0)
+                } else {
+                    EvalResult::Bv(mask(a << b, *width))
+                }
+            }
+            SmtExpr::BvLshr { lhs, rhs, width } => {
+                let a = lhs.eval(env).as_u64();
+                let b = rhs.eval(env).as_u64();
+                if b >= *width as u64 {
+                    EvalResult::Bv(0)
+                } else {
+                    EvalResult::Bv(mask(a >> b, *width))
+                }
+            }
+            SmtExpr::BvAshr { lhs, rhs, width } => {
+                let a = sign_extend(lhs.eval(env).as_u64(), *width);
+                let b = rhs.eval(env).as_u64();
+                if b >= *width as u64 {
+                    // Sign-fill: all 1s if negative, all 0s if positive.
+                    if a < 0 {
+                        EvalResult::Bv(mask(u64::MAX, *width))
+                    } else {
+                        EvalResult::Bv(0)
+                    }
+                } else {
+                    EvalResult::Bv(mask((a >> b) as u64, *width))
+                }
+            }
             SmtExpr::BvNeg { operand, width } => {
                 let a = operand.eval(env).as_u64();
                 // Two's complement negation = wrapping negate.
@@ -583,6 +701,12 @@ impl fmt::Display for SmtExpr {
             SmtExpr::BvMul { lhs, rhs, .. } => write!(f, "(bvmul {} {})", lhs, rhs),
             SmtExpr::BvSDiv { lhs, rhs, .. } => write!(f, "(bvsdiv {} {})", lhs, rhs),
             SmtExpr::BvUDiv { lhs, rhs, .. } => write!(f, "(bvudiv {} {})", lhs, rhs),
+            SmtExpr::BvAnd { lhs, rhs, .. } => write!(f, "(bvand {} {})", lhs, rhs),
+            SmtExpr::BvOr { lhs, rhs, .. } => write!(f, "(bvor {} {})", lhs, rhs),
+            SmtExpr::BvXor { lhs, rhs, .. } => write!(f, "(bvxor {} {})", lhs, rhs),
+            SmtExpr::BvShl { lhs, rhs, .. } => write!(f, "(bvshl {} {})", lhs, rhs),
+            SmtExpr::BvLshr { lhs, rhs, .. } => write!(f, "(bvlshr {} {})", lhs, rhs),
+            SmtExpr::BvAshr { lhs, rhs, .. } => write!(f, "(bvashr {} {})", lhs, rhs),
             SmtExpr::BvNeg { operand, .. } => write!(f, "(bvneg {})", operand),
             SmtExpr::Eq { lhs, rhs } => write!(f, "(= {} {})", lhs, rhs),
             SmtExpr::Not { operand } => write!(f, "(not {})", operand),
