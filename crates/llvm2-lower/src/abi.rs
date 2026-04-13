@@ -21,66 +21,21 @@ use crate::types::Type;
 pub use llvm2_ir::regs::PReg;
 
 // ---------------------------------------------------------------------------
-// ABI register constants (using llvm2-ir PReg encoding: 0-30 = X0-X30, 32-63 = V0-V31)
+// ABI register constants — re-exported from llvm2-ir (single source of truth)
 // ---------------------------------------------------------------------------
 
 /// GPR constants for ABI use.
+///
+/// These re-export the canonical constants from `llvm2_ir::regs` so that
+/// downstream code can write `gpr::X0` without a long import path.
 pub mod gpr {
-    use llvm2_ir::regs::PReg;
-
-    pub const X0: PReg = PReg(0);
-    pub const X1: PReg = PReg(1);
-    pub const X2: PReg = PReg(2);
-    pub const X3: PReg = PReg(3);
-    pub const X4: PReg = PReg(4);
-    pub const X5: PReg = PReg(5);
-    pub const X6: PReg = PReg(6);
-    pub const X7: PReg = PReg(7);
-    pub const X8: PReg = PReg(8);
-    pub const X9: PReg = PReg(9);
-    pub const X10: PReg = PReg(10);
-    pub const X11: PReg = PReg(11);
-    pub const X12: PReg = PReg(12);
-    pub const X13: PReg = PReg(13);
-    pub const X14: PReg = PReg(14);
-    pub const X15: PReg = PReg(15);
-    pub const X16: PReg = PReg(16);
-    pub const X17: PReg = PReg(17);
-    pub const X18: PReg = PReg(18);
-    pub const X19: PReg = PReg(19);
-    pub const X20: PReg = PReg(20);
-    pub const X21: PReg = PReg(21);
-    pub const X22: PReg = PReg(22);
-    pub const X23: PReg = PReg(23);
-    pub const X24: PReg = PReg(24);
-    pub const X25: PReg = PReg(25);
-    pub const X26: PReg = PReg(26);
-    pub const X27: PReg = PReg(27);
-    pub const X28: PReg = PReg(28);
-    /// Frame pointer (mandatory on Darwin).
-    pub const FP: PReg = PReg(29);
-    /// Link register.
-    pub const LR: PReg = PReg(30);
-
-    /// FPR argument/return registers (V0-V7).
-    pub const V0: PReg = PReg(32);
-    pub const V1: PReg = PReg(33);
-    pub const V2: PReg = PReg(34);
-    pub const V3: PReg = PReg(35);
-    pub const V4: PReg = PReg(36);
-    pub const V5: PReg = PReg(37);
-    pub const V6: PReg = PReg(38);
-    pub const V7: PReg = PReg(39);
-
-    /// FPR callee-saved (V8-V15, lower 64 bits only).
-    pub const V8: PReg = PReg(40);
-    pub const V9: PReg = PReg(41);
-    pub const V10: PReg = PReg(42);
-    pub const V11: PReg = PReg(43);
-    pub const V12: PReg = PReg(44);
-    pub const V13: PReg = PReg(45);
-    pub const V14: PReg = PReg(46);
-    pub const V15: PReg = PReg(47);
+    pub use llvm2_ir::regs::{
+        X0, X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15,
+        X16, X17, X18, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28,
+        FP, LR,
+        V0, V1, V2, V3, V4, V5, V6, V7,
+        V8, V9, V10, V11, V12, V13, V14, V15,
+    };
 }
 
 // ---------------------------------------------------------------------------

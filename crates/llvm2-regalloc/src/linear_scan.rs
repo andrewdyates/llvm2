@@ -240,20 +240,32 @@ pub fn aarch64_allocatable_regs() -> HashMap<RegClass, Vec<PReg>> {
     let mut regs = HashMap::new();
 
     // GPR64: X0-X15, X19-X28 (skip X16-X17 scratch, X18 reserved, X29 FP, X30 LR)
-    let gpr64: Vec<PReg> = (0..=15)
-        .chain(19..=28)
-        .map(PReg)
+    // PReg encoding: X registers are 0..=30
+    let gpr64: Vec<PReg> = (0u16..=15)
+        .chain(19u16..=28)
+        .map(PReg::new)
         .collect();
     regs.insert(RegClass::Gpr64, gpr64.clone());
 
     // GPR32: same set (W registers are the lower 32 bits of X registers).
-    regs.insert(RegClass::Gpr32, gpr64);
+    // PReg encoding: W registers are 32..=62
+    let gpr32: Vec<PReg> = (32u16..=47)
+        .chain(51u16..=60)
+        .map(PReg::new)
+        .collect();
+    regs.insert(RegClass::Gpr32, gpr32);
 
-    // FPR64 and FPR32: V0-V31 (encoded as 32-63).
-    let fpr: Vec<PReg> = (32..=63).map(PReg).collect();
-    regs.insert(RegClass::Fpr64, fpr.clone());
-    regs.insert(RegClass::Fpr32, fpr.clone());
-    regs.insert(RegClass::Vec128, fpr);
+    // FPR128: V0-V31 (encoded as 64-95).
+    let fpr128: Vec<PReg> = (64u16..=95).map(PReg::new).collect();
+    regs.insert(RegClass::Fpr128, fpr128);
+
+    // FPR64: D0-D31 (encoded as 96-127).
+    let fpr64: Vec<PReg> = (96u16..=127).map(PReg::new).collect();
+    regs.insert(RegClass::Fpr64, fpr64);
+
+    // FPR32: S0-S31 (encoded as 128-159).
+    let fpr32: Vec<PReg> = (128u16..=159).map(PReg::new).collect();
+    regs.insert(RegClass::Fpr32, fpr32);
 
     regs
 }

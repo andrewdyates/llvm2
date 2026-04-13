@@ -43,7 +43,7 @@
 use llvm2_ir::function::MachFunction;
 use llvm2_ir::inst::{AArch64Opcode, MachInst};
 use llvm2_ir::operand::MachOperand;
-use llvm2_ir::regs::{PReg, SpecialReg, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, V8, V9, V10, V11, V12, V13, V14, V15};
+use llvm2_ir::regs::{PReg, SP, SpecialReg, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, V8, V9, V10, V11, V12, V13, V14, V15};
 
 // ---------------------------------------------------------------------------
 // Constants — Darwin compact unwind encoding (ARM64)
@@ -162,7 +162,7 @@ fn scan_callee_saved_gprs(func: &MachFunction) -> u16 {
     for inst in &func.insts {
         for op in &inst.operands {
             if let MachOperand::PReg(preg) = op {
-                let r = preg.0;
+                let r = preg.encoding();
                 // X19=19 through X28=28
                 if (19..=28).contains(&r) {
                     used |= 1 << (r - 19);
@@ -171,7 +171,7 @@ fn scan_callee_saved_gprs(func: &MachFunction) -> u16 {
         }
         // Check implicit defs/uses.
         for preg in inst.implicit_defs.iter().chain(inst.implicit_uses.iter()) {
-            let r = preg.0;
+            let r = preg.encoding();
             if (19..=28).contains(&r) {
                 used |= 1 << (r - 19);
             }
@@ -189,17 +189,17 @@ fn scan_callee_saved_fprs(func: &MachFunction) -> u8 {
     for inst in &func.insts {
         for op in &inst.operands {
             if let MachOperand::PReg(preg) = op {
-                let r = preg.0;
-                // V8=40 through V15=47
-                if (40..=47).contains(&r) {
-                    used |= 1 << (r - 40);
+                let r = preg.encoding();
+                // V8=72 through V15=79 (unified PReg encoding)
+                if (72..=79).contains(&r) {
+                    used |= 1 << (r - 72);
                 }
             }
         }
         for preg in inst.implicit_defs.iter().chain(inst.implicit_uses.iter()) {
-            let r = preg.0;
-            if (40..=47).contains(&r) {
-                used |= 1 << (r - 40);
+            let r = preg.encoding();
+            if (72..=79).contains(&r) {
+                used |= 1 << (r - 72);
             }
         }
     }
@@ -514,7 +514,7 @@ pub fn eliminate_frame_indices(func: &mut MachFunction, layout: &FrameLayout) {
                         // SP-relative offset = FP_offset + callee_saved_area + sp_adjustment
                         let sp_offset = offset + (layout.sp_adjustment() as i32);
                         *operand = MachOperand::MemOp {
-                            base: PReg(31), // SP encoded as PReg(31) — but MemOp uses PReg
+                            base: SP, // SP = PReg(31)
                             offset: sp_offset as i64,
                         };
                     }
@@ -577,8 +577,8 @@ pub fn encode_compact_unwind(layout: &FrameLayout) -> CompactUnwindEncoding {
     // Encode which callee-saved pairs are saved (skip pair[0] = FP/LR, always implicit).
     for pair in layout.callee_saved_pairs.iter().skip(1) {
         if !pair.is_fpr {
-            // GPR pair
-            let flag = match (pair.reg1.0, pair.reg2.0) {
+            // GPR pair — X19-X28 encoding unchanged (19-28)
+            let flag = match (pair.reg1.encoding(), pair.reg2.encoding()) {
                 (19, 20) => UNWIND_ARM64_FRAME_X19_X20_PAIR,
                 (21, 22) => UNWIND_ARM64_FRAME_X21_X22_PAIR,
                 (23, 24) => UNWIND_ARM64_FRAME_X23_X24_PAIR,
@@ -589,11 +589,12 @@ pub fn encode_compact_unwind(layout: &FrameLayout) -> CompactUnwindEncoding {
             encoding |= flag;
         } else {
             // FPR pair (V8-V15 encode as D8-D15 for compact unwind)
-            let flag = match (pair.reg1.0, pair.reg2.0) {
-                (40, 41) => UNWIND_ARM64_FRAME_D8_D9_PAIR,   // V8/V9
-                (42, 43) => UNWIND_ARM64_FRAME_D10_D11_PAIR, // V10/V11
-                (44, 45) => UNWIND_ARM64_FRAME_D12_D13_PAIR, // V12/V13
-                (46, 47) => UNWIND_ARM64_FRAME_D14_D15_PAIR, // V14/V15
+            // V8=72, V9=73, ..., V15=79 in unified PReg encoding
+            let flag = match (pair.reg1.encoding(), pair.reg2.encoding()) {
+                (72, 73) => UNWIND_ARM64_FRAME_D8_D9_PAIR,   // V8/V9
+                (74, 75) => UNWIND_ARM64_FRAME_D10_D11_PAIR, // V10/V11
+                (76, 77) => UNWIND_ARM64_FRAME_D12_D13_PAIR, // V12/V13
+                (78, 79) => UNWIND_ARM64_FRAME_D14_D15_PAIR, // V14/V15
                 _ => 0,
             };
             encoding |= flag;
@@ -857,8 +858,8 @@ mod tests {
     #[test]
     fn test_layout_with_all_callee_saved() {
         // Function uses all callee-saved GPRs (X19-X28) and all FPRs (V8-V15).
-        let mut regs: Vec<PReg> = (19..=28).map(|r| PReg(r)).collect();
-        let fprs: Vec<PReg> = (40..=47).map(|r| PReg(r)).collect();
+        let mut regs: Vec<PReg> = (19..=28).map(|r| PReg::new(r)).collect();
+        let fprs: Vec<PReg> = (72..=79).map(|r| PReg::new(r)).collect(); // V8-V15
         regs.extend(fprs);
         let func = make_func_with_callee_saved_gprs(&regs);
         let layout = compute_frame_layout(&func, 0, false);
@@ -1053,7 +1054,7 @@ mod tests {
             MachInst::new(
                 AArch64Opcode::LdrRI,
                 vec![
-                    MachOperand::PReg(PReg(0)), // X0
+                    MachOperand::PReg(PReg::new(0)), // X0
                     MachOperand::FrameIndex(FrameIdx(0)),
                 ],
             ),
@@ -1082,15 +1083,15 @@ mod tests {
         let mut func = make_func("fi_multi", vec![
             MachInst::new(
                 AArch64Opcode::LdrRI,
-                vec![MachOperand::PReg(PReg(0)), MachOperand::FrameIndex(FrameIdx(0))],
+                vec![MachOperand::PReg(PReg::new(0)), MachOperand::FrameIndex(FrameIdx(0))],
             ),
             MachInst::new(
                 AArch64Opcode::LdrRI,
-                vec![MachOperand::PReg(PReg(1)), MachOperand::FrameIndex(FrameIdx(1))],
+                vec![MachOperand::PReg(PReg::new(1)), MachOperand::FrameIndex(FrameIdx(1))],
             ),
             MachInst::new(
                 AArch64Opcode::LdrRI,
-                vec![MachOperand::PReg(PReg(2)), MachOperand::FrameIndex(FrameIdx(2))],
+                vec![MachOperand::PReg(PReg::new(2)), MachOperand::FrameIndex(FrameIdx(2))],
             ),
             MachInst::new(AArch64Opcode::Ret, vec![]),
         ]);
@@ -1164,8 +1165,8 @@ mod tests {
     #[test]
     fn test_compact_unwind_all_regs() {
         // All callee-saved registers.
-        let mut regs: Vec<PReg> = (19..=28).map(|r| PReg(r)).collect();
-        let fprs: Vec<PReg> = (40..=47).map(|r| PReg(r)).collect();
+        let mut regs: Vec<PReg> = (19..=28).map(|r| PReg::new(r)).collect();
+        let fprs: Vec<PReg> = (72..=79).map(|r| PReg::new(r)).collect(); // V8-V15
         regs.extend(fprs);
         let func = make_func_with_callee_saved_gprs(&regs);
         let layout = compute_frame_layout(&func, 0, false);
