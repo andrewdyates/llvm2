@@ -51,7 +51,11 @@ impl MachinePass for Peephole {
             for &inst_id in block.insts.clone().iter() {
                 match try_peephole(func.inst(inst_id)) {
                     PeepholeResult::NoChange => {}
-                    PeepholeResult::Replace(new_inst) => {
+                    PeepholeResult::Replace(mut new_inst) => {
+                        // Preserve proof annotation from the original instruction.
+                        // The peephole simplification preserves semantics
+                        // (e.g., x + 0 -> x), so the proof remains valid.
+                        new_inst.proof = func.inst(inst_id).proof;
                         *func.inst_mut(inst_id) = new_inst;
                         changed = true;
                     }
@@ -199,7 +203,7 @@ mod tests {
     use super::*;
     use llvm2_ir::{
         AArch64Opcode, InstId, MachFunction, MachInst, MachOperand,
-        RegClass, Signature, VReg,
+        ProofAnnotation, RegClass, Signature, VReg,
     };
     use crate::pass_manager::MachinePass;
 
@@ -369,5 +373,86 @@ mod tests {
 
         let add_inst = func.inst(InstId(1));
         assert_eq!(add_inst.opcode, AArch64Opcode::MovR);
+    }
+
+    // ---- Proof annotation preservation tests ----
+
+    #[test]
+    fn test_add_zero_preserves_proof() {
+        // add v0, v1, #0 [NoOverflow] -> mov v0, v1 [NoOverflow]
+        let add = MachInst::new(AArch64Opcode::AddRI, vec![vreg(0), vreg(1), imm(0)])
+            .with_proof(ProofAnnotation::NoOverflow);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![add, ret]);
+
+        let mut peep = Peephole;
+        assert!(peep.run(&mut func));
+
+        let inst = func.inst(InstId(0));
+        assert_eq!(inst.opcode, AArch64Opcode::MovR);
+        assert_eq!(inst.proof, Some(ProofAnnotation::NoOverflow));
+    }
+
+    #[test]
+    fn test_sub_zero_preserves_proof() {
+        // sub v0, v1, #0 [InBounds] -> mov v0, v1 [InBounds]
+        let sub = MachInst::new(AArch64Opcode::SubRI, vec![vreg(0), vreg(1), imm(0)])
+            .with_proof(ProofAnnotation::InBounds);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![sub, ret]);
+
+        let mut peep = Peephole;
+        assert!(peep.run(&mut func));
+
+        let inst = func.inst(InstId(0));
+        assert_eq!(inst.opcode, AArch64Opcode::MovR);
+        assert_eq!(inst.proof, Some(ProofAnnotation::InBounds));
+    }
+
+    #[test]
+    fn test_shift_zero_preserves_proof() {
+        // lsl v0, v1, #0 [NotNull] -> mov v0, v1 [NotNull]
+        let lsl = MachInst::new(AArch64Opcode::LslRI, vec![vreg(0), vreg(1), imm(0)])
+            .with_proof(ProofAnnotation::NotNull);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![lsl, ret]);
+
+        let mut peep = Peephole;
+        assert!(peep.run(&mut func));
+
+        let inst = func.inst(InstId(0));
+        assert_eq!(inst.opcode, AArch64Opcode::MovR);
+        assert_eq!(inst.proof, Some(ProofAnnotation::NotNull));
+    }
+
+    #[test]
+    fn test_logical_self_preserves_proof() {
+        // orr v0, v1, v1 [ValidBorrow] -> mov v0, v1 [ValidBorrow]
+        let orr = MachInst::new(AArch64Opcode::OrrRR, vec![vreg(0), vreg(1), vreg(1)])
+            .with_proof(ProofAnnotation::ValidBorrow);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![orr, ret]);
+
+        let mut peep = Peephole;
+        assert!(peep.run(&mut func));
+
+        let inst = func.inst(InstId(0));
+        assert_eq!(inst.opcode, AArch64Opcode::MovR);
+        assert_eq!(inst.proof, Some(ProofAnnotation::ValidBorrow));
+    }
+
+    #[test]
+    fn test_no_proof_no_proof_after_peephole() {
+        // add v0, v1, #0 (no proof) -> mov v0, v1 (no proof)
+        let add = MachInst::new(AArch64Opcode::AddRI, vec![vreg(0), vreg(1), imm(0)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![add, ret]);
+
+        let mut peep = Peephole;
+        assert!(peep.run(&mut func));
+
+        let inst = func.inst(InstId(0));
+        assert_eq!(inst.opcode, AArch64Opcode::MovR);
+        assert!(inst.proof.is_none());
     }
 }
