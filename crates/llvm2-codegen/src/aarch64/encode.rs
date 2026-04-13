@@ -528,29 +528,49 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
 
         // LDR Rt, [Rn, #offset]
         AArch64Opcode::LdrRI => {
+            let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
             if is_fpr(inst, 0) {
-                // FP load: V=1
-                let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
-                let scaled = (offset / 8) as u32 & 0xFFF;
-                Ok(encoding::encode_load_store_ui(0b11, 1, 0b01, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
+                // FP load: V=1, size from FP register class
+                let fp_sz = fp_size_from_inst(inst);
+                let (size, scale) = match fp_sz {
+                    FpSize::Single => (0b10, 4i64), // 32-bit FP
+                    FpSize::Double | _ => (0b11, 8i64), // 64-bit FP (and 128-bit Q)
+                };
+                let scaled = (offset / scale) as u32 & 0xFFF;
+                Ok(encoding::encode_load_store_ui(size, 1, 0b01, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
             } else {
-                // Integer load: V=0, size=11 (64-bit)
-                let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
-                let scaled = (offset / 8) as u32 & 0xFFF;
-                Ok(encoding::encode_load_store_ui(0b11, 0, 0b01, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
+                // Integer load: V=0, size from register class
+                let sf = sf_from_operand(inst, 0);
+                let (size, scale) = if sf == 1 {
+                    (0b11, 8i64) // 64-bit (X registers)
+                } else {
+                    (0b10, 4i64) // 32-bit (W registers)
+                };
+                let scaled = (offset / scale) as u32 & 0xFFF;
+                Ok(encoding::encode_load_store_ui(size, 0, 0b01, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
             }
         }
 
         // STR Rt, [Rn, #offset]
         AArch64Opcode::StrRI => {
+            let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
             if is_fpr(inst, 0) {
-                let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
-                let scaled = (offset / 8) as u32 & 0xFFF;
-                Ok(encoding::encode_load_store_ui(0b11, 1, 0b00, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
+                let fp_sz = fp_size_from_inst(inst);
+                let (size, scale) = match fp_sz {
+                    FpSize::Single => (0b10, 4i64),
+                    FpSize::Double | _ => (0b11, 8i64),
+                };
+                let scaled = (offset / scale) as u32 & 0xFFF;
+                Ok(encoding::encode_load_store_ui(size, 1, 0b00, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
             } else {
-                let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
-                let scaled = (offset / 8) as u32 & 0xFFF;
-                Ok(encoding::encode_load_store_ui(0b11, 0, 0b00, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
+                let sf = sf_from_operand(inst, 0);
+                let (size, scale) = if sf == 1 {
+                    (0b11, 8i64)
+                } else {
+                    (0b10, 4i64)
+                };
+                let scaled = (offset / scale) as u32 & 0xFFF;
+                Ok(encoding::encode_load_store_ui(size, 0, 0b00, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
             }
         }
 

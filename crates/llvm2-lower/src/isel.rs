@@ -1188,32 +1188,20 @@ impl InstructionSelector {
 
             match loc {
                 ArgLocation::Reg(preg) => {
-                    let opc = if Self::is_32bit(&ty) {
-                        AArch64Opcode::MOVWrr
-                    } else {
-                        AArch64Opcode::MOVXrr
-                    };
+                    // MOVWrr/MOVXrr -> canonical MovR
                     self.func.push_inst(
                         block,
-                        MachInst::new(opc, vec![MachOperand::PReg(*preg), src]),
+                        MachInst::new(AArch64Opcode::MovR, vec![MachOperand::PReg(*preg), src]),
                     );
                 }
                 ArgLocation::Stack { offset, size: _ } => {
                     // STR to [SP + offset] — used for both fixed overflow and
                     // variadic arguments (Apple ABI puts all varargs on stack).
-                    let opc = if matches!(ty, Type::F32) {
-                        AArch64Opcode::STRSui
-                    } else if matches!(ty, Type::F64) {
-                        AArch64Opcode::STRDui
-                    } else if Self::is_32bit(&ty) {
-                        AArch64Opcode::STRWui
-                    } else {
-                        AArch64Opcode::STRXui
-                    };
+                    // STRSui/STRDui/STRWui/STRXui -> canonical StrRI
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            opc,
+                            AArch64Opcode::StrRI,
                             vec![src, MachOperand::PReg(SP), MachOperand::Imm(*offset)],
                         ),
                     );
@@ -1223,7 +1211,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::MOVXrr,
+                            AArch64Opcode::MovR,
                             vec![MachOperand::PReg(*ptr_reg), src],
                         ),
                     );
@@ -1235,7 +1223,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::BL,
+                AArch64Opcode::Bl,
                 vec![MachOperand::Symbol(callee_name.to_string())],
             ),
         );
@@ -1248,14 +1236,9 @@ impl InstructionSelector {
                     let ty = result_types[i].clone();
                     let class = reg_class_for_type(&ty);
                     let dst = self.new_vreg(class);
-                    let opc = if Self::is_32bit(&ty) {
-                        AArch64Opcode::MOVWrr
-                    } else {
-                        AArch64Opcode::MOVXrr
-                    };
                     self.func.push_inst(
                         block,
-                        MachInst::new(opc, vec![MachOperand::VReg(dst), MachOperand::PReg(*preg)]),
+                        MachInst::new(AArch64Opcode::MovR, vec![MachOperand::VReg(dst), MachOperand::PReg(*preg)]),
                     );
                     self.define_value(*val, MachOperand::VReg(dst), ty);
                 }
@@ -1265,7 +1248,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::MOVXrr,
+                            AArch64Opcode::MovR,
                             vec![MachOperand::VReg(dst), MachOperand::PReg(*ptr_reg)],
                         ),
                     );
@@ -1345,26 +1328,16 @@ impl InstructionSelector {
 
             match loc {
                 ArgLocation::Reg(preg) => {
-                    let opc = if Self::is_32bit(&ty) {
-                        AArch64Opcode::MOVWrr
-                    } else {
-                        AArch64Opcode::MOVXrr
-                    };
                     self.func.push_inst(
                         block,
-                        MachInst::new(opc, vec![MachOperand::PReg(*preg), src]),
+                        MachInst::new(AArch64Opcode::MovR, vec![MachOperand::PReg(*preg), src]),
                     );
                 }
                 ArgLocation::Stack { offset, size: _ } => {
-                    let opc = if Self::is_32bit(&ty) {
-                        AArch64Opcode::STRWui
-                    } else {
-                        AArch64Opcode::STRXui
-                    };
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            opc,
+                            AArch64Opcode::StrRI,
                             vec![src, MachOperand::PReg(SP), MachOperand::Imm(*offset)],
                         ),
                     );
@@ -1373,7 +1346,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::MOVXrr,
+                            AArch64Opcode::MovR,
                             vec![MachOperand::PReg(*ptr_reg), src],
                         ),
                     );
@@ -1388,7 +1361,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::MOVXrr,
+                AArch64Opcode::MovR,
                 vec![MachOperand::PReg(gpr::X16), fn_ptr],
             ),
         );
@@ -1397,7 +1370,7 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::BLR,
+                AArch64Opcode::Blr,
                 vec![MachOperand::PReg(gpr::X16)],
             ),
         );
@@ -1410,14 +1383,9 @@ impl InstructionSelector {
                     let ty = result_types[i].clone();
                     let class = reg_class_for_type(&ty);
                     let dst = self.new_vreg(class);
-                    let opc = if Self::is_32bit(&ty) {
-                        AArch64Opcode::MOVWrr
-                    } else {
-                        AArch64Opcode::MOVXrr
-                    };
                     self.func.push_inst(
                         block,
-                        MachInst::new(opc, vec![MachOperand::VReg(dst), MachOperand::PReg(*preg)]),
+                        MachInst::new(AArch64Opcode::MovR, vec![MachOperand::VReg(dst), MachOperand::PReg(*preg)]),
                     );
                     self.define_value(*val, MachOperand::VReg(dst), ty);
                 }
@@ -1427,7 +1395,7 @@ impl InstructionSelector {
                     self.func.push_inst(
                         block,
                         MachInst::new(
-                            AArch64Opcode::MOVXrr,
+                            AArch64Opcode::MovR,
                             vec![MachOperand::VReg(dst), MachOperand::PReg(*ptr_reg)],
                         ),
                     );
@@ -1499,15 +1467,10 @@ impl InstructionSelector {
             let case_fits_imm12 = *case_val >= 0 && *case_val <= 0xFFF;
 
             if case_fits_imm12 {
-                let cmp_opc = if is_32 {
-                    AArch64Opcode::CMPWri
-                } else {
-                    AArch64Opcode::CMPXri
-                };
                 self.func.push_inst(
                     block,
                     MachInst::new(
-                        cmp_opc,
+                        AArch64Opcode::CmpRI,
                         vec![selector.clone(), MachOperand::Imm(*case_val)],
                     ),
                 );
@@ -1515,18 +1478,13 @@ impl InstructionSelector {
                 // Materialize case value into a register, then CMP reg, reg.
                 let class = if is_32 { RegClass::Gpr32 } else { RegClass::Gpr64 };
                 let case_vreg = self.new_vreg(class);
-                let mov_opc = if is_32 {
-                    AArch64Opcode::MOVZWi
-                } else {
-                    AArch64Opcode::MOVZXi
-                };
                 // For simplicity, use MOVZi for non-negative values that fit
                 // in 16 bits, and the full materialization sequence for larger.
                 // TODO: Full 64-bit materialization for very large constants.
                 self.func.push_inst(
                     block,
                     MachInst::new(
-                        mov_opc,
+                        AArch64Opcode::Movz,
                         vec![
                             MachOperand::VReg(case_vreg),
                             MachOperand::Imm(*case_val),
@@ -1534,15 +1492,10 @@ impl InstructionSelector {
                     ),
                 );
 
-                let cmp_opc = if is_32 {
-                    AArch64Opcode::CMPWrr
-                } else {
-                    AArch64Opcode::CMPXrr
-                };
                 self.func.push_inst(
                     block,
                     MachInst::new(
-                        cmp_opc,
+                        AArch64Opcode::CmpRR,
                         vec![selector.clone(), MachOperand::VReg(case_vreg)],
                     ),
                 );
@@ -1552,7 +1505,7 @@ impl InstructionSelector {
             self.func.push_inst(
                 block,
                 MachInst::new(
-                    AArch64Opcode::Bcc,
+                    AArch64Opcode::BCond,
                     vec![
                         MachOperand::CondCode(AArch64CC::EQ),
                         MachOperand::Block(*target),
