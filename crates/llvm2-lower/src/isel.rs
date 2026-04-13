@@ -23,6 +23,7 @@ use crate::abi::{gpr, AppleAArch64ABI, ArgLocation, PReg};
 use crate::function::Signature;
 use crate::instructions::{Block, FloatCC, Instruction, IntCC, Opcode, Value};
 use crate::types::Type;
+use thiserror::Error;
 
 // Import canonical register types from llvm2-ir.
 use llvm2_ir::regs::{RegClass, VReg, SP};
@@ -39,6 +40,21 @@ fn reg_class_for_type(ty: Type) -> RegClass {
         Type::F32 => RegClass::Fpr32,
         Type::F64 => RegClass::Fpr64,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+/// Errors during instruction selection.
+#[derive(Debug, Error)]
+pub enum ISelError {
+    #[error("value {0:?} not defined before use")]
+    UndefinedValue(Value),
+    #[error("unsupported type for Fconst: {0:?} (expected F32 or F64)")]
+    UnsupportedFconstType(Type),
+    #[error("unsupported ABI location for return value: stack-passed returns are not supported")]
+    UnsupportedReturnLocation,
 }
 
 // ---------------------------------------------------------------------------
@@ -452,11 +468,11 @@ impl InstructionSelector {
     }
 
     /// Look up the machine operand for a tMIR Value.
-    fn use_value(&self, val: &Value) -> MachOperand {
+    fn use_value(&self, val: &Value) -> Result<MachOperand, ISelError> {
         self.value_map
             .get(val)
             .cloned()
-            .unwrap_or_else(|| panic!("Value {:?} not defined before use", val))
+            .ok_or_else(|| ISelError::UndefinedValue(*val))
     }
 
     /// Get the type of a tMIR Value.
@@ -477,99 +493,101 @@ impl InstructionSelector {
     // -----------------------------------------------------------------------
 
     /// Select all instructions in a block.
-    pub fn select_block(&mut self, block: Block, instructions: &[Instruction]) {
+    pub fn select_block(&mut self, block: Block, instructions: &[Instruction]) -> Result<(), ISelError> {
         self.func.ensure_block(block);
         for inst in instructions {
-            self.select_instruction(inst, block);
+            self.select_instruction(inst, block)?;
         }
+        Ok(())
     }
 
     /// Select a single tMIR instruction, emitting MachInsts into the block.
-    fn select_instruction(&mut self, inst: &Instruction, block: Block) {
+    fn select_instruction(&mut self, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         match &inst.opcode {
             // Constants
-            Opcode::Iconst { ty, imm } => self.select_iconst(*ty, *imm, inst, block),
-            Opcode::Fconst { ty, imm } => self.select_fconst(*ty, *imm, inst, block),
+            Opcode::Iconst { ty, imm } => self.select_iconst(*ty, *imm, inst, block)?,
+            Opcode::Fconst { ty, imm } => self.select_fconst(*ty, *imm, inst, block)?,
 
             // Arithmetic
-            Opcode::Iadd => self.select_binop(AArch64BinOp::Add, inst, block),
-            Opcode::Isub => self.select_binop(AArch64BinOp::Sub, inst, block),
-            Opcode::Imul => self.select_binop(AArch64BinOp::Mul, inst, block),
-            Opcode::Sdiv => self.select_binop(AArch64BinOp::Sdiv, inst, block),
-            Opcode::Udiv => self.select_binop(AArch64BinOp::Udiv, inst, block),
+            Opcode::Iadd => self.select_binop(AArch64BinOp::Add, inst, block)?,
+            Opcode::Isub => self.select_binop(AArch64BinOp::Sub, inst, block)?,
+            Opcode::Imul => self.select_binop(AArch64BinOp::Mul, inst, block)?,
+            Opcode::Sdiv => self.select_binop(AArch64BinOp::Sdiv, inst, block)?,
+            Opcode::Udiv => self.select_binop(AArch64BinOp::Udiv, inst, block)?,
 
             // Shift operations
-            Opcode::Ishl => self.select_shift(AArch64ShiftOp::Lsl, inst, block),
-            Opcode::Ushr => self.select_shift(AArch64ShiftOp::Lsr, inst, block),
-            Opcode::Sshr => self.select_shift(AArch64ShiftOp::Asr, inst, block),
+            Opcode::Ishl => self.select_shift(AArch64ShiftOp::Lsl, inst, block)?,
+            Opcode::Ushr => self.select_shift(AArch64ShiftOp::Lsr, inst, block)?,
+            Opcode::Sshr => self.select_shift(AArch64ShiftOp::Asr, inst, block)?,
 
             // Logical operations
-            Opcode::Band => self.select_logic(AArch64LogicOp::And, inst, block),
-            Opcode::Bor => self.select_logic(AArch64LogicOp::Orr, inst, block),
-            Opcode::Bxor => self.select_logic(AArch64LogicOp::Eor, inst, block),
-            Opcode::BandNot => self.select_logic(AArch64LogicOp::Bic, inst, block),
-            Opcode::BorNot => self.select_logic(AArch64LogicOp::Orn, inst, block),
+            Opcode::Band => self.select_logic(AArch64LogicOp::And, inst, block)?,
+            Opcode::Bor => self.select_logic(AArch64LogicOp::Orr, inst, block)?,
+            Opcode::Bxor => self.select_logic(AArch64LogicOp::Eor, inst, block)?,
+            Opcode::BandNot => self.select_logic(AArch64LogicOp::Bic, inst, block)?,
+            Opcode::BorNot => self.select_logic(AArch64LogicOp::Orn, inst, block)?,
 
             // Extensions
             Opcode::Sextend { from_ty, to_ty } => {
-                self.select_extend(true, *from_ty, *to_ty, inst, block);
+                self.select_extend(true, *from_ty, *to_ty, inst, block)?;
             }
             Opcode::Uextend { from_ty, to_ty } => {
-                self.select_extend(false, *from_ty, *to_ty, inst, block);
+                self.select_extend(false, *from_ty, *to_ty, inst, block)?;
             }
 
             // Bitfield operations
             Opcode::ExtractBits { lsb, width } => {
-                self.select_bitfield_extract(false, *lsb, *width, inst, block);
+                self.select_bitfield_extract(false, *lsb, *width, inst, block)?;
             }
             Opcode::SextractBits { lsb, width } => {
-                self.select_bitfield_extract(true, *lsb, *width, inst, block);
+                self.select_bitfield_extract(true, *lsb, *width, inst, block)?;
             }
             Opcode::InsertBits { lsb, width } => {
-                self.select_bitfield_insert(*lsb, *width, inst, block);
+                self.select_bitfield_insert(*lsb, *width, inst, block)?;
             }
 
             // Conditional select
-            Opcode::Select { cond } => self.select_csel(*cond, inst, block),
+            Opcode::Select { cond } => self.select_csel(*cond, inst, block)?,
 
             // Comparison
-            Opcode::Icmp { cond } => self.select_cmp(*cond, inst, block),
+            Opcode::Icmp { cond } => self.select_cmp(*cond, inst, block)?,
 
             // Floating-point arithmetic
-            Opcode::Fadd => self.select_fp_binop(AArch64FpBinOp::Fadd, inst, block),
-            Opcode::Fsub => self.select_fp_binop(AArch64FpBinOp::Fsub, inst, block),
-            Opcode::Fmul => self.select_fp_binop(AArch64FpBinOp::Fmul, inst, block),
-            Opcode::Fdiv => self.select_fp_binop(AArch64FpBinOp::Fdiv, inst, block),
-            Opcode::Fcmp { cond } => self.select_fcmp(*cond, inst, block),
+            Opcode::Fadd => self.select_fp_binop(AArch64FpBinOp::Fadd, inst, block)?,
+            Opcode::Fsub => self.select_fp_binop(AArch64FpBinOp::Fsub, inst, block)?,
+            Opcode::Fmul => self.select_fp_binop(AArch64FpBinOp::Fmul, inst, block)?,
+            Opcode::Fdiv => self.select_fp_binop(AArch64FpBinOp::Fdiv, inst, block)?,
+            Opcode::Fcmp { cond } => self.select_fcmp(*cond, inst, block)?,
             Opcode::FcvtToInt { dst_ty } => {
-                self.select_fcvt_to_int(*dst_ty, inst, block);
+                self.select_fcvt_to_int(*dst_ty, inst, block)?;
             }
             Opcode::FcvtFromInt { src_ty } => {
-                self.select_fcvt_from_int(*src_ty, inst, block);
+                self.select_fcvt_from_int(*src_ty, inst, block)?;
             }
 
             // Addressing
             Opcode::GlobalRef { name } => {
-                self.select_global_ref(name, inst, block);
+                self.select_global_ref(name, inst, block)?;
             }
             Opcode::StackAddr { slot } => {
-                self.select_stack_addr(*slot, inst, block);
+                self.select_stack_addr(*slot, inst, block)?;
             }
 
             // Control flow
-            Opcode::Jump { dest } => self.select_jump(*dest, block),
+            Opcode::Jump { dest } => self.select_jump(*dest, block)?,
             Opcode::Brif { then_dest, else_dest, .. } => {
-                self.select_brif(inst, *then_dest, *else_dest, block);
+                self.select_brif(inst, *then_dest, *else_dest, block)?;
             }
-            Opcode::Return => self.select_return(inst, block),
+            Opcode::Return => self.select_return(inst, block)?,
             Opcode::Call { name } => {
-                self.select_call_from_lir(name, inst, block);
+                self.select_call_from_lir(name, inst, block)?;
             }
 
             // Memory
-            Opcode::Load { ty } => self.select_load(*ty, inst, block),
-            Opcode::Store => self.select_store(inst, block),
+            Opcode::Load { ty } => self.select_load(*ty, inst, block)?,
+            Opcode::Store => self.select_store(inst, block)?,
         }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -580,7 +598,7 @@ impl InstructionSelector {
     /// Small values (0..65535): MOVZ
     /// Negative small values: MOVN
     /// Large values: MOVZ + MOVK sequence (TODO: full sequence)
-    fn select_iconst(&mut self, ty: Type, imm: i64, inst: &Instruction, block: Block) {
+    fn select_iconst(&mut self, ty: Type, imm: i64, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         let class = reg_class_for_type(ty);
         let dst = self.new_vreg(class);
         let result = inst.results.first().expect("Iconst must have a result");
@@ -650,10 +668,11 @@ impl InstructionSelector {
         }
 
         self.define_value(*result, MachOperand::VReg(dst), ty);
+        Ok(())
     }
 
     /// Select float constant materialization.
-    fn select_fconst(&mut self, ty: Type, imm: f64, inst: &Instruction, block: Block) {
+    fn select_fconst(&mut self, ty: Type, imm: f64, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         let class = reg_class_for_type(ty);
         let dst = self.new_vreg(class);
         let result = inst.results.first().expect("Fconst must have a result");
@@ -661,7 +680,7 @@ impl InstructionSelector {
         let opc = match ty {
             Type::F32 => AArch64Opcode::FMOVSri,
             Type::F64 => AArch64Opcode::FMOVDri,
-            _ => unreachable!("Fconst with non-float type"),
+            _ => return Err(ISelError::UnsupportedFconstType(ty)),
         };
 
         // FMOV immediate encoding is limited to a small set of values.
@@ -673,6 +692,7 @@ impl InstructionSelector {
         );
 
         self.define_value(*result, MachOperand::VReg(dst), ty);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -681,7 +701,7 @@ impl InstructionSelector {
 
     /// Internal enum for selecting the right opcode variant.
     #[allow(dead_code)]
-    fn select_binop(&mut self, op: AArch64BinOp, inst: &Instruction, block: Block) {
+    fn select_binop(&mut self, op: AArch64BinOp, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(inst.args.len() >= 2, "BinOp must have at least 2 args");
         assert!(!inst.results.is_empty(), "BinOp must have a result");
 
@@ -696,8 +716,8 @@ impl InstructionSelector {
         let class = reg_class_for_type(ty);
         let dst = self.new_vreg(class);
 
-        let lhs = self.use_value(&lhs_val);
-        let rhs = self.use_value(&rhs_val);
+        let lhs = self.use_value(&lhs_val)?;
+        let rhs = self.use_value(&rhs_val)?;
 
         let opc = match (op, is_32) {
             (AArch64BinOp::Add, true) => AArch64Opcode::ADDWrr,
@@ -718,6 +738,7 @@ impl InstructionSelector {
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), ty);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -729,7 +750,7 @@ impl InstructionSelector {
     /// tMIR `Icmp(cond, lhs, rhs) -> bool_result` becomes:
     ///   CMP Wn/Xn, Wm/Xm        (sets NZCV flags)
     ///   CSET Wd, <cond_code>     (materializes flag into register)
-    fn select_cmp(&mut self, cond: IntCC, inst: &Instruction, block: Block) {
+    fn select_cmp(&mut self, cond: IntCC, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(inst.args.len() >= 2, "Icmp must have 2 args");
         assert!(!inst.results.is_empty(), "Icmp must have a result");
 
@@ -740,8 +761,8 @@ impl InstructionSelector {
         let ty = self.value_type(&lhs_val);
         let is_32 = Self::is_32bit(ty);
 
-        let lhs = self.use_value(&lhs_val);
-        let rhs = self.use_value(&rhs_val);
+        let lhs = self.use_value(&lhs_val)?;
+        let rhs = self.use_value(&rhs_val)?;
 
         // CMP (subtract setting flags, discard result)
         let cmp_opc = if is_32 {
@@ -766,6 +787,7 @@ impl InstructionSelector {
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), Type::B1);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -773,7 +795,7 @@ impl InstructionSelector {
     // -----------------------------------------------------------------------
 
     /// Select unconditional jump.
-    fn select_jump(&mut self, dest: Block, block: Block) {
+    fn select_jump(&mut self, dest: Block, block: Block) -> Result<(), ISelError> {
         self.func.push_inst(
             block,
             MachInst::new(AArch64Opcode::B, vec![MachOperand::Block(dest)]),
@@ -784,6 +806,7 @@ impl InstructionSelector {
             .or_default()
             .successors
             .push(dest);
+        Ok(())
     }
 
     /// Select conditional branch: tMIR `Brif(cond, then, else)`.
@@ -798,10 +821,10 @@ impl InstructionSelector {
         then_dest: Block,
         else_dest: Block,
         block: Block,
-    ) {
+    ) -> Result<(), ISelError> {
         // The condition is the first argument
         let cond_val = inst.args[0];
-        let cond_op = self.use_value(&cond_val);
+        let cond_op = self.use_value(&cond_val)?;
 
         // CMP cond, #0 to set NZCV from boolean
         self.func.push_inst(
@@ -833,11 +856,12 @@ impl InstructionSelector {
         let mblock = self.func.blocks.entry(block).or_default();
         mblock.successors.push(then_dest);
         mblock.successors.push(else_dest);
+        Ok(())
     }
 
     /// Select return. Moves return values into ABI-specified physical registers
     /// (X0/V0 etc.) and emits RET.
-    fn select_return(&mut self, inst: &Instruction, block: Block) {
+    fn select_return(&mut self, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         // Classify return types to know which physical registers to use
         let ret_types: Vec<Type> = inst
             .args
@@ -848,7 +872,7 @@ impl InstructionSelector {
 
         // Move each return value into its designated physical register
         for (i, (val, loc)) in inst.args.iter().zip(ret_locs.iter()).enumerate() {
-            let src = self.use_value(val);
+            let src = self.use_value(val)?;
             match loc {
                 ArgLocation::Reg(preg) => {
                     let ty = ret_types[i];
@@ -871,7 +895,7 @@ impl InstructionSelector {
                     // TODO: Implement indirect return lowering
                 }
                 ArgLocation::Stack { .. } => {
-                    unreachable!("Return values should not be on stack");
+                    return Err(ISelError::UnsupportedReturnLocation);
                 }
             }
         }
@@ -881,6 +905,7 @@ impl InstructionSelector {
             block,
             MachInst::new(AArch64Opcode::RET, vec![MachOperand::PReg(gpr::LR)]),
         );
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -899,14 +924,14 @@ impl InstructionSelector {
         result_vals: &[Value],
         result_types: &[Type],
         block: Block,
-    ) {
+    ) -> Result<(), ISelError> {
         // Classify argument locations
         let arg_types: Vec<Type> = arg_vals.iter().map(|v| self.value_type(v)).collect();
         let arg_locs = AppleAArch64ABI::classify_params(&arg_types);
 
         // Move arguments to ABI locations
         for (i, (val, loc)) in arg_vals.iter().zip(arg_locs.iter()).enumerate() {
-            let src = self.use_value(val);
+            let src = self.use_value(val)?;
             match loc {
                 ArgLocation::Reg(preg) => {
                     let ty = arg_types[i];
@@ -987,11 +1012,11 @@ impl InstructionSelector {
                     self.define_value(*val, MachOperand::VReg(dst), ty);
                 }
                 ArgLocation::Stack { .. } => {
-                    unreachable!("Return values should not be on stack");
+                    return Err(ISelError::UnsupportedReturnLocation);
                 }
             }
         }
-
+        Ok(())
     }
 
     /// Select a call instruction from the LIR `Opcode::Call { name }`.
@@ -999,13 +1024,13 @@ impl InstructionSelector {
     /// This bridges the adapter's `Call` opcode to the existing `select_call`
     /// method by extracting the callee name, argument values, result values,
     /// and result types from the LIR instruction.
-    fn select_call_from_lir(&mut self, name: &str, inst: &Instruction, block: Block) {
+    fn select_call_from_lir(&mut self, name: &str, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         let result_types: Vec<Type> = inst
             .results
             .iter()
             .map(|v| self.value_type(v))
             .collect();
-        self.select_call(name, &inst.args, &inst.results, &result_types, block);
+        self.select_call(name, &inst.args, &inst.results, &result_types, block)
     }
 
     // -----------------------------------------------------------------------
@@ -1013,13 +1038,13 @@ impl InstructionSelector {
     // -----------------------------------------------------------------------
 
     /// Select a memory load.
-    fn select_load(&mut self, ty: Type, inst: &Instruction, block: Block) {
+    fn select_load(&mut self, ty: Type, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(!inst.args.is_empty(), "Load must have address arg");
         assert!(!inst.results.is_empty(), "Load must have result");
 
         let addr_val = inst.args[0];
         let result_val = inst.results[0];
-        let addr = self.use_value(&addr_val);
+        let addr = self.use_value(&addr_val)?;
 
         let class = reg_class_for_type(ty);
         let dst = self.new_vreg(class);
@@ -1043,10 +1068,11 @@ impl InstructionSelector {
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), ty);
+        Ok(())
     }
 
     /// Select a memory store.
-    fn select_store(&mut self, inst: &Instruction, block: Block) {
+    fn select_store(&mut self, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(
             inst.args.len() >= 2,
             "Store must have value and address args"
@@ -1055,8 +1081,8 @@ impl InstructionSelector {
         let value_val = inst.args[0];
         let addr_val = inst.args[1];
 
-        let src = self.use_value(&value_val);
-        let addr = self.use_value(&addr_val);
+        let src = self.use_value(&value_val)?;
+        let addr = self.use_value(&addr_val)?;
         let ty = self.value_type(&value_val);
 
         let opc = match ty {
@@ -1072,6 +1098,7 @@ impl InstructionSelector {
             block,
             MachInst::new(opc, vec![src, addr, MachOperand::Imm(0)]),
         );
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1083,7 +1110,7 @@ impl InstructionSelector {
     /// For each parameter, emit a COPY from the physical register (or stack
     /// location) designated by the ABI to a fresh virtual register. This
     /// establishes the initial value_map for the function body.
-    pub fn lower_formal_arguments(&mut self, sig: &Signature, entry_block: Block) {
+    pub fn lower_formal_arguments(&mut self, sig: &Signature, entry_block: Block) -> Result<(), ISelError> {
         self.func.ensure_block(entry_block);
 
         let param_locs = AppleAArch64ABI::classify_params(&sig.params);
@@ -1141,6 +1168,7 @@ impl InstructionSelector {
 
             self.define_value(val, MachOperand::VReg(vreg), *ty);
         }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1151,7 +1179,7 @@ impl InstructionSelector {
     ///
     /// If the shift amount is a constant (tracked as an Iconst in the value
     /// map), we emit the immediate form; otherwise, the register form.
-    fn select_shift(&mut self, op: AArch64ShiftOp, inst: &Instruction, block: Block) {
+    fn select_shift(&mut self, op: AArch64ShiftOp, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(inst.args.len() >= 2, "Shift must have 2 args (value, amount)");
         assert!(!inst.results.is_empty(), "Shift must have a result");
 
@@ -1164,8 +1192,8 @@ impl InstructionSelector {
         let class = reg_class_for_type(ty);
         let dst = self.new_vreg(class);
 
-        let src = self.use_value(&src_val);
-        let amt = self.use_value(&amt_val);
+        let src = self.use_value(&src_val)?;
+        let amt = self.use_value(&amt_val)?;
 
         // Check if shift amount is an immediate
         let is_imm = matches!(amt, MachOperand::Imm(_));
@@ -1201,6 +1229,7 @@ impl InstructionSelector {
         }
 
         self.define_value(result_val, MachOperand::VReg(dst), ty);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1208,7 +1237,7 @@ impl InstructionSelector {
     // -----------------------------------------------------------------------
 
     /// Select logical operation: AND, ORR, EOR, BIC, ORN.
-    fn select_logic(&mut self, op: AArch64LogicOp, inst: &Instruction, block: Block) {
+    fn select_logic(&mut self, op: AArch64LogicOp, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(inst.args.len() >= 2, "Logic op must have 2 args");
         assert!(!inst.results.is_empty(), "Logic op must have a result");
 
@@ -1221,8 +1250,8 @@ impl InstructionSelector {
         let class = reg_class_for_type(ty);
         let dst = self.new_vreg(class);
 
-        let lhs = self.use_value(&lhs_val);
-        let rhs = self.use_value(&rhs_val);
+        let lhs = self.use_value(&lhs_val)?;
+        let rhs = self.use_value(&rhs_val)?;
 
         let opc = match (op, is_32) {
             (AArch64LogicOp::And, true) => AArch64Opcode::ANDWrr,
@@ -1243,6 +1272,7 @@ impl InstructionSelector {
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), ty);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1261,7 +1291,7 @@ impl InstructionSelector {
         to_ty: Type,
         inst: &Instruction,
         block: Block,
-    ) {
+    ) -> Result<(), ISelError> {
         assert!(!inst.args.is_empty(), "Extend must have 1 arg");
         assert!(!inst.results.is_empty(), "Extend must have a result");
 
@@ -1270,7 +1300,7 @@ impl InstructionSelector {
 
         let dst_class = reg_class_for_type(to_ty);
         let dst = self.new_vreg(dst_class);
-        let src = self.use_value(&src_val);
+        let src = self.use_value(&src_val)?;
 
         let to_64 = !Self::is_32bit(to_ty);
 
@@ -1291,7 +1321,7 @@ impl InstructionSelector {
                         ),
                     );
                     self.define_value(result_val, MachOperand::VReg(dst), to_ty);
-                    return;
+                    return Ok(());
                 }
             }
         } else {
@@ -1311,7 +1341,7 @@ impl InstructionSelector {
                         ),
                     );
                     self.define_value(result_val, MachOperand::VReg(dst), to_ty);
-                    return;
+                    return Ok(());
                 }
                 _ => {
                     self.func.push_inst(
@@ -1322,7 +1352,7 @@ impl InstructionSelector {
                         ),
                     );
                     self.define_value(result_val, MachOperand::VReg(dst), to_ty);
-                    return;
+                    return Ok(());
                 }
             }
         };
@@ -1332,6 +1362,7 @@ impl InstructionSelector {
             MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
         );
         self.define_value(result_val, MachOperand::VReg(dst), to_ty);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1352,7 +1383,7 @@ impl InstructionSelector {
         width: u8,
         inst: &Instruction,
         block: Block,
-    ) {
+    ) -> Result<(), ISelError> {
         assert!(!inst.args.is_empty(), "BitfieldExtract must have 1 arg");
         assert!(!inst.results.is_empty(), "BitfieldExtract must have a result");
 
@@ -1363,7 +1394,7 @@ impl InstructionSelector {
         let is_32 = Self::is_32bit(ty);
         let class = reg_class_for_type(ty);
         let dst = self.new_vreg(class);
-        let src = self.use_value(&src_val);
+        let src = self.use_value(&src_val)?;
 
         let immr = lsb as i64;
         let imms = (lsb + width - 1) as i64;
@@ -1389,6 +1420,7 @@ impl InstructionSelector {
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), ty);
+        Ok(())
     }
 
     /// Select bitfield insert.
@@ -1401,7 +1433,7 @@ impl InstructionSelector {
         width: u8,
         inst: &Instruction,
         block: Block,
-    ) {
+    ) -> Result<(), ISelError> {
         assert!(
             inst.args.len() >= 2,
             "BitfieldInsert must have 2 args (dst, src)"
@@ -1419,8 +1451,8 @@ impl InstructionSelector {
         // BFM reads and writes the destination register. We model this by
         // first copying dst to a fresh vreg, then BFM modifying it in place.
         let result = self.new_vreg(class);
-        let dst_op = self.use_value(&dst_val);
-        let src_op = self.use_value(&src_val);
+        let dst_op = self.use_value(&dst_val)?;
+        let src_op = self.use_value(&src_val)?;
 
         // Copy dst to result (BFM operates on Wd as both read and write)
         self.func.push_inst(
@@ -1458,6 +1490,7 @@ impl InstructionSelector {
         );
 
         self.define_value(result_val, MachOperand::VReg(result), ty);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1469,7 +1502,7 @@ impl InstructionSelector {
     /// tMIR: Select { cond } (cc_val, true_val, false_val) -> result
     /// The cc_val is a comparison result (must have set NZCV flags first).
     /// We emit: CMP cc_val, #0; CSEL Wd/Xd, Wn/Xn, Wm/Xm, NE
-    fn select_csel(&mut self, cond: IntCC, inst: &Instruction, block: Block) {
+    fn select_csel(&mut self, cond: IntCC, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(
             inst.args.len() >= 3,
             "Select must have 3 args (cond_val, true_val, false_val)"
@@ -1486,9 +1519,9 @@ impl InstructionSelector {
         let class = reg_class_for_type(ty);
         let dst = self.new_vreg(class);
 
-        let cond_op = self.use_value(&cond_val);
-        let true_op = self.use_value(&true_val);
-        let false_op = self.use_value(&false_val);
+        let cond_op = self.use_value(&cond_val)?;
+        let true_op = self.use_value(&true_val)?;
+        let false_op = self.use_value(&false_val)?;
 
         // First, test the condition value (CMP cond, #0)
         self.func.push_inst(
@@ -1521,6 +1554,7 @@ impl InstructionSelector {
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), ty);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1528,7 +1562,7 @@ impl InstructionSelector {
     // -----------------------------------------------------------------------
 
     /// Select floating-point binary operation.
-    fn select_fp_binop(&mut self, op: AArch64FpBinOp, inst: &Instruction, block: Block) {
+    fn select_fp_binop(&mut self, op: AArch64FpBinOp, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(inst.args.len() >= 2, "FP binop must have 2 args");
         assert!(!inst.results.is_empty(), "FP binop must have a result");
 
@@ -1541,8 +1575,8 @@ impl InstructionSelector {
         let class = reg_class_for_type(ty);
         let dst = self.new_vreg(class);
 
-        let lhs = self.use_value(&lhs_val);
-        let rhs = self.use_value(&rhs_val);
+        let lhs = self.use_value(&lhs_val)?;
+        let rhs = self.use_value(&rhs_val)?;
 
         let opc = match (op, is_f32) {
             (AArch64FpBinOp::Fadd, true) => AArch64Opcode::FADDSrr,
@@ -1561,10 +1595,11 @@ impl InstructionSelector {
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), ty);
+        Ok(())
     }
 
     /// Select floating-point comparison: FCMP + CSET.
-    fn select_fcmp(&mut self, cond: FloatCC, inst: &Instruction, block: Block) {
+    fn select_fcmp(&mut self, cond: FloatCC, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(inst.args.len() >= 2, "Fcmp must have 2 args");
         assert!(!inst.results.is_empty(), "Fcmp must have a result");
 
@@ -1575,8 +1610,8 @@ impl InstructionSelector {
         let ty = self.value_type(&lhs_val);
         let is_f32 = matches!(ty, Type::F32);
 
-        let lhs = self.use_value(&lhs_val);
-        let rhs = self.use_value(&rhs_val);
+        let lhs = self.use_value(&lhs_val)?;
+        let rhs = self.use_value(&rhs_val)?;
 
         // FCMP sets NZCV
         let cmp_opc = if is_f32 {
@@ -1601,12 +1636,13 @@ impl InstructionSelector {
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), Type::B1);
+        Ok(())
     }
 
     /// Select float-to-integer conversion (FCVTZS).
     ///
     /// FCVTZS rounds toward zero (truncation), matching C cast semantics.
-    fn select_fcvt_to_int(&mut self, dst_ty: Type, inst: &Instruction, block: Block) {
+    fn select_fcvt_to_int(&mut self, dst_ty: Type, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(!inst.args.is_empty(), "FcvtToInt must have 1 arg");
         assert!(!inst.results.is_empty(), "FcvtToInt must have a result");
 
@@ -1614,7 +1650,7 @@ impl InstructionSelector {
         let result_val = inst.results[0];
 
         let src_ty = self.value_type(&src_val);
-        let src = self.use_value(&src_val);
+        let src = self.use_value(&src_val)?;
 
         let dst_class = reg_class_for_type(dst_ty);
         let dst = self.new_vreg(dst_class);
@@ -1643,10 +1679,11 @@ impl InstructionSelector {
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), dst_ty);
+        Ok(())
     }
 
     /// Select integer-to-float conversion (SCVTF).
-    fn select_fcvt_from_int(&mut self, src_ty: Type, inst: &Instruction, block: Block) {
+    fn select_fcvt_from_int(&mut self, src_ty: Type, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(!inst.args.is_empty(), "FcvtFromInt must have 1 arg");
         assert!(!inst.results.is_empty(), "FcvtFromInt must have a result");
 
@@ -1655,7 +1692,7 @@ impl InstructionSelector {
 
         // Destination type is the result's FP type; we infer from context.
         // The src_ty tells us the integer width of the source.
-        let src = self.use_value(&src_val);
+        let src = self.use_value(&src_val)?;
 
         // We need to know the destination float type. We default to F64 unless
         // the result type is tracked. For now, use the convention that
@@ -1683,6 +1720,7 @@ impl InstructionSelector {
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), dst_ty);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1699,7 +1737,7 @@ impl InstructionSelector {
         name: &str,
         inst: &Instruction,
         block: Block,
-    ) {
+    ) -> Result<(), ISelError> {
         assert!(!inst.results.is_empty(), "GlobalRef must have a result");
 
         let result_val = inst.results[0];
@@ -1728,13 +1766,14 @@ impl InstructionSelector {
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), Type::I64);
+        Ok(())
     }
 
     /// Select stack slot address computation.
     ///
     /// Emits ADD Xd, SP, #offset (the actual offset is resolved during
     /// frame lowering; we emit a placeholder StackSlot operand).
-    fn select_stack_addr(&mut self, slot: u32, inst: &Instruction, block: Block) {
+    fn select_stack_addr(&mut self, slot: u32, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(!inst.results.is_empty(), "StackAddr must have a result");
 
         let result_val = inst.results[0];
@@ -1753,6 +1792,7 @@ impl InstructionSelector {
         );
 
         self.define_value(result_val, MachOperand::VReg(dst), Type::I64);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1824,7 +1864,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("add".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
         (isel, entry)
     }
 
@@ -1836,7 +1876,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("op64".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
         (isel, entry)
     }
 
@@ -1848,7 +1888,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("fpop".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
         (isel, entry)
     }
 
@@ -1860,7 +1900,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("fpop32".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
         (isel, entry)
     }
 
@@ -1903,7 +1943,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 3);
@@ -1920,7 +1960,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::SUBXrr);
     }
@@ -1935,7 +1975,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         isel.select_instruction(
             &Instruction {
                 opcode: Opcode::Brif {
@@ -1947,7 +1987,7 @@ mod tests {
                 results: vec![],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 7);
@@ -1969,7 +2009,7 @@ mod tests {
                 results: vec![],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 4);
@@ -1987,7 +2027,7 @@ mod tests {
                 results: vec![Value(0)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 1);
@@ -2004,7 +2044,7 @@ mod tests {
                 results: vec![Value(0)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[0].opcode, AArch64Opcode::MOVNXi);
     }
@@ -2025,7 +2065,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("add".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
         isel.select_instruction(
             &Instruction {
                 opcode: Opcode::Iadd,
@@ -2033,7 +2073,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         isel.select_instruction(
             &Instruction {
                 opcode: Opcode::Return,
@@ -2041,7 +2081,7 @@ mod tests {
                 results: vec![],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 5);
@@ -2069,7 +2109,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         // 2 COPY + 1 LSLVWr
@@ -2087,7 +2127,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::LSRVXr);
     }
@@ -2102,7 +2142,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::ASRVWr);
     }
@@ -2120,7 +2160,7 @@ mod tests {
                 results: vec![Value(0)],
             },
             entry,
-        );
+        ).unwrap();
 
         // Value(1) = iconst i32, 4 (shift amount)
         isel.select_instruction(
@@ -2130,7 +2170,7 @@ mod tests {
                 results: vec![Value(1)],
             },
             entry,
-        );
+        ).unwrap();
 
         // Value(2) = ishl Value(0), Value(1)
         // Note: the shift amount is tracked as a VReg, not an immediate,
@@ -2143,7 +2183,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
@@ -2166,7 +2206,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::ANDWrr);
     }
@@ -2181,7 +2221,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::ORRXrr);
     }
@@ -2196,7 +2236,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::EORWrr);
     }
@@ -2211,7 +2251,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::BICXrr);
     }
@@ -2226,7 +2266,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::ORNWrr);
     }
@@ -2244,7 +2284,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("sextb".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
 
         isel.select_instruction(
             &Instruction {
@@ -2256,7 +2296,7 @@ mod tests {
                 results: vec![Value(1)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
@@ -2273,7 +2313,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("sexth".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
 
         isel.select_instruction(
             &Instruction {
@@ -2285,7 +2325,7 @@ mod tests {
                 results: vec![Value(1)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::SXTHXr);
@@ -2299,7 +2339,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("sxtw".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
 
         isel.select_instruction(
             &Instruction {
@@ -2311,7 +2351,7 @@ mod tests {
                 results: vec![Value(1)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::SXTWXr);
@@ -2325,7 +2365,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("uxtb".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
 
         isel.select_instruction(
             &Instruction {
@@ -2337,7 +2377,7 @@ mod tests {
                 results: vec![Value(1)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::UXTBWr);
@@ -2351,7 +2391,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("uxth".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
 
         isel.select_instruction(
             &Instruction {
@@ -2363,7 +2403,7 @@ mod tests {
                 results: vec![Value(1)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::UXTHWr);
@@ -2379,7 +2419,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("uxtw".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
 
         isel.select_instruction(
             &Instruction {
@@ -2391,7 +2431,7 @@ mod tests {
                 results: vec![Value(1)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::MOVWrr);
@@ -2409,7 +2449,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("ubfm".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
 
         // Extract 8 bits starting at bit 4: UBFM Wd, Wn, #4, #11
         isel.select_instruction(
@@ -2419,7 +2459,7 @@ mod tests {
                 results: vec![Value(1)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let inst = &mfunc.blocks[&entry].insts[1];
@@ -2437,7 +2477,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("sbfm".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
 
         // Signed extract 16 bits from bit 0: SBFM Xd, Xn, #0, #15
         isel.select_instruction(
@@ -2447,7 +2487,7 @@ mod tests {
                 results: vec![Value(1)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let inst = &mfunc.blocks[&entry].insts[1];
@@ -2468,7 +2508,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
@@ -2493,7 +2533,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("csel".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
 
         // Value(3) = select(NE, Value(0), Value(1), Value(2))
         // cond_val=Value(0), true=Value(1), false=Value(2)
@@ -2504,7 +2544,7 @@ mod tests {
                 results: vec![Value(3)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
@@ -2526,7 +2566,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("csel64".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
 
         isel.select_instruction(
             &Instruction {
@@ -2535,7 +2575,7 @@ mod tests {
                 results: vec![Value(3)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
@@ -2565,7 +2605,7 @@ mod tests {
                 results: vec![Value(0)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
@@ -2592,7 +2632,7 @@ mod tests {
                 results: vec![Value(0)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
@@ -2617,7 +2657,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FADDDrr);
     }
@@ -2632,7 +2672,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FSUBSrr);
     }
@@ -2647,7 +2687,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FMULDrr);
     }
@@ -2662,7 +2702,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FDIVSrr);
     }
@@ -2677,7 +2717,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         // 2 COPY + 1 FCMPDrr + 1 CSETWcc
@@ -2697,7 +2737,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("fcvt2i".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
 
         isel.select_instruction(
             &Instruction {
@@ -2706,7 +2746,7 @@ mod tests {
                 results: vec![Value(1)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FCVTZSWr);
@@ -2720,7 +2760,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("i2f".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
 
         isel.select_instruction(
             &Instruction {
@@ -2729,7 +2769,7 @@ mod tests {
                 results: vec![Value(1)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::SCVTFSWr);
@@ -2743,7 +2783,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("i642f64".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
 
         isel.select_instruction(
             &Instruction {
@@ -2752,7 +2792,7 @@ mod tests {
                 results: vec![Value(1)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::SCVTFDXr);
@@ -2772,7 +2812,7 @@ mod tests {
                 results: vec![Value(0)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
@@ -2794,7 +2834,7 @@ mod tests {
                 results: vec![Value(0)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
@@ -2853,7 +2893,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
 
         // Value(3) = iconst i32, 0xFF
         isel.select_instruction(
@@ -2863,7 +2903,7 @@ mod tests {
                 results: vec![Value(3)],
             },
             entry,
-        );
+        ).unwrap();
 
         // Value(4) = band Value(2), Value(3)
         isel.select_instruction(
@@ -2873,7 +2913,7 @@ mod tests {
                 results: vec![Value(4)],
             },
             entry,
-        );
+        ).unwrap();
 
         // Return Value(4)
         isel.select_instruction(
@@ -2883,7 +2923,7 @@ mod tests {
                 results: vec![],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
@@ -2913,7 +2953,7 @@ mod tests {
         };
         let mut isel = InstructionSelector::new("fadd64".to_string(), sig.clone());
         let entry = Block(0);
-        isel.lower_formal_arguments(&sig, entry);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
 
         isel.select_instruction(
             &Instruction {
@@ -2922,7 +2962,7 @@ mod tests {
                 results: vec![Value(2)],
             },
             entry,
-        );
+        ).unwrap();
         isel.select_instruction(
             &Instruction {
                 opcode: Opcode::Return,
@@ -2930,7 +2970,7 @@ mod tests {
                 results: vec![],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
@@ -2963,7 +3003,7 @@ mod tests {
                 results: vec![Value(1)],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
@@ -3010,7 +3050,7 @@ mod tests {
                 results: vec![],
             },
             entry,
-        );
+        ).unwrap();
 
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
