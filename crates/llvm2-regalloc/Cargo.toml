@@ -13,6 +13,6 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-# TODO: Add llvm2-ir = { workspace = true } when the shared machine model
-# crate lands. Currently machine_types are defined locally in this crate.
+# Shared machine IR model (canonical type definitions)
+llvm2-ir = { workspace = true }
 thiserror = { workspace = true }

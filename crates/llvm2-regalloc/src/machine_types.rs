@@ -5,100 +5,22 @@
 
 //! Machine-level type definitions used by the register allocator.
 //!
-//! These types represent the machine-level IR that register allocation
-//! operates on. When `llvm2-ir` lands as the shared machine model crate,
-//! these types should be re-exported from there.
+//! Primitive types (VReg, PReg, RegClass, BlockId, InstId, StackSlotId) are
+//! imported from `llvm2-ir`, the canonical source of truth for machine IR types.
+//!
+//! The compound types (MachInst, MachBlock, MachFunction, MachOperand) have
+//! regalloc-specific structure: MachInst separates defs from uses for
+//! efficient liveness computation, and MachFunction uses arena-based storage
+//! with stack slot tracking. These are intentionally different from the
+//! llvm2-ir versions and will be unified in a future phase.
 //!
 //! Reference: `~/llvm-project-ref/llvm/include/llvm/CodeGen/MachineInstr.h`
 
 use std::collections::HashMap;
-use std::fmt;
 
-/// Register class — determines which physical registers a virtual register
-/// can be allocated to.
-///
-/// Reference: designs/2026-04-12-aarch64-backend.md
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RegClass {
-    /// 32-bit general purpose (W0-W30)
-    Gpr32,
-    /// 64-bit general purpose (X0-X30)
-    Gpr64,
-    /// 32-bit floating point (S0-S31)
-    Fpr32,
-    /// 64-bit floating point (D0-D31)
-    Fpr64,
-    /// 128-bit SIMD (V0-V31)
-    Vec128,
-}
-
-/// Virtual register — SSA value that needs a physical register assignment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VReg {
-    pub id: u32,
-    pub class: RegClass,
-}
-
-impl fmt::Display for VReg {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "v{}", self.id)
-    }
-}
-
-/// Physical register — an actual hardware register.
-///
-/// Encoding: 0-30 = GPR (X0-X30), 32-63 = FPR (V0-V31).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PReg(pub u8);
-
-impl PReg {
-    /// Returns true if this is a GPR.
-    pub fn is_gpr(self) -> bool {
-        self.0 <= 30
-    }
-
-    /// Returns true if this is an FPR/SIMD register.
-    pub fn is_fpr(self) -> bool {
-        self.0 >= 32 && self.0 <= 63
-    }
-
-    /// Returns the register number within its class.
-    pub fn hw_index(self) -> u8 {
-        if self.is_fpr() {
-            self.0 - 32
-        } else {
-            self.0
-        }
-    }
-}
-
-impl fmt::Display for PReg {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_fpr() {
-            write!(f, "v{}", self.hw_index())
-        } else {
-            write!(f, "x{}", self.hw_index())
-        }
-    }
-}
-
-/// Stack slot identifier for spilled values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StackSlotId(pub u32);
-
-/// Block identifier in the machine function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BlockId(pub u32);
-
-impl fmt::Display for BlockId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "bb{}", self.0)
-    }
-}
-
-/// Instruction identifier (index into the function's instruction list).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct InstId(pub u32);
+// Re-export canonical primitive types from llvm2-ir.
+pub use llvm2_ir::regs::{PReg, RegClass, VReg};
+pub use llvm2_ir::types::{BlockId, InstId, StackSlotId};
 
 /// Operand of a machine instruction.
 #[derive(Debug, Clone, PartialEq)]
@@ -130,6 +52,9 @@ impl MachOperand {
 }
 
 /// Instruction flags describing side effects and control flow.
+///
+/// Uses the same flag encoding as `llvm2_ir::InstFlags` with additional
+/// regalloc-specific flags (IS_PHI).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct InstFlags(pub u16);
 
@@ -161,10 +86,14 @@ impl InstFlags {
     }
 }
 
-/// A machine instruction.
+/// A machine instruction for register allocation.
 ///
-/// Generic container with target-specific opcode (stored as u16 for now;
-/// will be an enum when `llvm2-ir` provides target definitions).
+/// Unlike `llvm2_ir::MachInst` which stores all operands in a single list,
+/// this struct separates defs (outputs) from uses (inputs) for efficient
+/// liveness analysis. The opcode is stored as u16 to be target-independent.
+///
+/// A future unification pass will reconcile this with the llvm2-ir model,
+/// likely by adding def/use classification to `llvm2_ir::MachInst`.
 #[derive(Debug, Clone)]
 pub struct MachInst {
     /// Target-specific opcode.
@@ -206,7 +135,14 @@ pub struct MachBlock {
     pub loop_depth: u32,
 }
 
-/// A machine function — the unit of register allocation.
+/// A stack slot for spilled values.
+#[derive(Debug, Clone)]
+pub struct StackSlot {
+    pub size: u32,
+    pub align: u32,
+}
+
+/// A machine function -- the unit of register allocation.
 ///
 /// Arena-based storage: instructions are stored in a flat Vec indexed by
 /// InstId, blocks in a Vec indexed by BlockId.
@@ -227,13 +163,6 @@ pub struct MachFunction {
     pub next_stack_slot: u32,
     /// Stack slots allocated (for spills and locals).
     pub stack_slots: HashMap<StackSlotId, StackSlot>,
-}
-
-/// A stack slot for spilled values.
-#[derive(Debug, Clone)]
-pub struct StackSlot {
-    pub size: u32,
-    pub align: u32,
 }
 
 impl MachFunction {

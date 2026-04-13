@@ -17,16 +17,17 @@
 
 use crate::types::Type;
 
+// Import physical register from llvm2-ir (canonical source of truth).
+pub use llvm2_ir::regs::PReg;
+
 // ---------------------------------------------------------------------------
-// Physical register encoding
+// ABI register constants (using llvm2-ir PReg encoding: 0-30 = X0-X30, 32-63 = V0-V31)
 // ---------------------------------------------------------------------------
 
-/// Physical register. Encoding: 0-30 = X0-X30 (GPR), 32-63 = V0-V31 (FPR).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PReg(pub u8);
+/// GPR constants for ABI use.
+pub mod gpr {
+    use llvm2_ir::regs::PReg;
 
-impl PReg {
-    // GPR argument registers (X0-X7)
     pub const X0: PReg = PReg(0);
     pub const X1: PReg = PReg(1);
     pub const X2: PReg = PReg(2);
@@ -35,11 +36,7 @@ impl PReg {
     pub const X5: PReg = PReg(5);
     pub const X6: PReg = PReg(6);
     pub const X7: PReg = PReg(7);
-
-    // Indirect result pointer
     pub const X8: PReg = PReg(8);
-
-    // Temporaries (caller-saved)
     pub const X9: PReg = PReg(9);
     pub const X10: PReg = PReg(10);
     pub const X11: PReg = PReg(11);
@@ -47,15 +44,9 @@ impl PReg {
     pub const X13: PReg = PReg(13);
     pub const X14: PReg = PReg(14);
     pub const X15: PReg = PReg(15);
-
-    // Intra-procedure scratch (linker veneer)
     pub const X16: PReg = PReg(16);
     pub const X17: PReg = PReg(17);
-
-    // Platform register (RESERVED on Apple)
     pub const X18: PReg = PReg(18);
-
-    // Callee-saved
     pub const X19: PReg = PReg(19);
     pub const X20: PReg = PReg(20);
     pub const X21: PReg = PReg(21);
@@ -66,13 +57,12 @@ impl PReg {
     pub const X26: PReg = PReg(26);
     pub const X27: PReg = PReg(27);
     pub const X28: PReg = PReg(28);
-
-    // Frame pointer (mandatory on Darwin)
+    /// Frame pointer (mandatory on Darwin).
     pub const FP: PReg = PReg(29);
-    // Link register
+    /// Link register.
     pub const LR: PReg = PReg(30);
 
-    // FPR argument/return registers (V0-V7)
+    /// FPR argument/return registers (V0-V7).
     pub const V0: PReg = PReg(32);
     pub const V1: PReg = PReg(33);
     pub const V2: PReg = PReg(34);
@@ -82,7 +72,7 @@ impl PReg {
     pub const V6: PReg = PReg(38);
     pub const V7: PReg = PReg(39);
 
-    // FPR callee-saved (V8-V15, lower 64 bits only)
+    /// FPR callee-saved (V8-V15, lower 64 bits only).
     pub const V8: PReg = PReg(40);
     pub const V9: PReg = PReg(41);
     pub const V10: PReg = PReg(42);
@@ -91,42 +81,6 @@ impl PReg {
     pub const V13: PReg = PReg(45);
     pub const V14: PReg = PReg(46);
     pub const V15: PReg = PReg(47);
-
-    /// Returns true if this is a GPR (X0-X30).
-    pub fn is_gpr(self) -> bool {
-        self.0 <= 30
-    }
-
-    /// Returns true if this is an FPR (V0-V31).
-    pub fn is_fpr(self) -> bool {
-        (32..=63).contains(&self.0)
-    }
-
-    /// GPR index (0-30).
-    pub fn gpr_index(self) -> Option<u8> {
-        if self.is_gpr() { Some(self.0) } else { None }
-    }
-
-    /// FPR index (0-31).
-    pub fn fpr_index(self) -> Option<u8> {
-        if self.is_fpr() { Some(self.0 - 32) } else { None }
-    }
-}
-
-impl std::fmt::Display for PReg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.is_gpr() {
-            match self.0 {
-                29 => write!(f, "fp"),
-                30 => write!(f, "lr"),
-                n => write!(f, "x{n}"),
-            }
-        } else if self.is_fpr() {
-            write!(f, "v{}", self.0 - 32)
-        } else {
-            write!(f, "?{}", self.0)
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -152,38 +106,38 @@ pub enum ArgLocation {
 
 /// GPR argument registers: X0-X7
 const GPR_ARG_REGS: [PReg; 8] = [
-    PReg::X0, PReg::X1, PReg::X2, PReg::X3,
-    PReg::X4, PReg::X5, PReg::X6, PReg::X7,
+    gpr::X0, gpr::X1, gpr::X2, gpr::X3,
+    gpr::X4, gpr::X5, gpr::X6, gpr::X7,
 ];
 
 /// FPR argument registers: V0-V7
 const FPR_ARG_REGS: [PReg; 8] = [
-    PReg::V0, PReg::V1, PReg::V2, PReg::V3,
-    PReg::V4, PReg::V5, PReg::V6, PReg::V7,
+    gpr::V0, gpr::V1, gpr::V2, gpr::V3,
+    gpr::V4, gpr::V5, gpr::V6, gpr::V7,
 ];
 
 /// Callee-saved GPRs: X19-X28 + FP(X29) + LR(X30)
 /// LR is saved by the call itself but must be restored on return.
 const CALLEE_SAVED_GPRS: [PReg; 12] = [
-    PReg::X19, PReg::X20, PReg::X21, PReg::X22,
-    PReg::X23, PReg::X24, PReg::X25, PReg::X26,
-    PReg::X27, PReg::X28, PReg::FP, PReg::LR,
+    gpr::X19, gpr::X20, gpr::X21, gpr::X22,
+    gpr::X23, gpr::X24, gpr::X25, gpr::X26,
+    gpr::X27, gpr::X28, gpr::FP, gpr::LR,
 ];
 
 /// Callee-saved FPRs: V8-V15 (lower 64 bits only per AAPCS64).
 const CALLEE_SAVED_FPRS: [PReg; 8] = [
-    PReg::V8, PReg::V9, PReg::V10, PReg::V11,
-    PReg::V12, PReg::V13, PReg::V14, PReg::V15,
+    gpr::V8, gpr::V9, gpr::V10, gpr::V11,
+    gpr::V12, gpr::V13, gpr::V14, gpr::V15,
 ];
 
 /// Call-clobbered GPRs: X0-X18 (everything not callee-saved or SP).
 /// X18 is reserved on Apple but still clobbered across calls.
 const CALL_CLOBBER_GPRS: [PReg; 19] = [
-    PReg::X0, PReg::X1, PReg::X2, PReg::X3,
-    PReg::X4, PReg::X5, PReg::X6, PReg::X7,
-    PReg::X8, PReg::X9, PReg::X10, PReg::X11,
-    PReg::X12, PReg::X13, PReg::X14, PReg::X15,
-    PReg::X16, PReg::X17, PReg::X18,
+    gpr::X0, gpr::X1, gpr::X2, gpr::X3,
+    gpr::X4, gpr::X5, gpr::X6, gpr::X7,
+    gpr::X8, gpr::X9, gpr::X10, gpr::X11,
+    gpr::X12, gpr::X13, gpr::X14, gpr::X15,
+    gpr::X16, gpr::X17, gpr::X18,
 ];
 
 // ---------------------------------------------------------------------------
@@ -296,7 +250,7 @@ impl AppleAArch64ABI {
                         gpr_idx += 1;
                     } else {
                         // Too many return values for registers -> indirect
-                        result.push(ArgLocation::Indirect { ptr_reg: PReg::X8 });
+                        result.push(ArgLocation::Indirect { ptr_reg: gpr::X8 });
                     }
                 }
 
@@ -307,7 +261,7 @@ impl AppleAArch64ABI {
                         });
                         gpr_idx += 2;
                     } else {
-                        result.push(ArgLocation::Indirect { ptr_reg: PReg::X8 });
+                        result.push(ArgLocation::Indirect { ptr_reg: gpr::X8 });
                     }
                 }
 
@@ -316,7 +270,7 @@ impl AppleAArch64ABI {
                         result.push(ArgLocation::Reg(FPR_ARG_REGS[fpr_idx]));
                         fpr_idx += 1;
                     } else {
-                        result.push(ArgLocation::Indirect { ptr_reg: PReg::X8 });
+                        result.push(ArgLocation::Indirect { ptr_reg: gpr::X8 });
                     }
                 }
             }
@@ -375,8 +329,8 @@ mod tests {
         // fn foo(i32, i32) -> first two in X0, X1
         let locs = AppleAArch64ABI::classify_params(&[Type::I32, Type::I32]);
         assert_eq!(locs.len(), 2);
-        assert_eq!(locs[0], ArgLocation::Reg(PReg::X0));
-        assert_eq!(locs[1], ArgLocation::Reg(PReg::X1));
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+        assert_eq!(locs[1], ArgLocation::Reg(gpr::X1));
     }
 
     #[test]
@@ -385,10 +339,10 @@ mod tests {
         let locs =
             AppleAArch64ABI::classify_params(&[Type::I64, Type::F64, Type::I32, Type::F32]);
         assert_eq!(locs.len(), 4);
-        assert_eq!(locs[0], ArgLocation::Reg(PReg::X0));
-        assert_eq!(locs[1], ArgLocation::Reg(PReg::V0));
-        assert_eq!(locs[2], ArgLocation::Reg(PReg::X1));
-        assert_eq!(locs[3], ArgLocation::Reg(PReg::V1));
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+        assert_eq!(locs[1], ArgLocation::Reg(gpr::V0));
+        assert_eq!(locs[2], ArgLocation::Reg(gpr::X1));
+        assert_eq!(locs[3], ArgLocation::Reg(gpr::V1));
     }
 
     #[test]
@@ -407,33 +361,33 @@ mod tests {
     fn classify_simple_return() {
         let locs = AppleAArch64ABI::classify_returns(&[Type::I64]);
         assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0], ArgLocation::Reg(PReg::X0));
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
     }
 
     #[test]
     fn classify_float_return() {
         let locs = AppleAArch64ABI::classify_returns(&[Type::F64]);
         assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0], ArgLocation::Reg(PReg::V0));
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
     }
 
     #[test]
     fn callee_saved_regs_correct() {
         let gprs = AppleAArch64ABI::callee_saved_gprs();
         assert_eq!(gprs.len(), 12); // X19-X28 + FP + LR
-        assert_eq!(gprs[0], PReg::X19);
-        assert_eq!(gprs[11], PReg::LR);
+        assert_eq!(gprs[0], gpr::X19);
+        assert_eq!(gprs[11], gpr::LR);
 
         let fprs = AppleAArch64ABI::callee_saved_fprs();
         assert_eq!(fprs.len(), 8); // V8-V15
-        assert_eq!(fprs[0], PReg::V8);
+        assert_eq!(fprs[0], gpr::V8);
     }
 
     #[test]
     fn call_clobber_includes_x18() {
         let clobber = AppleAArch64ABI::call_clobber_gprs();
-        assert!(clobber.contains(&PReg::X18));
-        assert!(!clobber.contains(&PReg::X19)); // callee-saved, not clobbered
+        assert!(clobber.contains(&gpr::X18));
+        assert!(!clobber.contains(&gpr::X19)); // callee-saved, not clobbered
     }
 
     #[test]

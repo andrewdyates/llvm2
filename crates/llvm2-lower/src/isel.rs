@@ -19,45 +19,26 @@
 
 use std::collections::HashMap;
 
-use crate::abi::{AppleAArch64ABI, ArgLocation, PReg};
+use crate::abi::{gpr, AppleAArch64ABI, ArgLocation, PReg};
 use crate::function::Signature;
 use crate::instructions::{Block, Instruction, IntCC, Opcode, Value};
 use crate::types::Type;
 
+// Import canonical register types from llvm2-ir.
+use llvm2_ir::regs::{RegClass, VReg};
+
 // ---------------------------------------------------------------------------
-// Register model
+// Register model helpers
 // ---------------------------------------------------------------------------
 
-/// Register class for virtual registers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RegClass {
-    /// 32-bit GPR (W registers)
-    Gpr32,
-    /// 64-bit GPR (X registers)
-    Gpr64,
-    /// 32-bit FPR (S registers)
-    Fpr32,
-    /// 64-bit FPR (D registers)
-    Fpr64,
-}
-
-impl RegClass {
-    /// Derive the register class for a given LIR type.
-    pub fn for_type(ty: Type) -> Self {
-        match ty {
-            Type::B1 | Type::I8 | Type::I16 | Type::I32 => RegClass::Gpr32,
-            Type::I64 | Type::I128 => RegClass::Gpr64,
-            Type::F32 => RegClass::Fpr32,
-            Type::F64 => RegClass::Fpr64,
-        }
+/// Derive the register class for a given LIR type.
+fn reg_class_for_type(ty: Type) -> RegClass {
+    match ty {
+        Type::B1 | Type::I8 | Type::I16 | Type::I32 => RegClass::Gpr32,
+        Type::I64 | Type::I128 => RegClass::Gpr64,
+        Type::F32 => RegClass::Fpr32,
+        Type::F64 => RegClass::Fpr64,
     }
-}
-
-/// Virtual register (pre-regalloc).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VReg {
-    pub id: u32,
-    pub class: RegClass,
 }
 
 // ---------------------------------------------------------------------------
@@ -372,7 +353,7 @@ impl InstructionSelector {
     /// Negative small values: MOVN
     /// Large values: MOVZ + MOVK sequence (TODO: full sequence)
     fn select_iconst(&mut self, ty: Type, imm: i64, inst: &Instruction, block: Block) {
-        let class = RegClass::for_type(ty);
+        let class = reg_class_for_type(ty);
         let dst = self.new_vreg(class);
         let result = inst.results.first().expect("Iconst must have a result");
 
@@ -445,7 +426,7 @@ impl InstructionSelector {
 
     /// Select float constant materialization.
     fn select_fconst(&mut self, ty: Type, imm: f64, inst: &Instruction, block: Block) {
-        let class = RegClass::for_type(ty);
+        let class = reg_class_for_type(ty);
         let dst = self.new_vreg(class);
         let result = inst.results.first().expect("Fconst must have a result");
 
@@ -484,7 +465,7 @@ impl InstructionSelector {
         let ty = self.value_type(&lhs_val);
         let is_32 = Self::is_32bit(ty);
 
-        let class = RegClass::for_type(ty);
+        let class = reg_class_for_type(ty);
         let dst = self.new_vreg(class);
 
         let lhs = self.use_value(&lhs_val);
@@ -670,7 +651,7 @@ impl InstructionSelector {
         // Emit RET (branches to LR)
         self.func.push_inst(
             block,
-            MachInst::new(AArch64Opcode::RET, vec![MachOperand::PReg(PReg::LR)]),
+            MachInst::new(AArch64Opcode::RET, vec![MachOperand::PReg(gpr::LR)]),
         );
     }
 
@@ -758,7 +739,7 @@ impl InstructionSelector {
             match loc {
                 ArgLocation::Reg(preg) => {
                     let ty = result_types[i];
-                    let class = RegClass::for_type(ty);
+                    let class = reg_class_for_type(ty);
                     let dst = self.new_vreg(class);
                     let opc = if Self::is_32bit(ty) {
                         AArch64Opcode::MOVWrr
@@ -775,7 +756,7 @@ impl InstructionSelector {
                     // Large aggregate returned via X8 pointer
                     // TODO: Load from sret pointer
                     let ty = result_types[i];
-                    let class = RegClass::for_type(ty);
+                    let class = reg_class_for_type(ty);
                     let dst = self.new_vreg(class);
                     self.define_value(*val, MachOperand::VReg(dst), ty);
                 }
@@ -802,7 +783,7 @@ impl InstructionSelector {
         let result_val = inst.results[0];
         let addr = self.use_value(&addr_val);
 
-        let class = RegClass::for_type(ty);
+        let class = reg_class_for_type(ty);
         let dst = self.new_vreg(class);
 
         let opc = match ty {
@@ -873,7 +854,7 @@ impl InstructionSelector {
         // args are Value(0), Value(1), ..., Value(n-1).
         for (i, (ty, loc)) in sig.params.iter().zip(param_locs.iter()).enumerate() {
             let val = Value(i as u32);
-            let class = RegClass::for_type(*ty);
+            let class = reg_class_for_type(*ty);
             let vreg = self.new_vreg(class);
 
             match loc {
