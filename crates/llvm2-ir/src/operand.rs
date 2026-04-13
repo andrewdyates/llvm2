@@ -32,6 +32,10 @@ pub enum MachOperand {
     },
     /// Special register (SP, XZR, WZR).
     Special(SpecialReg),
+    /// Symbol reference (for relocations: function calls, globals, TLS).
+    /// Carries the symbol name through the pipeline so the relocation
+    /// collector can emit proper linker entries.
+    Symbol(String),
 }
 
 impl MachOperand {
@@ -60,6 +64,11 @@ impl MachOperand {
         matches!(self, Self::Block(_))
     }
 
+    /// Returns true if this operand is a symbol reference.
+    pub fn is_symbol(&self) -> bool {
+        matches!(self, Self::Symbol(_))
+    }
+
     /// Returns the virtual register, if this is a VReg operand.
     pub fn as_vreg(&self) -> Option<VReg> {
         match self {
@@ -80,6 +89,14 @@ impl MachOperand {
     pub fn as_imm(&self) -> Option<i64> {
         match self {
             Self::Imm(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Returns the symbol name, if this is a Symbol operand.
+    pub fn as_symbol(&self) -> Option<&str> {
+        match self {
+            Self::Symbol(s) => Some(s.as_str()),
             _ => None,
         }
     }
@@ -317,9 +334,52 @@ mod tests {
             MachOperand::FrameIndex(FrameIdx(-8)),
             MachOperand::MemOp { base: X0, offset: 16 },
             MachOperand::Special(SpecialReg::SP),
+            MachOperand::Symbol("_my_func".to_string()),
         ];
         for op in &ops {
             let _ = format!("{:?}", op);
         }
+    }
+
+    // ---- Symbol operand tests ----
+
+    #[test]
+    fn construct_symbol_operand() {
+        let op = MachOperand::Symbol("_printf".to_string());
+        assert!(op.is_symbol());
+        assert!(!op.is_vreg());
+        assert!(!op.is_preg());
+        assert!(!op.is_imm());
+        assert!(!op.is_mem());
+        assert!(!op.is_block());
+    }
+
+    #[test]
+    fn as_symbol_some() {
+        let op = MachOperand::Symbol("_my_global".to_string());
+        assert_eq!(op.as_symbol(), Some("_my_global"));
+    }
+
+    #[test]
+    fn as_symbol_none() {
+        assert_eq!(MachOperand::Imm(0).as_symbol(), None);
+        assert_eq!(MachOperand::PReg(X0).as_symbol(), None);
+    }
+
+    #[test]
+    fn operand_equality_symbol() {
+        assert_eq!(
+            MachOperand::Symbol("foo".to_string()),
+            MachOperand::Symbol("foo".to_string())
+        );
+        assert_ne!(
+            MachOperand::Symbol("foo".to_string()),
+            MachOperand::Symbol("bar".to_string())
+        );
+        // Symbol is distinct from Imm even though symbols can carry Imm(0) placeholders
+        assert_ne!(
+            MachOperand::Symbol("foo".to_string()),
+            MachOperand::Imm(0)
+        );
     }
 }
