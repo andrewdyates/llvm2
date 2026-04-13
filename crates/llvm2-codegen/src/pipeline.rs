@@ -157,7 +157,7 @@ fn map_isel_opcode(isel_op: &llvm2_lower::isel::AArch64Opcode) -> IrOpcode {
         IsOp::UDIVWrr | IsOp::UDIVXrr => IrOpcode::UDiv,
         IsOp::CMPWrr | IsOp::CMPXrr => IrOpcode::CmpRR,
         IsOp::CMPWri | IsOp::CMPXri => IrOpcode::CmpRI,
-        IsOp::CSETWcc => IrOpcode::MovI, // CSET is a special MOV-like
+        IsOp::CSETWcc => IrOpcode::CSet, // CSET Wd, <cond>
         IsOp::MOVWrr | IsOp::MOVXrr => IrOpcode::MovR,
         IsOp::MOVZWi | IsOp::MOVZXi => IrOpcode::Movz,
         IsOp::MOVNWi | IsOp::MOVNXi => IrOpcode::MovI, // MOVN is a variant
@@ -204,10 +204,26 @@ fn convert_isel_operand(op: &llvm2_lower::isel::MachOperand) -> IrOperand {
         IsOp::Imm(v) => IrOperand::Imm(*v),
         IsOp::FImm(v) => IrOperand::FImm(*v),
         IsOp::Block(b) => IrOperand::Block(BlockId(b.0)),
-        IsOp::CondCode(_cc) => {
-            // Condition codes are encoded as immediates in the IR model.
-            // TODO: Add a proper CondCode operand to IR.
-            IrOperand::Imm(0)
+        IsOp::CondCode(cc) => {
+            // Condition codes are encoded as 4-bit immediates per ARM ARM.
+            use llvm2_lower::isel::AArch64CC;
+            let encoding = match cc {
+                AArch64CC::EQ => 0,
+                AArch64CC::NE => 1,
+                AArch64CC::HS => 2,
+                AArch64CC::LO => 3,
+                AArch64CC::MI => 4,
+                AArch64CC::PL => 5,
+                AArch64CC::VS => 6,
+                AArch64CC::VC => 7,
+                AArch64CC::HI => 8,
+                AArch64CC::LS => 9,
+                AArch64CC::GE => 10,
+                AArch64CC::LT => 11,
+                AArch64CC::GT => 12,
+                AArch64CC::LE => 13,
+            };
+            IrOperand::Imm(encoding)
         }
         IsOp::Symbol(_name) => {
             // Symbol references become immediates (relocated later).
@@ -252,7 +268,7 @@ pub fn isel_to_ir(
         BlockId(isel_func.block_order[0].0)
     };
 
-    // Convert instructions block by block.
+    // Convert instructions block by block and copy successor edges.
     for &block_ref in &isel_func.block_order {
         let block_id = BlockId(block_ref.0);
         if let Some(isel_block) = isel_func.blocks.get(&block_ref) {
@@ -267,7 +283,28 @@ pub fn isel_to_ir(
                 let inst_id = ir_func.push_inst(ir_inst);
                 ir_func.append_inst(block_id, inst_id);
             }
+
+            // Copy successor edges from ISel blocks to IR blocks.
+            for &succ in &isel_block.successors {
+                let succ_id = BlockId(succ.0);
+                ir_func.blocks[block_id.0 as usize].succs.push(succ_id);
+            }
         }
+    }
+
+    // Compute predecessor edges from successors.
+    let num_blocks = ir_func.blocks.len();
+    let mut preds_map: Vec<Vec<BlockId>> = vec![Vec::new(); num_blocks];
+    for &block_ref in &isel_func.block_order {
+        let block_id = BlockId(block_ref.0);
+        for &succ_id in &ir_func.blocks[block_id.0 as usize].succs {
+            if (succ_id.0 as usize) < num_blocks {
+                preds_map[succ_id.0 as usize].push(block_id);
+            }
+        }
+    }
+    for (i, preds) in preds_map.into_iter().enumerate() {
+        ir_func.blocks[i].preds = preds;
     }
 
     ir_func
@@ -444,6 +481,78 @@ pub fn apply_regalloc(
 // Encoding: IR MachFunction -> machine code bytes
 // ---------------------------------------------------------------------------
 
+/// Resolve symbolic block references in branch instructions to byte offsets.
+///
+/// After register allocation and frame lowering, branch instructions may still
+/// contain `Block(BlockId)` operands from the ISel. This pass computes the byte
+/// offset of each block in the final layout and replaces Block operands with
+/// immediate offsets (PC-relative, in instruction units).
+///
+/// Must be called after frame lowering (which may add instructions) and before
+/// encoding (which needs concrete offsets).
+pub fn resolve_branches(func: &mut IrMachFunction) {
+    // Phase 1: Compute the instruction-index offset of each block.
+    // Walk blocks in layout order, counting non-pseudo instructions.
+    let mut block_offsets: HashMap<BlockId, i64> = HashMap::new();
+    let mut current_offset: i64 = 0;
+
+    for &block_id in &func.block_order {
+        block_offsets.insert(block_id, current_offset);
+        let block = &func.blocks[block_id.0 as usize];
+        for &inst_id in &block.insts {
+            let inst = &func.insts[inst_id.0 as usize];
+            if !inst.is_pseudo() {
+                current_offset += 1; // Each instruction is 4 bytes = 1 instruction unit
+            }
+        }
+    }
+
+    // Phase 2: Walk all instructions and replace Block operands with offsets.
+    // For each branch instruction, find the Block operand, look up its offset,
+    // and replace it with the PC-relative offset (in instruction units).
+    let mut inst_offset: i64 = 0;
+    for &block_id in &func.block_order.clone() {
+        let block = &func.blocks[block_id.0 as usize];
+        let inst_ids: Vec<_> = block.insts.clone();
+        for &inst_id in &inst_ids {
+            let inst = &func.insts[inst_id.0 as usize];
+            if inst.is_pseudo() {
+                continue;
+            }
+
+            let is_branch = matches!(
+                inst.opcode,
+                IrOpcode::B | IrOpcode::BCond | IrOpcode::Cbz | IrOpcode::Cbnz
+                | IrOpcode::Tbz | IrOpcode::Tbnz
+            );
+
+            if is_branch {
+                // Find and resolve Block operands to PC-relative immediates.
+                let new_operands: Vec<IrOperand> = inst
+                    .operands
+                    .iter()
+                    .map(|op| {
+                        if let IrOperand::Block(target_block) = op {
+                            if let Some(&target_offset) = block_offsets.get(target_block) {
+                                // PC-relative offset in instruction units
+                                let rel_offset = target_offset - inst_offset;
+                                IrOperand::Imm(rel_offset)
+                            } else {
+                                op.clone()
+                            }
+                        } else {
+                            op.clone()
+                        }
+                    })
+                    .collect();
+                func.insts[inst_id.0 as usize].operands = new_operands;
+            }
+
+            inst_offset += 1;
+        }
+    }
+}
+
 /// Encode a single IR instruction into AArch64 machine code.
 ///
 /// Delegates to the unified encoder in [`crate::aarch64::encode`] which
@@ -513,6 +622,26 @@ impl Pipeline {
         let return_types = self.convert_lower_types_to_ir(&input.signature.returns);
         let mut ir_func = isel_to_ir(&isel_func, &param_types, &return_types);
 
+        // Debug: verify succs/preds are populated for multi-block functions
+        #[cfg(debug_assertions)]
+        {
+            let has_branches = ir_func.blocks.len() > 1;
+            if has_branches {
+                let total_succs: usize = ir_func.blocks.iter().map(|b| b.succs.len()).sum();
+                let total_preds: usize = ir_func.blocks.iter().map(|b| b.preds.len()).sum();
+                debug_assert!(
+                    total_succs > 0,
+                    "Multi-block function '{}' has no successor edges! Blocks: {}",
+                    ir_func.name, ir_func.blocks.len()
+                );
+                debug_assert!(
+                    total_preds > 0,
+                    "Multi-block function '{}' has no predecessor edges! Blocks: {}",
+                    ir_func.name, ir_func.blocks.len()
+                );
+            }
+        }
+
         // Phase 3: Optimization
         self.run_optimization(&mut ir_func);
 
@@ -521,6 +650,10 @@ impl Pipeline {
 
         // Phase 7: Frame Lowering
         self.run_frame_lowering(&mut ir_func);
+
+        // Phase 7.5: Branch Resolution — resolve symbolic Block operands to
+        // PC-relative byte offsets before encoding.
+        resolve_branches(&mut ir_func);
 
         // Phase 8: Encoding
         let code = encode_function(&ir_func)?;
@@ -547,6 +680,9 @@ impl Pipeline {
 
         // Phase 7: Frame Lowering
         self.run_frame_lowering(ir_func);
+
+        // Phase 7.5: Branch Resolution
+        resolve_branches(ir_func);
 
         // Phase 8: Encoding
         let code = encode_function(ir_func)?;
@@ -591,11 +727,27 @@ impl Pipeline {
             returns: input.signature.returns.clone(),
         };
 
-        let mut isel = InstructionSelector::new(input.name.clone(), sig);
+        let mut isel = InstructionSelector::new(input.name.clone(), sig.clone());
 
-        // Process blocks in order.
-        for (&block_ref, basic_block) in &input.blocks {
-            isel.select_block(block_ref, &basic_block.instructions);
+        // Lower formal arguments at entry: copies ABI physical registers into
+        // VRegs and populates the value_map for function parameters.
+        isel.lower_formal_arguments(&sig, input.entry_block);
+
+        // Sort blocks by ID to ensure deterministic processing order. The entry
+        // block is processed first (it should have the lowest ID), then remaining
+        // blocks in layout order. This ensures SSA values defined in dominating
+        // blocks are available when referenced by later blocks.
+        let mut block_order: Vec<_> = input.blocks.keys().copied().collect();
+        block_order.sort_by_key(|b| b.0);
+
+        // Process blocks in sorted order. For non-entry blocks, define block
+        // parameter Values before processing instructions.
+        for block_ref in &block_order {
+            let basic_block = &input.blocks[block_ref];
+            if *block_ref != input.entry_block && !basic_block.params.is_empty() {
+                isel.define_block_params(&basic_block.params);
+            }
+            isel.select_block(*block_ref, &basic_block.instructions);
         }
 
         Ok(isel.finalize())
@@ -624,10 +776,38 @@ impl Pipeline {
         // Phase 4: Convert IR to regalloc format
         let mut ra_func = ir_to_regalloc(ir_func);
 
+        // Debug: dump block structure before regalloc
+        #[cfg(debug_assertions)]
+        if std::env::var("LLVM2_DEBUG_REGALLOC").is_ok() {
+            eprintln!("=== REGALLOC DEBUG: {} ===", ra_func.name);
+            for (bi, block) in ra_func.blocks.iter().enumerate() {
+                eprintln!("  block {}: insts={:?} succs={:?} preds={:?}",
+                    bi, block.insts.len(), block.succs, block.preds);
+            }
+            for (ii, inst) in ra_func.insts.iter().enumerate() {
+                eprintln!("  inst {}: opc={} defs={:?} uses={:?}",
+                    ii, inst.opcode,
+                    inst.defs.iter().filter_map(|o| o.as_vreg()).collect::<Vec<_>>(),
+                    inst.uses.iter().filter_map(|o| o.as_vreg()).collect::<Vec<_>>());
+            }
+        }
+
         // Phase 5: Run the allocator
         let ra_config = llvm2_regalloc::AllocConfig::default_aarch64();
         let result = llvm2_regalloc::allocate(&mut ra_func, &ra_config)
             .map_err(|e| PipelineError::RegAlloc(e.to_string()))?;
+
+        // Debug: dump allocation
+        #[cfg(debug_assertions)]
+        if std::env::var("LLVM2_DEBUG_REGALLOC").is_ok() {
+            eprintln!("  allocation:");
+            let mut allocs: Vec<_> = result.allocation.iter().collect();
+            allocs.sort_by_key(|(v, _)| v.id);
+            for (vreg, preg) in allocs {
+                eprintln!("    v{} -> {:?}", vreg.id, preg);
+            }
+            eprintln!("=== END REGALLOC DEBUG ===");
+        }
 
         // Phase 6: Apply allocation back to IR
         apply_regalloc(ir_func, &result.allocation);

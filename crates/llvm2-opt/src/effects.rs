@@ -100,8 +100,8 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         // MemoryEffect. For memory-effect purposes, these are pure.
         CmpRR | CmpRI | Tst | Fcmp => MemoryEffect::Pure,
 
-        // Move
-        MovR | MovI | Movz | Movk => MemoryEffect::Pure,
+        // Move / conditional set
+        MovR | MovI | Movz | Movk | CSet => MemoryEffect::Pure,
 
         // Extension
         Sxtw | Uxtw | Sxtb | Sxth => MemoryEffect::Pure,

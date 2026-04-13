@@ -492,6 +492,9 @@ impl InstructionSelector {
             Opcode::Fconst { ty, imm } => self.select_fconst(*ty, *imm, inst, block),
 
             // Arithmetic
+            // Single-arg Iadd is used by the adapter as a COPY placeholder
+            // (block argument passing, phi resolution). Emit a MOV instead.
+            Opcode::Iadd if inst.args.len() == 1 => self.select_copy(inst, block),
             Opcode::Iadd => self.select_binop(AArch64BinOp::Add, inst, block),
             Opcode::Isub => self.select_binop(AArch64BinOp::Sub, inst, block),
             Opcode::Imul => self.select_binop(AArch64BinOp::Mul, inst, block),
@@ -676,6 +679,56 @@ impl InstructionSelector {
     }
 
     // -----------------------------------------------------------------------
+    // Copy (single-arg Iadd used as COPY by adapter)
+    // -----------------------------------------------------------------------
+
+    /// Select a COPY instruction (emitted for single-arg Iadd from the adapter).
+    ///
+    /// The adapter uses `Iadd` with a single argument as a placeholder for
+    /// register copies (block argument passing, phi resolution). We emit a
+    /// MOV (register-to-register copy) instruction.
+    fn select_copy(&mut self, inst: &Instruction, block: Block) {
+        assert!(inst.args.len() == 1, "copy must have exactly 1 arg");
+        assert!(!inst.results.is_empty(), "copy must have a result");
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&src_val);
+        let src = self.use_value(&src_val);
+
+        // If the result value already has a vreg (e.g., a block parameter
+        // that was defined by an earlier predecessor's copy), reuse it.
+        // This ensures all predecessors write to the same vreg for block
+        // parameters, which is essential for correct register allocation
+        // across loop back-edges.
+        let dst = if let Some(existing) = self.value_map.get(&result_val) {
+            if let MachOperand::VReg(v) = existing {
+                *v
+            } else {
+                let class = reg_class_for_type(ty);
+                self.new_vreg(class)
+            }
+        } else {
+            let class = reg_class_for_type(ty);
+            self.new_vreg(class)
+        };
+
+        let opc = if Self::is_32bit(ty) {
+            AArch64Opcode::MOVWrr
+        } else {
+            AArch64Opcode::MOVXrr
+        };
+
+        self.func.push_inst(
+            block,
+            MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
+        );
+
+        self.define_value(result_val, MachOperand::VReg(dst), ty);
+    }
+
+    // -----------------------------------------------------------------------
     // Arithmetic
     // -----------------------------------------------------------------------
 
@@ -754,9 +807,14 @@ impl InstructionSelector {
             MachInst::new(cmp_opc, vec![lhs, rhs]),
         );
 
-        // CSET: materialize condition code into a W register
+        // CSET: materialize condition code into a register.
+        // We use Gpr64 for the destination to avoid register aliasing issues
+        // with the linear scan allocator, which treats W<n> and X<n> as
+        // independent physical registers despite them sharing hardware.
+        // CSET writes a 32-bit result (0 or 1) that zero-extends to 64 bits,
+        // so using an X register is semantically correct.
         let cc = AArch64CC::from_intcc(cond);
-        let dst = self.new_vreg(RegClass::Gpr32);
+        let dst = self.new_vreg(RegClass::Gpr64);
         self.func.push_inst(
             block,
             MachInst::new(
@@ -803,11 +861,12 @@ impl InstructionSelector {
         let cond_val = inst.args[0];
         let cond_op = self.use_value(&cond_val);
 
-        // CMP cond, #0 to set NZCV from boolean
+        // CMP cond, #0 to set NZCV from boolean.
+        // Use 64-bit CMP to match the Gpr64 class of the CSET result.
         self.func.push_inst(
             block,
             MachInst::new(
-                AArch64Opcode::CMPWri,
+                AArch64Opcode::CMPXri,
                 vec![cond_op, MachOperand::Imm(0)],
             ),
         );
@@ -1758,6 +1817,30 @@ impl InstructionSelector {
     // -----------------------------------------------------------------------
     // Finalize
     // -----------------------------------------------------------------------
+
+    /// Define block parameter Values for a non-entry block.
+    ///
+    /// tMIR uses block parameters for SSA phi semantics. Before processing
+    /// instructions in a block that has parameters, the ISel must have VRegs
+    /// allocated for those parameter Values. This method creates a fresh VReg
+    /// for each block parameter and records the mapping.
+    ///
+    /// Entry block parameters should be handled by `lower_formal_arguments`
+    /// instead, which also emits COPY instructions from physical registers.
+    pub fn define_block_params(&mut self, params: &[(Value, Type)]) {
+        for &(val, ty) in params {
+            // Skip values already defined by copies in predecessor blocks.
+            // The adapter emits single-arg Iadd (copy) instructions in
+            // predecessor blocks that define block parameter values before
+            // the target block is processed.
+            if self.value_map.contains_key(&val) {
+                continue;
+            }
+            let class = reg_class_for_type(ty);
+            let vreg = self.new_vreg(class);
+            self.define_value(val, MachOperand::VReg(vreg), ty);
+        }
+    }
 
     /// Consume the selector and return the completed MachFunction.
     pub fn finalize(self) -> MachFunction {

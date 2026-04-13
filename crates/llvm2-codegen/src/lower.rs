@@ -494,6 +494,19 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             let imm16 = imm_val(1) as u32 & 0xFFFF;
             Ok(encoding::encode_move_wide(sf, 0b11, 0, imm16, preg_hw(0)?))
         }
+        AArch64Opcode::CSet => {
+            // CSET Wd, <cond> — encoded as CSINC Wd, WZR, WZR, invert(cond)
+            // Encoding: sf=0 | 00 | 11010100 | Rm(=WZR) | inv_cond | 01 | Rn(=WZR) | Rd
+            let rd = preg_hw(0)?;
+            let cond = imm_val(1) as u32 & 0xF;
+            let inv_cond = cond ^ 1;
+            Ok((0b0_0_0_11010100u32 << 21)
+                | (31 << 16)       // Rm = WZR
+                | (inv_cond << 12) // inverted condition
+                | (0b01 << 10)     // op2 = 01 (CSINC)
+                | (31 << 5)        // Rn = WZR
+                | rd)
+        }
 
         // --- Extension ---
         AArch64Opcode::Sxtw => {
