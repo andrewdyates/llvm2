@@ -12,6 +12,10 @@
 pub mod types;
 pub mod instructions;
 pub mod function;
+pub mod abi;
+pub mod isel;
 
 pub use types::Type;
 pub use function::Function;
+pub use abi::{AppleAArch64ABI, ArgLocation, PReg};
+pub use isel::InstructionSelector;
