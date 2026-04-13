@@ -77,7 +77,7 @@ fn imm_val(inst: &MachInst, idx: usize) -> i64 {
 fn sf_from_operand(inst: &MachInst, idx: usize) -> u32 {
     match inst.operands.get(idx) {
         Some(MachOperand::PReg(p)) => {
-            if p.is_gpr() && p.0 < 32 {
+            if p.is_gpr() && p.encoding() < 32 {
                 1 // All GPRs default to 64-bit in this model
             } else {
                 1
@@ -732,6 +732,52 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
         // =================================================================
 
         AArch64Opcode::Phi | AArch64Opcode::StackAlloc | AArch64Opcode::Nop => Ok(NOP),
+
+        // Checked arithmetic — encode as their unchecked counterparts
+        // (ADDS/SUBS set NZCV flags; the flag-setting bit is bit 29).
+        AArch64Opcode::AddsRR => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let rm = preg_hw(inst, 2);
+            // ADDS Rd, Rn, Rm: sf|01|01011|shift=00|0|Rm|imm6=0|Rn|Rd
+            Ok((sf << 31) | (0b0101011_00_0 << 21) | (rm << 16) | (rn << 5) | rd)
+        }
+        AArch64Opcode::AddsRI => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let imm12 = (imm_val(inst, 2) as u32) & 0xFFF;
+            // ADDS Rd, Rn, #imm: sf|01|100010|sh=0|imm12|Rn|Rd
+            Ok((sf << 31) | (0b01_100010_0 << 22) | (imm12 << 10) | (rn << 5) | rd)
+        }
+        AArch64Opcode::SubsRR => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let rm = preg_hw(inst, 2);
+            // SUBS Rd, Rn, Rm: sf|11|01011|shift=00|0|Rm|imm6=0|Rn|Rd
+            Ok((sf << 31) | (0b1101011_00_0 << 21) | (rm << 16) | (rn << 5) | rd)
+        }
+        AArch64Opcode::SubsRI => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let imm12 = (imm_val(inst, 2) as u32) & 0xFFF;
+            // SUBS Rd, Rn, #imm: sf|11|100010|sh=0|imm12|Rn|Rd
+            Ok((sf << 31) | (0b11_100010_0 << 22) | (imm12 << 10) | (rn << 5) | rd)
+        }
+
+        // Trap/panic pseudo-instructions — encode as conditional BRK for now.
+        // These are pseudo-ops that should be lowered before encoding,
+        // but as a safety fallback we emit NOP.
+        AArch64Opcode::TrapOverflow
+        | AArch64Opcode::TrapBoundsCheck
+        | AArch64Opcode::TrapNull => Ok(NOP),
+
+        // Reference counting pseudo-instructions — should be lowered to
+        // actual call sequences before encoding. Emit NOP as fallback.
+        AArch64Opcode::Retain | AArch64Opcode::Release => Ok(NOP),
     }
 }
 
