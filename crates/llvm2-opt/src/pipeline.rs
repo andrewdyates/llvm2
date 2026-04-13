@@ -10,10 +10,12 @@
 //! design doc (designs/2026-04-12-aarch64-backend.md):
 //!
 //! Pre-register-allocation:
-//! 1. DCE
-//! 2. Constant folding
-//! 3. Copy propagation
-//! 4. Peephole
+//! 1. Constant folding
+//! 2. Copy propagation
+//! 3. CSE (common subexpression elimination)
+//! 4. LICM (loop-invariant code motion)
+//! 5. Peephole
+//! 6. DCE
 //!
 //! Higher optimization levels run additional iterations and enable
 //! more aggressive transforms.
@@ -22,7 +24,9 @@ use llvm2_ir::MachFunction;
 
 use crate::const_fold::ConstantFolding;
 use crate::copy_prop::CopyPropagation;
+use crate::cse::CommonSubexprElim;
 use crate::dce::DeadCodeElimination;
+use crate::licm::LoopInvariantCodeMotion;
 use crate::pass_manager::{PassManager, PassStats};
 use crate::peephole::Peephole;
 
@@ -66,10 +70,12 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(Peephole))
             }
             OptLevel::O2 | OptLevel::Os => {
-                // Standard: full pipeline.
+                // Standard: full pipeline with CSE and LICM.
                 PassManager::new()
                     .with_pass(Box::new(ConstantFolding))
                     .with_pass(Box::new(CopyPropagation))
+                    .with_pass(Box::new(CommonSubexprElim))
+                    .with_pass(Box::new(LoopInvariantCodeMotion))
                     .with_pass(Box::new(Peephole))
                     .with_pass(Box::new(DeadCodeElimination))
             }
@@ -78,6 +84,8 @@ impl OptimizationPipeline {
                 PassManager::new()
                     .with_pass(Box::new(ConstantFolding))
                     .with_pass(Box::new(CopyPropagation))
+                    .with_pass(Box::new(CommonSubexprElim))
+                    .with_pass(Box::new(LoopInvariantCodeMotion))
                     .with_pass(Box::new(Peephole))
                     .with_pass(Box::new(DeadCodeElimination))
             }
@@ -186,6 +194,6 @@ mod tests {
     fn test_o3_iterates() {
         let pipeline = OptimizationPipeline::new(OptLevel::O3);
         let pm = pipeline.build_pass_manager();
-        assert_eq!(pm.num_passes(), 4);
+        assert_eq!(pm.num_passes(), 6);
     }
 }
