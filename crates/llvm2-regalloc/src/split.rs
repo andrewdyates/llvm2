@@ -617,4 +617,90 @@ mod tests {
             SplitDecision::SplitAroundRegion { start: 3, end: 7 }
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case tests (issue #404 — TL7 coverage expansion)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_split_at_call_boundary() {
+        // Simulate splitting an interval at a call boundary.
+        // Interval: [0, 30) with uses at 5 and 25, call at position 15.
+        // Splitting at 15 should produce two valid halves.
+        let mut func = make_test_func(30);
+        let interval = make_interval(0, &[(0, 30)], &[5, 25], &[0]);
+
+        let result = split_interval(&interval, 15, &mut func);
+        assert!(result.is_some());
+
+        let result = result.unwrap();
+        assert_eq!(result.original_interval.start(), 0);
+        assert_eq!(result.original_interval.end(), 15);
+        assert_eq!(result.new_interval.start(), 15);
+        assert_eq!(result.new_interval.end(), 30);
+
+        // Use at 5 should be in original, use at 25 in new.
+        assert!(result.original_interval.use_positions.contains(&5));
+        assert!(!result.original_interval.use_positions.contains(&25));
+        assert!(result.new_interval.use_positions.contains(&25));
+        assert!(!result.new_interval.use_positions.contains(&5));
+    }
+
+    #[test]
+    fn test_split_produces_minimal_length_intervals() {
+        // Split a [0, 4) interval at position 2. Both halves should be 2 instructions.
+        let mut func = make_test_func(10);
+        let interval = make_interval(0, &[(0, 4)], &[0, 3], &[0]);
+
+        let result = split_interval(&interval, 2, &mut func);
+        assert!(result.is_some());
+
+        let result = result.unwrap();
+        assert_eq!(result.original_interval.start(), 0);
+        assert_eq!(result.original_interval.end(), 2);
+        assert_eq!(result.new_interval.start(), 2);
+        assert_eq!(result.new_interval.end(), 4);
+    }
+
+    #[test]
+    fn test_split_def_at_exact_split_point_goes_to_new() {
+        // A def position exactly at the split point should go to the new interval.
+        let mut func = make_test_func(20);
+        let interval = make_interval(0, &[(0, 20)], &[2, 15], &[0, 10]);
+
+        let result = split_interval(&interval, 10, &mut func).unwrap();
+
+        // def at 0 < 10 -> original; def at 10 >= 10 -> new
+        assert!(result.original_interval.def_positions.contains(&0));
+        assert!(!result.original_interval.def_positions.contains(&10));
+        assert!(result.new_interval.def_positions.contains(&10));
+        assert!(!result.new_interval.def_positions.contains(&0));
+    }
+
+    #[test]
+    fn test_analyze_split_candidates_single_position_returns_empty() {
+        // An interval with only one use/def position cannot be split.
+        let interval = make_interval(0, &[(0, 20)], &[10], &[]);
+        let candidates = analyze_split_candidates(&interval, &[], 10);
+        assert!(candidates.is_empty(), "single position should produce no candidates");
+    }
+
+    #[test]
+    fn test_split_fpr_interval_preserves_class() {
+        // Splitting an FPR interval should produce intervals of the same class.
+        let mut func = make_test_func(20);
+        let fpr_vreg = VReg { id: 0, class: RegClass::Fpr64 };
+        let mut interval = LiveInterval::new(fpr_vreg);
+        interval.add_range(0, 20);
+        interval.use_positions = vec![2, 18];
+        interval.def_positions = vec![0];
+        interval.spill_weight = 2.0;
+
+        let result = split_interval(&interval, 10, &mut func).unwrap();
+
+        assert_eq!(result.original_vreg.class, RegClass::Fpr64);
+        assert_eq!(result.new_vreg.class, RegClass::Fpr64);
+        assert_eq!(result.original_interval.vreg.class, RegClass::Fpr64);
+        assert_eq!(result.new_interval.vreg.class, RegClass::Fpr64);
+    }
 }

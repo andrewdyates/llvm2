@@ -1229,4 +1229,279 @@ mod tests {
         assert_eq!(count_copies_in_block(1), 2, "block 1 should have 2 copies");
         assert_eq!(count_copies_in_block(2), 2, "block 2 should have 2 copies");
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case tests (issue #404 — TL7 coverage expansion)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_phi_self_copy_eliminated() {
+        // A phi where one input is the same as the output (v0 = phi(v0, v1))
+        // should NOT insert a copy for the v0 -> v0 path.
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        // Block 0: branch -> block 2
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(2))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 1: branch -> block 2
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(2))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 2: phi v0 = [v0 from block0, v1 from block1]
+        let i2 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0x00,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 }), // self-copy from block 0
+                MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 }), // from block 1
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_PHI,
+        });
+
+        let mut func = MachFunction {
+            name: "self_copy_phi".into(),
+            insts,
+            blocks: vec![
+                MachBlock {
+                    insts: vec![i0],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(2)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i1],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(2)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i2],
+                    preds: vec![BlockId(0), BlockId(1)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+            ],
+            block_order: vec![BlockId(0), BlockId(1), BlockId(2)],
+            entry_block: BlockId(0),
+            next_vreg: 2,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        };
+
+        eliminate_phis(&mut func);
+
+        // Block 0 should NOT have a copy (v0 = v0 is a self-copy, skipped).
+        let block0_copy_count = func.blocks[0].insts.iter()
+            .filter(|&&id| func.insts[id.0 as usize].opcode == PSEUDO_COPY)
+            .count();
+        assert_eq!(block0_copy_count, 0, "self-copy v0 <- v0 should be omitted");
+
+        // Block 1 SHOULD have a copy (v0 <- v1).
+        let block1_copy_count = func.blocks[1].insts.iter()
+            .filter(|&&id| func.insts[id.0 as usize].opcode == PSEUDO_COPY)
+            .count();
+        assert_eq!(block1_copy_count, 1, "block 1 should have copy v0 <- v1");
+    }
+
+    #[test]
+    fn test_critical_edge_split_then_phi_elim_combined() {
+        // Build a CFG where critical edge splitting is required before phi
+        // elimination can be correct. Verify the combined pipeline works.
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        // Block 0: def v0, cbranch -> block 1 or block 2
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(10)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBB,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(1)), MachOperand::Block(BlockId(2))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 1: def v1, cbranch -> block 2 or block 3
+        let i2 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(20)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i3 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBB,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(2)), MachOperand::Block(BlockId(3))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 2: phi v2 = [v0 from block0, v1 from block1], use v2
+        // This has 2 preds; block 0 has 2 succs and block 1 has 2 succs.
+        // Both edges (0->2) and (1->2) are critical.
+        let i4 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0x00,
+            defs: vec![MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 })],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 }),
+                MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 }),
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_PHI,
+        });
+        let i5 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 3,
+            defs: vec![],
+            uses: vec![MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        // Block 3: exit
+        let i6 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xFF,
+            defs: vec![],
+            uses: vec![],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_RETURN.union(InstFlags::IS_TERMINATOR),
+        });
+
+        let mut func = MachFunction {
+            name: "critical_phi".into(),
+            insts,
+            blocks: vec![
+                MachBlock {
+                    insts: vec![i0, i1],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(1), BlockId(2)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i2, i3],
+                    preds: vec![BlockId(0)],
+                    succs: vec![BlockId(2), BlockId(3)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i4, i5],
+                    preds: vec![BlockId(0), BlockId(1)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i6],
+                    preds: vec![BlockId(1)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+            ],
+            block_order: vec![BlockId(0), BlockId(1), BlockId(2), BlockId(3)],
+            entry_block: BlockId(0),
+            next_vreg: 3,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        };
+
+        // Step 1: Split critical edges.
+        let edges_split = split_critical_edges(&mut func);
+        assert_eq!(edges_split, 2, "both edges to block 2 should be critical");
+
+        // Step 2: Eliminate phis.
+        eliminate_phis(&mut func);
+
+        // Verify: no phi instructions remain.
+        for &block_id in &func.block_order {
+            let block = &func.blocks[block_id.0 as usize];
+            for &inst_id in &block.insts {
+                let inst = &func.insts[inst_id.0 as usize];
+                assert!(!inst.flags.is_phi(), "phi should be eliminated in block {:?}", block_id);
+            }
+        }
+
+        // Verify: copy instructions exist in the new split blocks.
+        let total_copies = func.insts.iter()
+            .filter(|i| i.opcode == PSEUDO_COPY)
+            .count();
+        assert!(total_copies >= 2, "should have at least 2 copies (one per phi input)");
+    }
+
+    #[test]
+    fn test_parallel_copy_mixed_register_classes() {
+        // Parallel copies with different register classes — should allocate
+        // temporaries of the correct class.
+        let mut func = make_empty_func(10);
+
+        let v0_gpr = VReg { id: 0, class: RegClass::Gpr64 };
+        let v1_gpr = VReg { id: 1, class: RegClass::Gpr64 };
+        let v2_fpr = VReg { id: 2, class: RegClass::Fpr64 };
+        let v3_fpr = VReg { id: 3, class: RegClass::Fpr64 };
+
+        // GPR swap + FPR swap (two independent cycles).
+        let copies = vec![
+            (v0_gpr, v1_gpr),
+            (v1_gpr, v0_gpr),
+            (v2_fpr, v3_fpr),
+            (v3_fpr, v2_fpr),
+        ];
+        let result = resolve_parallel_copies(&copies, &mut func);
+
+        // Both cycles need temps. Simulate to verify correctness.
+        let mut regs: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
+        regs.insert(0, 100); regs.insert(1, 200);
+        regs.insert(2, 300); regs.insert(3, 400);
+        for &(dst, _) in &result {
+            regs.entry(dst.id).or_insert(0);
+        }
+        regs.insert(0, 100); regs.insert(1, 200);
+        regs.insert(2, 300); regs.insert(3, 400);
+
+        for &(dst, src) in &result {
+            let val = regs[&src.id];
+            regs.insert(dst.id, val);
+        }
+
+        assert_eq!(regs[&0], 200, "v0 should have old v1 (GPR swap)");
+        assert_eq!(regs[&1], 100, "v1 should have old v0 (GPR swap)");
+        assert_eq!(regs[&2], 400, "v2 should have old v3 (FPR swap)");
+        assert_eq!(regs[&3], 300, "v3 should have old v2 (FPR swap)");
+    }
 }
