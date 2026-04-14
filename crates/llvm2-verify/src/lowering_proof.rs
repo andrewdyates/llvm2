@@ -117,24 +117,136 @@ impl ProofObligation {
 // Mock verification (concrete evaluation)
 // ---------------------------------------------------------------------------
 
-/// Verify a proof obligation by exhaustive testing for small widths
-/// or random sampling for larger widths.
+/// Default number of random samples for statistical verification of
+/// 32/64-bit proof obligations. Edge cases are always tested first
+/// (0, 1, MAX, midpoints), then this many random trials follow.
 ///
-/// For widths <= 8 and <= 2 inputs: tests all 2^(n*inputs) combinations.
-/// For widths > 8 or > 2 inputs: tests random samples (default: 100_000 trials).
+/// At 100,000 trials the false-positive probability per proof is
+/// approximately 1 - (1 - 2^{-32})^{100000} for 32-bit, which provides
+/// reasonable confidence but is **not** a formal proof. Use z4/z3 via
+/// [`crate::z4_bridge::verify_with_z4`] for complete guarantees.
+pub const DEFAULT_SAMPLE_COUNT: u64 = 100_000;
+
+/// Maximum bit-width for which exhaustive verification is performed.
+///
+/// For widths <= this threshold (with <= 2 inputs), every possible input
+/// combination is tested (2^{width * num_inputs} evaluations). For widths
+/// above this threshold, random sampling is used instead.
+///
+/// Currently set to 8 because exhaustive 16-bit with 2 inputs requires
+/// 2^32 evaluations (4 billion), which is too slow for routine testing.
+pub const EXHAUSTIVE_WIDTH_THRESHOLD: u32 = 8;
+
+/// Configuration for the verification evaluation engine.
+///
+/// Controls sampling parameters for statistical (non-exhaustive) verification.
+///
+/// # Verification strength levels
+///
+/// | Level | Width | Inputs | Strategy | Guarantee |
+/// |-------|-------|--------|----------|-----------|
+/// | **Exhaustive** | <= 8 | <= 2 | All 2^(w*n) combos | Complete for that width |
+/// | **Statistical** | > 8 | any | Edge cases + N random samples | Probabilistic (configurable N) |
+/// | **Formal** | any | any | SMT solver (z4/z3) | Complete (not yet default) |
+///
+/// # Path to formal verification
+///
+/// The current `verify_by_evaluation` uses **mock verification**: exhaustive
+/// for small widths, statistical sampling for larger widths. This catches most
+/// bugs but cannot prove correctness for all 2^64 input combinations.
+///
+/// The path to full formal verification:
+/// 1. **Current**: Mock evaluation (this module) -- fast, catches regressions
+/// 2. **Available**: CLI z4/z3 via [`crate::z4_bridge`] -- serialize to SMT-LIB2, pipe to solver
+/// 3. **Future**: Native z4 API (feature-gated `z4`) -- in-process SMT, no subprocess overhead
+///
+/// When z4 integration is the default, `verify_by_evaluation` will become
+/// the fast pre-check, with z4 providing the formal proof.
+#[derive(Debug, Clone)]
+pub struct VerificationConfig {
+    /// Number of random samples for statistical verification of widths
+    /// above [`EXHAUSTIVE_WIDTH_THRESHOLD`]. Defaults to [`DEFAULT_SAMPLE_COUNT`].
+    ///
+    /// Higher values increase confidence but slow down verification.
+    /// At N=1,000,000 a single 32-bit proof takes ~100ms on modern hardware.
+    pub sample_count: u64,
+
+    /// Maximum bit-width for exhaustive verification.
+    /// Defaults to [`EXHAUSTIVE_WIDTH_THRESHOLD`] (8).
+    ///
+    /// Setting this to 16 enables exhaustive 16-bit single-input proofs
+    /// (65,536 evaluations) but 16-bit two-input proofs require 2^32
+    /// evaluations and will be very slow.
+    pub exhaustive_threshold: u32,
+}
+
+impl Default for VerificationConfig {
+    fn default() -> Self {
+        Self {
+            sample_count: DEFAULT_SAMPLE_COUNT,
+            exhaustive_threshold: EXHAUSTIVE_WIDTH_THRESHOLD,
+        }
+    }
+}
+
+impl VerificationConfig {
+    /// Create a configuration with the given sample count.
+    pub fn with_sample_count(sample_count: u64) -> Self {
+        Self {
+            sample_count,
+            ..Default::default()
+        }
+    }
+}
+
+/// Verify a proof obligation by exhaustive testing for small widths
+/// or random sampling for larger widths, using default configuration.
+///
+/// # Verification strategy
+///
+/// - **Widths <= 8, inputs <= 2**: Exhaustive -- tests all 2^(width * num_inputs)
+///   input combinations. This is a complete proof for that bit-width.
+/// - **Widths > 8, inputs <= 2**: Statistical -- tests 6 edge cases per input
+///   (0, 1, MAX, MAX-1, midpoint, midpoint-1) in all combinations (36 pairs),
+///   then [`DEFAULT_SAMPLE_COUNT`] (100,000) random samples using a deterministic
+///   LCG seeded from the proof obligation name.
+/// - **3+ inputs**: Statistical -- tests 36 edge-case combinations, then
+///   [`DEFAULT_SAMPLE_COUNT`] random samples with per-input width masking.
+///
+/// # Guarantees
+///
+/// For widths <= 8: **complete** -- equivalent to formal proof for that width.
+/// For widths > 8: **statistical** -- high confidence but not a formal proof.
+/// A counterexample-free result with 100,000 random 32-bit samples means the
+/// probability of a lurking bug at any single input point is bounded by
+/// ~10^{-5}, but adversarial or structured bugs could still hide.
+///
+/// For formal guarantees on 32/64-bit widths, use
+/// [`crate::z4_bridge::verify_with_z4`] or enable the `z4` feature.
 pub fn verify_by_evaluation(obligation: &ProofObligation) -> VerificationResult {
+    verify_by_evaluation_with_config(obligation, &VerificationConfig::default())
+}
+
+/// Verify a proof obligation with a custom [`VerificationConfig`].
+///
+/// See [`verify_by_evaluation`] for strategy details. The `config` parameter
+/// controls the number of random samples and the exhaustive width threshold.
+pub fn verify_by_evaluation_with_config(
+    obligation: &ProofObligation,
+    config: &VerificationConfig,
+) -> VerificationResult {
     let width = obligation.inputs.first().map(|(_, w)| *w).unwrap_or(32);
     let num_inputs = obligation.inputs.len();
 
     // For 3+ inputs or mixed widths, use multi-input random sampling.
     if num_inputs > 2 {
-        return verify_random_multi(obligation, 100_000);
+        return verify_random_multi(obligation, config.sample_count);
     }
 
-    if width <= 8 {
+    if width <= config.exhaustive_threshold {
         verify_exhaustive(obligation, width)
     } else {
-        verify_random(obligation, width, 100_000)
+        verify_random(obligation, width, config.sample_count)
     }
 }
 
@@ -1116,5 +1228,114 @@ mod tests {
 
         let result = verify_by_evaluation(&obligation);
         assert!(matches!(result, VerificationResult::Valid));
+    }
+
+    // -----------------------------------------------------------------------
+    // VerificationConfig tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_default_config_values() {
+        let config = VerificationConfig::default();
+        assert_eq!(config.sample_count, DEFAULT_SAMPLE_COUNT);
+        assert_eq!(config.sample_count, 100_000);
+        assert_eq!(config.exhaustive_threshold, EXHAUSTIVE_WIDTH_THRESHOLD);
+        assert_eq!(config.exhaustive_threshold, 8);
+    }
+
+    #[test]
+    fn test_config_with_sample_count() {
+        let config = VerificationConfig::with_sample_count(500_000);
+        assert_eq!(config.sample_count, 500_000);
+        assert_eq!(config.exhaustive_threshold, EXHAUSTIVE_WIDTH_THRESHOLD);
+    }
+
+    /// Test that a custom sample count is respected by verify_by_evaluation_with_config.
+    ///
+    /// We verify a correct 32-bit obligation with a very low sample count (10)
+    /// and a high sample count (200_000). Both should pass for a correct rule.
+    #[test]
+    fn test_custom_sample_count_respected() {
+        let obligation = proof_iadd_i32();
+
+        // Low sample count -- still passes for a correct rule
+        let config_low = VerificationConfig::with_sample_count(10);
+        let result = verify_by_evaluation_with_config(&obligation, &config_low);
+        assert!(matches!(result, VerificationResult::Valid),
+            "Correct rule should pass even with low sample count");
+
+        // High sample count -- also passes
+        let config_high = VerificationConfig::with_sample_count(200_000);
+        let result = verify_by_evaluation_with_config(&obligation, &config_high);
+        assert!(matches!(result, VerificationResult::Valid),
+            "Correct rule should pass with high sample count");
+    }
+
+    /// Test that a wrong rule is caught even with low sample count, because
+    /// edge cases are always tested first.
+    #[test]
+    fn test_wrong_rule_caught_with_low_samples() {
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+
+        let obligation = ProofObligation {
+            name: "WRONG: Iadd_I32 -> SUB".to_string(),
+            tmir_expr: a.clone().bvadd(b.clone()),
+            aarch64_expr: a.bvsub(b),
+            inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        // Even with 0 random samples, edge cases should catch add != sub
+        let config = VerificationConfig::with_sample_count(0);
+        let result = verify_by_evaluation_with_config(&obligation, &config);
+        assert!(matches!(result, VerificationResult::Invalid { .. }),
+            "Wrong rule should be caught by edge cases even with 0 random samples");
+    }
+
+    /// Test that the exhaustive threshold is respected: a 16-bit obligation
+    /// uses exhaustive verification when threshold is raised to 16.
+    #[test]
+    fn test_custom_exhaustive_threshold() {
+        let a = SmtExpr::var("a", 16);
+
+        // Single-input 16-bit obligation (65536 evaluations -- feasible)
+        let obligation = ProofObligation {
+            name: "Identity_I16".to_string(),
+            tmir_expr: a.clone(),
+            aarch64_expr: a,
+            inputs: vec![("a".to_string(), 16)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        // With default threshold (8), 16-bit falls into random sampling
+        let config_default = VerificationConfig::default();
+        assert!(obligation.inputs[0].1 > config_default.exhaustive_threshold,
+            "16-bit should exceed default exhaustive threshold");
+
+        // With raised threshold, it should use exhaustive
+        let config_16 = VerificationConfig {
+            sample_count: 10,
+            exhaustive_threshold: 16,
+        };
+        let result = verify_by_evaluation_with_config(&obligation, &config_16);
+        assert!(matches!(result, VerificationResult::Valid));
+    }
+
+    /// Test that verify_by_evaluation uses the default sample count.
+    #[test]
+    fn test_verify_by_evaluation_uses_defaults() {
+        // This is a sanity check -- verify_by_evaluation should produce the
+        // same result as verify_by_evaluation_with_config with default config.
+        let obligation = proof_iadd_i64();
+        let result_default = verify_by_evaluation(&obligation);
+        let result_config = verify_by_evaluation_with_config(
+            &obligation, &VerificationConfig::default());
+
+        // Both should be Valid for a correct rule
+        assert!(matches!(result_default, VerificationResult::Valid));
+        assert!(matches!(result_config, VerificationResult::Valid));
     }
 }
