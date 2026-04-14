@@ -42,6 +42,12 @@
 use crate::lowering_proof::ProofObligation;
 use crate::smt::{SmtExpr, SmtSort, RoundingMode};
 #[cfg(feature = "z4")]
+compile_error!(
+    "The `z4` feature requires the z4 crate dependency. \
+     Uncomment the z4 line in llvm2-verify/Cargo.toml and change \
+     the z4 feature to `z4 = [\"dep:z4\"]`."
+);
+#[cfg(feature = "z4")]
 use std::collections::HashMap;
 use std::fmt;
 

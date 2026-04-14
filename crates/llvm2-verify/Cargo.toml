@@ -14,14 +14,19 @@ authors.workspace = true
 
 [features]
 default = []
-z4 = ["dep:z4"]  # Enable real z4 solver integration (in-process via Rust API)
+# z4 feature: enables in-process z4 Rust API (requires z4 crate).
+# Without this feature, verification uses CLI subprocess fallback (z4_bridge.rs).
+# To enable: add z4 dep below, then `cargo test -p llvm2-verify --features z4`.
+z4 = []
 
 [dependencies]
 llvm2-ir = { workspace = true }
 llvm2-lower = { workspace = true }
 thiserror = { workspace = true }
-# z4 dependency: use local path for development, switch to git dep for release.
-# Local path assumes z4 repo is checked out at ~/z4/ (see CLAUDE.md).
-# For worktree compatibility, use absolute-style relative path.
+# z4 dependency: REMOVED to unblock workspace compilation (#175).
+# Cargo resolves git deps even when optional, blocking builds when z4 repo
+# is inaccessible. The z4 CLI subprocess fallback (z4_bridge.rs) works without
+# this crate dep. To re-enable in-process z4 API:
+#   1. Uncomment the line below
+#   2. Change the z4 feature above to: z4 = ["dep:z4"]
 # z4 = { git = "https://github.com/dropbox-ai-prototypes/z4", optional = true }
-z4 = { git = "https://github.com/dropbox-ai-prototypes/z4", optional = true }
