@@ -44,6 +44,7 @@ pub mod cost_model;
 pub mod function;
 pub mod inst;
 pub mod operand;
+pub mod provenance;
 pub mod regs;
 pub mod trace;
 pub mod types;
@@ -58,8 +59,12 @@ pub use operand::MachOperand;
 pub use regs::{CondCode, PReg, RegClass, SpecialReg, VReg};
 pub use types::{BlockId, FrameIdx, InstId, StackSlotId, VRegId};
 pub use trace::{
-    CompilationEvent, CompilationTrace, EventKind, Justification, PassId, RuleId, TmirInstId,
+    CompilationEvent, CompilationTrace, EventKind, Justification, RuleId,
     TraceLevel,
+};
+pub use provenance::{
+    PassId, ProvenanceEntry, ProvenanceMap, ProvenanceStats, ProvenanceStatus, TmirInstId,
+    TransformKind, TransformRecord,
 };
 pub use x86_64_ops::{X86CondCode, X86Opcode};
 pub use x86_64_regs::{X86PReg, X86RegClass};
