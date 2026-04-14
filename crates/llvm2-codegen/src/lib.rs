@@ -40,5 +40,5 @@ pub use pipeline::{
     compile_to_object, generate_cpu_only_plan,
     CoreMLOutput, emit_coreml_program,
 };
-pub use relax::RelaxError;
+pub use relax::{BranchRelaxation, RelaxError, RelaxedCode};
 pub use target::{CallingConvention, Target};
