@@ -66,6 +66,7 @@ pub mod cegis;
 pub mod rule_discovery;
 pub mod neon_semantics;
 pub mod ane_semantics;
+pub mod gpu_semantics;
 pub mod unified_synthesis;
 pub mod neon_lowering_proofs;
 
