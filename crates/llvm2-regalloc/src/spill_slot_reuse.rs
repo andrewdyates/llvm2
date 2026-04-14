@@ -265,4 +265,176 @@ mod tests {
         // Different register classes -> different groups -> no sharing.
         assert_eq!(result.slots_eliminated, 0);
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case and correctness tests (issue #139)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_empty_spills() {
+        let result = compute_spill_slot_reuse(&[], &HashMap::new());
+        assert_eq!(result.slots_eliminated, 0);
+        assert!(result.slot_rewrites.is_empty());
+    }
+
+    #[test]
+    fn test_single_spill_no_reuse() {
+        let spills = vec![SpillInfo {
+            vreg: vreg(0),
+            slot: StackSlotId(0),
+        }];
+        let intervals = HashMap::from([(0, interval(0, &[(0, 10)]))]);
+        let result = compute_spill_slot_reuse(&spills, &intervals);
+        assert_eq!(result.slots_eliminated, 0);
+    }
+
+    #[test]
+    fn test_adjacent_intervals_share_slot() {
+        // [0,5) and [5,10) are adjacent (non-overlapping) — should share.
+        let spills = vec![
+            SpillInfo { vreg: vreg(0), slot: StackSlotId(0) },
+            SpillInfo { vreg: vreg(1), slot: StackSlotId(1) },
+        ];
+        let intervals = HashMap::from([
+            (0, interval(0, &[(0, 5)])),
+            (1, interval(1, &[(5, 10)])),
+        ]);
+        let result = compute_spill_slot_reuse(&spills, &intervals);
+        assert_eq!(result.slots_eliminated, 1);
+    }
+
+    #[test]
+    fn test_partial_overlap_two_of_three() {
+        // v0: [0,10), v1: [5,15), v2: [20,25)
+        // v0 and v1 overlap (can't share). v2 can share with v0 or v1.
+        let spills = vec![
+            SpillInfo { vreg: vreg(0), slot: StackSlotId(0) },
+            SpillInfo { vreg: vreg(1), slot: StackSlotId(1) },
+            SpillInfo { vreg: vreg(2), slot: StackSlotId(2) },
+        ];
+        let intervals = HashMap::from([
+            (0, interval(0, &[(0, 10)])),
+            (1, interval(1, &[(5, 15)])),
+            (2, interval(2, &[(20, 25)])),
+        ]);
+        let result = compute_spill_slot_reuse(&spills, &intervals);
+        // v2 can share with v0, so 1 slot eliminated.
+        assert_eq!(result.slots_eliminated, 1);
+    }
+
+    #[test]
+    fn test_all_overlapping_no_reuse() {
+        // All three intervals overlap pairwise — no sharing possible.
+        let spills = vec![
+            SpillInfo { vreg: vreg(0), slot: StackSlotId(0) },
+            SpillInfo { vreg: vreg(1), slot: StackSlotId(1) },
+            SpillInfo { vreg: vreg(2), slot: StackSlotId(2) },
+        ];
+        let intervals = HashMap::from([
+            (0, interval(0, &[(0, 10)])),
+            (1, interval(1, &[(5, 15)])),
+            (2, interval(2, &[(8, 20)])),
+        ]);
+        let result = compute_spill_slot_reuse(&spills, &intervals);
+        assert_eq!(result.slots_eliminated, 0);
+    }
+
+    #[test]
+    fn test_missing_interval_conservative() {
+        // When interval data is missing for a vreg, it should conservatively
+        // assume conflict and not share.
+        let spills = vec![
+            SpillInfo { vreg: vreg(0), slot: StackSlotId(0) },
+            SpillInfo { vreg: vreg(1), slot: StackSlotId(1) },
+        ];
+        // Only provide interval for v0, not v1.
+        let intervals = HashMap::from([(0, interval(0, &[(0, 5)]))]);
+        let result = compute_spill_slot_reuse(&spills, &intervals);
+        // v1 has no interval data — should get its own color, no sharing.
+        assert_eq!(result.slots_eliminated, 0);
+    }
+
+    #[test]
+    fn test_apply_spill_slot_reuse_rewrites_operands() {
+        use crate::machine_types::*;
+        let mut func = MachFunction {
+            name: "rewrite_test".into(),
+            insts: vec![
+                MachInst {
+                    opcode: crate::spill::PSEUDO_SPILL_STORE,
+                    defs: vec![],
+                    uses: vec![
+                        MachOperand::VReg(vreg(0)),
+                        MachOperand::StackSlot(StackSlotId(1)),
+                    ],
+                    implicit_defs: Vec::new(),
+                    implicit_uses: Vec::new(),
+                    flags: InstFlags::WRITES_MEMORY,
+                },
+                MachInst {
+                    opcode: crate::spill::PSEUDO_SPILL_LOAD,
+                    defs: vec![MachOperand::VReg(vreg(0))],
+                    uses: vec![MachOperand::StackSlot(StackSlotId(1))],
+                    implicit_defs: Vec::new(),
+                    implicit_uses: Vec::new(),
+                    flags: InstFlags::READS_MEMORY,
+                },
+            ],
+            blocks: vec![MachBlock {
+                insts: vec![InstId(0), InstId(1)],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 1,
+            next_stack_slot: 2,
+            stack_slots: HashMap::new(),
+        };
+
+        let rewrites = HashMap::from([(StackSlotId(1), StackSlotId(0))]);
+        apply_spill_slot_reuse(&mut func, &rewrites);
+
+        // All StackSlot(1) operands should now be StackSlot(0).
+        for inst in &func.insts {
+            for op in inst.defs.iter().chain(inst.uses.iter()) {
+                if let MachOperand::StackSlot(slot) = op {
+                    assert_ne!(*slot, StackSlotId(1), "slot 1 should have been rewritten to slot 0");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_apply_spill_slot_reuse_empty_rewrites() {
+        use crate::machine_types::*;
+        let mut func = MachFunction {
+            name: "no_rewrite".into(),
+            insts: vec![MachInst {
+                opcode: crate::spill::PSEUDO_SPILL_LOAD,
+                defs: vec![MachOperand::VReg(vreg(0))],
+                uses: vec![MachOperand::StackSlot(StackSlotId(0))],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::READS_MEMORY,
+            }],
+            blocks: vec![MachBlock {
+                insts: vec![InstId(0)],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 1,
+            next_stack_slot: 1,
+            stack_slots: HashMap::new(),
+        };
+
+        // Empty rewrites should be a no-op.
+        apply_spill_slot_reuse(&mut func, &HashMap::new());
+        let slot_op = &func.insts[0].uses[0];
+        assert_eq!(*slot_op, MachOperand::StackSlot(StackSlotId(0)));
+    }
 }

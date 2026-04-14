@@ -388,4 +388,354 @@ mod tests {
             assert!(callee_saved.contains(&preg), "{:?} is not callee-saved", preg);
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case and correctness tests (issue #139)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_caller_callee_sets_disjoint() {
+        let caller = aarch64_caller_saved_regs();
+        let callee = aarch64_callee_saved_regs();
+        // Caller-saved and callee-saved should be completely disjoint.
+        for reg in &caller {
+            assert!(
+                !callee.contains(reg),
+                "{:?} is in both caller-saved and callee-saved sets",
+                reg
+            );
+        }
+    }
+
+    #[test]
+    fn test_caller_saved_count() {
+        let cs = aarch64_caller_saved_regs();
+        // X0-X15 = 16 GPRs + V0-V7 = 8 FPRs = 24 total.
+        assert_eq!(cs.len(), 24, "expected 24 caller-saved regs, got {}", cs.len());
+    }
+
+    #[test]
+    fn test_callee_saved_count() {
+        let cs = aarch64_callee_saved_regs();
+        // X19-X28 = 10 GPRs + V8-V15 = 8 FPRs = 18 total.
+        assert_eq!(cs.len(), 18, "expected 18 callee-saved regs, got {}", cs.len());
+    }
+
+    #[test]
+    fn test_find_call_crossings_no_calls() {
+        // Function with no call instructions should produce no crossings.
+        let insts = vec![MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(vreg(0))],
+            uses: vec![],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        }];
+        let func = MachFunction {
+            name: "no_call".into(),
+            insts,
+            blocks: vec![MachBlock {
+                insts: vec![InstId(0)],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 1,
+            next_stack_slot: 0,
+            stack_slots: HashMap::new(),
+        };
+
+        let numbering = HashMap::from([(InstId(0), 0u32)]);
+        let intervals = HashMap::from([(0u32, interval_at(0, 0, 1))]);
+        let crossings = find_call_crossings(&func, &intervals, &numbering);
+        assert!(crossings.is_empty());
+    }
+
+    #[test]
+    fn test_find_call_crossings_no_live_across() {
+        // A call with no live values across it should produce no crossings.
+        let insts = vec![
+            MachInst {
+                opcode: 1,
+                defs: vec![MachOperand::VReg(vreg(0))],
+                uses: vec![],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+            // use v0 (v0 dies before call)
+            MachInst {
+                opcode: 2,
+                defs: vec![],
+                uses: vec![MachOperand::VReg(vreg(0))],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+            // call (v0 is dead here)
+            MachInst {
+                opcode: 3,
+                defs: vec![],
+                uses: vec![],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::IS_CALL,
+            },
+        ];
+        let func = MachFunction {
+            name: "dead_before_call".into(),
+            insts,
+            blocks: vec![MachBlock {
+                insts: vec![InstId(0), InstId(1), InstId(2)],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 1,
+            next_stack_slot: 0,
+            stack_slots: HashMap::new(),
+        };
+
+        let numbering: HashMap<InstId, u32> = (0..3).map(|i| (InstId(i), i as u32)).collect();
+        // v0 live [0, 2) — dies before call at index 2.
+        let intervals = HashMap::from([(0u32, interval_at(0, 0, 2))]);
+        let crossings = find_call_crossings(&func, &intervals, &numbering);
+        assert!(crossings.is_empty(), "no values live across the call");
+    }
+
+    #[test]
+    fn test_find_call_crossings_multiple_vregs() {
+        // Two VRegs live across a call.
+        let insts = vec![
+            MachInst {
+                opcode: 1,
+                defs: vec![MachOperand::VReg(vreg(0))],
+                uses: vec![],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+            MachInst {
+                opcode: 1,
+                defs: vec![MachOperand::VReg(vreg(1))],
+                uses: vec![],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+            MachInst {
+                opcode: 0xCA,
+                defs: vec![],
+                uses: vec![],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::IS_CALL,
+            },
+            MachInst {
+                opcode: 2,
+                defs: vec![],
+                uses: vec![MachOperand::VReg(vreg(0)), MachOperand::VReg(vreg(1))],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+        ];
+        let func = MachFunction {
+            name: "multi_live".into(),
+            insts,
+            blocks: vec![MachBlock {
+                insts: vec![InstId(0), InstId(1), InstId(2), InstId(3)],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 2,
+            next_stack_slot: 0,
+            stack_slots: HashMap::new(),
+        };
+
+        let numbering: HashMap<InstId, u32> = (0..4).map(|i| (InstId(i), i as u32)).collect();
+        let intervals = HashMap::from([
+            (0u32, interval_at(0, 0, 4)),
+            (1u32, interval_at(1, 1, 4)),
+        ]);
+        let crossings = find_call_crossings(&func, &intervals, &numbering);
+        assert_eq!(crossings.len(), 1);
+        assert_eq!(crossings[0].live_across.len(), 2);
+    }
+
+    #[test]
+    fn test_insert_call_save_restore_callee_saved_skipped() {
+        // A VReg assigned to a callee-saved register should NOT get save/restore.
+        let insts = vec![
+            MachInst {
+                opcode: 1,
+                defs: vec![MachOperand::VReg(vreg(0))],
+                uses: vec![],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+            MachInst {
+                opcode: 0xCA,
+                defs: vec![],
+                uses: vec![],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::IS_CALL,
+            },
+            MachInst {
+                opcode: 2,
+                defs: vec![],
+                uses: vec![MachOperand::VReg(vreg(0))],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+        ];
+
+        let mut func = MachFunction {
+            name: "callee_saved_alloc".into(),
+            insts,
+            blocks: vec![MachBlock {
+                insts: vec![InstId(0), InstId(1), InstId(2)],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 1,
+            next_stack_slot: 0,
+            stack_slots: HashMap::new(),
+        };
+
+        let crossings = vec![CallCrossing {
+            call_inst_idx: 1,
+            call_inst_id: InstId(1),
+            live_across: vec![vreg(0)],
+        }];
+
+        // v0 is allocated to X19 (callee-saved).
+        let mut allocation = HashMap::new();
+        allocation.insert(vreg(0), PReg::new(19));
+
+        let caller_saved = aarch64_caller_saved_regs();
+        let pairs = insert_call_save_restore(&mut func, &crossings, &allocation, &caller_saved);
+
+        assert_eq!(pairs, 0, "callee-saved register should not need save/restore");
+    }
+
+    #[test]
+    fn test_insert_call_save_restore_caller_saved_needs_save() {
+        let insts = vec![
+            MachInst {
+                opcode: 1,
+                defs: vec![MachOperand::VReg(vreg(0))],
+                uses: vec![],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+            MachInst {
+                opcode: 0xCA,
+                defs: vec![],
+                uses: vec![],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::IS_CALL,
+            },
+            MachInst {
+                opcode: 2,
+                defs: vec![],
+                uses: vec![MachOperand::VReg(vreg(0))],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+        ];
+
+        let mut func = MachFunction {
+            name: "caller_saved_alloc".into(),
+            insts,
+            blocks: vec![MachBlock {
+                insts: vec![InstId(0), InstId(1), InstId(2)],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 1,
+            next_stack_slot: 0,
+            stack_slots: HashMap::new(),
+        };
+
+        let crossings = vec![CallCrossing {
+            call_inst_idx: 1,
+            call_inst_id: InstId(1),
+            live_across: vec![vreg(0)],
+        }];
+
+        // v0 is allocated to X0 (caller-saved).
+        let mut allocation = HashMap::new();
+        allocation.insert(vreg(0), PReg::new(0));
+
+        let caller_saved = aarch64_caller_saved_regs();
+        let pairs = insert_call_save_restore(&mut func, &crossings, &allocation, &caller_saved);
+
+        assert_eq!(pairs, 1, "caller-saved register needs save/restore");
+
+        // Verify a store and load were inserted.
+        let block = &func.blocks[0];
+        let has_store = block.insts.iter().any(|&id| {
+            func.insts[id.0 as usize].opcode == crate::spill::PSEUDO_SPILL_STORE
+        });
+        let has_load = block.insts.iter().any(|&id| {
+            func.insts[id.0 as usize].opcode == crate::spill::PSEUDO_SPILL_LOAD
+        });
+        assert!(has_store, "should insert store before call");
+        assert!(has_load, "should insert load after call");
+    }
+
+    #[test]
+    fn test_compute_hints_no_crossings() {
+        let crossings: Vec<CallCrossing> = Vec::new();
+        let callee_saved = aarch64_callee_saved_regs();
+        let allocatable = HashMap::new();
+        let hints = compute_call_crossing_hints(&crossings, &callee_saved, &allocatable);
+        assert!(hints.is_empty());
+    }
+
+    #[test]
+    fn test_compute_hints_deduplicates_vregs() {
+        // Same vreg crossing multiple calls should only get one hint entry.
+        let crossings = vec![
+            CallCrossing {
+                call_inst_idx: 5,
+                call_inst_id: InstId(5),
+                live_across: vec![vreg(0)],
+            },
+            CallCrossing {
+                call_inst_idx: 10,
+                call_inst_id: InstId(10),
+                live_across: vec![vreg(0)],
+            },
+        ];
+
+        let callee_saved = aarch64_callee_saved_regs();
+        let mut allocatable = HashMap::new();
+        let gpr: Vec<PReg> = (0u16..=15).chain(19u16..=28).map(PReg::new).collect();
+        allocatable.insert(RegClass::Gpr64, gpr);
+
+        let hints = compute_call_crossing_hints(&crossings, &callee_saved, &allocatable);
+        assert_eq!(hints.len(), 1, "should have one hint entry for v0");
+    }
 }

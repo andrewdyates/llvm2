@@ -820,4 +820,683 @@ mod tests {
         assert_eq!(idx1, 1);
         assert_eq!(idx2, 2);
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case and correctness tests (issue #139)
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a single-block function with given (def_vreg, use_vregs) per instruction.
+    fn make_custom_function(
+        block_specs: Vec<Vec<(Vec<u32>, Vec<u32>)>>, // per-block: Vec<(def_vregs, use_vregs)>
+        succs_map: Vec<Vec<u32>>,                     // per-block: successor block ids
+        preds_map: Vec<Vec<u32>>,                     // per-block: predecessor block ids
+        loop_depths: Vec<u32>,                        // per-block: loop depth
+    ) -> crate::machine_types::MachFunction {
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+        let mut blocks = Vec::new();
+        let mut block_order = Vec::new();
+        let mut max_vreg = 0u32;
+
+        for (bi, block_instrs) in block_specs.iter().enumerate() {
+            let mut block_inst_ids = Vec::new();
+            for (defs, uses) in block_instrs {
+                let inst_id = InstId(insts.len() as u32);
+                let def_ops: Vec<MachOperand> = defs.iter().map(|&id| {
+                    max_vreg = max_vreg.max(id + 1);
+                    MachOperand::VReg(VReg { id, class: RegClass::Gpr64 })
+                }).collect();
+                let use_ops: Vec<MachOperand> = uses.iter().map(|&id| {
+                    max_vreg = max_vreg.max(id + 1);
+                    MachOperand::VReg(VReg { id, class: RegClass::Gpr64 })
+                }).collect();
+                insts.push(MachInst {
+                    opcode: 1,
+                    defs: def_ops,
+                    uses: use_ops,
+                    implicit_defs: Vec::new(),
+                    implicit_uses: Vec::new(),
+                    flags: InstFlags::default(),
+                });
+                block_inst_ids.push(inst_id);
+            }
+
+            let succs: Vec<BlockId> = succs_map.get(bi).map(|s|
+                s.iter().map(|&id| BlockId(id)).collect()
+            ).unwrap_or_default();
+            let preds: Vec<BlockId> = preds_map.get(bi).map(|p|
+                p.iter().map(|&id| BlockId(id)).collect()
+            ).unwrap_or_default();
+            let depth = loop_depths.get(bi).copied().unwrap_or(0);
+
+            blocks.push(MachBlock {
+                insts: block_inst_ids,
+                preds,
+                succs,
+                loop_depth: depth,
+            });
+            block_order.push(BlockId(bi as u32));
+        }
+
+        MachFunction {
+            name: "custom".into(),
+            insts,
+            blocks,
+            block_order,
+            entry_block: BlockId(0),
+            next_vreg: max_vreg,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_empty_function_no_crash() {
+        // A function with no blocks should produce empty results.
+        let func = crate::machine_types::MachFunction {
+            name: "empty".into(),
+            insts: Vec::new(),
+            blocks: Vec::new(),
+            block_order: Vec::new(),
+            entry_block: crate::machine_types::BlockId(0),
+            next_vreg: 0,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+        let result = compute_live_intervals(&func);
+        assert!(result.intervals.is_empty());
+        assert!(result.inst_numbering.is_empty());
+    }
+
+    #[test]
+    fn test_single_instruction_function() {
+        // One block, one instruction: def v0.
+        let func = make_custom_function(
+            vec![vec![(vec![0], vec![])]],
+            vec![vec![]],
+            vec![vec![]],
+            vec![0],
+        );
+        let result = compute_live_intervals(&func);
+        let v0 = result.intervals.get(&0).expect("v0 should have interval");
+        assert_eq!(v0.ranges.len(), 1);
+        assert_eq!(v0.def_positions.len(), 1);
+    }
+
+    #[test]
+    fn test_use_before_def_in_same_block() {
+        // v0 defined early, v1 uses v0 then defs v1.
+        // Block 0: def v0; use v0 def v1; use v1
+        let func = make_custom_function(
+            vec![vec![
+                (vec![0], vec![]),
+                (vec![1], vec![0]),
+                (vec![], vec![1]),
+            ]],
+            vec![vec![]],
+            vec![vec![]],
+            vec![0],
+        );
+        let result = compute_live_intervals(&func);
+
+        let v0 = result.intervals.get(&0).expect("v0 should have interval");
+        let v1 = result.intervals.get(&1).expect("v1 should have interval");
+
+        // v0 defined at inst 0, used at inst 1 -> should be live at both.
+        assert!(v0.is_live_at(0));
+        assert!(v0.is_live_at(1));
+
+        // v1 defined at inst 1, used at inst 2 -> should be live at both.
+        assert!(v1.is_live_at(1));
+        assert!(v1.is_live_at(2));
+    }
+
+    #[test]
+    fn test_multiple_uses_same_vreg() {
+        // v0 is used at multiple points — interval should cover all uses.
+        // Block 0: def v0; use v0; nop; use v0
+        let func = make_custom_function(
+            vec![vec![
+                (vec![0], vec![]),
+                (vec![], vec![0]),
+                (vec![1], vec![]),
+                (vec![], vec![0]),
+            ]],
+            vec![vec![]],
+            vec![vec![]],
+            vec![0],
+        );
+        let result = compute_live_intervals(&func);
+        let v0 = result.intervals.get(&0).expect("v0 should have interval");
+
+        // v0 should be live at inst 0, 1, and 3.
+        assert!(v0.is_live_at(0));
+        assert!(v0.is_live_at(1));
+        assert!(v0.is_live_at(3));
+    }
+
+    #[test]
+    fn test_non_overlapping_intervals_detected() {
+        // v0 lives [0,2), v1 lives [3,5) — they should NOT overlap.
+        let mut a = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+        a.add_range(0, 2);
+        let mut b = LiveInterval::new(VReg { id: 1, class: RegClass::Gpr64 });
+        b.add_range(3, 5);
+        assert!(!a.overlaps(&b));
+        assert!(!b.overlaps(&a));
+    }
+
+    #[test]
+    fn test_live_interval_overlaps_empty() {
+        let empty = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+        let mut non_empty = LiveInterval::new(VReg { id: 1, class: RegClass::Gpr64 });
+        non_empty.add_range(0, 10);
+
+        // An empty interval should not overlap with anything.
+        assert!(!empty.overlaps(&non_empty));
+        assert!(!non_empty.overlaps(&empty));
+        assert!(!empty.overlaps(&empty));
+    }
+
+    #[test]
+    fn test_live_range_single_point() {
+        // A range of [5, 6) covers only instruction 5.
+        let r = LiveRange::new(5, 6);
+        assert!(r.contains(5));
+        assert!(!r.contains(4));
+        assert!(!r.contains(6));
+    }
+
+    #[test]
+    fn test_live_interval_add_range_fully_contained() {
+        // Adding a range that is fully contained in an existing range.
+        let mut interval = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+        interval.add_range(0, 20);
+        interval.add_range(5, 10); // fully contained
+        assert_eq!(interval.ranges.len(), 1);
+        assert_eq!(interval.ranges[0].start, 0);
+        assert_eq!(interval.ranges[0].end, 20);
+    }
+
+    #[test]
+    fn test_live_interval_add_range_superset() {
+        // Adding a range that fully contains existing ranges.
+        let mut interval = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+        interval.add_range(3, 5);
+        interval.add_range(8, 10);
+        interval.add_range(0, 20); // superset of both
+        assert_eq!(interval.ranges.len(), 1);
+        assert_eq!(interval.ranges[0].start, 0);
+        assert_eq!(interval.ranges[0].end, 20);
+    }
+
+    #[test]
+    fn test_diamond_cfg_liveness() {
+        // Block 0: def v0, branch -> block 1 or block 2
+        // Block 1: use v0, def v1
+        // Block 2: use v0, def v2
+        // Block 3 (merge): use v1 (but v2 NOT used in merge — only defined in block 2)
+        //
+        // v0 should be live across blocks 0 -> 1 and 0 -> 2.
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        // Block 0: def v0, branch
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(0)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBB,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(1)), MachOperand::Block(BlockId(2))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 1: use v0, def v1
+        let i2 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 2,
+            defs: vec![MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i3 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(3))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 2: use v0, def v2
+        let i4 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 2,
+            defs: vec![MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i5 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(3))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 3 (merge): use v1
+        let i6 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 3,
+            defs: vec![],
+            uses: vec![MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let func = MachFunction {
+            name: "diamond".into(),
+            insts,
+            blocks: vec![
+                MachBlock {
+                    insts: vec![i0, i1],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(1), BlockId(2)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i2, i3],
+                    preds: vec![BlockId(0)],
+                    succs: vec![BlockId(3)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i4, i5],
+                    preds: vec![BlockId(0)],
+                    succs: vec![BlockId(3)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i6],
+                    preds: vec![BlockId(1), BlockId(2)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+            ],
+            block_order: vec![BlockId(0), BlockId(1), BlockId(2), BlockId(3)],
+            entry_block: BlockId(0),
+            next_vreg: 3,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+
+        let result = compute_live_intervals(&func);
+
+        // v0 should be live in both block 1 and block 2 (used in both).
+        let v0 = result.intervals.get(&0).expect("v0 should have interval");
+        let idx_i2 = result.inst_numbering[&i2]; // use in block 1
+        let idx_i4 = result.inst_numbering[&i4]; // use in block 2
+        assert!(v0.is_live_at(idx_i2), "v0 should be live at its use in block 1");
+        assert!(v0.is_live_at(idx_i4), "v0 should be live at its use in block 2");
+
+        // v1 is defined in block 1 and used in block 3 — should span both.
+        let v1 = result.intervals.get(&1).expect("v1 should have interval");
+        let idx_i6 = result.inst_numbering[&i6]; // use in block 3
+        assert!(v1.is_live_at(idx_i6), "v1 should be live at its use in merge block");
+    }
+
+    #[test]
+    fn test_spill_weight_zero_for_no_positions() {
+        // Interval with ranges but no use/def positions should have weight 0.
+        let mut interval = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+        interval.add_range(0, 10);
+        // spill_weight defaults to 0.0 when not computed.
+        assert_eq!(interval.spill_weight, 0.0);
+    }
+
+    #[test]
+    fn test_spill_weight_increases_with_loop_depth() {
+        // Build two functions: one with loop depth 0, one with loop depth 2.
+        // The same use pattern at higher depth should produce higher weight.
+        use crate::machine_types::*;
+
+        let make_func_with_depth = |depth: u32| {
+            let mut insts = Vec::new();
+            let i0 = InstId(insts.len() as u32);
+            insts.push(MachInst {
+                opcode: 1,
+                defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+                uses: vec![MachOperand::Imm(1)],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            });
+            let i1 = InstId(insts.len() as u32);
+            insts.push(MachInst {
+                opcode: 2,
+                defs: vec![],
+                uses: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            });
+
+            MachFunction {
+                name: "depth_test".into(),
+                insts,
+                blocks: vec![MachBlock {
+                    insts: vec![i0, i1],
+                    preds: Vec::new(),
+                    succs: Vec::new(),
+                    loop_depth: depth,
+                }],
+                block_order: vec![BlockId(0)],
+                entry_block: BlockId(0),
+                next_vreg: 1,
+                next_stack_slot: 0,
+                stack_slots: std::collections::HashMap::new(),
+            }
+        };
+
+        let result_d0 = compute_live_intervals(&make_func_with_depth(0));
+        let result_d2 = compute_live_intervals(&make_func_with_depth(2));
+
+        let w0 = result_d0.intervals.get(&0).unwrap().spill_weight;
+        let w2 = result_d2.intervals.get(&0).unwrap().spill_weight;
+
+        assert!(w2 > w0, "weight at depth 2 ({w2}) should be greater than depth 0 ({w0})");
+    }
+
+    #[test]
+    fn test_multiple_defs_same_vreg() {
+        // A vreg defined twice in different blocks should have a valid interval.
+        // Block 0: def v0, branch
+        // Block 1: def v0 (redefinition), use v0
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(0)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(1))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        let i2 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(1)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i3 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 2,
+            defs: vec![],
+            uses: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let func = MachFunction {
+            name: "multi_def".into(),
+            insts,
+            blocks: vec![
+                MachBlock {
+                    insts: vec![i0, i1],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(1)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i2, i3],
+                    preds: vec![BlockId(0)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+            ],
+            block_order: vec![BlockId(0), BlockId(1)],
+            entry_block: BlockId(0),
+            next_vreg: 1,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+
+        let result = compute_live_intervals(&func);
+        let v0 = result.intervals.get(&0).expect("v0 should have interval");
+        // v0 has defs at two points — interval should cover both.
+        assert!(v0.def_positions.len() >= 2, "v0 should have at least 2 def positions");
+    }
+
+    #[test]
+    fn test_live_interval_is_fixed_property() {
+        let mut interval = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+        assert!(!interval.is_fixed);
+        interval.is_fixed = true;
+        assert!(interval.is_fixed);
+    }
+
+    #[test]
+    fn test_many_blocks_linear_chain() {
+        // 5-block linear chain: each block defines a new vreg and uses the
+        // previous one. Tests iterative fixpoint convergence.
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+        let num_blocks = 5;
+        let mut blocks = Vec::new();
+        let mut block_order = Vec::new();
+
+        for bi in 0..num_blocks {
+            let mut block_insts = Vec::new();
+
+            // Use previous vreg (if not first block).
+            if bi > 0 {
+                let inst_id = InstId(insts.len() as u32);
+                insts.push(MachInst {
+                    opcode: 2,
+                    defs: vec![],
+                    uses: vec![MachOperand::VReg(VReg {
+                        id: (bi - 1) as u32,
+                        class: RegClass::Gpr64,
+                    })],
+                    implicit_defs: Vec::new(),
+                    implicit_uses: Vec::new(),
+                    flags: InstFlags::default(),
+                });
+                block_insts.push(inst_id);
+            }
+
+            // Define new vreg.
+            let inst_id = InstId(insts.len() as u32);
+            insts.push(MachInst {
+                opcode: 1,
+                defs: vec![MachOperand::VReg(VReg {
+                    id: bi as u32,
+                    class: RegClass::Gpr64,
+                })],
+                uses: vec![MachOperand::Imm(bi as i64)],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            });
+            block_insts.push(inst_id);
+
+            // Branch to next block (if not last).
+            if bi < num_blocks - 1 {
+                let inst_id = InstId(insts.len() as u32);
+                insts.push(MachInst {
+                    opcode: 0xBA,
+                    defs: vec![],
+                    uses: vec![MachOperand::Block(BlockId((bi + 1) as u32))],
+                    implicit_defs: Vec::new(),
+                    implicit_uses: Vec::new(),
+                    flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+                });
+                block_insts.push(inst_id);
+            }
+
+            let preds = if bi == 0 { Vec::new() } else { vec![BlockId((bi - 1) as u32)] };
+            let succs = if bi == num_blocks - 1 { Vec::new() } else { vec![BlockId((bi + 1) as u32)] };
+
+            blocks.push(MachBlock {
+                insts: block_insts,
+                preds,
+                succs,
+                loop_depth: 0,
+            });
+            block_order.push(BlockId(bi as u32));
+        }
+
+        let func = MachFunction {
+            name: "chain".into(),
+            insts,
+            blocks,
+            block_order,
+            entry_block: BlockId(0),
+            next_vreg: num_blocks as u32,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+
+        let result = compute_live_intervals(&func);
+
+        // Each vreg (except the last) should be live across at least the def
+        // block and the next block where it's used.
+        for bi in 0..(num_blocks - 1) {
+            let v = result.intervals.get(&(bi as u32));
+            assert!(v.is_some(), "v{bi} should have an interval");
+        }
+    }
+
+    #[test]
+    fn test_empty_block_skipped() {
+        // A function with an empty block should not crash.
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(0)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(1))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        let i2 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 2,
+            defs: vec![],
+            uses: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let func = MachFunction {
+            name: "empty_block".into(),
+            insts,
+            blocks: vec![
+                MachBlock {
+                    insts: vec![i0, i1],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(1)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: Vec::new(), // empty block
+                    preds: vec![BlockId(0)],
+                    succs: vec![BlockId(2)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i2],
+                    preds: vec![BlockId(1)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+            ],
+            block_order: vec![BlockId(0), BlockId(1), BlockId(2)],
+            entry_block: BlockId(0),
+            next_vreg: 1,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+
+        let result = compute_live_intervals(&func);
+        // Should not crash and v0 should have an interval.
+        assert!(result.intervals.contains_key(&0));
+    }
+
+    #[test]
+    fn test_no_overlapping_allocations_invariant() {
+        // Build a function, compute intervals, and verify that no two
+        // intervals for different vregs have identical ranges that would
+        // prevent allocation. This is a structural sanity check.
+        let func = make_loop_function();
+        let result = compute_live_intervals(&func);
+
+        // Every interval should have at least one range.
+        for (vreg_id, interval) in &result.intervals {
+            assert!(
+                !interval.ranges.is_empty(),
+                "vreg {vreg_id} should have at least one range"
+            );
+        }
+
+        // Ranges within a single interval should be sorted and non-overlapping.
+        for (vreg_id, interval) in &result.intervals {
+            for i in 1..interval.ranges.len() {
+                assert!(
+                    interval.ranges[i - 1].end <= interval.ranges[i].start,
+                    "vreg {vreg_id}: ranges {:?} and {:?} overlap or are unsorted",
+                    interval.ranges[i - 1],
+                    interval.ranges[i]
+                );
+            }
+        }
+    }
 }

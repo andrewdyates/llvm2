@@ -496,4 +496,318 @@ mod tests {
         });
         assert!(block1_has_load, "block 1 should have a spill load before use");
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case and correctness tests (issue #139)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_reg_class_size_all_classes() {
+        // Exhaustive: every RegClass variant must have a sensible size.
+        assert_eq!(reg_class_size(RegClass::Gpr32), 4);
+        assert_eq!(reg_class_size(RegClass::Gpr64), 8);
+        assert_eq!(reg_class_size(RegClass::Fpr8), 1);
+        assert_eq!(reg_class_size(RegClass::Fpr16), 2);
+        assert_eq!(reg_class_size(RegClass::Fpr32), 4);
+        assert_eq!(reg_class_size(RegClass::Fpr64), 8);
+        assert_eq!(reg_class_size(RegClass::Fpr128), 16);
+        assert_eq!(reg_class_size(RegClass::System), 4);
+    }
+
+    #[test]
+    fn test_spill_code_instruction_ordering_invariant() {
+        // After spill insertion, for each original instruction:
+        // loads come before it, stores come after it.
+        // This is a structural correctness invariant.
+        let (mut func, allocation) = make_simple_def_use();
+        let v0 = VReg { id: 0, class: RegClass::Gpr64 };
+
+        insert_spill_code(&mut func, &[v0], &allocation);
+
+        let block = &func.blocks[0];
+        let opcodes: Vec<u16> = block.insts.iter()
+            .map(|&id| func.insts[id.0 as usize].opcode)
+            .collect();
+
+        // Expected order: [def_v0, STORE, LOAD, use_v0]
+        // (store after def, load before use)
+        let def_pos = opcodes.iter().position(|&op| op == 1).unwrap();
+        let store_pos = opcodes.iter().position(|&op| op == PSEUDO_SPILL_STORE).unwrap();
+        let load_pos = opcodes.iter().position(|&op| op == PSEUDO_SPILL_LOAD).unwrap();
+        let use_pos = opcodes.iter().position(|&op| op == 2).unwrap();
+
+        assert!(def_pos < store_pos, "store must come after def");
+        assert!(load_pos < use_pos, "load must come before use");
+        assert!(store_pos < load_pos, "store should come before load (def before use)");
+    }
+
+    #[test]
+    fn test_spill_code_def_and_use_same_instruction() {
+        // An instruction that both defines and uses v0 should get both
+        // a load (for the use) and a store (for the def).
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        // inst 0: v0 = v0 + 1 (both def and use of v0)
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 }),
+                MachOperand::Imm(1),
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let mut func = MachFunction {
+            name: "def_use_same".into(),
+            insts,
+            blocks: vec![MachBlock {
+                insts: vec![i0],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 1,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+
+        let v0 = VReg { id: 0, class: RegClass::Gpr64 };
+        insert_spill_code(&mut func, &[v0], &HashMap::new());
+
+        let block = &func.blocks[0];
+        let has_load = block.insts.iter().any(|&id| func.insts[id.0 as usize].opcode == PSEUDO_SPILL_LOAD);
+        let has_store = block.insts.iter().any(|&id| func.insts[id.0 as usize].opcode == PSEUDO_SPILL_STORE);
+
+        assert!(has_load, "should insert load for the use of v0");
+        assert!(has_store, "should insert store for the def of v0");
+    }
+
+    #[test]
+    fn test_spill_multiple_uses_in_single_instruction() {
+        // An instruction that uses v0 twice should get one load
+        // (the scan is per-use, so may get two loads).
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(42)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 2,
+            defs: vec![],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 }),
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 }),
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let mut func = MachFunction {
+            name: "multi_use".into(),
+            insts,
+            blocks: vec![MachBlock {
+                insts: vec![i0, i1],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 1,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+
+        let v0 = VReg { id: 0, class: RegClass::Gpr64 };
+        insert_spill_code(&mut func, &[v0], &HashMap::new());
+
+        // Should have at least one load before the double-use instruction.
+        let load_count = func.blocks[0].insts.iter()
+            .filter(|&&id| func.insts[id.0 as usize].opcode == PSEUDO_SPILL_LOAD)
+            .count();
+        // Two VReg uses of v0 means two loads (one per operand scan).
+        assert!(load_count >= 2, "should have load(s) for double-use: got {load_count}");
+    }
+
+    #[test]
+    fn test_spill_fpr128_slot_size() {
+        // FPR128 should allocate a 16-byte stack slot.
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Fpr128 })],
+            uses: vec![MachOperand::FImm(0.0)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 2,
+            defs: vec![],
+            uses: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Fpr128 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let mut func = MachFunction {
+            name: "fpr128_spill".into(),
+            insts,
+            blocks: vec![MachBlock {
+                insts: vec![i0, i1],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 1,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+
+        let v0 = VReg { id: 0, class: RegClass::Fpr128 };
+        let spill_infos = insert_spill_code(&mut func, &[v0], &HashMap::new());
+
+        assert_eq!(spill_infos.len(), 1);
+        let slot = &func.stack_slots[&spill_infos[0].slot];
+        assert_eq!(slot.size, 16, "Fpr128 should use 16-byte slot");
+        assert_eq!(slot.align, 16, "Fpr128 should use 16-byte alignment");
+    }
+
+    #[test]
+    fn test_spill_preserves_non_spilled_instructions() {
+        // Instructions that do not use/define spilled VRegs should be
+        // unchanged after spill insertion.
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(42)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        // Non-spilled instruction.
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 99,
+            defs: vec![MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(7)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i2 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 2,
+            defs: vec![],
+            uses: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let mut func = MachFunction {
+            name: "preserve_non_spilled".into(),
+            insts,
+            blocks: vec![MachBlock {
+                insts: vec![i0, i1, i2],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 2,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+
+        let v0 = VReg { id: 0, class: RegClass::Gpr64 };
+        insert_spill_code(&mut func, &[v0], &HashMap::new());
+
+        // The non-spilled instruction (opcode 99) should still be in the block.
+        let has_non_spilled = func.blocks[0].insts.iter()
+            .any(|&id| func.insts[id.0 as usize].opcode == 99);
+        assert!(has_non_spilled, "non-spilled instruction should be preserved");
+    }
+
+    #[test]
+    fn test_spill_unique_stack_slots() {
+        // Three spilled VRegs should each get their own unique stack slot.
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        for id in 0..3u32 {
+            let _inst_id = InstId(insts.len() as u32);
+            insts.push(MachInst {
+                opcode: 1,
+                defs: vec![MachOperand::VReg(VReg { id, class: RegClass::Gpr64 })],
+                uses: vec![MachOperand::Imm(id as i64)],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            });
+        }
+        for id in 0..3u32 {
+            let _inst_id = InstId(insts.len() as u32);
+            insts.push(MachInst {
+                opcode: 2,
+                defs: vec![],
+                uses: vec![MachOperand::VReg(VReg { id, class: RegClass::Gpr64 })],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            });
+        }
+
+        let inst_ids: Vec<InstId> = (0..6).map(|i| InstId(i)).collect();
+        let mut func = MachFunction {
+            name: "triple_spill".into(),
+            insts,
+            blocks: vec![MachBlock {
+                insts: inst_ids,
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 3,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+
+        let vregs: Vec<VReg> = (0..3).map(|id| VReg { id, class: RegClass::Gpr64 }).collect();
+        let spill_infos = insert_spill_code(&mut func, &vregs, &HashMap::new());
+
+        assert_eq!(spill_infos.len(), 3);
+        let slots: std::collections::HashSet<StackSlotId> =
+            spill_infos.iter().map(|si| si.slot).collect();
+        assert_eq!(slots.len(), 3, "each spilled vreg should have a unique slot");
+    }
 }

@@ -214,7 +214,7 @@ mod tests {
     use super::*;
     use crate::machine_types::{
         BlockId, InstFlags, MachBlock, MachFunction, MachInst, MachOperand,
-        RegClass, StackSlotId, VReg,
+        PReg, RegClass, StackSlotId, VReg,
     };
     use std::collections::HashMap;
 
@@ -400,5 +400,266 @@ mod tests {
         assert_eq!(replaced_inst.opcode, 1);
         assert_eq!(replaced_inst.uses.len(), 1);
         assert_eq!(replaced_inst.uses[0], MachOperand::Imm(42));
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case and correctness tests (issue #139)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_classify_expensive_side_effects() {
+        let inst = MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(vreg(0))],
+            uses: vec![MachOperand::Imm(0)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::HAS_SIDE_EFFECTS,
+        };
+        assert_eq!(classify_remat_cost(&inst), RematCost::Expensive);
+    }
+
+    #[test]
+    fn test_classify_expensive_writes_memory() {
+        let inst = MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(vreg(0))],
+            uses: vec![MachOperand::VReg(vreg(1))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::WRITES_MEMORY,
+        };
+        assert_eq!(classify_remat_cost(&inst), RematCost::Expensive);
+    }
+
+    #[test]
+    fn test_classify_expensive_phi() {
+        let inst = MachInst {
+            opcode: 0x00,
+            defs: vec![MachOperand::VReg(vreg(0))],
+            uses: vec![MachOperand::VReg(vreg(1)), MachOperand::VReg(vreg(2))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_PHI,
+        };
+        assert_eq!(classify_remat_cost(&inst), RematCost::Expensive);
+    }
+
+    #[test]
+    fn test_classify_expensive_branch() {
+        let inst = MachInst {
+            opcode: 0xBB,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(1))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        };
+        assert_eq!(classify_remat_cost(&inst), RematCost::Expensive);
+    }
+
+    #[test]
+    fn test_classify_expensive_block_operand() {
+        // Even without special flags, a Block operand makes it expensive.
+        let inst = MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(vreg(0))],
+            uses: vec![MachOperand::Block(BlockId(0))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        };
+        assert_eq!(classify_remat_cost(&inst), RematCost::Expensive);
+    }
+
+    #[test]
+    fn test_classify_expensive_stack_slot_operand() {
+        let inst = MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(vreg(0))],
+            uses: vec![MachOperand::StackSlot(StackSlotId(0))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        };
+        assert_eq!(classify_remat_cost(&inst), RematCost::Expensive);
+    }
+
+    #[test]
+    fn test_classify_free_fimm() {
+        // FMOV Dd, #3.14 — float immediate, no register uses.
+        let inst = MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(vreg(0))],
+            uses: vec![MachOperand::FImm(3.14)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        };
+        assert_eq!(classify_remat_cost(&inst), RematCost::Free);
+    }
+
+    #[test]
+    fn test_classify_expensive_no_uses() {
+        // No uses at all (and no immediates) -> Expensive (not Free).
+        let inst = MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(vreg(0))],
+            uses: vec![],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        };
+        assert_eq!(classify_remat_cost(&inst), RematCost::Expensive);
+    }
+
+    #[test]
+    fn test_classify_expensive_preg_use() {
+        // Physical register use counts as a register use.
+        let inst = MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(vreg(0))],
+            uses: vec![MachOperand::PReg(PReg::new(0))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        };
+        // One PReg use, zero imms -> Expensive (no imm for Cheap).
+        assert_eq!(classify_remat_cost(&inst), RematCost::Expensive);
+    }
+
+    #[test]
+    fn test_classify_cheap_preg_plus_imm() {
+        // PReg + Imm counts as Cheap (one register + one immediate).
+        let inst = MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(vreg(0))],
+            uses: vec![MachOperand::PReg(PReg::new(0)), MachOperand::Imm(5)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        };
+        assert_eq!(classify_remat_cost(&inst), RematCost::Cheap);
+    }
+
+    #[test]
+    fn test_find_remat_candidates_no_spills() {
+        let func = make_func(vec![MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(vreg(0))],
+            uses: vec![MachOperand::Imm(42)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        }]);
+        let candidates = find_remat_candidates(&func, &[]);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_apply_remat_multiple_loads() {
+        // Two spill loads for the same vreg should both be replaced.
+        let mut func = make_func(vec![
+            MachInst {
+                opcode: 1,
+                defs: vec![MachOperand::VReg(vreg(0))],
+                uses: vec![MachOperand::Imm(99)],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+            MachInst {
+                opcode: PSEUDO_SPILL_LOAD,
+                defs: vec![MachOperand::VReg(vreg(0))],
+                uses: vec![MachOperand::StackSlot(StackSlotId(0))],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::READS_MEMORY,
+            },
+            MachInst {
+                opcode: 3,
+                defs: vec![],
+                uses: vec![MachOperand::VReg(vreg(0))],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+            MachInst {
+                opcode: PSEUDO_SPILL_LOAD,
+                defs: vec![MachOperand::VReg(vreg(0))],
+                uses: vec![MachOperand::StackSlot(StackSlotId(0))],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::READS_MEMORY,
+            },
+            MachInst {
+                opcode: 4,
+                defs: vec![],
+                uses: vec![MachOperand::VReg(vreg(0))],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+        ]);
+
+        let candidates = vec![RematCandidate {
+            vreg: vreg(0),
+            defining_inst_id: InstId(0),
+            cost: RematCost::Free,
+        }];
+        let mut spill_infos = vec![SpillInfo {
+            vreg: vreg(0),
+            slot: StackSlotId(0),
+        }];
+
+        let count = apply_rematerialization(&mut func, &candidates, &mut spill_infos);
+        assert_eq!(count, 2, "should rematerialize both spill loads");
+        assert!(spill_infos.is_empty());
+    }
+
+    #[test]
+    fn test_apply_remat_preserves_non_candidate_loads() {
+        // v0 is a remat candidate, v1 is not. Only v0's loads should be replaced.
+        let mut func = make_func(vec![
+            MachInst {
+                opcode: 1,
+                defs: vec![MachOperand::VReg(vreg(0))],
+                uses: vec![MachOperand::Imm(42)],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+            MachInst {
+                opcode: PSEUDO_SPILL_LOAD,
+                defs: vec![MachOperand::VReg(vreg(0))],
+                uses: vec![MachOperand::StackSlot(StackSlotId(0))],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::READS_MEMORY,
+            },
+            MachInst {
+                opcode: PSEUDO_SPILL_LOAD,
+                defs: vec![MachOperand::VReg(vreg(1))],
+                uses: vec![MachOperand::StackSlot(StackSlotId(1))],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::READS_MEMORY,
+            },
+        ]);
+
+        let candidates = vec![RematCandidate {
+            vreg: vreg(0),
+            defining_inst_id: InstId(0),
+            cost: RematCost::Free,
+        }];
+        let mut spill_infos = vec![
+            SpillInfo { vreg: vreg(0), slot: StackSlotId(0) },
+            SpillInfo { vreg: vreg(1), slot: StackSlotId(1) },
+        ];
+
+        let count = apply_rematerialization(&mut func, &candidates, &mut spill_infos);
+        assert_eq!(count, 1, "only v0's load should be replaced");
+        assert_eq!(spill_infos.len(), 1, "v1's spill info should remain");
+        assert_eq!(spill_infos[0].vreg.id, 1);
     }
 }

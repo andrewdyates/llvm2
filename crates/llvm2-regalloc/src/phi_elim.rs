@@ -762,4 +762,471 @@ mod tests {
         assert_eq!(regs[&0], 200, "v0 should be 200 (old v1)");
         assert_eq!(regs[&1], 100, "v1 should be 100 (old v0)");
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case and correctness tests (issue #139)
+    // -----------------------------------------------------------------------
+
+    /// Helper to create a minimal test function.
+    fn make_empty_func(next_vreg: u32) -> MachFunction {
+        MachFunction {
+            name: "test".into(),
+            insts: Vec::new(),
+            blocks: Vec::new(),
+            block_order: Vec::new(),
+            entry_block: BlockId(0),
+            next_vreg,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_parallel_copy_four_way_cycle() {
+        // v0 <- v1, v1 <- v2, v2 <- v3, v3 <- v0 — 4-way rotation.
+        let mut func = make_empty_func(10);
+        let v0 = VReg { id: 0, class: RegClass::Gpr64 };
+        let v1 = VReg { id: 1, class: RegClass::Gpr64 };
+        let v2 = VReg { id: 2, class: RegClass::Gpr64 };
+        let v3 = VReg { id: 3, class: RegClass::Gpr64 };
+
+        let copies = vec![(v0, v1), (v1, v2), (v2, v3), (v3, v0)];
+        let result = resolve_parallel_copies(&copies, &mut func);
+
+        // Must use at least one temporary.
+        assert!(result.len() > 4, "4-way cycle needs temps: got {:?}", result);
+
+        // Simulate and verify correctness.
+        let mut regs: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
+        regs.insert(0, 10); regs.insert(1, 20); regs.insert(2, 30); regs.insert(3, 40);
+        for &(dst, _) in &result {
+            regs.entry(dst.id).or_insert(0);
+        }
+        // Reset.
+        regs.insert(0, 10); regs.insert(1, 20); regs.insert(2, 30); regs.insert(3, 40);
+        for &(dst, src) in &result {
+            let val = regs[&src.id];
+            regs.insert(dst.id, val);
+        }
+
+        assert_eq!(regs[&0], 20, "v0 should have old v1");
+        assert_eq!(regs[&1], 30, "v1 should have old v2");
+        assert_eq!(regs[&2], 40, "v2 should have old v3");
+        assert_eq!(regs[&3], 10, "v3 should have old v0");
+    }
+
+    #[test]
+    fn test_parallel_copy_self_copy_ignored() {
+        // v0 <- v0 should be a no-op.
+        let mut func = make_empty_func(10);
+        let v0 = VReg { id: 0, class: RegClass::Gpr64 };
+        let v1 = VReg { id: 1, class: RegClass::Gpr64 };
+
+        // Mix self-copies with real copies.
+        let copies = vec![(v0, v1)]; // just one real copy
+        let result = resolve_parallel_copies(&copies, &mut func);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], (v0, v1));
+    }
+
+    #[test]
+    fn test_parallel_copy_independent_copies() {
+        // Independent copies: v0 <- v2, v1 <- v3 (no dependencies).
+        let mut func = make_empty_func(10);
+        let v0 = VReg { id: 0, class: RegClass::Gpr64 };
+        let v1 = VReg { id: 1, class: RegClass::Gpr64 };
+        let v2 = VReg { id: 2, class: RegClass::Gpr64 };
+        let v3 = VReg { id: 3, class: RegClass::Gpr64 };
+
+        let copies = vec![(v0, v2), (v1, v3)];
+        let result = resolve_parallel_copies(&copies, &mut func);
+        assert_eq!(result.len(), 2, "independent copies need no temps");
+    }
+
+    #[test]
+    fn test_parallel_copy_chain_correctness_simulation() {
+        // Chain: v0 <- v1, v1 <- v2. After parallel execution:
+        // v0 = old_v1, v1 = old_v2.
+        let mut func = make_empty_func(10);
+        let v0 = VReg { id: 0, class: RegClass::Gpr64 };
+        let v1 = VReg { id: 1, class: RegClass::Gpr64 };
+        let v2 = VReg { id: 2, class: RegClass::Gpr64 };
+
+        let copies = vec![(v0, v1), (v1, v2)];
+        let result = resolve_parallel_copies(&copies, &mut func);
+
+        let mut regs: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
+        regs.insert(0, 10); regs.insert(1, 20); regs.insert(2, 30);
+        for &(dst, src) in &result {
+            let val = regs[&src.id];
+            regs.insert(dst.id, val);
+        }
+        assert_eq!(regs[&0], 20, "v0 should have old v1");
+        assert_eq!(regs[&1], 30, "v1 should have old v2");
+    }
+
+    #[test]
+    fn test_critical_edge_splitting_no_edges_no_changes() {
+        // A single-block function has no edges to split.
+        use crate::machine_types::*;
+        let mut func = MachFunction {
+            name: "single".into(),
+            insts: vec![MachInst {
+                opcode: 0xFF,
+                defs: vec![],
+                uses: vec![],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::IS_RETURN.union(InstFlags::IS_TERMINATOR),
+            }],
+            blocks: vec![MachBlock {
+                insts: vec![InstId(0)],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 0,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        };
+
+        let splits = split_critical_edges(&mut func);
+        assert_eq!(splits, 0);
+        assert_eq!(func.blocks.len(), 1);
+    }
+
+    #[test]
+    fn test_eliminate_phis_no_phis_no_change() {
+        // A function with no phi instructions should be unchanged.
+        use crate::machine_types::*;
+        let mut func = MachFunction {
+            name: "no_phis".into(),
+            insts: vec![MachInst {
+                opcode: 1,
+                defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+                uses: vec![MachOperand::Imm(0)],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            }],
+            blocks: vec![MachBlock {
+                insts: vec![InstId(0)],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 1,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        };
+
+        let insts_before = func.insts.len();
+        eliminate_phis(&mut func);
+        assert_eq!(func.insts.len(), insts_before, "no phis means no changes");
+    }
+
+    #[test]
+    fn test_eliminate_phis_copies_go_to_correct_predecessor() {
+        let mut func = make_diamond_with_phi();
+        eliminate_phis(&mut func);
+
+        // Block 1 (then) should now have a copy instruction (v2 <- v0).
+        let block1_has_copy = func.blocks[1].insts.iter().any(|&id| {
+            func.insts[id.0 as usize].opcode == PSEUDO_COPY
+        });
+        assert!(block1_has_copy, "block 1 should have a copy for the phi");
+
+        // Block 2 (else) should now have a copy instruction (v2 <- v1).
+        let block2_has_copy = func.blocks[2].insts.iter().any(|&id| {
+            func.insts[id.0 as usize].opcode == PSEUDO_COPY
+        });
+        assert!(block2_has_copy, "block 2 should have a copy for the phi");
+    }
+
+    #[test]
+    fn test_eliminate_phis_copy_before_terminator() {
+        let mut func = make_diamond_with_phi();
+        eliminate_phis(&mut func);
+
+        // In each predecessor block, the copy should be inserted before
+        // the terminator (branch) instruction, not after it.
+        for block_idx in [1usize, 2usize] {
+            let block = &func.blocks[block_idx];
+            let insts = &block.insts;
+            if insts.len() < 2 {
+                continue;
+            }
+            let last_inst = &func.insts[insts.last().unwrap().0 as usize];
+            assert!(
+                last_inst.flags.is_branch() || last_inst.flags.is_terminator(),
+                "block {block_idx}: last instruction should still be a terminator"
+            );
+        }
+    }
+
+    #[test]
+    fn test_critical_edge_split_new_block_in_block_order() {
+        let mut func = make_critical_edge_cfg();
+        let edges_split = split_critical_edges(&mut func);
+        assert_eq!(edges_split, 2);
+
+        // The new blocks should appear in block_order.
+        assert!(func.block_order.len() >= 6, "should have original 4 + 2 new blocks");
+
+        // New blocks should be contiguous in block_order.
+        for &block_id in &func.block_order {
+            assert!(
+                (block_id.0 as usize) < func.blocks.len(),
+                "block_order references non-existent block {:?}",
+                block_id
+            );
+        }
+    }
+
+    #[test]
+    fn test_parallel_copy_preserves_all_values() {
+        // Exhaustive simulation for a 5-way rotation.
+        let mut func = make_empty_func(20);
+        let vregs: Vec<VReg> = (0..5).map(|id| VReg { id, class: RegClass::Gpr64 }).collect();
+        let copies: Vec<(VReg, VReg)> = (0..5).map(|i| (vregs[i], vregs[(i + 1) % 5])).collect();
+        let result = resolve_parallel_copies(&copies, &mut func);
+
+        let initial: Vec<i64> = vec![100, 200, 300, 400, 500];
+        let mut regs: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
+        for i in 0..5 { regs.insert(i as u32, initial[i]); }
+        for &(dst, _) in &result { regs.entry(dst.id).or_insert(0); }
+        for i in 0..5 { regs.insert(i as u32, initial[i]); }
+        for &(dst, src) in &result {
+            let val = regs[&src.id];
+            regs.insert(dst.id, val);
+        }
+
+        // Each v[i] should get old v[(i+1)%5].
+        for i in 0..5 {
+            let expected = initial[(i + 1) % 5];
+            assert_eq!(
+                regs[&(i as u32)], expected,
+                "v{i} should be {expected} (old v{})",
+                (i + 1) % 5
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_terminator_pos_all_terminators() {
+        // When ALL instructions are terminators, insertion should be at position 0.
+        use crate::machine_types::*;
+        let insts = vec![
+            MachInst {
+                opcode: 0xBA,
+                defs: vec![],
+                uses: vec![],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+            },
+        ];
+        let block = MachBlock {
+            insts: vec![InstId(0)],
+            preds: Vec::new(),
+            succs: Vec::new(),
+            loop_depth: 0,
+        };
+        let pos = find_terminator_pos(&block, &insts);
+        assert_eq!(pos, 0, "with all terminators, insert at 0");
+    }
+
+    #[test]
+    fn test_find_terminator_pos_no_terminators() {
+        // When NO instructions are terminators, insertion should be at end.
+        use crate::machine_types::*;
+        let insts = vec![
+            MachInst {
+                opcode: 1,
+                defs: vec![],
+                uses: vec![],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+            MachInst {
+                opcode: 2,
+                defs: vec![],
+                uses: vec![],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+        ];
+        let block = MachBlock {
+            insts: vec![InstId(0), InstId(1)],
+            preds: Vec::new(),
+            succs: Vec::new(),
+            loop_depth: 0,
+        };
+        let pos = find_terminator_pos(&block, &insts);
+        assert_eq!(pos, 2, "with no terminators, insert at end");
+    }
+
+    #[test]
+    fn test_eliminate_phis_multiple_phis_same_block() {
+        // Block 3 has two phis: phi v2 = [v0, v1], phi v3 = [v4, v5].
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        // Block 0: def v0, v4, branch -> block 1 or block 2
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(10)],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i0b = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 4, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(40)],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(20)],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1b = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 5, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(50)],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let branch = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBB,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(1)), MachOperand::Block(BlockId(2))],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 1: branch to 3
+        let b1_br = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![], uses: vec![MachOperand::Block(BlockId(3))],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 2: branch to 3
+        let b2_br = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![], uses: vec![MachOperand::Block(BlockId(3))],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 3: phi v2 = [v0, v1], phi v3 = [v4, v5], use v2, use v3
+        let phi1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0x00,
+            defs: vec![MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 })],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 }),
+                MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 }),
+            ],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::IS_PHI,
+        });
+        let phi2 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0x00,
+            defs: vec![MachOperand::VReg(VReg { id: 3, class: RegClass::Gpr64 })],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 4, class: RegClass::Gpr64 }),
+                MachOperand::VReg(VReg { id: 5, class: RegClass::Gpr64 }),
+            ],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::IS_PHI,
+        });
+        let use_inst = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 3,
+            defs: vec![],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 }),
+                MachOperand::VReg(VReg { id: 3, class: RegClass::Gpr64 }),
+            ],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let mut func = MachFunction {
+            name: "multi_phi".into(),
+            insts,
+            blocks: vec![
+                MachBlock {
+                    insts: vec![i0, i0b, i1, i1b, branch],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(1), BlockId(2)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![b1_br],
+                    preds: vec![BlockId(0)],
+                    succs: vec![BlockId(3)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![b2_br],
+                    preds: vec![BlockId(0)],
+                    succs: vec![BlockId(3)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![phi1, phi2, use_inst],
+                    preds: vec![BlockId(1), BlockId(2)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+            ],
+            block_order: vec![BlockId(0), BlockId(1), BlockId(2), BlockId(3)],
+            entry_block: BlockId(0),
+            next_vreg: 6,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        };
+
+        eliminate_phis(&mut func);
+
+        // Both phis should be eliminated.
+        for &block_id in &func.block_order {
+            let block = &func.blocks[block_id.0 as usize];
+            for &inst_id in &block.insts {
+                let inst = &func.insts[inst_id.0 as usize];
+                assert!(!inst.flags.is_phi(), "all phis should be eliminated");
+            }
+        }
+
+        // Each predecessor should have 2 copies (one for each phi).
+        let count_copies_in_block = |block_idx: usize| -> usize {
+            func.blocks[block_idx].insts.iter()
+                .filter(|&&id| func.insts[id.0 as usize].opcode == PSEUDO_COPY)
+                .count()
+        };
+        assert_eq!(count_copies_in_block(1), 2, "block 1 should have 2 copies");
+        assert_eq!(count_copies_in_block(2), 2, "block 2 should have 2 copies");
+    }
 }

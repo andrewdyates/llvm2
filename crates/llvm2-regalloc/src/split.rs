@@ -427,4 +427,194 @@ mod tests {
         assert_eq!(result.new_interval.start(), 10);
         assert_eq!(result.new_interval.end(), 20);
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case and correctness tests (issue #139)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_find_optimal_split_point_two_uses() {
+        // Uses at 2 and 10. Gap = 8, midpoint = 6.
+        let interval = make_interval(0, &[(0, 15)], &[2, 10], &[]);
+        let split = find_optimal_split_point(&interval);
+        assert_eq!(split, Some(6));
+    }
+
+    #[test]
+    fn test_find_optimal_split_point_equal_gaps() {
+        // Uses at 0, 5, 10 — two gaps of size 5 each.
+        let interval = make_interval(0, &[(0, 15)], &[0, 5, 10], &[]);
+        let split = find_optimal_split_point(&interval);
+        // Both gaps are 5, so should pick the first one found: mid of [0,5] = 2.
+        assert!(split.is_some());
+        let sp = split.unwrap();
+        // Either gap midpoint is valid.
+        assert!(sp == 2 || sp == 7, "split should be at midpoint of one gap: got {sp}");
+    }
+
+    #[test]
+    fn test_find_optimal_split_point_gap_size_1() {
+        // Uses at 3 and 5. Gap = 2. Midpoint = 4. Gap >= 2 so should split.
+        let interval = make_interval(0, &[(0, 10)], &[3, 5], &[]);
+        let split = find_optimal_split_point(&interval);
+        assert_eq!(split, Some(4));
+    }
+
+    #[test]
+    fn test_find_optimal_split_point_empty_interval() {
+        let interval = make_interval(0, &[], &[], &[]);
+        let split = find_optimal_split_point(&interval);
+        assert_eq!(split, None);
+    }
+
+    #[test]
+    fn test_analyze_split_candidates_empty_positions() {
+        let interval = make_interval(0, &[(0, 10)], &[], &[]);
+        let candidates = analyze_split_candidates(&interval, &[], 10);
+        assert!(candidates.is_empty() || candidates[0] == SplitDecision::NoSplit);
+    }
+
+    #[test]
+    fn test_analyze_split_candidates_small_gap() {
+        // Uses at 0 and 2. Gap = 2 but gap_start=1, gap_end=2 -> gap_size=1.
+        // gap_size < 2 so should produce SplitBeforeUse.
+        let interval = make_interval(0, &[(0, 5)], &[0, 2], &[]);
+        let candidates = analyze_split_candidates(&interval, &[], 10);
+        assert!(!candidates.is_empty());
+        match &candidates[0] {
+            SplitDecision::SplitBeforeUse(pos) => {
+                assert_eq!(*pos, 2);
+            }
+            SplitDecision::SplitAroundRegion { .. } => {
+                // Also acceptable if gap >= 2.
+            }
+            other => panic!("Unexpected decision: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_analyze_split_candidates_multiple_decisions() {
+        // Uses at 0, 10, 30, 35.
+        // Gaps: (10, 1, 10) size=9, (20, 11, 30) size=19, (5, 31, 35) size=4.
+        // Sorted: size 19 first, then 9, then 4.
+        let interval = make_interval(0, &[(0, 40)], &[0, 10, 30, 35], &[]);
+        let candidates = analyze_split_candidates(&interval, &[], 10);
+        assert!(candidates.len() >= 3, "should have 3 candidates");
+        // First should be the largest gap (11..30, size 19).
+        match &candidates[0] {
+            SplitDecision::SplitAroundRegion { start, end } => {
+                assert_eq!(*start, 11);
+                assert_eq!(*end, 30);
+            }
+            other => panic!("Expected largest gap first, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_split_interval_creates_copy_instruction() {
+        let mut func = make_test_func(20);
+        let interval = make_interval(0, &[(0, 20)], &[2, 18], &[0]);
+        let insts_before = func.insts.len();
+
+        let result = split_interval(&interval, 10, &mut func);
+        assert!(result.is_some());
+
+        // A PSEUDO_COPY instruction should have been inserted.
+        assert!(func.insts.len() > insts_before, "should have added a copy instruction");
+        let copy_inst = &func.insts[insts_before];
+        assert_eq!(copy_inst.opcode, crate::phi_elim::PSEUDO_COPY);
+    }
+
+    #[test]
+    fn test_split_interval_allocates_new_vreg() {
+        let mut func = make_test_func(20);
+        let original_next_vreg = func.next_vreg;
+        let interval = make_interval(0, &[(0, 20)], &[2, 18], &[0]);
+
+        let result = split_interval(&interval, 10, &mut func).unwrap();
+        assert!(func.next_vreg > original_next_vreg, "should allocate a new vreg");
+        assert_eq!(result.new_vreg.id, original_next_vreg);
+    }
+
+    #[test]
+    fn test_split_interval_use_positions_partitioned() {
+        let mut func = make_test_func(20);
+        let interval = make_interval(0, &[(0, 20)], &[2, 5, 12, 18], &[0]);
+
+        let result = split_interval(&interval, 10, &mut func).unwrap();
+
+        // Uses before split point go to original.
+        assert!(result.original_interval.use_positions.contains(&2));
+        assert!(result.original_interval.use_positions.contains(&5));
+        // Uses at or after split point go to new.
+        assert!(result.new_interval.use_positions.contains(&12));
+        assert!(result.new_interval.use_positions.contains(&18));
+    }
+
+    #[test]
+    fn test_split_interval_spill_weight_distributed() {
+        let mut func = make_test_func(20);
+        let interval = make_interval(0, &[(0, 20)], &[2, 18], &[0]);
+
+        let result = split_interval(&interval, 10, &mut func).unwrap();
+
+        // Both intervals should have positive spill weight.
+        assert!(result.original_interval.spill_weight > 0.0);
+        assert!(result.new_interval.spill_weight > 0.0);
+
+        // Combined should roughly equal original.
+        let combined = result.original_interval.spill_weight + result.new_interval.spill_weight;
+        let diff = (combined - 1.0).abs();
+        assert!(diff < 0.01, "combined weight {combined} should be close to 1.0");
+    }
+
+    #[test]
+    fn test_split_interval_spanning_range() {
+        // Split in the middle of a single range.
+        let mut func = make_test_func(30);
+        let interval = make_interval(0, &[(5, 25)], &[5, 24], &[5]);
+
+        let result = split_interval(&interval, 15, &mut func).unwrap();
+        assert_eq!(result.original_interval.start(), 5);
+        assert_eq!(result.original_interval.end(), 15);
+        assert_eq!(result.new_interval.start(), 15);
+        assert_eq!(result.new_interval.end(), 25);
+    }
+
+    #[test]
+    fn test_split_interval_many_small_ranges() {
+        // Multiple small ranges: [0,3), [5,8), [10,13), [15,18).
+        // Split at 9 should put first two in original, last two in new.
+        let mut func = make_test_func(20);
+        let interval = make_interval(
+            0,
+            &[(0, 3), (5, 8), (10, 13), (15, 18)],
+            &[1, 6, 11, 16],
+            &[0, 5, 10, 15],
+        );
+
+        let result = split_interval(&interval, 9, &mut func).unwrap();
+
+        assert_eq!(result.original_interval.ranges.len(), 2);
+        assert_eq!(result.new_interval.ranges.len(), 2);
+        assert_eq!(result.original_interval.end(), 8);
+        assert_eq!(result.new_interval.start(), 10);
+    }
+
+    #[test]
+    fn test_split_decision_enum_equality() {
+        assert_eq!(SplitDecision::NoSplit, SplitDecision::NoSplit);
+        assert_eq!(
+            SplitDecision::SplitBeforeUse(5),
+            SplitDecision::SplitBeforeUse(5)
+        );
+        assert_ne!(
+            SplitDecision::SplitBeforeUse(5),
+            SplitDecision::SplitBeforeUse(10)
+        );
+        assert_eq!(
+            SplitDecision::SplitAroundRegion { start: 3, end: 7 },
+            SplitDecision::SplitAroundRegion { start: 3, end: 7 }
+        );
+    }
 }
