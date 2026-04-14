@@ -48,25 +48,27 @@
 //! **Unified (no adapter needed):**
 //! - `AArch64Opcode`: ISel uses `llvm2_ir::AArch64Opcode` directly.
 //! - `InstFlags`: regalloc re-exports `llvm2_ir::InstFlags` directly.
-//!   The `convert_ir_flags_to_regalloc()` function has been eliminated.
+//! - `MachBlock` / `RegAllocBlock`: structurally identical after `loop_depth`
+//!   was added to `llvm2_ir::MachBlock`. Converted via `From<&MachBlock>`.
+//! - `StackSlot` / `RegAllocStackSlot`: converted via `From<&StackSlot>`.
 //! - Primitive types: `VReg`, `PReg`, `RegClass`, `BlockId`, `InstId`,
 //!   `StackSlotId` — all re-exported from `llvm2_ir` by regalloc.
 //!
-//! **Remaining structural adapters (separate types, renamed in issue #73):**
+//! **Remaining structural adapters (separate types, with From/TryFrom impls):**
 //! - `ISelOperand` / `RegAllocOperand`: ISel has `CondCode`/`Symbol`/`StackSlot(u32)`
-//!   variants; regalloc omits `MemOp`/`FrameIndex`/`Special`. Unification requires
-//!   a superset enum with phase-dependent validation.
+//!   variants; regalloc omits `MemOp`/`FrameIndex`/`Special`.
+//!   `TryFrom<&MachOperand>` for `RegAllocOperand` handles the conversion.
 //! - `ISelInst` / `RegAllocInst`: regalloc separates defs/uses for liveness analysis;
 //!   ISel has no flags/implicit-defs/proofs. Unification requires adding
 //!   def/use classification to `llvm2_ir::MachInst`.
-//! - `ISelBlock` / `RegAllocBlock`: regalloc adds `loop_depth`; ISel uses inline
-//!   `Vec<ISelInst>`.
+//! - `ISelBlock`: ISel uses inline `Vec<ISelInst>` (not arena-indexed).
 //! - `ISelFunction` / `RegAllocFunction`: ISel uses `HashMap<Block, ISelBlock>`
 //!   (construction-friendly); regalloc uses `HashMap<StackSlotId, RegAllocStackSlot>`
 //!   + `next_stack_slot`.
 //!
 //! The canonical types are in `llvm2_ir`: `MachFunction`, `MachInst`, `MachBlock`,
 //! `MachOperand`. ISel and regalloc types have been renamed to avoid confusion.
+//! See `llvm2_ir::type_hierarchy` for complete documentation.
 //! See issue #73 for the remaining unification plan.
 
 use std::collections::HashMap;
@@ -196,6 +198,9 @@ pub fn isel_to_ir(
 /// The `RegAllocFunction` separates defs from uses for liveness analysis.
 /// We use a simple heuristic: first operand is def, rest are uses
 /// (for most instructions). Special cases: branches have no defs, etc.
+///
+/// Uses `From`/`TryFrom` impls from `llvm2_regalloc::machine_types` for
+/// individual block and operand conversions (issue #73 consolidation).
 pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> Result<llvm2_regalloc::RegAllocFunction, PipelineError> {
     use llvm2_regalloc::machine_types as ra;
 
@@ -210,14 +215,11 @@ pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> Result<llvm2_regalloc::RegAll
         stack_slots: HashMap::new(),
     };
 
-    // Convert stack slots.
+    // Convert stack slots using From impl (issue #73).
     for (i, slot) in ir_func.stack_slots.iter().enumerate() {
         ra_func.stack_slots.insert(
             llvm2_ir::types::StackSlotId(i as u32),
-            ra::RegAllocStackSlot {
-                size: slot.size,
-                align: slot.align,
-            },
+            ra::RegAllocStackSlot::from(slot),
         );
     }
 
@@ -239,14 +241,9 @@ pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> Result<llvm2_regalloc::RegAll
         });
     }
 
-    // Convert blocks.
+    // Convert blocks using From impl (issue #73).
     for ir_block in &ir_func.blocks {
-        ra_func.blocks.push(ra::RegAllocBlock {
-            insts: ir_block.insts.clone(),
-            preds: ir_block.preds.clone(),
-            succs: ir_block.succs.clone(),
-            loop_depth: 0,
-        });
+        ra_func.blocks.push(ra::RegAllocBlock::from(ir_block));
     }
 
     Ok(ra_func)
@@ -259,40 +256,18 @@ pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> Result<llvm2_regalloc::RegAll
 /// - For stores: all operands are uses (no register def)
 /// - For branches/returns: all operands are uses
 /// - For loads: operand[0] is def, rest are uses
+///
+/// Uses `TryFrom<&MachOperand>` for `RegAllocOperand` (issue #73) for the
+/// individual operand conversions. The TryFrom impl rejects IR-only variants
+/// (FrameIndex, MemOp, Special) that must be lowered before register
+/// allocation.
 fn classify_def_use(
     inst: &IrMachInst,
 ) -> Result<(Vec<llvm2_regalloc::RegAllocOperand>, Vec<llvm2_regalloc::RegAllocOperand>), PipelineError> {
     use llvm2_regalloc::machine_types::RegAllocOperand as RaOp;
 
     let convert_op = |op: &IrOperand| -> Result<RaOp, PipelineError> {
-        match op {
-            IrOperand::VReg(v) => Ok(RaOp::VReg(*v)),
-            IrOperand::PReg(p) => Ok(RaOp::PReg(*p)),
-            IrOperand::Imm(i) => Ok(RaOp::Imm(*i)),
-            IrOperand::FImm(f) => Ok(RaOp::FImm(*f)),
-            IrOperand::Block(b) => Ok(RaOp::Block(*b)),
-            IrOperand::StackSlot(s) => Ok(RaOp::StackSlot(*s)),
-            // FrameIndex, MemOp, and Special should not appear pre-regalloc.
-            // Silently mapping them to Imm(0) produces wrong code (#94).
-            IrOperand::FrameIndex(fi) => Err(PipelineError::InvalidOperand(format!(
-                "FrameIndex({:?}) operand reached regalloc adapter; \
-                 frame indices must be eliminated before register allocation",
-                fi
-            ))),
-            IrOperand::MemOp { base, offset } => Err(PipelineError::InvalidOperand(format!(
-                "MemOp(base={:?}, offset={}) operand reached regalloc adapter; \
-                 memory operands must be lowered before register allocation",
-                base, offset
-            ))),
-            IrOperand::Special(s) => Err(PipelineError::InvalidOperand(format!(
-                "Special({:?}) operand reached regalloc adapter; \
-                 special registers must be lowered to PReg before register allocation",
-                s
-            ))),
-            // Symbol operands are pure metadata (relocation targets) — no register involvement.
-            // Map to Imm(0) since regalloc doesn't need to track them.
-            IrOperand::Symbol(_) => Ok(RaOp::Imm(0)),
-        }
+        RaOp::try_from(op).map_err(|e| PipelineError::InvalidOperand(e.message))
     };
 
     let is_store = inst.flags.contains(llvm2_ir::inst::InstFlags::WRITES_MEMORY);

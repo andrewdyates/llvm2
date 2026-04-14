@@ -47,6 +47,7 @@ pub mod operand;
 pub mod provenance;
 pub mod regs;
 pub mod trace;
+pub mod type_hierarchy;
 pub mod types;
 pub mod x86_64_ops;
 pub mod x86_64_regs;
