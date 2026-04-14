@@ -56,6 +56,18 @@ impl X86PReg {
         self.0 >= 16 && self.0 <= 31
     }
 
+    /// Returns true if this is a 16-bit general-purpose register.
+    #[inline]
+    pub const fn is_gpr16(self) -> bool {
+        self.0 >= 32 && self.0 <= 47
+    }
+
+    /// Returns true if this is an 8-bit general-purpose register.
+    #[inline]
+    pub const fn is_gpr8(self) -> bool {
+        self.0 >= 48 && self.0 <= 63
+    }
+
     /// Returns true if this is any GPR (64, 32, 16, or 8 bit).
     #[inline]
     pub const fn is_gpr(self) -> bool {
@@ -66,6 +78,24 @@ impl X86PReg {
     #[inline]
     pub const fn is_xmm(self) -> bool {
         self.0 >= 64 && self.0 <= 79
+    }
+
+    /// Returns true if this is a system/special register (RFLAGS, RIP).
+    #[inline]
+    pub const fn is_system(self) -> bool {
+        self.0 == 80 || self.0 == 81
+    }
+
+    /// Returns true if this register is allocatable for register allocation.
+    ///
+    /// RSP (stack pointer) and RBP (frame pointer) and their sub-register
+    /// aliases are excluded. System registers (RFLAGS, RIP) are also excluded.
+    #[inline]
+    pub fn is_allocatable(self) -> bool {
+        let hw = self.hw_enc();
+        // Exclude RSP (hw=4), RBP (hw=5), and system regs
+        self.is_gpr() && hw != 4 && hw != 5
+            || self.is_xmm()
     }
 
     /// Returns the 4-bit hardware encoding for this register.
@@ -96,6 +126,12 @@ impl X86PReg {
             72..=79 => true,
             _ => false,
         }
+    }
+
+    /// Returns the register class for this register.
+    #[inline]
+    pub fn reg_class(self) -> X86RegClass {
+        x86_preg_class(self)
     }
 }
 
@@ -338,6 +374,42 @@ pub const X86_ARG_XMMS: [X86PReg; 8] = [
 /// Return-value XMM registers. XMM0 for the first FP return, XMM1 for the second.
 pub const X86_RET_XMMS: [X86PReg; 2] = [XMM0, XMM1];
 
+/// Registers clobbered by a CALL instruction (superset of caller-saved).
+///
+/// Includes all caller-saved GPRs. RSP is also modified (by the implicit
+/// push of the return address), but it is restored by RET so it is not
+/// listed here. RFLAGS is clobbered but handled separately.
+pub const X86_CALL_CLOBBER_GPRS: [X86PReg; 9] = X86_CALLER_SAVED_GPRS;
+
+/// Allocatable 32-bit GPRs (sub-register aliases of allocatable 64-bit GPRs).
+///
+/// Excludes ESP (alias of RSP) and EBP (alias of RBP).
+pub const X86_ALLOCATABLE_GPR32S: [X86PReg; 14] = [
+    EAX, ECX, EDX, EBX, ESI, EDI,
+    R8D, R9D, R10D, R11D, R12D, R13D, R14D, R15D,
+];
+
+/// Allocatable 16-bit GPRs (sub-register aliases of allocatable 64-bit GPRs).
+///
+/// Excludes SP16 (alias of RSP) and BP16 (alias of RBP).
+pub const X86_ALLOCATABLE_GPR16S: [X86PReg; 14] = [
+    AX, CX, DX, BX, SI, DI,
+    R8W, R9W, R10W, R11W, R12W, R13W, R14W, R15W,
+];
+
+/// Allocatable 8-bit GPRs (sub-register aliases of allocatable 64-bit GPRs).
+///
+/// Excludes SPL (alias of RSP) and BPL (alias of RBP).
+pub const X86_ALLOCATABLE_GPR8S: [X86PReg; 14] = [
+    AL, CL, DL, BL, SIL, DIL,
+    R8B, R9B, R10B, R11B, R12B, R13B, R14B, R15B,
+];
+
+/// Callee-saved 32-bit GPR aliases (sub-registers of callee-saved 64-bit GPRs).
+pub const X86_CALLEE_SAVED_GPR32S: [X86PReg; 6] = [
+    EBX, EBP, R12D, R13D, R14D, R15D,
+];
+
 // ===========================================================================
 // Lookup tables for name -> register mapping
 // ===========================================================================
@@ -504,6 +576,149 @@ fn x86_reg_root(reg: X86PReg) -> Option<(u8, u8)> {
         32..=47 => Some(((e - 32) as u8, 0)), // GPR16 aliases GPR64
         48..=63 => Some(((e - 48) as u8, 0)), // GPR8 aliases GPR64
         64..=79 => Some(((e - 64) as u8, 1)), // XMM
+        _ => None,
+    }
+}
+
+/// Convert a 64-bit GPR to its 16-bit alias.
+///
+/// Returns `None` if the input is not a GPR64.
+pub fn x86_gpr64_to_gpr16(reg: X86PReg) -> Option<X86PReg> {
+    if reg.0 <= 15 {
+        Some(X86PReg(reg.0 + 32))
+    } else {
+        None
+    }
+}
+
+/// Convert a 64-bit GPR to its 8-bit alias.
+///
+/// Returns `None` if the input is not a GPR64.
+pub fn x86_gpr64_to_gpr8(reg: X86PReg) -> Option<X86PReg> {
+    if reg.0 <= 15 {
+        Some(X86PReg(reg.0 + 48))
+    } else {
+        None
+    }
+}
+
+/// Convert a 16-bit GPR to its 64-bit alias.
+///
+/// Returns `None` if the input is not a GPR16.
+pub fn x86_gpr16_to_gpr64(reg: X86PReg) -> Option<X86PReg> {
+    if reg.0 >= 32 && reg.0 <= 47 {
+        Some(X86PReg(reg.0 - 32))
+    } else {
+        None
+    }
+}
+
+/// Convert an 8-bit GPR to its 64-bit alias.
+///
+/// Returns `None` if the input is not a GPR8.
+pub fn x86_gpr8_to_gpr64(reg: X86PReg) -> Option<X86PReg> {
+    if reg.0 >= 48 && reg.0 <= 63 {
+        Some(X86PReg(reg.0 - 48))
+    } else {
+        None
+    }
+}
+
+/// Convert a 32-bit GPR to its 16-bit alias.
+///
+/// Returns `None` if the input is not a GPR32.
+pub fn x86_gpr32_to_gpr16(reg: X86PReg) -> Option<X86PReg> {
+    if reg.0 >= 16 && reg.0 <= 31 {
+        Some(X86PReg(reg.0 + 16))
+    } else {
+        None
+    }
+}
+
+/// Convert a 32-bit GPR to its 8-bit alias.
+///
+/// Returns `None` if the input is not a GPR32.
+pub fn x86_gpr32_to_gpr8(reg: X86PReg) -> Option<X86PReg> {
+    if reg.0 >= 16 && reg.0 <= 31 {
+        Some(X86PReg(reg.0 + 32))
+    } else {
+        None
+    }
+}
+
+/// Return the register number (0-15) for any register in its class.
+///
+/// This is the logical index within the register file and matches the
+/// hardware encoding for GPR and XMM registers. Returns `None` for
+/// system registers (RFLAGS, RIP).
+pub fn x86_reg_number(reg: X86PReg) -> Option<u8> {
+    let e = reg.encoding();
+    match e {
+        0..=15 => Some(e as u8),           // GPR64
+        16..=31 => Some((e - 16) as u8),   // GPR32
+        32..=47 => Some((e - 32) as u8),   // GPR16
+        48..=63 => Some((e - 48) as u8),   // GPR8
+        64..=79 => Some((e - 64) as u8),   // XMM
+        _ => None,
+    }
+}
+
+/// Try to parse an x86-64 register from its assembly name.
+///
+/// Accepts lowercase names: `"rax"`, `"eax"`, `"ax"`, `"al"`, `"xmm0"`,
+/// `"rflags"`, `"rip"`, etc.
+///
+/// Returns `None` if the name is not recognized.
+pub fn x86_preg_from_name(name: &str) -> Option<X86PReg> {
+    // GPR64
+    for (i, &n) in GPR64_NAMES.iter().enumerate() {
+        if n == name {
+            return Some(X86PReg(i as u16));
+        }
+    }
+    // GPR32
+    for (i, &n) in GPR32_NAMES.iter().enumerate() {
+        if n == name {
+            return Some(X86PReg(16 + i as u16));
+        }
+    }
+    // GPR16
+    for (i, &n) in GPR16_NAMES.iter().enumerate() {
+        if n == name {
+            return Some(X86PReg(32 + i as u16));
+        }
+    }
+    // GPR8
+    for (i, &n) in GPR8_NAMES.iter().enumerate() {
+        if n == name {
+            return Some(X86PReg(48 + i as u16));
+        }
+    }
+    // XMM
+    for (i, &n) in XMM_NAMES.iter().enumerate() {
+        if n == name {
+            return Some(X86PReg(64 + i as u16));
+        }
+    }
+    // Special
+    match name {
+        "rflags" => Some(RFLAGS),
+        "rip" => Some(RIP),
+        _ => None,
+    }
+}
+
+/// Return the 64-bit GPR that contains the given register as a sub-register.
+///
+/// For any GPR (64/32/16/8-bit), returns the corresponding GPR64.
+/// For XMM and system registers, returns `None`.
+pub fn x86_containing_gpr64(reg: X86PReg) -> Option<X86PReg> {
+    let e = reg.encoding();
+    match e {
+        0..=15 => Some(reg),                     // Already GPR64
+        16..=31 => Some(X86PReg(e - 16)),         // GPR32 -> GPR64
+        32..=47 => Some(X86PReg(e - 32)),         // GPR16 -> GPR64
+        48..=63 => Some(X86PReg(e - 48)),         // GPR8 -> GPR64
         _ => None,
     }
 }
@@ -717,5 +932,235 @@ mod tests {
 
         assert!(XMM0.is_xmm());
         assert!(!XMM0.is_gpr());
+
+        // New GPR16/GPR8 predicates
+        assert!(AX.is_gpr16());
+        assert!(R15W.is_gpr16());
+        assert!(!AX.is_gpr64());
+        assert!(!AX.is_gpr32());
+        assert!(AX.is_gpr());
+
+        assert!(AL.is_gpr8());
+        assert!(R15B.is_gpr8());
+        assert!(!AL.is_gpr64());
+        assert!(!AL.is_gpr16());
+        assert!(AL.is_gpr());
+
+        // System register predicates
+        assert!(RFLAGS.is_system());
+        assert!(RIP.is_system());
+        assert!(!RAX.is_system());
+        assert!(!XMM0.is_system());
+    }
+
+    #[test]
+    fn test_gpr16_gpr8_conversion() {
+        // GPR64 -> GPR16
+        assert_eq!(x86_gpr64_to_gpr16(RAX), Some(AX));
+        assert_eq!(x86_gpr64_to_gpr16(R15), Some(R15W));
+        assert_eq!(x86_gpr64_to_gpr16(RSP), Some(SP16));
+        assert_eq!(x86_gpr64_to_gpr16(XMM0), None);
+        assert_eq!(x86_gpr64_to_gpr16(EAX), None);
+
+        // GPR64 -> GPR8
+        assert_eq!(x86_gpr64_to_gpr8(RAX), Some(AL));
+        assert_eq!(x86_gpr64_to_gpr8(R15), Some(R15B));
+        assert_eq!(x86_gpr64_to_gpr8(RSP), Some(SPL));
+        assert_eq!(x86_gpr64_to_gpr8(XMM0), None);
+
+        // GPR16 -> GPR64
+        assert_eq!(x86_gpr16_to_gpr64(AX), Some(RAX));
+        assert_eq!(x86_gpr16_to_gpr64(R15W), Some(R15));
+        assert_eq!(x86_gpr16_to_gpr64(SP16), Some(RSP));
+        assert_eq!(x86_gpr16_to_gpr64(RAX), None);
+
+        // GPR8 -> GPR64
+        assert_eq!(x86_gpr8_to_gpr64(AL), Some(RAX));
+        assert_eq!(x86_gpr8_to_gpr64(R15B), Some(R15));
+        assert_eq!(x86_gpr8_to_gpr64(SPL), Some(RSP));
+        assert_eq!(x86_gpr8_to_gpr64(RAX), None);
+
+        // GPR32 -> GPR16
+        assert_eq!(x86_gpr32_to_gpr16(EAX), Some(AX));
+        assert_eq!(x86_gpr32_to_gpr16(R15D), Some(R15W));
+        assert_eq!(x86_gpr32_to_gpr16(RAX), None);
+
+        // GPR32 -> GPR8
+        assert_eq!(x86_gpr32_to_gpr8(EAX), Some(AL));
+        assert_eq!(x86_gpr32_to_gpr8(R15D), Some(R15B));
+        assert_eq!(x86_gpr32_to_gpr8(RAX), None);
+    }
+
+    #[test]
+    fn test_reg_number() {
+        assert_eq!(x86_reg_number(RAX), Some(0));
+        assert_eq!(x86_reg_number(RCX), Some(1));
+        assert_eq!(x86_reg_number(R15), Some(15));
+        assert_eq!(x86_reg_number(EAX), Some(0));
+        assert_eq!(x86_reg_number(R15D), Some(15));
+        assert_eq!(x86_reg_number(AX), Some(0));
+        assert_eq!(x86_reg_number(AL), Some(0));
+        assert_eq!(x86_reg_number(R15B), Some(15));
+        assert_eq!(x86_reg_number(XMM0), Some(0));
+        assert_eq!(x86_reg_number(XMM15), Some(15));
+        assert_eq!(x86_reg_number(RFLAGS), None);
+        assert_eq!(x86_reg_number(RIP), None);
+    }
+
+    #[test]
+    fn test_preg_from_name() {
+        // GPR64
+        assert_eq!(x86_preg_from_name("rax"), Some(RAX));
+        assert_eq!(x86_preg_from_name("rsp"), Some(RSP));
+        assert_eq!(x86_preg_from_name("r15"), Some(R15));
+
+        // GPR32
+        assert_eq!(x86_preg_from_name("eax"), Some(EAX));
+        assert_eq!(x86_preg_from_name("r15d"), Some(R15D));
+
+        // GPR16
+        assert_eq!(x86_preg_from_name("ax"), Some(AX));
+        assert_eq!(x86_preg_from_name("r8w"), Some(R8W));
+
+        // GPR8
+        assert_eq!(x86_preg_from_name("al"), Some(AL));
+        assert_eq!(x86_preg_from_name("spl"), Some(SPL));
+        assert_eq!(x86_preg_from_name("r15b"), Some(R15B));
+
+        // XMM
+        assert_eq!(x86_preg_from_name("xmm0"), Some(XMM0));
+        assert_eq!(x86_preg_from_name("xmm15"), Some(XMM15));
+
+        // Special
+        assert_eq!(x86_preg_from_name("rflags"), Some(RFLAGS));
+        assert_eq!(x86_preg_from_name("rip"), Some(RIP));
+
+        // Unknown
+        assert_eq!(x86_preg_from_name("ymm0"), None);
+        assert_eq!(x86_preg_from_name(""), None);
+    }
+
+    #[test]
+    fn test_containing_gpr64() {
+        assert_eq!(x86_containing_gpr64(RAX), Some(RAX));
+        assert_eq!(x86_containing_gpr64(EAX), Some(RAX));
+        assert_eq!(x86_containing_gpr64(AX), Some(RAX));
+        assert_eq!(x86_containing_gpr64(AL), Some(RAX));
+        assert_eq!(x86_containing_gpr64(R15), Some(R15));
+        assert_eq!(x86_containing_gpr64(R15D), Some(R15));
+        assert_eq!(x86_containing_gpr64(R15W), Some(R15));
+        assert_eq!(x86_containing_gpr64(R15B), Some(R15));
+        assert_eq!(x86_containing_gpr64(RSP), Some(RSP));
+        assert_eq!(x86_containing_gpr64(ESP), Some(RSP));
+        assert_eq!(x86_containing_gpr64(SP16), Some(RSP));
+        assert_eq!(x86_containing_gpr64(SPL), Some(RSP));
+        assert_eq!(x86_containing_gpr64(XMM0), None);
+        assert_eq!(x86_containing_gpr64(RFLAGS), None);
+    }
+
+    #[test]
+    fn test_is_allocatable() {
+        // Allocatable GPRs
+        assert!(RAX.is_allocatable());
+        assert!(RCX.is_allocatable());
+        assert!(R15.is_allocatable());
+
+        // Non-allocatable: RSP, RBP
+        assert!(!RSP.is_allocatable());
+        assert!(!RBP.is_allocatable());
+
+        // Sub-register aliases of RSP/RBP are also non-allocatable
+        assert!(!ESP.is_allocatable());
+        assert!(!EBP.is_allocatable());
+        assert!(!SP16.is_allocatable());
+        assert!(!BP16.is_allocatable());
+        assert!(!SPL.is_allocatable());
+        assert!(!BPL.is_allocatable());
+
+        // XMM registers are allocatable
+        assert!(XMM0.is_allocatable());
+        assert!(XMM15.is_allocatable());
+
+        // System registers are not allocatable
+        assert!(!RFLAGS.is_allocatable());
+        assert!(!RIP.is_allocatable());
+    }
+
+    #[test]
+    fn test_allocatable_subreg_arrays() {
+        // GPR32 allocatable excludes ESP, EBP
+        assert!(!X86_ALLOCATABLE_GPR32S.contains(&ESP));
+        assert!(!X86_ALLOCATABLE_GPR32S.contains(&EBP));
+        assert!(X86_ALLOCATABLE_GPR32S.contains(&EAX));
+        assert!(X86_ALLOCATABLE_GPR32S.contains(&R15D));
+        assert_eq!(X86_ALLOCATABLE_GPR32S.len(), 14);
+
+        // GPR16 allocatable excludes SP16, BP16
+        assert!(!X86_ALLOCATABLE_GPR16S.contains(&SP16));
+        assert!(!X86_ALLOCATABLE_GPR16S.contains(&BP16));
+        assert!(X86_ALLOCATABLE_GPR16S.contains(&AX));
+        assert!(X86_ALLOCATABLE_GPR16S.contains(&R15W));
+        assert_eq!(X86_ALLOCATABLE_GPR16S.len(), 14);
+
+        // GPR8 allocatable excludes SPL, BPL
+        assert!(!X86_ALLOCATABLE_GPR8S.contains(&SPL));
+        assert!(!X86_ALLOCATABLE_GPR8S.contains(&BPL));
+        assert!(X86_ALLOCATABLE_GPR8S.contains(&AL));
+        assert!(X86_ALLOCATABLE_GPR8S.contains(&R15B));
+        assert_eq!(X86_ALLOCATABLE_GPR8S.len(), 14);
+    }
+
+    #[test]
+    fn test_callee_saved_subreg_consistency() {
+        // Every register in callee-saved 32-bit list should be a sub-register
+        // of a register in the callee-saved 64-bit list.
+        for &gpr32 in &X86_CALLEE_SAVED_GPR32S {
+            let gpr64 = x86_gpr32_to_gpr64(gpr32).unwrap();
+            assert!(
+                X86_CALLEE_SAVED_GPRS.contains(&gpr64),
+                "{:?} (from {:?}) not in callee-saved GPRs",
+                gpr64, gpr32
+            );
+        }
+    }
+
+    #[test]
+    fn test_caller_callee_partition() {
+        // For each allocatable GPR, it should be either caller-saved or callee-saved
+        // (but not both and not neither). RSP/RBP are excluded from both sets.
+        for &gpr in &X86_ALLOCATABLE_GPRS {
+            let caller = x86_is_caller_saved(gpr);
+            let callee = x86_is_callee_saved(gpr);
+            assert!(
+                caller ^ callee,
+                "{:?} is caller_saved={}, callee_saved={} (expected exactly one)",
+                gpr, caller, callee
+            );
+        }
+    }
+
+    #[test]
+    fn test_hw_encoding_consistency_across_aliases() {
+        // All aliases of the same register should have the same hw encoding.
+        for i in 0..16u16 {
+            let gpr64 = X86PReg(i);
+            let gpr32 = X86PReg(i + 16);
+            let gpr16 = X86PReg(i + 32);
+            let gpr8 = X86PReg(i + 48);
+            let expected = i as u8;
+            assert_eq!(x86_hw_encoding(gpr64), expected);
+            assert_eq!(x86_hw_encoding(gpr32), expected);
+            assert_eq!(x86_hw_encoding(gpr16), expected);
+            assert_eq!(x86_hw_encoding(gpr8), expected);
+        }
+    }
+
+    #[test]
+    fn test_reg_class_method_matches_function() {
+        // The reg_class() method should return the same thing as x86_preg_class()
+        let test_regs = [RAX, EAX, AX, AL, XMM0, RFLAGS, RIP, R15, R15D, R15W, R15B, XMM15];
+        for &reg in &test_regs {
+            assert_eq!(reg.reg_class(), x86_preg_class(reg), "mismatch for {:?}", reg);
+        }
     }
 }
