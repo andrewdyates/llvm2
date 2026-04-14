@@ -109,6 +109,7 @@ pub mod neon_lowering_proofs;
 pub mod vectorization_proofs;
 pub mod ane_precision_proofs;
 pub mod proof_database;
+pub mod verification_runner;
 
 pub use verify::{VerificationResult, VerificationReport, ProofResult, Verifier, VerificationStrength};
 pub use lowering_proof::{ProofObligation, verify_by_evaluation, verify_by_evaluation_with_config,
@@ -118,3 +119,5 @@ pub use z4_bridge::{Z4Config, Z4Result, verify_with_z4};
 pub use cegis::{CegisLoop, CegisResult, ConcreteInput};
 pub use rule_discovery::{RuleDiscovery, RuleProposal, RuleResult, RuleDatabase, DiscoveryStats};
 pub use proof_database::{ProofDatabase, ProofCategory, CategorizedProof, ProofSummary};
+pub use verification_runner::{VerificationRunner, VerificationRunReport, VerificationRunResult,
+    CategoryBreakdown, FailedProofDetail};
