@@ -520,12 +520,63 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 | (preg_hw(1)? << 5)
                 | preg_hw(0)?)
         }
-        AArch64Opcode::LslRI | AArch64Opcode::LsrRI | AArch64Opcode::AsrRI => {
-            // Immediate shifts use UBFM/SBFM encoding.
-            // For simplicity, encode as the register-variant with the
-            // immediate handled by prior lowering. Emit NOP as fallback.
-            // TODO: Implement proper UBFM/SBFM encoding for immediate shifts.
-            Ok(0xD503201F) // NOP
+        AArch64Opcode::LslRI => {
+            // LSL Rd, Rn, #shift = UBFM Rd, Rn, #(-shift MOD regsize), #(regsize-1-shift)
+            // Bitfield format: sf | opc(10) | 100110 | N | immr(6) | imms(6) | Rn | Rd
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let shift = imm_val(2) as u32;
+            let regsize = if sf == 1 { 64u32 } else { 32u32 };
+            let n = sf;
+            let immr = regsize.wrapping_sub(shift) & (regsize - 1);
+            let imms = regsize - 1 - shift;
+            Ok((sf << 31)
+                | (0b10 << 29)      // opc = 10 (UBFM)
+                | (0b100110 << 23)
+                | (n << 22)
+                | (immr << 16)
+                | (imms << 10)
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::LsrRI => {
+            // LSR Rd, Rn, #shift = UBFM Rd, Rn, #shift, #(regsize-1)
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let shift = imm_val(2) as u32;
+            let regsize = if sf == 1 { 64u32 } else { 32u32 };
+            let n = sf;
+            let immr = shift;
+            let imms = regsize - 1;
+            Ok((sf << 31)
+                | (0b10 << 29)      // opc = 10 (UBFM)
+                | (0b100110 << 23)
+                | (n << 22)
+                | (immr << 16)
+                | (imms << 10)
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::AsrRI => {
+            // ASR Rd, Rn, #shift = SBFM Rd, Rn, #shift, #(regsize-1)
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let shift = imm_val(2) as u32;
+            let regsize = if sf == 1 { 64u32 } else { 32u32 };
+            let n = sf;
+            let immr = shift;
+            let imms = regsize - 1;
+            Ok((sf << 31)
+                | (0b00 << 29)      // opc = 00 (SBFM)
+                | (0b100110 << 23)
+                | (n << 22)
+                | (immr << 16)
+                | (imms << 10)
+                | (rn << 5)
+                | rd)
         }
 
         // --- Move ---
@@ -1181,24 +1232,222 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             Ok(0xD503201F)
         }
 
-        // New opcodes added for ISel unification (issue #73).
-        // Encoding not yet implemented — return error if reached.
+        // --- Bitfield move instructions ---
+        AArch64Opcode::Ubfm => {
+            // UBFM Rd, Rn, #immr, #imms
+            // sf | 10 | 100110 | N | immr(6) | imms(6) | Rn | Rd
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let immr = imm_val(2) as u32 & 0x3F;
+            let imms = imm_val(3) as u32 & 0x3F;
+            let n = sf;
+            Ok((sf << 31)
+                | (0b10 << 29)
+                | (0b100110 << 23)
+                | (n << 22)
+                | (immr << 16)
+                | (imms << 10)
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::Sbfm => {
+            // SBFM Rd, Rn, #immr, #imms
+            // sf | 00 | 100110 | N | immr(6) | imms(6) | Rn | Rd
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let immr = imm_val(2) as u32 & 0x3F;
+            let imms = imm_val(3) as u32 & 0x3F;
+            let n = sf;
+            Ok((sf << 31)
+                | (0b00 << 29)
+                | (0b100110 << 23)
+                | (n << 22)
+                | (immr << 16)
+                | (imms << 10)
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::Bfm => {
+            // BFM Rd, Rn, #immr, #imms
+            // sf | 01 | 100110 | N | immr(6) | imms(6) | Rn | Rd
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let immr = imm_val(2) as u32 & 0x3F;
+            let imms = imm_val(3) as u32 & 0x3F;
+            let n = sf;
+            Ok((sf << 31)
+                | (0b01 << 29)
+                | (0b100110 << 23)
+                | (n << 22)
+                | (immr << 16)
+                | (imms << 10)
+                | (rn << 5)
+                | rd)
+        }
+
+        // --- Load/Store register offset ---
+        AArch64Opcode::LdrRO => {
+            // LDR Rt, [Rn, Rm] — base + register offset
+            // size | 111 | V | 00 | opc(01) | 1 | Rm | option(3) | S | 10 | Rn | Rt
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rt = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let rm = preg_hw(2)?;
+            let size = if sf == 1 { 0b11u32 } else { 0b10u32 };
+            // Default: LSL extend (option=011), no shift (S=0)
+            let (option, s) = if inst.operands.len() > 3 {
+                let packed = imm_val(3) as u32;
+                ((packed >> 1) & 0b111, packed & 1)
+            } else {
+                (0b011u32, 0u32)
+            };
+            Ok((size << 30)
+                | (0b111 << 27)
+                | (0 << 26)     // V=0 (integer)
+                | (0b00 << 24)
+                | (0b01 << 22)  // opc=01 (load)
+                | (1 << 21)
+                | (rm << 16)
+                | (option << 13)
+                | (s << 12)
+                | (0b10 << 10)
+                | (rn << 5)
+                | rt)
+        }
+        AArch64Opcode::StrRO => {
+            // STR Rt, [Rn, Rm] — base + register offset store
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rt = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let rm = preg_hw(2)?;
+            let size = if sf == 1 { 0b11u32 } else { 0b10u32 };
+            let (option, s) = if inst.operands.len() > 3 {
+                let packed = imm_val(3) as u32;
+                ((packed >> 1) & 0b111, packed & 1)
+            } else {
+                (0b011u32, 0u32)
+            };
+            Ok((size << 30)
+                | (0b111 << 27)
+                | (0 << 26)     // V=0 (integer)
+                | (0b00 << 24)
+                | (0b00 << 22)  // opc=00 (store)
+                | (1 << 21)
+                | (rm << 16)
+                | (option << 13)
+                | (s << 12)
+                | (0b10 << 10)
+                | (rn << 5)
+                | rt)
+        }
+
+        // --- GOT and TLV loads ---
+        AArch64Opcode::LdrGot => {
+            // LDR Xd, [Xn, #offset] — GOT slot load (always 64-bit)
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
+            let scaled = (offset / 8) as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b11, 0, 0b01, scaled, rn, rd))
+        }
+        AArch64Opcode::LdrTlvp => {
+            // LDR Xd, [Xn, #offset] — TLV descriptor load (always 64-bit)
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
+            let scaled = (offset / 8) as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b11, 0, 0b01, scaled, rn, rd))
+        }
+
+        // --- BIC (bit clear) ---
+        AArch64Opcode::BicRR => {
+            // BIC Rd, Rn, Rm = AND Rd, Rn, NOT(Rm)
+            // Logical shifted register with opc=00, N=1.
+            // Convention matches ORN encoding in both encoders.
+            let sf = if is_64bit(0) { 1 } else { 0 };
+            Ok(encoding::encode_logical_shifted_reg(
+                sf,
+                0b00,
+                1, // N=1 for BIC (same convention as ORN)
+                0,
+                preg_hw(2)?,
+                0,
+                preg_hw(1)?,
+                preg_hw(0)?,
+            ))
+        }
+
+        // --- Conditional select variants ---
+        AArch64Opcode::Csinc => {
+            // CSINC Xd, Xn, Xm, cond
+            // sf | 0 | 0 | 11010100 | Rm | cond | 0 | 1 | Rn | Rd
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let rm = preg_hw(2)?;
+            let cond = imm_val(3) as u32 & 0xF;
+            Ok((sf << 31)
+                | (0b00 << 29)
+                | (0b11010100 << 21)
+                | (rm << 16)
+                | (cond << 12)
+                | (0b01 << 10)  // op2=01 (CSINC)
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::Csinv => {
+            // CSINV Xd, Xn, Xm, cond
+            // sf | 1 | 0 | 11010100 | Rm | cond | 0 | 0 | Rn | Rd
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let rm = preg_hw(2)?;
+            let cond = imm_val(3) as u32 & 0xF;
+            Ok((sf << 31)
+                | (0b10 << 29)
+                | (0b11010100 << 21)
+                | (rm << 16)
+                | (cond << 12)
+                | (0b00 << 10)  // op2=00 (CSINV)
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::Csneg => {
+            // CSNEG Xd, Xn, Xm, cond
+            // sf | 1 | 0 | 11010100 | Rm | cond | 0 | 1 | Rn | Rd
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let rm = preg_hw(2)?;
+            let cond = imm_val(3) as u32 & 0xF;
+            Ok((sf << 31)
+                | (0b10 << 29)
+                | (0b11010100 << 21)
+                | (rm << 16)
+                | (cond << 12)
+                | (0b01 << 10)  // op2=01 (CSNEG)
+                | (rn << 5)
+                | rd)
+        }
+
+        // --- MOVN (move wide with NOT) ---
+        AArch64Opcode::Movn => {
+            // MOVN Rd, #imm16 — move wide with NOT
+            // sf | 00 | 100101 | hw(2) | imm16(16) | Rd(5)
+            let sf = if is_64bit(0) { 1 } else { 0 };
+            let imm16 = imm_val(1) as u32 & 0xFFFF;
+            Ok(encoding::encode_move_wide(sf, 0b00, 0, imm16, preg_hw(0)?))
+        }
+
+        // Opcodes not yet implemented — return error.
+        // TODO(#73): Implement encoding for logical immediates and FP immediates.
         AArch64Opcode::AndRI
         | AArch64Opcode::OrrRI
         | AArch64Opcode::EorRI
-        | AArch64Opcode::BicRR
-        | AArch64Opcode::Csinc
-        | AArch64Opcode::Csinv
-        | AArch64Opcode::Csneg
-        | AArch64Opcode::Movn
-        | AArch64Opcode::FmovImm
-        | AArch64Opcode::LdrRO
-        | AArch64Opcode::StrRO
-        | AArch64Opcode::LdrGot
-        | AArch64Opcode::LdrTlvp
-        | AArch64Opcode::Ubfm
-        | AArch64Opcode::Sbfm
-        | AArch64Opcode::Bfm => {
+        | AArch64Opcode::FmovImm => {
             Err(LowerError::UnsupportedInstruction(
                 format!("{:?} encoding not yet implemented (issue #73)", inst.opcode),
             ))
@@ -2368,5 +2617,326 @@ mod tests {
         let word = encode_inst(&inst).unwrap();
         let ftype = (word >> 22) & 0b11;
         assert_eq!(ftype, 0b00, "SCVTF to S-reg should use ftype=00 (single), got {}", ftype);
+    }
+
+    // -----------------------------------------------------------------------
+    // Immediate shift encoding tests (previously emitted NOP — fixed in #134)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encode_lsl_ri_not_nop() {
+        // LSL X0, X1, #2 must NOT emit NOP
+        let inst = MachInst::new(
+            AArch64Opcode::LslRI,
+            vec![MachOperand::PReg(X0), MachOperand::PReg(X1), MachOperand::Imm(2)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_ne!(word, 0xD503201F, "LSL X0, X1, #2 must not emit NOP");
+        // Verify it matches the unified encoder
+        let unified = crate::aarch64::encode::encode_instruction(&inst).unwrap();
+        assert_eq!(word, unified,
+            "lower and unified must agree for LslRI: lower=0x{word:08X}, unified=0x{unified:08X}");
+    }
+
+    #[test]
+    fn test_encode_lsr_ri_not_nop() {
+        let inst = MachInst::new(
+            AArch64Opcode::LsrRI,
+            vec![MachOperand::PReg(X0), MachOperand::PReg(X1), MachOperand::Imm(2)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_ne!(word, 0xD503201F, "LSR X0, X1, #2 must not emit NOP");
+        let unified = crate::aarch64::encode::encode_instruction(&inst).unwrap();
+        assert_eq!(word, unified,
+            "lower and unified must agree for LsrRI: lower=0x{word:08X}, unified=0x{unified:08X}");
+    }
+
+    #[test]
+    fn test_encode_asr_ri_not_nop() {
+        let inst = MachInst::new(
+            AArch64Opcode::AsrRI,
+            vec![MachOperand::PReg(X0), MachOperand::PReg(X1), MachOperand::Imm(2)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_ne!(word, 0xD503201F, "ASR X0, X1, #2 must not emit NOP");
+        let unified = crate::aarch64::encode::encode_instruction(&inst).unwrap();
+        assert_eq!(word, unified,
+            "lower and unified must agree for AsrRI: lower=0x{word:08X}, unified=0x{unified:08X}");
+    }
+
+    #[test]
+    fn test_encode_lsl_ri_known_value() {
+        // LSL X0, X1, #2 = UBFM X0, X1, #62, #61
+        // Expected: 0xD37EF420 (from ARM ARM)
+        let inst = MachInst::new(
+            AArch64Opcode::LslRI,
+            vec![MachOperand::PReg(X0), MachOperand::PReg(X1), MachOperand::Imm(2)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_eq!(word, 0xD37EF420, "LSL X0, X1, #2 = 0x{word:08X}");
+    }
+
+    #[test]
+    fn test_encode_lsr_ri_known_value() {
+        // LSR X0, X1, #2 = UBFM X0, X1, #2, #63
+        // Expected: 0xD342FC20
+        let inst = MachInst::new(
+            AArch64Opcode::LsrRI,
+            vec![MachOperand::PReg(X0), MachOperand::PReg(X1), MachOperand::Imm(2)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_eq!(word, 0xD342FC20, "LSR X0, X1, #2 = 0x{word:08X}");
+    }
+
+    #[test]
+    fn test_encode_asr_ri_known_value() {
+        // ASR X0, X1, #2 = SBFM X0, X1, #2, #63
+        // Expected: 0x9342FC20
+        let inst = MachInst::new(
+            AArch64Opcode::AsrRI,
+            vec![MachOperand::PReg(X0), MachOperand::PReg(X1), MachOperand::Imm(2)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_eq!(word, 0x9342FC20, "ASR X0, X1, #2 = 0x{word:08X}");
+    }
+
+    // -----------------------------------------------------------------------
+    // UBFM/SBFM/BFM encoding tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encode_ubfm() {
+        // UBFM X0, X1, #2, #5
+        let inst = MachInst::new(
+            AArch64Opcode::Ubfm,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X1),
+                MachOperand::Imm(2),
+                MachOperand::Imm(5),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let unified = crate::aarch64::encode::encode_instruction(&inst).unwrap();
+        assert_eq!(word, unified,
+            "lower and unified must agree for UBFM: lower=0x{word:08X}, unified=0x{unified:08X}");
+        // Check opc field = 10 (UBFM)
+        assert_eq!((word >> 29) & 0b11, 0b10, "UBFM opc should be 10");
+    }
+
+    #[test]
+    fn test_encode_sbfm() {
+        // SBFM X0, X1, #0, #31 (= SXTW alias)
+        let inst = MachInst::new(
+            AArch64Opcode::Sbfm,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X1),
+                MachOperand::Imm(0),
+                MachOperand::Imm(31),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let unified = crate::aarch64::encode::encode_instruction(&inst).unwrap();
+        assert_eq!(word, unified,
+            "lower and unified must agree for SBFM: lower=0x{word:08X}, unified=0x{unified:08X}");
+        // Check opc field = 00 (SBFM)
+        assert_eq!((word >> 29) & 0b11, 0b00, "SBFM opc should be 00");
+    }
+
+    #[test]
+    fn test_encode_bfm() {
+        // BFM X0, X1, #4, #7
+        let inst = MachInst::new(
+            AArch64Opcode::Bfm,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X1),
+                MachOperand::Imm(4),
+                MachOperand::Imm(7),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let unified = crate::aarch64::encode::encode_instruction(&inst).unwrap();
+        assert_eq!(word, unified,
+            "lower and unified must agree for BFM: lower=0x{word:08X}, unified=0x{unified:08X}");
+        // Check opc field = 01 (BFM)
+        assert_eq!((word >> 29) & 0b11, 0b01, "BFM opc should be 01");
+    }
+
+    // -----------------------------------------------------------------------
+    // LDR/STR register offset encoding tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encode_ldr_ro() {
+        // LDR X0, [X1, X2]
+        let inst = MachInst::new(
+            AArch64Opcode::LdrRO,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X1),
+                MachOperand::PReg(X2),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_ne!(word, 0xD503201F, "LdrRO must not emit NOP");
+        // Check it's a load (opc=01) and register offset (bit 21=1)
+        assert_eq!((word >> 22) & 0b11, 0b01, "LdrRO should have opc=01 (load)");
+        assert_eq!((word >> 21) & 1, 1, "LdrRO should have bit 21=1 (register offset)");
+    }
+
+    #[test]
+    fn test_encode_str_ro() {
+        // STR X0, [X1, X2]
+        let inst = MachInst::new(
+            AArch64Opcode::StrRO,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X1),
+                MachOperand::PReg(X2),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_ne!(word, 0xD503201F, "StrRO must not emit NOP");
+        // Check it's a store (opc=00) and register offset (bit 21=1)
+        assert_eq!((word >> 22) & 0b11, 0b00, "StrRO should have opc=00 (store)");
+        assert_eq!((word >> 21) & 1, 1, "StrRO should have bit 21=1 (register offset)");
+    }
+
+    // -----------------------------------------------------------------------
+    // GOT/TLV load encoding tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encode_ldr_got() {
+        // LDR X0, [X1, #0] (GOT load)
+        let inst = MachInst::new(
+            AArch64Opcode::LdrGot,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X1),
+                MachOperand::Imm(0),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_ne!(word, 0xD503201F, "LdrGot must not emit NOP");
+        // Verify it's a 64-bit load (size=11) with unsigned offset
+        assert_eq!((word >> 30) & 0b11, 0b11, "LdrGot size should be 11 (64-bit)");
+        assert_eq!((word >> 22) & 0b11, 0b01, "LdrGot opc should be 01 (load)");
+    }
+
+    #[test]
+    fn test_encode_ldr_tlvp() {
+        // LDR X0, [X1, #0] (TLV load)
+        let inst = MachInst::new(
+            AArch64Opcode::LdrTlvp,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X1),
+                MachOperand::Imm(0),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_ne!(word, 0xD503201F, "LdrTlvp must not emit NOP");
+        assert_eq!((word >> 30) & 0b11, 0b11, "LdrTlvp size should be 11 (64-bit)");
+    }
+
+    // -----------------------------------------------------------------------
+    // BIC, CSINC, CSINV, CSNEG, MOVN encoding tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encode_bic_rr() {
+        // BIC X0, X1, X2 = AND X0, X1, NOT(X2)
+        // Uses same convention as ORN: N-bit encoded via shift param in
+        // encode_logical_shifted_reg (see note in ORN — pre-existing convention).
+        let inst = MachInst::new(
+            AArch64Opcode::BicRR,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X1),
+                MachOperand::PReg(X2),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        // BIC uses opc=00 (AND family)
+        assert_eq!((word >> 29) & 0b11, 0b00, "BIC opc should be 00 (AND family)");
+        // Verify encoding matches encode_logical_shifted_reg with same convention as ORN
+        let expected = encoding::encode_logical_shifted_reg(1, 0b00, 1, 0, 2, 0, 1, 0);
+        assert_eq!(word, expected, "BIC X0, X1, X2 = 0x{word:08X}");
+    }
+
+    #[test]
+    fn test_encode_csinc() {
+        // CSINC X0, X1, X2, EQ (cond=0)
+        let inst = MachInst::new(
+            AArch64Opcode::Csinc,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X1),
+                MachOperand::PReg(X2),
+                MachOperand::Imm(0), // EQ condition
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        // Check op2 field = 01 (CSINC)
+        assert_eq!((word >> 10) & 0b11, 0b01, "CSINC op2 should be 01");
+        // Check opc field is 00 (not CSINV/CSNEG which use 10)
+        assert_eq!((word >> 29) & 0b11, 0b00, "CSINC should have bits 30:29 = 00");
+    }
+
+    #[test]
+    fn test_encode_csinv() {
+        // CSINV X0, X1, X2, NE (cond=1)
+        let inst = MachInst::new(
+            AArch64Opcode::Csinv,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X1),
+                MachOperand::PReg(X2),
+                MachOperand::Imm(1), // NE condition
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        // Check op2 field = 00 (CSINV)
+        assert_eq!((word >> 10) & 0b11, 0b00, "CSINV op2 should be 00");
+        // Check bit 30 = 1 (CSINV uses op=1)
+        assert_eq!((word >> 30) & 1, 1, "CSINV should have bit 30 = 1");
+    }
+
+    #[test]
+    fn test_encode_csneg() {
+        // CSNEG X0, X1, X2, EQ (cond=0)
+        let inst = MachInst::new(
+            AArch64Opcode::Csneg,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X1),
+                MachOperand::PReg(X2),
+                MachOperand::Imm(0),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        // Check op2 field = 01 (CSNEG)
+        assert_eq!((word >> 10) & 0b11, 0b01, "CSNEG op2 should be 01");
+        // Check bit 30 = 1 (CSNEG uses op=1)
+        assert_eq!((word >> 30) & 1, 1, "CSNEG should have bit 30 = 1");
+    }
+
+    #[test]
+    fn test_encode_movn() {
+        // MOVN X0, #42
+        let inst = MachInst::new(
+            AArch64Opcode::Movn,
+            vec![MachOperand::PReg(X0), MachOperand::Imm(42)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        // MOVN uses opc=00 in the move-wide encoding
+        let opc = (word >> 29) & 0b11;
+        assert_eq!(opc, 0b00, "MOVN opc should be 00");
+        // Check the immediate is embedded
+        let imm_field = (word >> 5) & 0xFFFF;
+        assert_eq!(imm_field, 42, "MOVN imm16 should be 42");
     }
 }
