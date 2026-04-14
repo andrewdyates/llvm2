@@ -252,14 +252,14 @@ fn try_cset(
     if true_val == 1 && false_val == 0 {
         // CSET dst, cond
         Some(MachInst::new(
-            AArch64Opcode::Cset,
+            AArch64Opcode::CSet,
             vec![dst, MachOperand::Imm(cond.encoding() as i64)],
         ))
     } else if true_val == 0 && false_val == 1 {
         // Invert: CSET dst, !cond
         let inv = cond.invert();
         Some(MachInst::new(
-            AArch64Opcode::Cset,
+            AArch64Opcode::CSet,
             vec![dst, MachOperand::Imm(inv.encoding() as i64)],
         ))
     } else {
@@ -529,7 +529,7 @@ mod tests {
         assert_eq!(header.insts.len(), 3);
 
         let cset = func.inst(header.insts[1]);
-        assert_eq!(cset.opcode, AArch64Opcode::Cset);
+        assert_eq!(cset.opcode, AArch64Opcode::CSet);
         assert_eq!(cset.operands[0], vreg(2)); // dst
         assert_eq!(cset.operands[1], imm(CondCode::EQ.encoding() as i64));
     }
@@ -551,7 +551,7 @@ mod tests {
 
         let header = func.block(BlockId(0));
         let cset = func.inst(header.insts[1]);
-        assert_eq!(cset.opcode, AArch64Opcode::Cset);
+        assert_eq!(cset.opcode, AArch64Opcode::CSet);
         // B.NE true_arm=0, false_arm=1 -> CSET with inverted NE = EQ
         assert_eq!(cset.operands[1], imm(CondCode::EQ.encoding() as i64));
     }
@@ -573,7 +573,7 @@ mod tests {
 
         let header = func.block(BlockId(0));
         let cset = func.inst(header.insts[1]);
-        assert_eq!(cset.opcode, AArch64Opcode::Cset);
+        assert_eq!(cset.opcode, AArch64Opcode::CSet);
         assert_eq!(cset.operands[0], vreg(1));
         assert_eq!(cset.operands[1], imm(CondCode::LT.encoding() as i64));
     }

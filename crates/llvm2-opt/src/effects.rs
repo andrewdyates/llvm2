@@ -103,7 +103,7 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         CmpRR | CmpRI | CMPWrr | CMPXrr | CMPWri | CMPXri | Tst | Fcmp => MemoryEffect::Pure,
 
         // Conditional select/set: pure computation, no memory access.
-        Csel | Cset | CSet | Csinc | Csinv | Csneg => MemoryEffect::Pure,
+        Csel | CSet | Csinc | Csinv | Csneg => MemoryEffect::Pure,
 
         // Move (including LLVM-style typed aliases)
         MovR | MovI | Movz | Movn | Movk | FmovImm

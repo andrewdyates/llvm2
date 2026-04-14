@@ -62,10 +62,6 @@ pub enum AArch64Opcode {
     /// CSEL Xd, Xn, Xm, cond — conditional select.
     /// Operands: [dst, true_src, false_src, Imm(cond_code_encoding)].
     Csel,
-    /// CSET Xd, cond — conditional set (materialize condition as 0/1).
-    /// Operands: [dst, Imm(cond_code_encoding)].
-    /// Semantically: Xd = (cond) ? 1 : 0.
-    Cset,
     /// CSINC Xd, Xn, Xm, cond — conditional select increment.
     /// Semantically: Xd = cond ? Xn : (Xm + 1).
     Csinc,
@@ -144,9 +140,10 @@ pub enum AArch64Opcode {
     Ret,
 
     // -- Conditional --
-    /// CSET Wd, <cond> — set register to 1 if condition is true, 0 otherwise.
-    /// Encoded as CSINC Wd, WZR, WZR, invert(cond) per ARM ARM.
-    /// Operands: [PReg(Wd), Imm(cond_encoding)]
+    /// CSET Xd/Wd, cond — conditional set (materialize condition as 0/1).
+    /// Encoded as CSINC Xd, XZR, XZR, invert(cond) per ARM ARM C6.2.70.
+    /// Operands: [dst, Imm(cond_code_encoding)].
+    /// Semantically: Xd = (cond) ? 1 : 0.
     CSet,
 
     // -- Extension --

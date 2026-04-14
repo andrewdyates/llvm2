@@ -136,7 +136,7 @@ impl AppleSiliconCostModel {
             CMPWri | CMPXri     => (1, m4_int_tp),
             Tst                 => (1, m4_int_tp),
             Csel                => (1, m4_int_tp),
-            Cset | CSet         => (1, m4_int_tp),
+            CSet                => (1, m4_int_tp),
             Csinc               => (1, m4_int_tp),
             Csinv               => (1, m4_int_tp),
             Csneg               => (1, m4_int_tp),
@@ -549,7 +549,7 @@ mod tests {
             AArch64Opcode::CMPWri, AArch64Opcode::CMPXri,
             AArch64Opcode::Tst,
             // Conditional
-            AArch64Opcode::Csel, AArch64Opcode::Cset, AArch64Opcode::CSet,
+            AArch64Opcode::Csel, AArch64Opcode::CSet,
             AArch64Opcode::Csinc, AArch64Opcode::Csinv, AArch64Opcode::Csneg,
             // Flag-setting
             AArch64Opcode::AddsRR, AArch64Opcode::AddsRI,

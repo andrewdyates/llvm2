@@ -568,16 +568,21 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             Ok(encoding::encode_move_wide(sf, 0b11, 0, imm16, preg_hw(0)?))
         }
         AArch64Opcode::CSet => {
-            // CSET Wd, <cond> — encoded as CSINC Wd, WZR, WZR, invert(cond)
-            // Encoding: sf=0 | 00 | 11010100 | Rm(=WZR) | inv_cond | 01 | Rn(=WZR) | Rd
+            // CSET Xd/Wd, cond — encoded as CSINC Xd, XZR, XZR, invert(cond)
+            // ARM ARM C6.2.70: sf | 0 | 0 | 11010100 | Rm(=XZR) | inv_cond | 0 | 1 | Rn(=XZR) | Rd
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
             let rd = preg_hw(0)?;
             let cond = imm_val(1) as u32 & 0xF;
             let inv_cond = cond ^ 1;
-            Ok((0b0_0_0_11010100u32 << 21)
-                | (31 << 16)       // Rm = WZR
-                | (inv_cond << 12) // inverted condition
+            let rn = 31u32; // XZR/WZR
+            let rm = 31u32; // XZR/WZR
+            Ok((sf << 31)
+                | (0b00 << 29)
+                | (0b11010100 << 21)
+                | (rm << 16)
+                | (inv_cond << 12)
                 | (0b01 << 10)     // op2 = 01 (CSINC)
-                | (31 << 5)        // Rn = WZR
+                | (rn << 5)
                 | rd)
         }
 
@@ -1128,25 +1133,6 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 | (rm << 16)
                 | (cond << 12)
                 | (0b00 << 10)
-                | (rn << 5)
-                | rd)
-        }
-
-        // CSET Xd, cond — encoded as CSINC Xd, XZR, XZR, invert(cond)
-        // Operands: [dst, Imm(cond_code_encoding)]
-        AArch64Opcode::Cset => {
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let rd = preg_hw(0)?;
-            let cond = imm_val(1) as u32 & 0xF;
-            let inv_cond = cond ^ 1;
-            let rn = 31u32; // XZR
-            let rm = 31u32; // XZR
-            Ok((sf << 31)
-                | (0b00 << 29)
-                | (0b11010100 << 21)
-                | (rm << 16)
-                | (inv_cond << 12)
-                | (0b01 << 10) // CSINC
                 | (rn << 5)
                 | rd)
         }

@@ -488,24 +488,25 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             }
         }
 
-        // CSET Wd, <cond> — encoded as CSINC Wd, WZR, WZR, invert(cond)
+        // CSET Xd/Wd, cond — encoded as CSINC Xd, XZR, XZR, invert(cond)
+        // ARM ARM C6.2.70: sf | 0 | 0 | 11010100 | Rm(=XZR) | inv_cond | 0 | 1 | Rn(=XZR) | Rd
         // Operands: [PReg(Rd), Imm(cond_encoding)]
         AArch64Opcode::CSet => {
+            let sf = sf_from_operand(inst, 0);
             let rd = preg_hw(inst, 0);
             let cond = imm_val(inst, 1) as u32 & 0xF;
             // Invert condition code: flip bit 0 (ARM ARM C6.2.70)
             let inv_cond = cond ^ 1;
-            // CSINC encoding: sf=0 (32-bit), op=0, S=0, op2=01
-            // 31 30 29:21    20:16 15:12 11:10 9:5   4:0
-            // sf  0  0_11010100  Rm   cond   01    Rn   Rd
-            // For 32-bit: sf=0, Rn=WZR(31), Rm=WZR(31)
-            let encoding = (0b0_0_0_11010100u32 << 21)
-                | (31 << 16)       // Rm = WZR
-                | (inv_cond << 12) // inverted condition
+            let rn = 31u32; // XZR/WZR
+            let rm = 31u32; // XZR/WZR
+            Ok((sf << 31)
+                | (0b00 << 29)
+                | (0b11010100 << 21)
+                | (rm << 16)
+                | (inv_cond << 12)
                 | (0b01 << 10)     // op2 = 01 (CSINC)
-                | (31 << 5)        // Rn = WZR
-                | rd;              // Rd
-            Ok(encoding)
+                | (rn << 5)
+                | rd)
         }
 
         // MOVZ Rd, #imm16 (and MovI treated as MOVZ)
@@ -1075,31 +1076,6 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
                 | (rm << 16)
                 | (cond << 12)
                 | (0b00 << 10)
-                | (rn << 5)
-                | rd)
-        }
-
-        // CSET Xd, cond  — encoded as CSINC Xd, XZR, XZR, invert(cond)
-        // ARM ARM: C6.2.78  CSINC (alias CSET when Rn=Rm=XZR)
-        // 31 30 29 28:21    20:16 15:12 11 10 9:5  4:0
-        // sf  0  0  11010100 Rm    cond   0  1  Rn   Rd
-        // Operands: [dst, Imm(cond_code_encoding)]
-        // The condition stored is the ORIGINAL condition; we invert it for the
-        // CSINC encoding (CSINC Xd, XZR, XZR, inv(cond) = CSET Xd, cond).
-        AArch64Opcode::Cset => {
-            let sf = sf_from_operand(inst, 0);
-            let rd = preg_hw(inst, 0);
-            let cond = imm_val(inst, 1) as u32 & 0xF;
-            // Invert condition for CSINC encoding: flip bit 0.
-            let inv_cond = cond ^ 1;
-            let rn = 31u32; // XZR
-            let rm = 31u32; // XZR
-            Ok((sf << 31)
-                | (0b00 << 29)
-                | (0b11010100 << 21)
-                | (rm << 16)
-                | (inv_cond << 12)
-                | (0b01 << 10) // o2=0, op=1 → CSINC
                 | (rn << 5)
                 | rd)
         }
