@@ -51,6 +51,12 @@ use crate::target_analysis::{
     TargetProofContext,
 };
 
+use llvm2_ir::cost_model::{
+    CostModelGen,
+    ProfitabilityAnalyzer,
+    ComputeTarget as CostComputeTarget,
+};
+
 // ---------------------------------------------------------------------------
 // Node and edge identifiers
 // ---------------------------------------------------------------------------
@@ -192,6 +198,9 @@ pub struct ComputeNode {
     pub produced_values: Vec<ValueId>,
     /// Values consumed by this node (used for edge construction).
     pub consumed_values: Vec<ValueId>,
+    /// Dominant operation name (e.g., "ADD", "MUL", "GEMM") for cost model queries.
+    /// Derived from the most common instruction in the node.
+    pub dominant_op: String,
     /// Full target legality analysis from ProofAnalyzer, including justifications,
     /// parallel reduction legality, and per-target judgments.
     /// `None` for manually constructed nodes that bypass proof analysis.
@@ -219,6 +228,10 @@ pub struct ComputeGraph {
     pub nodes: Vec<ComputeNode>,
     /// Data dependency edges.
     pub edges: Vec<DataEdge>,
+    /// Profitability analyzer for GPU/ANE dispatch decisions.
+    /// Uses proper thresholds from the cost model instead of ad-hoc checks.
+    #[serde(skip)]
+    pub(crate) profitability: Option<ProfitabilityAnalyzer>,
 }
 
 impl ComputeGraph {
@@ -227,7 +240,22 @@ impl ComputeGraph {
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
+            profitability: None,
         }
+    }
+
+    /// Create an empty computation graph with a profitability analyzer.
+    pub fn new_with_profitability(generation: CostModelGen) -> Self {
+        Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            profitability: Some(ProfitabilityAnalyzer::new(generation)),
+        }
+    }
+
+    /// Set the profitability analyzer for this graph.
+    pub fn set_profitability(&mut self, analyzer: ProfitabilityAnalyzer) {
+        self.profitability = Some(analyzer);
     }
 
     /// Get a node by ID.
@@ -304,6 +332,74 @@ impl Default for ComputeGraph {
 }
 
 // ---------------------------------------------------------------------------
+// Target mapping: llvm2-lower ComputeTarget <-> llvm2-ir cost_model ComputeTarget
+// ---------------------------------------------------------------------------
+
+/// Map a `llvm2-lower` ComputeTarget to the `llvm2-ir::cost_model` ComputeTarget.
+/// Returns `None` for targets with no direct cost model equivalent.
+fn to_cost_target(target: ComputeTarget) -> Option<CostComputeTarget> {
+    match target {
+        ComputeTarget::CpuScalar => Some(CostComputeTarget::CpuScalar),
+        ComputeTarget::CpuSimd => Some(CostComputeTarget::Neon),
+        ComputeTarget::Gpu => Some(CostComputeTarget::Gpu),
+        ComputeTarget::NeuralEngine => Some(CostComputeTarget::Ane),
+    }
+}
+
+/// Convert a BinOp to the operation name string used by ProfitabilityAnalyzer.
+fn binop_to_op_name(op: &BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "ADD",
+        BinOp::Sub => "SUB",
+        BinOp::Mul => "MUL",
+        BinOp::SDiv => "SDIV",
+        BinOp::UDiv => "UDIV",
+        BinOp::SRem => "SDIV", // closest equivalent
+        BinOp::URem => "UDIV", // closest equivalent
+        BinOp::And => "AND",
+        BinOp::Or => "ORR",
+        BinOp::Xor => "EOR",
+        BinOp::Shl => "SHL",
+        BinOp::AShr => "ASR",
+        BinOp::LShr => "LSR",
+        BinOp::FAdd => "FADD",
+        BinOp::FSub => "FSUB",
+        BinOp::FMul => "FMUL",
+        BinOp::FDiv => "FDIV",
+    }
+}
+
+/// Derive the dominant operation name from a block's instructions.
+///
+/// Examines BinOp instructions and returns the most frequent operation name.
+/// Falls back to a kind-based heuristic if no BinOps are found.
+fn derive_dominant_op(body: &[InstrNode], kind: NodeKind) -> String {
+    let mut op_counts: HashMap<&'static str, usize> = HashMap::new();
+
+    for node in body {
+        match &node.instr {
+            Instr::BinOp { op, .. } => {
+                let name = binop_to_op_name(op);
+                *op_counts.entry(name).or_insert(0) += 1;
+            }
+            _ => {}
+        }
+    }
+
+    // Return the most frequent BinOp if any were found.
+    if let Some((&name, _)) = op_counts.iter().max_by_key(|(_, count)| **count) {
+        return name.to_string();
+    }
+
+    // Fallback based on NodeKind.
+    match kind {
+        NodeKind::MatrixHeavy => "GEMM".to_string(),
+        NodeKind::DataParallel => "ADD".to_string(),
+        NodeKind::Scalar => "ADD".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Proof-guided target recommendations
 // ---------------------------------------------------------------------------
 
@@ -331,20 +427,43 @@ impl ComputeGraph {
     /// This is the primary entry point for proof-guided graph construction.
     /// Each node's `target_legality` is populated with full [`TargetLegality`]
     /// from the analyzer, including justifications and parallel reduction info.
+    /// A default M1 ProfitabilityAnalyzer is attached for target dispatch.
     pub fn with_proof_context(
         module: &TmirModule,
         proof_ctx: TargetProofContext,
         analyzer: &ProofAnalyzer,
     ) -> Self {
         let mut builder = GraphBuilder::new(analyzer.clone(), proof_ctx);
-        builder.build_from_module(module)
+        let mut graph = builder.build_from_module(module);
+        graph.profitability = Some(ProfitabilityAnalyzer::new(CostModelGen::M1));
+        graph
     }
 
-    /// Return per-node target recommendations using stored proof-guided legality.
+    /// Build a graph from a tMIR module with proof context and a custom
+    /// ProfitabilityAnalyzer for GPU/ANE dispatch thresholds.
+    pub fn with_profitability(
+        module: &TmirModule,
+        proof_ctx: TargetProofContext,
+        analyzer: &ProofAnalyzer,
+        profitability: ProfitabilityAnalyzer,
+    ) -> Self {
+        let mut builder = GraphBuilder::new(analyzer.clone(), proof_ctx);
+        let mut graph = builder.build_from_module(module);
+        graph.profitability = Some(profitability);
+        graph
+    }
+
+    /// Return per-node target recommendations using stored proof-guided legality
+    /// and profitability analysis.
     ///
-    /// For each node, picks the cheapest legal target by `latency_cycles` from
-    /// the node's cost map. Nodes without `target_legality` fall back to
-    /// CpuScalar.
+    /// For each node, filters legal targets through the [`ProfitabilityAnalyzer`]
+    /// (when available) to exclude targets that are legal but unprofitable for
+    /// the node's workload size. Then picks the cheapest remaining target by
+    /// `latency_cycles`. Nodes without `target_legality` fall back to CpuScalar.
+    ///
+    /// When no `ProfitabilityAnalyzer` is set, falls back to the previous
+    /// behavior of picking the cheapest legal target without profitability
+    /// filtering.
     pub fn target_recommendations(&self) -> Vec<TargetRecommendation> {
         self.nodes.iter().map(|node| {
             let legal = if let Some(ref legality) = node.target_legality {
@@ -353,8 +472,49 @@ impl ComputeGraph {
                 node.legal_targets.clone()
             };
 
-            // Pick cheapest legal target by latency.
-            let recommended = legal.iter()
+            // Filter legal targets through ProfitabilityAnalyzer when available.
+            // GPU and ANE have dispatch overhead that makes them unprofitable for
+            // small workloads. ProfitabilityAnalyzer encodes these thresholds.
+            let profitable = if let Some(ref pa) = self.profitability {
+                let op = &node.dominant_op;
+                let data_size = node.data_size_bytes;
+                // Approximate element count: assume 4-byte elements as default.
+                let element_count = (data_size / 4).max(1);
+                // Approximate tensor shape as a flat array for profitability checks.
+                let tensor_shape = [element_count];
+
+                legal.iter().copied().filter(|&target| {
+                    match target {
+                        ComputeTarget::Gpu => {
+                            if let Some(cost_target) = to_cost_target(target) {
+                                pa.target_legality(op, cost_target)
+                                    && pa.is_gpu_profitable(op, data_size, element_count)
+                            } else {
+                                false
+                            }
+                        }
+                        ComputeTarget::NeuralEngine => {
+                            if let Some(cost_target) = to_cost_target(target) {
+                                pa.target_legality(op, cost_target)
+                                    && pa.is_ane_profitable(op, data_size, &tensor_shape)
+                            } else {
+                                false
+                            }
+                        }
+                        // CPU Scalar and SIMD are always considered profitable.
+                        _ => true,
+                    }
+                }).collect::<Vec<_>>()
+            } else {
+                legal.clone()
+            };
+
+            // If profitability filtering removed all targets, fall back to
+            // the original legal set (CPU targets will still be there).
+            let effective = if profitable.is_empty() { &legal } else { &profitable };
+
+            // Pick cheapest legal+profitable target by latency.
+            let recommended = effective.iter()
                 .filter_map(|t| node.costs.get(t).map(|c| (*t, c.latency_cycles)))
                 .min_by_key(|(_, cost)| *cost)
                 .map(|(t, _)| t)
@@ -366,9 +526,15 @@ impl ComputeGraph {
                 .unwrap_or(false);
 
             let reason = if let Some(ref legality) = node.target_legality {
-                legality.reason(recommended)
-                    .unwrap_or("no justification available")
-                    .to_string()
+                let base = legality.reason(recommended)
+                    .unwrap_or("no justification available");
+                if self.profitability.is_some() && !profitable.contains(&recommended) {
+                    format!("{} (profitability-filtered fallback)", base)
+                } else if self.profitability.is_some() {
+                    format!("{} (profitability-verified)", base)
+                } else {
+                    base.to_string()
+                }
             } else {
                 format!("{} selected as cheapest legal target (no proof context)", recommended)
             };
@@ -376,7 +542,7 @@ impl ComputeGraph {
             TargetRecommendation {
                 node_id: node.id,
                 recommended_target: recommended,
-                legal_targets: legal,
+                legal_targets: effective.to_vec(),
                 reason,
                 parallel_reduction_legal,
             }
@@ -1110,6 +1276,9 @@ impl GraphBuilder {
             costs.insert(target, cost);
         }
 
+        // Derive dominant operation name from instructions for profitability queries.
+        let dominant_op = derive_dominant_op(body, kind);
+
         vec![ComputeNode {
             id: node_id,
             instructions,
@@ -1119,6 +1288,7 @@ impl GraphBuilder {
             data_size_bytes,
             produced_values,
             consumed_values,
+            dominant_op,
             target_legality: Some(legality),
         }]
     }
@@ -1182,13 +1352,16 @@ impl ComputeGraph {
     }
 
     /// Build a graph with a custom proof context.
+    /// Attaches a default M1 ProfitabilityAnalyzer for GPU/ANE dispatch.
     pub fn from_module_with_proofs(
         module: &TmirModule,
         proof_ctx: TargetProofContext,
     ) -> Self {
         let analyzer = ProofAnalyzer::with_defaults();
         let mut builder = GraphBuilder::new(analyzer, proof_ctx);
-        builder.build_from_module(module)
+        let mut graph = builder.build_from_module(module);
+        graph.profitability = Some(ProfitabilityAnalyzer::new(CostModelGen::M1));
+        graph
     }
 
     /// Add a node manually (for testing).
@@ -1329,6 +1502,107 @@ mod tests {
                             instr: Instr::BinOp {
                                 op: BinOp::FMul,
                                 ty: Ty::Array(Box::new(Ty::Float(64)), 1000),
+                                lhs: ValueId(0),
+                                rhs: ValueId(1),
+                            },
+                            results: vec![ValueId(2)],
+                        },
+                        // FAdd: accumulate (MAC pattern)
+                        InstrNode {
+                            instr: Instr::BinOp {
+                                op: BinOp::FAdd,
+                                ty: Ty::Float(64),
+                                lhs: ValueId(2),
+                                rhs: ValueId(2),
+                            },
+                            results: vec![ValueId(3)],
+                        },
+                        InstrNode {
+                            instr: Instr::Return {
+                                values: vec![ValueId(3)],
+                            },
+                            results: vec![],
+                        },
+                    ],
+                }],
+            }],
+            structs: vec![],
+        }
+    }
+
+    /// Build a large data-parallel module (100K-element arrays).
+    /// Workload large enough for GPU profitability thresholds.
+    fn build_large_data_parallel_module() -> Module {
+        Module {
+            name: "large_data_parallel".to_string(),
+            functions: vec![TmirFunction {
+                id: FuncId(0),
+                name: "large_vec_add".to_string(),
+                ty: FuncTy {
+                    params: vec![
+                        Ty::Array(Box::new(Ty::Float(64)), 100_000),
+                        Ty::Array(Box::new(Ty::Float(64)), 100_000),
+                    ],
+                    returns: vec![Ty::Float(64)],
+                },
+                entry: BlockId(0),
+                blocks: vec![TmirBlock {
+                    id: BlockId(0),
+                    params: vec![
+                        (ValueId(0), Ty::Array(Box::new(Ty::Float(64)), 100_000)),
+                        (ValueId(1), Ty::Array(Box::new(Ty::Float(64)), 100_000)),
+                    ],
+                    body: vec![
+                        InstrNode {
+                            instr: Instr::BinOp {
+                                op: BinOp::FAdd,
+                                ty: Ty::Array(Box::new(Ty::Float(64)), 100_000),
+                                lhs: ValueId(0),
+                                rhs: ValueId(1),
+                            },
+                            results: vec![ValueId(2)],
+                        },
+                        InstrNode {
+                            instr: Instr::Return {
+                                values: vec![ValueId(2)],
+                            },
+                            results: vec![],
+                        },
+                    ],
+                }],
+            }],
+            structs: vec![],
+        }
+    }
+
+    /// Build a large matrix-heavy module (100K-element arrays).
+    /// Workload large enough for GPU/ANE profitability thresholds.
+    fn build_large_matrix_heavy_module() -> Module {
+        Module {
+            name: "large_matrix_heavy".to_string(),
+            functions: vec![TmirFunction {
+                id: FuncId(0),
+                name: "large_dot_product".to_string(),
+                ty: FuncTy {
+                    params: vec![
+                        Ty::Array(Box::new(Ty::Float(64)), 100_000),
+                        Ty::Array(Box::new(Ty::Float(64)), 100_000),
+                    ],
+                    returns: vec![Ty::Float(64)],
+                },
+                entry: BlockId(0),
+                blocks: vec![TmirBlock {
+                    id: BlockId(0),
+                    params: vec![
+                        (ValueId(0), Ty::Array(Box::new(Ty::Float(64)), 100_000)),
+                        (ValueId(1), Ty::Array(Box::new(Ty::Float(64)), 100_000)),
+                    ],
+                    body: vec![
+                        // FMul: multiply elements
+                        InstrNode {
+                            instr: Instr::BinOp {
+                                op: BinOp::FMul,
+                                ty: Ty::Array(Box::new(Ty::Float(64)), 100_000),
                                 lhs: ValueId(0),
                                 rhs: ValueId(1),
                             },
@@ -1870,6 +2144,7 @@ mod tests {
             data_size_bytes: 1000,
             produced_values: vec![],
             consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
             target_legality: None,
         });
 
@@ -1892,6 +2167,7 @@ mod tests {
             data_size_bytes: 2000,
             produced_values: vec![],
             consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
             target_legality: None,
         });
 
@@ -2161,7 +2437,8 @@ mod tests {
 
     #[test]
     fn test_target_recommendations_prefer_gpu() {
-        let module = build_data_parallel_module();
+        // Use large module so workload exceeds GPU profitability thresholds.
+        let module = build_large_data_parallel_module();
         let proof_ctx = full_proof_context();
         let analyzer = ProofAnalyzer::with_defaults();
 
@@ -2171,19 +2448,19 @@ mod tests {
         assert_eq!(recs.len(), 1);
         let rec = &recs[0];
 
-        // For data-parallel workloads with full proofs, GPU should have lower
-        // latency than CPU scalar (massive parallelism).
+        // For large data-parallel workloads with full proofs, GPU should pass
+        // profitability check and be in the filtered legal targets.
         assert!(
             rec.legal_targets.contains(&ComputeTarget::Gpu),
-            "GPU should be in legal targets"
+            "GPU should be in legal targets for large workload"
         );
 
         // The recommendation should be GPU because it has the lowest latency
-        // for data-parallel workloads.
+        // for large data-parallel workloads.
         assert_eq!(
             rec.recommended_target,
             ComputeTarget::Gpu,
-            "Should recommend GPU for data-parallel with full proofs, got: {}",
+            "Should recommend GPU for large data-parallel with full proofs, got: {}",
             rec.recommended_target
         );
     }
@@ -2313,7 +2590,8 @@ mod tests {
 
     #[test]
     fn test_matrix_heavy_with_proofs_recommends_accelerator() {
-        let module = build_matrix_heavy_module();
+        // Use large module so workload exceeds GPU/ANE profitability thresholds.
+        let module = build_large_matrix_heavy_module();
 
         let mut proof_ctx = ProofContext::default();
         for i in 0..2 {
@@ -2340,11 +2618,12 @@ mod tests {
         assert_eq!(recs.len(), 1);
         let rec = &recs[0];
 
-        // Matrix-heavy: GPU or ANE should be recommended (not CPU scalar).
+        // Matrix-heavy with large workload: GPU should be recommended
+        // (profitability thresholds exceeded).
         assert!(
             rec.recommended_target == ComputeTarget::Gpu
                 || rec.recommended_target == ComputeTarget::NeuralEngine,
-            "Matrix-heavy with proofs should recommend GPU or ANE, got: {}",
+            "Large matrix-heavy with proofs should recommend GPU or ANE, got: {}",
             rec.recommended_target
         );
     }
@@ -2730,6 +3009,192 @@ mod tests {
             graph.nodes[0].kind,
             NodeKind::Scalar,
             "Small array operations should be classified as Scalar, not DataParallel"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // ProfitabilityAnalyzer integration tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_small_workload_filters_gpu_ane() {
+        // Small data-parallel module (1000-element arrays, ~16KB data).
+        // GPU requires >= 4096 elements; ANE requires >= 32KB.
+        // Both should be filtered out by ProfitabilityAnalyzer.
+        let module = build_data_parallel_module();
+        let proof_ctx = full_proof_context();
+        let analyzer = ProofAnalyzer::with_defaults();
+
+        let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
+        let recs = graph.target_recommendations();
+
+        assert_eq!(recs.len(), 1);
+        let rec = &recs[0];
+
+        // GPU and ANE should be filtered out by profitability checks.
+        assert!(
+            !rec.legal_targets.contains(&ComputeTarget::Gpu),
+            "GPU should be filtered for small workload (profitability)"
+        );
+        assert!(
+            !rec.legal_targets.contains(&ComputeTarget::NeuralEngine),
+            "ANE should be filtered for small workload (profitability)"
+        );
+
+        // Should recommend CPU target instead.
+        assert!(
+            rec.recommended_target == ComputeTarget::CpuScalar
+                || rec.recommended_target == ComputeTarget::CpuSimd,
+            "Small workload should recommend CPU, got: {}",
+            rec.recommended_target
+        );
+    }
+
+    #[test]
+    fn test_large_workload_includes_gpu() {
+        // Large data-parallel module (100K-element arrays, ~1.6MB data).
+        // Well above GPU thresholds.
+        let module = build_large_data_parallel_module();
+        let proof_ctx = full_proof_context();
+        let analyzer = ProofAnalyzer::with_defaults();
+
+        let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
+        let recs = graph.target_recommendations();
+
+        assert_eq!(recs.len(), 1);
+        let rec = &recs[0];
+
+        // Large workload: GPU should pass profitability check.
+        assert!(
+            rec.legal_targets.contains(&ComputeTarget::Gpu),
+            "GPU should be profitable for large workload"
+        );
+    }
+
+    #[test]
+    fn test_target_legality_filters_bitwise_from_ane() {
+        // Build a module with bitwise operations (AND).
+        // ANE does not support bitwise ops per ProfitabilityAnalyzer::target_legality.
+        let module = Module {
+            name: "bitwise".to_string(),
+            functions: vec![TmirFunction {
+                id: FuncId(0),
+                name: "bitwise_and".to_string(),
+                ty: FuncTy {
+                    params: vec![
+                        Ty::Array(Box::new(Ty::Int(32)), 100_000),
+                        Ty::Array(Box::new(Ty::Int(32)), 100_000),
+                    ],
+                    returns: vec![Ty::Int(32)],
+                },
+                entry: BlockId(0),
+                blocks: vec![TmirBlock {
+                    id: BlockId(0),
+                    params: vec![
+                        (ValueId(0), Ty::Array(Box::new(Ty::Int(32)), 100_000)),
+                        (ValueId(1), Ty::Array(Box::new(Ty::Int(32)), 100_000)),
+                    ],
+                    body: vec![
+                        InstrNode {
+                            instr: Instr::BinOp {
+                                op: BinOp::And,
+                                ty: Ty::Array(Box::new(Ty::Int(32)), 100_000),
+                                lhs: ValueId(0),
+                                rhs: ValueId(1),
+                            },
+                            results: vec![ValueId(2)],
+                        },
+                        InstrNode {
+                            instr: Instr::Return {
+                                values: vec![ValueId(2)],
+                            },
+                            results: vec![],
+                        },
+                    ],
+                }],
+            }],
+            structs: vec![],
+        };
+
+        // Give full proofs so GPU/ANE are at least proof-legal.
+        let proof_ctx = full_proof_context();
+        let analyzer = ProofAnalyzer::with_defaults();
+
+        let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
+        let recs = graph.target_recommendations();
+
+        assert_eq!(recs.len(), 1);
+        let rec = &recs[0];
+
+        // ANE should be filtered: ProfitabilityAnalyzer says AND is not
+        // ANE-legal (bitwise ops are not supported by the Neural Engine).
+        assert!(
+            !rec.legal_targets.contains(&ComputeTarget::NeuralEngine),
+            "ANE should not be legal for bitwise AND (hardware limitation)"
+        );
+    }
+
+    #[test]
+    fn test_profitability_set_and_get() {
+        // Verify that setting a ProfitabilityAnalyzer on a graph affects
+        // target_recommendations() behavior.
+        let module = build_data_parallel_module();
+        let proof_ctx = full_proof_context();
+        let analyzer = ProofAnalyzer::with_defaults();
+
+        // Build graph WITHOUT profitability analyzer.
+        let mut builder = GraphBuilder::new(analyzer.clone(), proof_ctx.clone());
+        let mut graph = builder.build_from_module(&module);
+
+        // Without profitability: GPU should appear in recommendations
+        // (it's proof-legal and has lowest latency).
+        let recs_without = graph.target_recommendations();
+        let has_gpu_without = recs_without.iter().any(|r|
+            r.legal_targets.contains(&ComputeTarget::Gpu)
+        );
+
+        // Now set the profitability analyzer.
+        graph.set_profitability(ProfitabilityAnalyzer::new(CostModelGen::M1));
+
+        // With profitability: GPU should be filtered for this small workload.
+        let recs_with = graph.target_recommendations();
+        let has_gpu_with = recs_with.iter().any(|r|
+            r.legal_targets.contains(&ComputeTarget::Gpu)
+        );
+
+        // The small workload should see GPU removed after profitability filtering.
+        if has_gpu_without {
+            assert!(
+                !has_gpu_with,
+                "ProfitabilityAnalyzer should filter GPU for small workload"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dominant_op_derived_from_instructions() {
+        // Build modules and verify the dominant_op field is set correctly.
+        let module = build_data_parallel_module();
+        let graph = ComputeGraph::from_module(&module);
+
+        assert_eq!(graph.num_nodes(), 1);
+        // data_parallel module has a single FAdd -> dominant op is "FADD"
+        assert_eq!(
+            graph.nodes[0].dominant_op, "FADD",
+            "Data-parallel module should have dominant_op FADD"
+        );
+
+        // Matrix-heavy module has FMul + FAdd -> dominant is tied,
+        // HashMap iteration order is nondeterministic but both are valid.
+        let mat_module = build_matrix_heavy_module();
+        let mat_graph = ComputeGraph::from_module(&mat_module);
+
+        assert_eq!(mat_graph.num_nodes(), 1);
+        let dom = &mat_graph.nodes[0].dominant_op;
+        assert!(
+            dom == "FMUL" || dom == "FADD",
+            "Matrix-heavy module should have dominant_op FMUL or FADD, got: {}",
+            dom
         );
     }
 }

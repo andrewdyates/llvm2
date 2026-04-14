@@ -1119,6 +1119,7 @@ pub enum OperationCategory {
 /// checks hardware-level operation support.
 ///
 /// Source: designs/2026-04-14-profitability-thresholds.md
+#[derive(Debug, Clone, Copy)]
 pub struct ProfitabilityAnalyzer {
     gpu_thresholds: GpuThresholds,
     ane_thresholds: AneThresholds,
