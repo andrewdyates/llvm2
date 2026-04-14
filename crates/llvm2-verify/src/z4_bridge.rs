@@ -364,6 +364,68 @@ pub fn generate_smt2_query_with_arrays(
 }
 
 // ---------------------------------------------------------------------------
+// Public convenience API (named per task specification)
+// ---------------------------------------------------------------------------
+
+/// Serialize a proof obligation to a complete SMT-LIB2 query string.
+///
+/// This is a convenience wrapper around [`generate_smt2_query`] using default
+/// configuration. For custom solver options (timeout, model production, etc.),
+/// use [`generate_smt2_query`] directly.
+///
+/// The returned string is a complete SMT-LIB2 script ready to be piped to
+/// z3 or z4:
+/// ```text
+/// (set-logic QF_BV)
+/// (set-option :timeout 5000)
+/// (set-option :produce-models true)
+/// (declare-const a (_ BitVec 32))
+/// (declare-const b (_ BitVec 32))
+/// (assert (not (= (bvadd a b) (bvadd a b))))
+/// (check-sat)
+/// (get-value (a b))
+/// (exit)
+/// ```
+pub fn serialize_to_smt2(obligation: &ProofObligation) -> String {
+    generate_smt2_query(obligation, &Z4Config::default())
+}
+
+/// Verify a proof obligation by shelling out to a z4 or z3 CLI binary.
+///
+/// This is an alias for [`verify_with_cli`] with a name that matches the
+/// z4-specific nomenclature used throughout the codebase.
+///
+/// The function:
+/// 1. Serializes the proof obligation to SMT-LIB2
+/// 2. Writes it to a temp file
+/// 3. Invokes the solver binary (z3 or z4, auto-detected)
+/// 4. Parses the output (sat/unsat/timeout/error)
+/// 5. Extracts counterexamples from the model if SAT
+pub fn verify_with_z4_cli(obligation: &ProofObligation, config: &Z4Config) -> Z4Result {
+    verify_with_cli(obligation, config)
+}
+
+/// Parse raw solver output text into a [`Z4Result`].
+///
+/// This is a public wrapper around the internal parser, useful for testing
+/// and for consumers that invoke the solver themselves.
+///
+/// # Arguments
+///
+/// * `output` -- the solver's stdout text (e.g., "unsat\n" or "sat\n((a #x0a))")
+/// * `inputs` -- the bitvector input variables for counterexample extraction
+///
+/// # Returns
+///
+/// * [`Z4Result::Verified`] if the output is "unsat"
+/// * [`Z4Result::CounterExample`] if the output is "sat" (with model if available)
+/// * [`Z4Result::Timeout`] if the output is "unknown" or contains "timeout"
+/// * [`Z4Result::Error`] for any other output
+pub fn parse_z4_output(output: &str, inputs: &[(String, u32)]) -> Z4Result {
+    parse_solver_output(output, "", inputs)
+}
+
+// ---------------------------------------------------------------------------
 // CLI subprocess backend (always available)
 // ---------------------------------------------------------------------------
 
@@ -1638,5 +1700,483 @@ mod tests {
             SmtExpr::fp64_const(3.0),
         );
         assert_eq!(infer_logic(&expr), "QF_BVFP");
+    }
+
+    // -----------------------------------------------------------------------
+    // Public API convenience function tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_serialize_to_smt2() {
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        let obligation = ProofObligation {
+            name: "test_serialize".to_string(),
+            tmir_expr: a.clone().bvadd(b.clone()),
+            aarch64_expr: a.bvadd(b),
+            inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let smt2 = serialize_to_smt2(&obligation);
+
+        // Should produce a complete SMT-LIB2 script
+        assert!(smt2.contains("(set-logic QF_BV)"));
+        assert!(smt2.contains("(declare-const a (_ BitVec 32))"));
+        assert!(smt2.contains("(declare-const b (_ BitVec 32))"));
+        assert!(smt2.contains("(assert"));
+        assert!(smt2.contains("(check-sat)"));
+        assert!(smt2.contains("(exit)"));
+        // Default config includes timeout and models
+        assert!(smt2.contains("(set-option :timeout 5000)"));
+        assert!(smt2.contains("(set-option :produce-models true)"));
+    }
+
+    #[test]
+    fn test_parse_z4_output_unsat() {
+        let result = parse_z4_output("unsat\n", &[]);
+        assert_eq!(result, Z4Result::Verified);
+    }
+
+    #[test]
+    fn test_parse_z4_output_sat_with_model() {
+        let output = "sat\n((x #x0000002a))";
+        let inputs = vec![("x".to_string(), 32)];
+        let result = parse_z4_output(output, &inputs);
+        match result {
+            Z4Result::CounterExample(cex) => {
+                assert_eq!(cex.len(), 1);
+                assert_eq!(cex[0], ("x".to_string(), 0x2a));
+            }
+            other => panic!("Expected CounterExample, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_z4_output_unknown() {
+        let result = parse_z4_output("unknown\n", &[]);
+        assert_eq!(result, Z4Result::Timeout);
+    }
+
+    #[test]
+    fn test_parse_z4_output_timeout_in_text() {
+        let result = parse_z4_output("timeout\n", &[]);
+        assert_eq!(result, Z4Result::Timeout);
+    }
+
+    #[test]
+    fn test_parse_z4_output_empty() {
+        let result = parse_z4_output("", &[]);
+        assert!(matches!(result, Z4Result::Error(_)));
+    }
+
+    #[test]
+    fn test_parse_z4_output_unexpected() {
+        let result = parse_z4_output("garbage\n", &[]);
+        assert!(matches!(result, Z4Result::Error(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // SmtExpr::to_smt2_expr() tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_to_smt2_expr_var() {
+        let expr = SmtExpr::var("x", 32);
+        assert_eq!(expr.to_smt2_expr(), "x");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_bv_const() {
+        let expr = SmtExpr::bv_const(42, 32);
+        assert_eq!(expr.to_smt2_expr(), "(_ bv42 32)");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_bool_const() {
+        assert_eq!(SmtExpr::bool_const(true).to_smt2_expr(), "true");
+        assert_eq!(SmtExpr::bool_const(false).to_smt2_expr(), "false");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_bvadd() {
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        assert_eq!(a.bvadd(b).to_smt2_expr(), "(bvadd a b)");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_bvsub() {
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        assert_eq!(a.bvsub(b).to_smt2_expr(), "(bvsub a b)");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_bvmul() {
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        assert_eq!(a.bvmul(b).to_smt2_expr(), "(bvmul a b)");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_bvneg() {
+        let a = SmtExpr::var("a", 32);
+        assert_eq!(a.bvneg().to_smt2_expr(), "(bvneg a)");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_bitwise_ops() {
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        assert_eq!(a.clone().bvand(b.clone()).to_smt2_expr(), "(bvand a b)");
+        assert_eq!(a.clone().bvor(b.clone()).to_smt2_expr(), "(bvor a b)");
+        assert_eq!(a.clone().bvxor(b.clone()).to_smt2_expr(), "(bvxor a b)");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_shift_ops() {
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        assert_eq!(a.clone().bvshl(b.clone()).to_smt2_expr(), "(bvshl a b)");
+        assert_eq!(a.clone().bvlshr(b.clone()).to_smt2_expr(), "(bvlshr a b)");
+        assert_eq!(a.clone().bvashr(b.clone()).to_smt2_expr(), "(bvashr a b)");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_comparisons() {
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        assert_eq!(a.clone().eq_expr(b.clone()).to_smt2_expr(), "(= a b)");
+        assert_eq!(a.clone().bvslt(b.clone()).to_smt2_expr(), "(bvslt a b)");
+        assert_eq!(a.clone().bvsge(b.clone()).to_smt2_expr(), "(bvsge a b)");
+        assert_eq!(a.clone().bvult(b.clone()).to_smt2_expr(), "(bvult a b)");
+        assert_eq!(a.clone().bvuge(b.clone()).to_smt2_expr(), "(bvuge a b)");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_logical_ops() {
+        let a = SmtExpr::bool_const(true);
+        let b = SmtExpr::bool_const(false);
+        assert_eq!(a.clone().and_expr(b.clone()).to_smt2_expr(), "(and true false)");
+        assert_eq!(a.clone().or_expr(b.clone()).to_smt2_expr(), "(or true false)");
+        assert_eq!(a.not_expr().to_smt2_expr(), "(not true)");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_ite() {
+        let cond = SmtExpr::var("c", 32).eq_expr(SmtExpr::bv_const(0, 32));
+        let then_e = SmtExpr::var("a", 32);
+        let else_e = SmtExpr::var("b", 32);
+        let expr = SmtExpr::ite(cond, then_e, else_e);
+        assert_eq!(expr.to_smt2_expr(), "(ite (= c (_ bv0 32)) a b)");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_extract() {
+        let a = SmtExpr::var("a", 32);
+        assert_eq!(a.extract(15, 0).to_smt2_expr(), "((_ extract 15 0) a)");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_concat() {
+        let hi = SmtExpr::var("hi", 16);
+        let lo = SmtExpr::var("lo", 16);
+        assert_eq!(hi.concat(lo).to_smt2_expr(), "(concat hi lo)");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_extend() {
+        let a = SmtExpr::var("a", 8);
+        assert_eq!(a.clone().zero_ext(24).to_smt2_expr(), "((_ zero_extend 24) a)");
+        assert_eq!(a.sign_ext(24).to_smt2_expr(), "((_ sign_extend 24) a)");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_division() {
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        assert_eq!(a.clone().bvsdiv(b.clone()).to_smt2_expr(), "(bvsdiv a b)");
+        assert_eq!(a.bvudiv(b).to_smt2_expr(), "(bvudiv a b)");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_nested() {
+        // (bvadd (bvmul a b) (bvsub c d))
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        let c = SmtExpr::var("c", 32);
+        let d = SmtExpr::var("d", 32);
+        let expr = a.bvmul(b).bvadd(c.bvsub(d));
+        assert_eq!(expr.to_smt2_expr(), "(bvadd (bvmul a b) (bvsub c d))");
+    }
+
+    #[test]
+    fn test_to_smt2_expr_fp_operations() {
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let add = SmtExpr::fp_add(RoundingMode::RNE, a.clone(), b.clone());
+        assert!(add.to_smt2_expr().starts_with("(fp.add RNE"));
+
+        let neg = a.clone().fp_neg();
+        assert!(neg.to_smt2_expr().starts_with("(fp.neg"));
+
+        let eq = a.clone().fp_eq(b.clone());
+        assert!(eq.to_smt2_expr().starts_with("(fp.eq"));
+    }
+
+    #[test]
+    fn test_to_smt2_expr_array_operations() {
+        let arr = SmtExpr::const_array(SmtSort::BitVec(32), SmtExpr::bv_const(0, 8));
+        let smt2 = arr.to_smt2_expr();
+        assert!(smt2.contains("as const"));
+        assert!(smt2.contains("Array"));
+
+        let sel = SmtExpr::select(arr.clone(), SmtExpr::var("idx", 32));
+        assert!(sel.to_smt2_expr().starts_with("(select"));
+
+        let st = SmtExpr::store(arr, SmtExpr::var("idx", 32), SmtExpr::bv_const(42, 8));
+        assert!(st.to_smt2_expr().starts_with("(store"));
+    }
+
+    // -----------------------------------------------------------------------
+    // CLI integration tests for the public API wrappers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_with_z4_cli_trivial_correct() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let a = SmtExpr::var("x", 16);
+        let obligation = ProofObligation {
+            name: "trivial_identity".to_string(),
+            tmir_expr: a.clone(),
+            aarch64_expr: a,
+            inputs: vec![("x".to_string(), 16)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let config = Z4Config::default();
+        let result = verify_with_z4_cli(&obligation, &config);
+        assert_eq!(result, Z4Result::Verified);
+    }
+
+    #[test]
+    fn test_verify_with_z4_cli_trivial_wrong() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        // x != x + 1 (should find counterexample for any x)
+        let x = SmtExpr::var("x", 8);
+        let obligation = ProofObligation {
+            name: "wrong_identity".to_string(),
+            tmir_expr: x.clone(),
+            aarch64_expr: x.bvadd(SmtExpr::bv_const(1, 8)),
+            inputs: vec![("x".to_string(), 8)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let config = Z4Config::default();
+        let result = verify_with_z4_cli(&obligation, &config);
+        assert!(matches!(result, Z4Result::CounterExample(_)));
+    }
+
+    #[test]
+    fn test_serialize_to_smt2_roundtrip_with_solver() {
+        // Verify that serialize_to_smt2 output is valid SMT-LIB2 by running it
+        // through z3 if available.
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        let obligation = ProofObligation {
+            name: "roundtrip_test".to_string(),
+            tmir_expr: a.clone().bvadd(b.clone()),
+            aarch64_expr: a.bvadd(b),
+            inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let smt2 = serialize_to_smt2(&obligation);
+
+        // Write to temp file and verify z3 can parse it
+        let tmp_path = write_temp_smt2(&smt2).expect("failed to write temp file");
+        let output = std::process::Command::new(&solver)
+            .arg("-smt2")
+            .arg(&tmp_path)
+            .output()
+            .expect("failed to invoke solver");
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Should be unsat (a+b == a+b is trivially true)
+        assert!(stdout.trim().starts_with("unsat"),
+            "Expected unsat, got: {}", stdout);
+    }
+
+    #[test]
+    fn test_serialize_to_smt2_with_preconditions() {
+        // Test serialization of obligations with preconditions
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        let precond = b.clone().eq_expr(SmtExpr::bv_const(0, 32)).not_expr();
+
+        let obligation = ProofObligation {
+            name: "div_with_precond".to_string(),
+            tmir_expr: a.clone().bvsdiv(b.clone()),
+            aarch64_expr: a.bvsdiv(b),
+            inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+            preconditions: vec![precond],
+            fp_inputs: vec![],
+        };
+
+        let smt2 = serialize_to_smt2(&obligation);
+        assert!(smt2.contains("(assert"));
+        assert!(smt2.contains("bvsdiv"));
+        assert!(smt2.contains("(not (="));  // precondition b != 0
+    }
+
+    #[test]
+    fn test_verify_with_z4_cli_with_preconditions() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        // a / b == a / b with precondition b != 0
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        let precond = b.clone().eq_expr(SmtExpr::bv_const(0, 32)).not_expr();
+
+        let obligation = ProofObligation {
+            name: "sdiv_identity".to_string(),
+            tmir_expr: a.clone().bvsdiv(b.clone()),
+            aarch64_expr: a.bvsdiv(b),
+            inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+            preconditions: vec![precond],
+            fp_inputs: vec![],
+        };
+
+        let config = Z4Config::default();
+        let result = verify_with_z4_cli(&obligation, &config);
+        assert_eq!(result, Z4Result::Verified);
+    }
+
+    #[test]
+    fn test_verify_with_z4_cli_negation_rule() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        // Verify that bvneg(a) == bvsub(0, a) -- foundational identity
+        let a = SmtExpr::var("a", 32);
+        let obligation = ProofObligation {
+            name: "neg_is_sub_zero".to_string(),
+            tmir_expr: a.clone().bvneg(),
+            aarch64_expr: SmtExpr::bv_const(0, 32).bvsub(a),
+            inputs: vec![("a".to_string(), 32)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let config = Z4Config::default();
+        let result = verify_with_z4_cli(&obligation, &config);
+        assert_eq!(result, Z4Result::Verified);
+    }
+
+    #[test]
+    fn test_verify_with_z4_cli_bitwise_identity() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        // Verify that a XOR a == 0 for all 16-bit values
+        let a = SmtExpr::var("a", 16);
+        let obligation = ProofObligation {
+            name: "xor_self_is_zero".to_string(),
+            tmir_expr: a.clone().bvxor(a.clone()),
+            aarch64_expr: SmtExpr::bv_const(0, 16),
+            inputs: vec![("a".to_string(), 16)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let config = Z4Config::default();
+        let result = verify_with_z4_cli(&obligation, &config);
+        assert_eq!(result, Z4Result::Verified);
+    }
+
+    #[test]
+    fn test_verify_with_z4_cli_extract_zeroext_identity() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        // Verify that zero_extend(extract[7:0](a), 24) extracts and extends correctly
+        // For a 32-bit value, this should equal a AND 0xFF
+        let a = SmtExpr::var("a", 32);
+        let tmir = a.clone().extract(7, 0).zero_ext(24);
+        let aarch64 = a.bvand(SmtExpr::bv_const(0xFF, 32));
+
+        let obligation = ProofObligation {
+            name: "extract_zext_eq_mask".to_string(),
+            tmir_expr: tmir,
+            aarch64_expr: aarch64,
+            inputs: vec![("a".to_string(), 32)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let config = Z4Config::default();
+        let result = verify_with_z4_cli(&obligation, &config);
+        assert_eq!(result, Z4Result::Verified);
+    }
+
+    #[test]
+    fn test_parse_z4_output_sat_empty_model() {
+        // SAT but no model lines following
+        let result = parse_z4_output("sat\n", &[("x".to_string(), 32)]);
+        match result {
+            Z4Result::CounterExample(cex) => {
+                // No model available, empty counterexample
+                assert!(cex.is_empty());
+            }
+            other => panic!("Expected CounterExample, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_z4_output_multiple_vars() {
+        let output = "sat\n((a #x00000001)\n (b #x00000002)\n (c #x00000003))";
+        let inputs = vec![
+            ("a".to_string(), 32),
+            ("b".to_string(), 32),
+            ("c".to_string(), 32),
+        ];
+        let result = parse_z4_output(output, &inputs);
+        match result {
+            Z4Result::CounterExample(cex) => {
+                assert_eq!(cex.len(), 3);
+                assert_eq!(cex[0], ("a".to_string(), 1));
+                assert_eq!(cex[1], ("b".to_string(), 2));
+                assert_eq!(cex[2], ("c".to_string(), 3));
+            }
+            other => panic!("Expected CounterExample, got {:?}", other),
+        }
     }
 }

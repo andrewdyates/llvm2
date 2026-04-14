@@ -115,7 +115,8 @@ pub use verify::{VerificationResult, VerificationReport, ProofResult, Verifier, 
 pub use lowering_proof::{ProofObligation, verify_by_evaluation, verify_by_evaluation_with_config,
     verify_fp_by_evaluation, VerificationConfig, DEFAULT_SAMPLE_COUNT, EXHAUSTIVE_WIDTH_THRESHOLD};
 pub use smt::{SmtError, SmtExpr, SmtSort};
-pub use z4_bridge::{Z4Config, Z4Result, verify_with_z4};
+pub use z4_bridge::{Z4Config, Z4Result, verify_with_z4, serialize_to_smt2, verify_with_z4_cli,
+    parse_z4_output, generate_smt2_query, verify_with_cli};
 pub use cegis::{CegisLoop, CegisResult, ConcreteInput};
 pub use rule_discovery::{RuleDiscovery, RuleProposal, RuleResult, RuleDatabase, DiscoveryStats};
 pub use proof_database::{ProofDatabase, ProofCategory, CategorizedProof, ProofSummary};
