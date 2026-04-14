@@ -2259,7 +2259,7 @@ mod dispatch_verification_tests {
 mod coreml_dispatch_tests {
     use super::*;
     use llvm2_lower::compute_graph::{
-        ComputeCost, ComputeNode, ComputeNodeId, DataEdge, NodeKind, TransferCost,
+        ComputeCost, ComputeNode, ComputeNodeId, DataEdge, NodeKind,
     };
     use llvm2_lower::target_analysis::ComputeTarget;
     use llvm2_lower::dispatch::DispatchOp;
