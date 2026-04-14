@@ -40,8 +40,7 @@
 //! [`SmtExpr`]: crate::smt::SmtExpr
 
 use crate::lowering_proof::ProofObligation;
-#[cfg(feature = "z4")]
-use crate::smt::SmtExpr;
+use crate::smt::{SmtExpr, RoundingMode};
 #[cfg(feature = "z4")]
 use std::collections::HashMap;
 use std::fmt;
@@ -129,17 +128,144 @@ impl Z4Config {
 // SMT-LIB2 generation (enhanced version of ProofObligation::to_smt2)
 // ---------------------------------------------------------------------------
 
+/// Infer the minimal SMT-LIB2 logic string needed for an expression.
+///
+/// Walks the expression tree and returns the appropriate logic:
+/// - `QF_BV` -- bitvectors only (default)
+/// - `QF_ABV` -- bitvectors + arrays
+/// - `QF_BVFP` -- bitvectors + floating-point
+/// - `QF_ABVFP` -- bitvectors + arrays + floating-point
+/// - `QF_UFBV` -- bitvectors + uninterpreted functions
+/// - `ALL` -- when multiple theories are combined
+pub fn infer_logic(expr: &SmtExpr) -> &'static str {
+    let mut has_array = false;
+    let mut has_fp = false;
+    let mut has_uf = false;
+    infer_logic_walk(expr, &mut has_array, &mut has_fp, &mut has_uf);
+
+    match (has_array, has_fp, has_uf) {
+        (false, false, false) => "QF_BV",
+        (true, false, false)  => "QF_ABV",
+        (false, true, false)  => "QF_BVFP",
+        (true, true, false)   => "QF_ABVFP",
+        (false, false, true)  => "QF_UFBV",
+        _                     => "ALL",
+    }
+}
+
+fn infer_logic_walk(expr: &SmtExpr, has_array: &mut bool, has_fp: &mut bool, has_uf: &mut bool) {
+    match expr {
+        SmtExpr::Select { array, index } => {
+            *has_array = true;
+            infer_logic_walk(array, has_array, has_fp, has_uf);
+            infer_logic_walk(index, has_array, has_fp, has_uf);
+        }
+        SmtExpr::Store { array, index, value } => {
+            *has_array = true;
+            infer_logic_walk(array, has_array, has_fp, has_uf);
+            infer_logic_walk(index, has_array, has_fp, has_uf);
+            infer_logic_walk(value, has_array, has_fp, has_uf);
+        }
+        SmtExpr::ConstArray { value, .. } => {
+            *has_array = true;
+            infer_logic_walk(value, has_array, has_fp, has_uf);
+        }
+        SmtExpr::FPAdd { lhs, rhs, .. }
+        | SmtExpr::FPMul { lhs, rhs, .. }
+        | SmtExpr::FPDiv { lhs, rhs, .. }
+        | SmtExpr::FPEq { lhs, rhs }
+        | SmtExpr::FPLt { lhs, rhs } => {
+            *has_fp = true;
+            infer_logic_walk(lhs, has_array, has_fp, has_uf);
+            infer_logic_walk(rhs, has_array, has_fp, has_uf);
+        }
+        SmtExpr::FPNeg { operand } => {
+            *has_fp = true;
+            infer_logic_walk(operand, has_array, has_fp, has_uf);
+        }
+        SmtExpr::FPConst { .. } => {
+            *has_fp = true;
+        }
+        SmtExpr::UF { args, .. } => {
+            *has_uf = true;
+            for arg in args {
+                infer_logic_walk(arg, has_array, has_fp, has_uf);
+            }
+        }
+        SmtExpr::UFDecl { .. } => {
+            *has_uf = true;
+        }
+        // Binary BV/Bool ops
+        SmtExpr::BvAdd { lhs, rhs, .. }
+        | SmtExpr::BvSub { lhs, rhs, .. }
+        | SmtExpr::BvMul { lhs, rhs, .. }
+        | SmtExpr::BvSDiv { lhs, rhs, .. }
+        | SmtExpr::BvUDiv { lhs, rhs, .. }
+        | SmtExpr::BvAnd { lhs, rhs, .. }
+        | SmtExpr::BvOr { lhs, rhs, .. }
+        | SmtExpr::BvXor { lhs, rhs, .. }
+        | SmtExpr::BvShl { lhs, rhs, .. }
+        | SmtExpr::BvLshr { lhs, rhs, .. }
+        | SmtExpr::BvAshr { lhs, rhs, .. }
+        | SmtExpr::Eq { lhs, rhs }
+        | SmtExpr::BvSlt { lhs, rhs, .. }
+        | SmtExpr::BvSge { lhs, rhs, .. }
+        | SmtExpr::BvSgt { lhs, rhs, .. }
+        | SmtExpr::BvSle { lhs, rhs, .. }
+        | SmtExpr::BvUlt { lhs, rhs, .. }
+        | SmtExpr::BvUge { lhs, rhs, .. }
+        | SmtExpr::BvUgt { lhs, rhs, .. }
+        | SmtExpr::BvUle { lhs, rhs, .. }
+        | SmtExpr::And { lhs, rhs }
+        | SmtExpr::Or { lhs, rhs } => {
+            infer_logic_walk(lhs, has_array, has_fp, has_uf);
+            infer_logic_walk(rhs, has_array, has_fp, has_uf);
+        }
+        SmtExpr::BvNeg { operand, .. }
+        | SmtExpr::Not { operand }
+        | SmtExpr::Extract { operand, .. }
+        | SmtExpr::ZeroExtend { operand, .. }
+        | SmtExpr::SignExtend { operand, .. } => {
+            infer_logic_walk(operand, has_array, has_fp, has_uf);
+        }
+        SmtExpr::Concat { hi, lo, .. } => {
+            infer_logic_walk(hi, has_array, has_fp, has_uf);
+            infer_logic_walk(lo, has_array, has_fp, has_uf);
+        }
+        SmtExpr::Ite { cond, then_expr, else_expr } => {
+            infer_logic_walk(cond, has_array, has_fp, has_uf);
+            infer_logic_walk(then_expr, has_array, has_fp, has_uf);
+            infer_logic_walk(else_expr, has_array, has_fp, has_uf);
+        }
+        SmtExpr::Var { .. } | SmtExpr::BvConst { .. } | SmtExpr::BoolConst(_) => {}
+    }
+}
+
+/// Serialize a rounding mode to SMT-LIB2.
+pub fn rounding_mode_to_smt2(rm: &RoundingMode) -> &'static str {
+    match rm {
+        RoundingMode::RNE => "RNE",
+        RoundingMode::RNA => "RNA",
+        RoundingMode::RTP => "RTP",
+        RoundingMode::RTN => "RTN",
+        RoundingMode::RTZ => "RTZ",
+    }
+}
+
 /// Generate a complete SMT-LIB2 query for a proof obligation.
 ///
 /// This extends `ProofObligation::to_smt2()` with:
+/// - Automatic logic inference (QF_BV, QF_ABV, QF_BVFP, etc.)
 /// - `(set-option :timeout <ms>)` for solver timeout
 /// - `(get-model)` after `(check-sat)` for counterexample extraction
 /// - Proper `(get-value ...)` queries for each input variable
 pub fn generate_smt2_query(obligation: &ProofObligation, config: &Z4Config) -> String {
     let mut lines = Vec::new();
 
-    // Logic declaration
-    lines.push("(set-logic QF_BV)".to_string());
+    // Logic declaration -- infer from the formula content.
+    let formula = obligation.negated_equivalence();
+    let logic = infer_logic(&formula);
+    lines.push(format!("(set-logic {})", logic));
 
     // Solver options
     if config.timeout_ms > 0 {
@@ -159,7 +285,6 @@ pub fn generate_smt2_query(obligation: &ProofObligation, config: &Z4Config) -> S
     }
 
     // Assert the negated equivalence
-    let formula = obligation.negated_equivalence();
     lines.push(format!("(assert {})", formula));
 
     // Check satisfiability
@@ -602,6 +727,39 @@ fn translate_expr_to_z4(
             let o = translate_expr_to_z4(operand, solver, var_terms)?;
             Ok(solver.extract(*high, *low, o))
         }
+        SmtExpr::Concat { hi, lo, .. } => {
+            let h = translate_expr_to_z4(hi, solver, var_terms)?;
+            let l = translate_expr_to_z4(lo, solver, var_terms)?;
+            Ok(solver.concat(h, l))
+        }
+        SmtExpr::ZeroExtend { operand, extra_bits, .. } => {
+            let o = translate_expr_to_z4(operand, solver, var_terms)?;
+            Ok(solver.zero_ext(*extra_bits, o))
+        }
+        SmtExpr::SignExtend { operand, extra_bits, .. } => {
+            let o = translate_expr_to_z4(operand, solver, var_terms)?;
+            Ok(solver.sign_ext(*extra_bits, o))
+        }
+        // New theory extensions -- these will be translatable once z4 gains
+        // array/FP/UF theory support. For now, return descriptive errors.
+        SmtExpr::Select { .. }
+        | SmtExpr::Store { .. }
+        | SmtExpr::ConstArray { .. } => {
+            Err("Array theory (QF_ABV) not yet supported in z4 native API; use CLI fallback with z3".to_string())
+        }
+        SmtExpr::FPAdd { .. }
+        | SmtExpr::FPMul { .. }
+        | SmtExpr::FPDiv { .. }
+        | SmtExpr::FPNeg { .. }
+        | SmtExpr::FPEq { .. }
+        | SmtExpr::FPLt { .. }
+        | SmtExpr::FPConst { .. } => {
+            Err("Floating-point theory (QF_FP) not yet supported in z4 native API; use CLI fallback with z3".to_string())
+        }
+        SmtExpr::UF { .. }
+        | SmtExpr::UFDecl { .. } => {
+            Err("Uninterpreted function theory (QF_UF) not yet supported in z4 native API; use CLI fallback with z3".to_string())
+        }
     }
 }
 
@@ -720,7 +878,7 @@ impl fmt::Display for VerificationSummary {
 mod tests {
     use super::*;
     use crate::lowering_proof::ProofObligation;
-    use crate::smt::SmtExpr;
+    use crate::smt::{SmtExpr, SmtSort};
 
     // -----------------------------------------------------------------------
     // SMT-LIB2 generation tests (always run, no solver needed)
@@ -978,5 +1136,56 @@ mod tests {
         let config = Z4Config::default();
         let result = verify_with_cli(&obligation, &config);
         assert_eq!(result, Z4Result::Verified);
+    }
+
+    // -----------------------------------------------------------------------
+    // Logic inference tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_logic_bv_only() {
+        let expr = SmtExpr::var("x", 32).bvadd(SmtExpr::var("y", 32));
+        assert_eq!(infer_logic(&expr), "QF_BV");
+    }
+
+    #[test]
+    fn test_infer_logic_array() {
+        let arr = SmtExpr::const_array(
+            SmtSort::BitVec(32),
+            SmtExpr::bv_const(0, 32),
+        );
+        let expr = SmtExpr::select(arr, SmtExpr::var("idx", 32));
+        assert_eq!(infer_logic(&expr), "QF_ABV");
+    }
+
+    #[test]
+    fn test_infer_logic_fp() {
+        let expr = SmtExpr::fp_add(
+            crate::smt::RoundingMode::RNE,
+            SmtExpr::fp64_const(1.0),
+            SmtExpr::fp64_const(2.0),
+        );
+        assert_eq!(infer_logic(&expr), "QF_BVFP");
+    }
+
+    #[test]
+    fn test_infer_logic_uf() {
+        let expr = SmtExpr::uf("f", vec![SmtExpr::var("x", 32)], SmtSort::BitVec(32));
+        assert_eq!(infer_logic(&expr), "QF_UFBV");
+    }
+
+    #[test]
+    fn test_infer_logic_mixed_array_fp() {
+        let arr = SmtExpr::const_array(
+            SmtSort::BitVec(32),
+            SmtExpr::fp64_const(0.0),
+        );
+        assert_eq!(infer_logic(&arr), "QF_ABVFP");
+    }
+
+    #[test]
+    fn test_rounding_mode_smt2() {
+        assert_eq!(rounding_mode_to_smt2(&RoundingMode::RNE), "RNE");
+        assert_eq!(rounding_mode_to_smt2(&RoundingMode::RTZ), "RTZ");
     }
 }

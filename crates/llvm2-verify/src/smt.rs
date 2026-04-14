@@ -22,6 +22,27 @@ use std::fmt;
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
+// RoundingMode (IEEE 754)
+// ---------------------------------------------------------------------------
+
+/// IEEE 754 rounding mode for floating-point operations.
+///
+/// Maps to SMT-LIB2 rounding modes in the QF_FP theory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RoundingMode {
+    /// Round to nearest, ties to even (default).
+    RNE,
+    /// Round to nearest, ties away from zero.
+    RNA,
+    /// Round toward positive infinity.
+    RTP,
+    /// Round toward negative infinity.
+    RTN,
+    /// Round toward zero (truncation).
+    RTZ,
+}
+
+// ---------------------------------------------------------------------------
 // SmtError
 // ---------------------------------------------------------------------------
 
@@ -56,15 +77,47 @@ pub enum SmtSort {
     BitVec(u32),
     /// Boolean (used for comparison results, preconditions).
     Bool,
+    /// Array sort: `(Array index_sort element_sort)`.
+    ///
+    /// Maps to SMT-LIB2 QF_ABV (arrays of bitvectors) or QF_AUFBV.
+    Array(Box<SmtSort>, Box<SmtSort>),
+    /// IEEE 754 floating-point sort: `(_ FloatingPoint eb sb)`.
+    ///
+    /// `eb` = exponent bits, `sb` = significand bits (including implicit bit).
+    /// Maps to SMT-LIB2 QF_FP theory.
+    FloatingPoint(u32, u32),
 }
 
 impl SmtSort {
-    /// Bitvector width, or `None` for Bool.
+    /// Bitvector width, or `None` for non-bitvector sorts.
     pub fn bv_width(&self) -> Option<u32> {
         match self {
             SmtSort::BitVec(w) => Some(*w),
-            SmtSort::Bool => None,
+            _ => None,
         }
+    }
+
+    /// IEEE 754 half-precision: `(_ FloatingPoint 5 11)`.
+    pub fn fp16() -> Self {
+        SmtSort::FloatingPoint(5, 11)
+    }
+
+    /// IEEE 754 single-precision: `(_ FloatingPoint 8 24)`.
+    pub fn fp32() -> Self {
+        SmtSort::FloatingPoint(8, 24)
+    }
+
+    /// IEEE 754 double-precision: `(_ FloatingPoint 11 53)`.
+    pub fn fp64() -> Self {
+        SmtSort::FloatingPoint(11, 53)
+    }
+
+    /// Convenience: array from bitvectors to bitvectors.
+    pub fn bv_array(index_width: u32, element_width: u32) -> Self {
+        SmtSort::Array(
+            Box::new(SmtSort::BitVec(index_width)),
+            Box::new(SmtSort::BitVec(element_width)),
+        )
     }
 }
 
@@ -79,12 +132,20 @@ impl TryFrom<Type> for SmtSort {
             Type::I32 => Ok(SmtSort::BitVec(32)),
             Type::I64 => Ok(SmtSort::BitVec(64)),
             Type::I128 => Ok(SmtSort::BitVec(128)),
-            Type::F32 | Type::F64 => Err(SmtError::UnsupportedType(
-                "floating-point verification not yet supported".to_string(),
+            Type::F32 => Ok(SmtSort::fp32()),
+            Type::F64 => Ok(SmtSort::fp64()),
+            Type::Struct(_) => Err(SmtError::UnsupportedType(
+                "struct type verification not yet supported".to_string(),
             )),
-            Type::Struct(_) | Type::Array(_, _) => Err(SmtError::UnsupportedType(
-                "aggregate type verification not yet supported".to_string(),
-            )),
+            Type::Array(elem_ty, count) => {
+                let elem_sort = SmtSort::try_from(*elem_ty)?;
+                // Index sort: bitvector wide enough to address `count` elements.
+                let index_bits = if count == 0 { 1 } else { 32u32.max((count as f64).log2().ceil() as u32).max(1) };
+                Ok(SmtSort::Array(
+                    Box::new(SmtSort::BitVec(index_bits)),
+                    Box::new(elem_sort),
+                ))
+            }
         }
     }
 }
@@ -212,6 +273,64 @@ pub enum SmtExpr {
     /// Produces a bitvector of width `operand.width + extra_bits`.
     /// SMT-LIB2: `((_ sign_extend extra_bits) operand)`.
     SignExtend { operand: Box<SmtExpr>, extra_bits: u32, width: u32 },
+
+    // -- Array operations (QF_ABV theory) --
+
+    /// `(select array index)` -- read element at index.
+    Select {
+        array: Box<SmtExpr>,
+        index: Box<SmtExpr>,
+    },
+
+    /// `(store array index value)` -- write element at index, producing new array.
+    Store {
+        array: Box<SmtExpr>,
+        index: Box<SmtExpr>,
+        value: Box<SmtExpr>,
+    },
+
+    /// `((as const (Array idx_sort elem_sort)) value)` -- constant array.
+    ConstArray {
+        index_sort: SmtSort,
+        value: Box<SmtExpr>,
+    },
+
+    // -- Floating-point operations (QF_FP theory) --
+
+    /// `(fp.add rm a b)` -- floating-point addition.
+    FPAdd { rm: RoundingMode, lhs: Box<SmtExpr>, rhs: Box<SmtExpr> },
+
+    /// `(fp.mul rm a b)` -- floating-point multiplication.
+    FPMul { rm: RoundingMode, lhs: Box<SmtExpr>, rhs: Box<SmtExpr> },
+
+    /// `(fp.div rm a b)` -- floating-point division.
+    FPDiv { rm: RoundingMode, lhs: Box<SmtExpr>, rhs: Box<SmtExpr> },
+
+    /// `(fp.neg a)` -- floating-point negation.
+    FPNeg { operand: Box<SmtExpr> },
+
+    /// `(fp.eq a b)` -- floating-point equality (returns Bool).
+    FPEq { lhs: Box<SmtExpr>, rhs: Box<SmtExpr> },
+
+    /// `(fp.lt a b)` -- floating-point less-than (returns Bool).
+    FPLt { lhs: Box<SmtExpr>, rhs: Box<SmtExpr> },
+
+    /// Floating-point constant from f64 bits.
+    ///
+    /// `eb` = exponent bits, `sb` = significand bits.
+    /// The `bits` field holds the IEEE 754 bit pattern.
+    FPConst { bits: u64, eb: u32, sb: u32 },
+
+    // -- Uninterpreted functions (QF_UF theory) --
+
+    /// `(name arg1 arg2 ...)` -- uninterpreted function application.
+    UF { name: String, args: Vec<SmtExpr>, ret_sort: SmtSort },
+
+    /// `(declare-fun name (arg_sorts...) ret_sort)` -- function declaration.
+    ///
+    /// This is not an expression per se but a declaration node used in
+    /// query generation to emit the function signature.
+    UFDecl { name: String, arg_sorts: Vec<SmtSort>, ret_sort: SmtSort },
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +533,92 @@ impl SmtExpr {
         SmtExpr::SignExtend { operand: Box::new(self), extra_bits, width: w }
     }
 
+    // -- Array constructors --
+
+    /// `(select array index)` -- read from array.
+    pub fn select(array: Self, index: Self) -> Self {
+        SmtExpr::Select {
+            array: Box::new(array),
+            index: Box::new(index),
+        }
+    }
+
+    /// `(store array index value)` -- write to array.
+    pub fn store(array: Self, index: Self, value: Self) -> Self {
+        SmtExpr::Store {
+            array: Box::new(array),
+            index: Box::new(index),
+            value: Box::new(value),
+        }
+    }
+
+    /// `((as const ...) value)` -- constant array filled with `value`.
+    pub fn const_array(index_sort: SmtSort, value: Self) -> Self {
+        SmtExpr::ConstArray {
+            index_sort,
+            value: Box::new(value),
+        }
+    }
+
+    // -- Floating-point constructors --
+
+    /// Floating-point constant from raw IEEE 754 bits.
+    pub fn fp_const(bits: u64, eb: u32, sb: u32) -> Self {
+        SmtExpr::FPConst { bits, eb, sb }
+    }
+
+    /// FP32 constant from an f32 value.
+    pub fn fp32_const(v: f32) -> Self {
+        SmtExpr::FPConst { bits: v.to_bits() as u64, eb: 8, sb: 24 }
+    }
+
+    /// FP64 constant from an f64 value.
+    pub fn fp64_const(v: f64) -> Self {
+        SmtExpr::FPConst { bits: v.to_bits(), eb: 11, sb: 53 }
+    }
+
+    /// `(fp.add rm a b)` -- floating-point addition.
+    pub fn fp_add(rm: RoundingMode, a: Self, b: Self) -> Self {
+        SmtExpr::FPAdd { rm, lhs: Box::new(a), rhs: Box::new(b) }
+    }
+
+    /// `(fp.mul rm a b)` -- floating-point multiplication.
+    pub fn fp_mul(rm: RoundingMode, a: Self, b: Self) -> Self {
+        SmtExpr::FPMul { rm, lhs: Box::new(a), rhs: Box::new(b) }
+    }
+
+    /// `(fp.div rm a b)` -- floating-point division.
+    pub fn fp_div(rm: RoundingMode, a: Self, b: Self) -> Self {
+        SmtExpr::FPDiv { rm, lhs: Box::new(a), rhs: Box::new(b) }
+    }
+
+    /// `(fp.neg a)` -- floating-point negation.
+    pub fn fp_neg(self) -> Self {
+        SmtExpr::FPNeg { operand: Box::new(self) }
+    }
+
+    /// `(fp.eq a b)` -- floating-point equality (returns Bool).
+    pub fn fp_eq(self, other: Self) -> Self {
+        SmtExpr::FPEq { lhs: Box::new(self), rhs: Box::new(other) }
+    }
+
+    /// `(fp.lt a b)` -- floating-point less-than (returns Bool).
+    pub fn fp_lt(self, other: Self) -> Self {
+        SmtExpr::FPLt { lhs: Box::new(self), rhs: Box::new(other) }
+    }
+
+    // -- Uninterpreted function constructors --
+
+    /// Uninterpreted function application.
+    pub fn uf(name: impl Into<String>, args: Vec<Self>, ret_sort: SmtSort) -> Self {
+        SmtExpr::UF { name: name.into(), args, ret_sort }
+    }
+
+    /// Uninterpreted function declaration.
+    pub fn uf_decl(name: impl Into<String>, arg_sorts: Vec<SmtSort>, ret_sort: SmtSort) -> Self {
+        SmtExpr::UFDecl { name: name.into(), arg_sorts, ret_sort }
+    }
+
     /// Return the bitvector width of this expression, or an error for Bool-sorted expressions.
     pub fn try_bv_width(&self) -> Result<u32, SmtError> {
         match self {
@@ -436,6 +641,10 @@ impl SmtExpr {
             SmtExpr::ZeroExtend { width, .. } => Ok(*width),
             SmtExpr::SignExtend { width, .. } => Ok(*width),
             SmtExpr::Ite { then_expr, .. } => then_expr.try_bv_width(),
+            // Array select returns the element sort; if it's BV, extract width.
+            SmtExpr::Select { .. } => Err(SmtError::BoolHasNoWidth),
+            // UF returns its declared sort.
+            SmtExpr::UF { ret_sort, .. } => ret_sort.bv_width().ok_or(SmtError::BoolHasNoWidth),
             SmtExpr::BoolConst(_)
             | SmtExpr::Eq { .. }
             | SmtExpr::Not { .. }
@@ -448,7 +657,18 @@ impl SmtExpr {
             | SmtExpr::BvUgt { .. }
             | SmtExpr::BvUle { .. }
             | SmtExpr::And { .. }
-            | SmtExpr::Or { .. } => Err(SmtError::BoolHasNoWidth),
+            | SmtExpr::Or { .. }
+            | SmtExpr::FPEq { .. }
+            | SmtExpr::FPLt { .. } => Err(SmtError::BoolHasNoWidth),
+            // FP / array / UF decl nodes have no BV width.
+            SmtExpr::FPAdd { .. }
+            | SmtExpr::FPMul { .. }
+            | SmtExpr::FPDiv { .. }
+            | SmtExpr::FPNeg { .. }
+            | SmtExpr::FPConst { .. }
+            | SmtExpr::Store { .. }
+            | SmtExpr::ConstArray { .. }
+            | SmtExpr::UFDecl { .. } => Err(SmtError::BoolHasNoWidth),
         }
     }
 
@@ -478,7 +698,33 @@ impl SmtExpr {
             | SmtExpr::BvUgt { .. }
             | SmtExpr::BvUle { .. }
             | SmtExpr::And { .. }
-            | SmtExpr::Or { .. } => SmtSort::Bool,
+            | SmtExpr::Or { .. }
+            | SmtExpr::FPEq { .. }
+            | SmtExpr::FPLt { .. } => SmtSort::Bool,
+            // Floating-point expressions
+            SmtExpr::FPAdd { lhs, .. }
+            | SmtExpr::FPMul { lhs, .. }
+            | SmtExpr::FPDiv { lhs, .. } => lhs.sort(),
+            SmtExpr::FPNeg { operand } => operand.sort(),
+            SmtExpr::FPConst { eb, sb, .. } => SmtSort::FloatingPoint(*eb, *sb),
+            // Array expressions
+            SmtExpr::Store { array, .. } => array.sort(),
+            SmtExpr::ConstArray { index_sort, value } => {
+                SmtSort::Array(Box::new(index_sort.clone()), Box::new(value.sort()))
+            }
+            SmtExpr::Select { array, .. } => {
+                // Element sort of the array
+                if let SmtSort::Array(_, elem_sort) = array.sort() {
+                    *elem_sort
+                } else {
+                    // Fallback: shouldn't happen for well-typed expressions.
+                    SmtSort::Bool
+                }
+            }
+            // Uninterpreted functions
+            SmtExpr::UF { ret_sort, .. } => ret_sort.clone(),
+            SmtExpr::UFDecl { ret_sort, .. } => ret_sort.clone(),
+            // All BV expressions
             _ => SmtSort::BitVec(self.bv_width()),
         }
     }
@@ -495,7 +741,7 @@ impl SmtExpr {
     fn collect_vars(&self, vars: &mut Vec<String>) {
         match self {
             SmtExpr::Var { name, .. } => vars.push(name.clone()),
-            SmtExpr::BvConst { .. } | SmtExpr::BoolConst(_) => {}
+            SmtExpr::BvConst { .. } | SmtExpr::BoolConst(_) | SmtExpr::FPConst { .. } => {}
             SmtExpr::BvAdd { lhs, rhs, .. }
             | SmtExpr::BvSub { lhs, rhs, .. }
             | SmtExpr::BvMul { lhs, rhs, .. }
@@ -517,7 +763,15 @@ impl SmtExpr {
             | SmtExpr::BvUgt { lhs, rhs, .. }
             | SmtExpr::BvUle { lhs, rhs, .. }
             | SmtExpr::And { lhs, rhs }
-            | SmtExpr::Or { lhs, rhs } => {
+            | SmtExpr::Or { lhs, rhs }
+            | SmtExpr::FPEq { lhs, rhs }
+            | SmtExpr::FPLt { lhs, rhs } => {
+                lhs.collect_vars(vars);
+                rhs.collect_vars(vars);
+            }
+            SmtExpr::FPAdd { lhs, rhs, .. }
+            | SmtExpr::FPMul { lhs, rhs, .. }
+            | SmtExpr::FPDiv { lhs, rhs, .. } => {
                 lhs.collect_vars(vars);
                 rhs.collect_vars(vars);
             }
@@ -525,7 +779,8 @@ impl SmtExpr {
             | SmtExpr::Not { operand }
             | SmtExpr::Extract { operand, .. }
             | SmtExpr::ZeroExtend { operand, .. }
-            | SmtExpr::SignExtend { operand, .. } => {
+            | SmtExpr::SignExtend { operand, .. }
+            | SmtExpr::FPNeg { operand } => {
                 operand.collect_vars(vars);
             }
             SmtExpr::Concat { hi, lo, .. } => {
@@ -537,6 +792,24 @@ impl SmtExpr {
                 then_expr.collect_vars(vars);
                 else_expr.collect_vars(vars);
             }
+            SmtExpr::Select { array, index } => {
+                array.collect_vars(vars);
+                index.collect_vars(vars);
+            }
+            SmtExpr::Store { array, index, value } => {
+                array.collect_vars(vars);
+                index.collect_vars(vars);
+                value.collect_vars(vars);
+            }
+            SmtExpr::ConstArray { value, .. } => {
+                value.collect_vars(vars);
+            }
+            SmtExpr::UF { args, .. } => {
+                for arg in args {
+                    arg.collect_vars(vars);
+                }
+            }
+            SmtExpr::UFDecl { .. } => {}
         }
     }
 }
@@ -545,18 +818,30 @@ impl SmtExpr {
 // Concrete evaluation
 // ---------------------------------------------------------------------------
 
-/// Evaluation result: either a bitvector value or a boolean.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Evaluation result: bitvector, boolean, floating-point, or array.
+#[derive(Debug, Clone, PartialEq)]
 pub enum EvalResult {
     Bv(u64),
     Bool(bool),
+    /// Floating-point value stored as f64 (sufficient for FP16/FP32/FP64).
+    Float(f64),
+    /// Array value: maps bitvector index (u64) to EvalResult.
+    /// The default value is used for indices not in the map.
+    Array {
+        entries: HashMap<u64, Box<EvalResult>>,
+        default: Box<EvalResult>,
+    },
 }
+
+impl Eq for EvalResult {}
 
 impl EvalResult {
     pub fn as_u64(self) -> u64 {
         match self {
             EvalResult::Bv(v) => v,
             EvalResult::Bool(b) => b as u64,
+            EvalResult::Float(f) => f.to_bits(),
+            EvalResult::Array { .. } => 0, // arrays don't have a scalar representation
         }
     }
 
@@ -564,6 +849,17 @@ impl EvalResult {
         match self {
             EvalResult::Bool(b) => b,
             EvalResult::Bv(v) => v != 0,
+            EvalResult::Float(f) => f != 0.0,
+            EvalResult::Array { .. } => false,
+        }
+    }
+
+    pub fn as_f64(&self) -> f64 {
+        match self {
+            EvalResult::Float(f) => *f,
+            EvalResult::Bv(v) => *v as f64,
+            EvalResult::Bool(b) => if *b { 1.0 } else { 0.0 },
+            EvalResult::Array { .. } => 0.0,
         }
     }
 }
@@ -788,6 +1084,95 @@ impl SmtExpr {
                 let extended = sign_extend(v, src_width) as u64;
                 Ok(EvalResult::Bv(mask(extended, *width)))
             }
+
+            // -- Array evaluation --
+
+            SmtExpr::ConstArray { value, .. } => {
+                let v = value.try_eval(env)?;
+                Ok(EvalResult::Array {
+                    entries: HashMap::new(),
+                    default: Box::new(v),
+                })
+            }
+            SmtExpr::Select { array, index } => {
+                let arr = array.try_eval(env)?;
+                let idx = index.try_eval(env)?.as_u64();
+                match arr {
+                    EvalResult::Array { entries, default } => {
+                        Ok(entries.get(&idx).map(|v| *v.clone()).unwrap_or(*default))
+                    }
+                    _ => Err(SmtError::EvalError("select on non-array value".to_string())),
+                }
+            }
+            SmtExpr::Store { array, index, value } => {
+                let arr = array.try_eval(env)?;
+                let idx = index.try_eval(env)?.as_u64();
+                let val = value.try_eval(env)?;
+                match arr {
+                    EvalResult::Array { mut entries, default } => {
+                        entries.insert(idx, Box::new(val));
+                        Ok(EvalResult::Array { entries, default })
+                    }
+                    _ => Err(SmtError::EvalError("store on non-array value".to_string())),
+                }
+            }
+
+            // -- Floating-point evaluation (using Rust native f32/f64) --
+
+            SmtExpr::FPConst { bits, eb, sb } => {
+                let f = if *eb == 8 && *sb == 24 {
+                    // FP32: interpret lower 32 bits as f32
+                    f32::from_bits(*bits as u32) as f64
+                } else {
+                    // FP64 or other: interpret as f64
+                    f64::from_bits(*bits)
+                };
+                Ok(EvalResult::Float(f))
+            }
+            SmtExpr::FPAdd { lhs, rhs, .. } => {
+                let a = lhs.try_eval(env)?.as_f64();
+                let b = rhs.try_eval(env)?.as_f64();
+                Ok(EvalResult::Float(a + b))
+            }
+            SmtExpr::FPMul { lhs, rhs, .. } => {
+                let a = lhs.try_eval(env)?.as_f64();
+                let b = rhs.try_eval(env)?.as_f64();
+                Ok(EvalResult::Float(a * b))
+            }
+            SmtExpr::FPDiv { lhs, rhs, .. } => {
+                let a = lhs.try_eval(env)?.as_f64();
+                let b = rhs.try_eval(env)?.as_f64();
+                Ok(EvalResult::Float(a / b))
+            }
+            SmtExpr::FPNeg { operand } => {
+                let a = operand.try_eval(env)?.as_f64();
+                Ok(EvalResult::Float(-a))
+            }
+            SmtExpr::FPEq { lhs, rhs } => {
+                let a = lhs.try_eval(env)?.as_f64();
+                let b = rhs.try_eval(env)?.as_f64();
+                Ok(EvalResult::Bool(a == b))
+            }
+            SmtExpr::FPLt { lhs, rhs } => {
+                let a = lhs.try_eval(env)?.as_f64();
+                let b = rhs.try_eval(env)?.as_f64();
+                Ok(EvalResult::Bool(a < b))
+            }
+
+            // -- Uninterpreted functions --
+            // UF evaluation is not meaningful in concrete evaluation (they are
+            // uninterpreted). Return an error for now; real verification uses
+            // the SMT solver for UF reasoning.
+            SmtExpr::UF { name, .. } => {
+                Err(SmtError::EvalError(format!(
+                    "cannot concretely evaluate uninterpreted function '{}'", name
+                )))
+            }
+            SmtExpr::UFDecl { name, .. } => {
+                Err(SmtError::EvalError(format!(
+                    "cannot evaluate UF declaration '{}'", name
+                )))
+            }
         }
     }
 
@@ -855,6 +1240,92 @@ impl fmt::Display for SmtExpr {
             SmtExpr::SignExtend { operand, extra_bits, .. } => {
                 write!(f, "((_ sign_extend {}) {})", extra_bits, operand)
             }
+            // Array operations
+            SmtExpr::Select { array, index } => {
+                write!(f, "(select {} {})", array, index)
+            }
+            SmtExpr::Store { array, index, value } => {
+                write!(f, "(store {} {} {})", array, index, value)
+            }
+            SmtExpr::ConstArray { index_sort, value } => {
+                write!(f, "((as const {}) {})", index_sort, value)
+            }
+            // Floating-point operations
+            SmtExpr::FPConst { bits, eb, sb } => {
+                // Emit as fp literal with bitvector decomposition
+                let total = eb + sb;
+                write!(f, "(fp #b{} #b{} #b{})",
+                    // sign bit
+                    if bits >> (total - 1) & 1 == 1 { "1" } else { "0" },
+                    // exponent bits
+                    format!("{:0>width$b}", (bits >> (sb - 1)) & ((1u64 << eb) - 1), width = *eb as usize),
+                    // significand bits (without implicit bit)
+                    format!("{:0>width$b}", bits & ((1u64 << (sb - 1)) - 1), width = (*sb - 1) as usize),
+                )
+            }
+            SmtExpr::FPAdd { rm, lhs, rhs } => {
+                write!(f, "(fp.add {} {} {})", rm, lhs, rhs)
+            }
+            SmtExpr::FPMul { rm, lhs, rhs } => {
+                write!(f, "(fp.mul {} {} {})", rm, lhs, rhs)
+            }
+            SmtExpr::FPDiv { rm, lhs, rhs } => {
+                write!(f, "(fp.div {} {} {})", rm, lhs, rhs)
+            }
+            SmtExpr::FPNeg { operand } => {
+                write!(f, "(fp.neg {})", operand)
+            }
+            SmtExpr::FPEq { lhs, rhs } => {
+                write!(f, "(fp.eq {} {})", lhs, rhs)
+            }
+            SmtExpr::FPLt { lhs, rhs } => {
+                write!(f, "(fp.lt {} {})", lhs, rhs)
+            }
+            // Uninterpreted functions
+            SmtExpr::UF { name, args, .. } => {
+                if args.is_empty() {
+                    write!(f, "{}", name)
+                } else {
+                    write!(f, "({}", name)?;
+                    for arg in args {
+                        write!(f, " {}", arg)?;
+                    }
+                    write!(f, ")")
+                }
+            }
+            SmtExpr::UFDecl { name, arg_sorts, ret_sort } => {
+                write!(f, "(declare-fun {} (", name)?;
+                for (i, sort) in arg_sorts.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{}", sort)?;
+                }
+                write!(f, ") {})", ret_sort)
+            }
+        }
+    }
+}
+
+impl fmt::Display for RoundingMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RoundingMode::RNE => write!(f, "RNE"),
+            RoundingMode::RNA => write!(f, "RNA"),
+            RoundingMode::RTP => write!(f, "RTP"),
+            RoundingMode::RTN => write!(f, "RTN"),
+            RoundingMode::RTZ => write!(f, "RTZ"),
+        }
+    }
+}
+
+impl fmt::Display for SmtSort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SmtSort::BitVec(w) => write!(f, "(_ BitVec {})", w),
+            SmtSort::Bool => write!(f, "Bool"),
+            SmtSort::Array(idx, elem) => write!(f, "(Array {} {})", idx, elem),
+            SmtSort::FloatingPoint(eb, sb) => write!(f, "(_ FloatingPoint {} {})", eb, sb),
         }
     }
 }
@@ -1270,5 +1741,260 @@ mod tests {
         let lo = SmtExpr::var("lo", 8);
         let expr = hi.concat(lo);
         assert_eq!(format!("{}", expr), "(concat hi lo)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Array theory tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_const_array_select() {
+        // Create a constant array filled with 42, then select index 0.
+        let arr = SmtExpr::const_array(
+            SmtSort::BitVec(32),
+            SmtExpr::bv_const(42, 32),
+        );
+        let expr = SmtExpr::select(arr, SmtExpr::bv_const(0, 32));
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bv(42));
+    }
+
+    #[test]
+    fn test_const_array_select_any_index() {
+        // Constant array: any index should return the default.
+        let arr = SmtExpr::const_array(
+            SmtSort::BitVec(8),
+            SmtExpr::bv_const(0xFF, 8),
+        );
+        let expr = SmtExpr::select(arr, SmtExpr::bv_const(99, 8));
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bv(0xFF));
+    }
+
+    #[test]
+    fn test_store_then_select() {
+        // store(const_array(0), idx=5, val=100) then select idx=5
+        let arr = SmtExpr::const_array(
+            SmtSort::BitVec(8),
+            SmtExpr::bv_const(0, 32),
+        );
+        let arr = SmtExpr::store(arr, SmtExpr::bv_const(5, 8), SmtExpr::bv_const(100, 32));
+        let expr = SmtExpr::select(arr, SmtExpr::bv_const(5, 8));
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bv(100));
+    }
+
+    #[test]
+    fn test_store_preserves_other_indices() {
+        // store at index 5, select at index 3 should return default.
+        let arr = SmtExpr::const_array(
+            SmtSort::BitVec(8),
+            SmtExpr::bv_const(0, 32),
+        );
+        let arr = SmtExpr::store(arr, SmtExpr::bv_const(5, 8), SmtExpr::bv_const(100, 32));
+        let expr = SmtExpr::select(arr, SmtExpr::bv_const(3, 8));
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bv(0));
+    }
+
+    #[test]
+    fn test_array_sort() {
+        let arr = SmtExpr::const_array(
+            SmtSort::BitVec(32),
+            SmtExpr::bv_const(0, 64),
+        );
+        assert_eq!(arr.sort(), SmtSort::Array(
+            Box::new(SmtSort::BitVec(32)),
+            Box::new(SmtSort::BitVec(64)),
+        ));
+    }
+
+    #[test]
+    fn test_array_display() {
+        let arr = SmtExpr::const_array(
+            SmtSort::BitVec(32),
+            SmtExpr::bv_const(0, 32),
+        );
+        let sel = SmtExpr::select(arr.clone(), SmtExpr::bv_const(1, 32));
+        assert_eq!(
+            format!("{}", sel),
+            "(select ((as const (_ BitVec 32)) (_ bv0 32)) (_ bv1 32))"
+        );
+
+        let st = SmtExpr::store(arr, SmtExpr::bv_const(1, 32), SmtExpr::bv_const(42, 32));
+        assert_eq!(
+            format!("{}", st),
+            "(store ((as const (_ BitVec 32)) (_ bv0 32)) (_ bv1 32) (_ bv42 32))"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Floating-point theory tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fp32_add() {
+        let a = SmtExpr::fp32_const(1.5f32);
+        let b = SmtExpr::fp32_const(2.5f32);
+        let expr = SmtExpr::fp_add(RoundingMode::RNE, a, b);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Float(4.0));
+    }
+
+    #[test]
+    fn test_fp64_mul() {
+        let a = SmtExpr::fp64_const(3.0f64);
+        let b = SmtExpr::fp64_const(7.0f64);
+        let expr = SmtExpr::fp_mul(RoundingMode::RNE, a, b);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Float(21.0));
+    }
+
+    #[test]
+    fn test_fp_div() {
+        let a = SmtExpr::fp64_const(10.0);
+        let b = SmtExpr::fp64_const(4.0);
+        let expr = SmtExpr::fp_div(RoundingMode::RNE, a, b);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Float(2.5));
+    }
+
+    #[test]
+    fn test_fp_neg() {
+        let a = SmtExpr::fp64_const(42.0);
+        let expr = a.fp_neg();
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Float(-42.0));
+    }
+
+    #[test]
+    fn test_fp_eq() {
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(1.0);
+        let expr = a.fp_eq(b);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(true));
+    }
+
+    #[test]
+    fn test_fp_lt() {
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let expr = a.fp_lt(b);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(true));
+    }
+
+    #[test]
+    fn test_fp_sort() {
+        let a = SmtExpr::fp32_const(1.0f32);
+        assert_eq!(a.sort(), SmtSort::FloatingPoint(8, 24));
+
+        let b = SmtExpr::fp64_const(1.0);
+        assert_eq!(b.sort(), SmtSort::FloatingPoint(11, 53));
+    }
+
+    #[test]
+    fn test_fp_display() {
+        let expr = SmtExpr::fp_add(
+            RoundingMode::RNE,
+            SmtExpr::fp64_const(1.0),
+            SmtExpr::fp64_const(2.0),
+        );
+        let s = format!("{}", expr);
+        assert!(s.starts_with("(fp.add RNE"));
+    }
+
+    #[test]
+    fn test_smt_sort_constructors() {
+        assert_eq!(SmtSort::fp16(), SmtSort::FloatingPoint(5, 11));
+        assert_eq!(SmtSort::fp32(), SmtSort::FloatingPoint(8, 24));
+        assert_eq!(SmtSort::fp64(), SmtSort::FloatingPoint(11, 53));
+        assert_eq!(
+            SmtSort::bv_array(32, 64),
+            SmtSort::Array(Box::new(SmtSort::BitVec(32)), Box::new(SmtSort::BitVec(64)))
+        );
+    }
+
+    #[test]
+    fn test_smt_sort_display() {
+        assert_eq!(format!("{}", SmtSort::BitVec(32)), "(_ BitVec 32)");
+        assert_eq!(format!("{}", SmtSort::Bool), "Bool");
+        assert_eq!(
+            format!("{}", SmtSort::fp32()),
+            "(_ FloatingPoint 8 24)"
+        );
+        assert_eq!(
+            format!("{}", SmtSort::bv_array(32, 8)),
+            "(Array (_ BitVec 32) (_ BitVec 8))"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Uninterpreted function tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_uf_display() {
+        let uf = SmtExpr::uf(
+            "hash",
+            vec![SmtExpr::bv_const(42, 32)],
+            SmtSort::BitVec(64),
+        );
+        assert_eq!(format!("{}", uf), "(hash (_ bv42 32))");
+    }
+
+    #[test]
+    fn test_uf_decl_display() {
+        let decl = SmtExpr::uf_decl(
+            "hash",
+            vec![SmtSort::BitVec(32)],
+            SmtSort::BitVec(64),
+        );
+        assert_eq!(
+            format!("{}", decl),
+            "(declare-fun hash ((_ BitVec 32)) (_ BitVec 64))"
+        );
+    }
+
+    #[test]
+    fn test_uf_sort() {
+        let uf = SmtExpr::uf("f", vec![], SmtSort::BitVec(32));
+        assert_eq!(uf.sort(), SmtSort::BitVec(32));
+    }
+
+    #[test]
+    fn test_uf_eval_errors() {
+        let uf = SmtExpr::uf("f", vec![], SmtSort::BitVec(32));
+        assert!(uf.try_eval(&HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn test_rounding_mode_display() {
+        assert_eq!(format!("{}", RoundingMode::RNE), "RNE");
+        assert_eq!(format!("{}", RoundingMode::RNA), "RNA");
+        assert_eq!(format!("{}", RoundingMode::RTP), "RTP");
+        assert_eq!(format!("{}", RoundingMode::RTN), "RTN");
+        assert_eq!(format!("{}", RoundingMode::RTZ), "RTZ");
+    }
+
+    #[test]
+    fn test_free_vars_with_new_exprs() {
+        // Array expression references no free vars if built from constants.
+        let arr = SmtExpr::const_array(SmtSort::BitVec(8), SmtExpr::bv_const(0, 32));
+        let sel = SmtExpr::select(arr, SmtExpr::var("idx", 8));
+        assert_eq!(sel.free_vars(), vec!["idx".to_string()]);
+
+        // FP expression
+        let fp_expr = SmtExpr::fp_add(
+            RoundingMode::RNE,
+            SmtExpr::fp64_const(1.0),
+            SmtExpr::fp64_const(2.0),
+        );
+        assert!(fp_expr.free_vars().is_empty());
+
+        // UF with args
+        let uf = SmtExpr::uf("f", vec![SmtExpr::var("x", 32)], SmtSort::BitVec(32));
+        assert_eq!(uf.free_vars(), vec!["x".to_string()]);
     }
 }

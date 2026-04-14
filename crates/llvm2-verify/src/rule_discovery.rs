@@ -176,7 +176,15 @@ impl RuleProposal {
             | SmtExpr::BvUgt { lhs, rhs, .. }
             | SmtExpr::BvUle { lhs, rhs, .. }
             | SmtExpr::And { lhs, rhs }
-            | SmtExpr::Or { lhs, rhs } => {
+            | SmtExpr::Or { lhs, rhs }
+            | SmtExpr::FPEq { lhs, rhs }
+            | SmtExpr::FPLt { lhs, rhs } => {
+                Self::find_var_width_in_expr(lhs, target)
+                    .or_else(|| Self::find_var_width_in_expr(rhs, target))
+            }
+            SmtExpr::FPAdd { lhs, rhs, .. }
+            | SmtExpr::FPMul { lhs, rhs, .. }
+            | SmtExpr::FPDiv { lhs, rhs, .. } => {
                 Self::find_var_width_in_expr(lhs, target)
                     .or_else(|| Self::find_var_width_in_expr(rhs, target))
             }
@@ -184,7 +192,8 @@ impl RuleProposal {
             | SmtExpr::Not { operand }
             | SmtExpr::Extract { operand, .. }
             | SmtExpr::ZeroExtend { operand, .. }
-            | SmtExpr::SignExtend { operand, .. } => {
+            | SmtExpr::SignExtend { operand, .. }
+            | SmtExpr::FPNeg { operand } => {
                 Self::find_var_width_in_expr(operand, target)
             }
             SmtExpr::Concat { hi, lo, .. } => {
@@ -196,6 +205,27 @@ impl RuleProposal {
                     .or_else(|| Self::find_var_width_in_expr(then_expr, target))
                     .or_else(|| Self::find_var_width_in_expr(else_expr, target))
             }
+            SmtExpr::Select { array, index } => {
+                Self::find_var_width_in_expr(array, target)
+                    .or_else(|| Self::find_var_width_in_expr(index, target))
+            }
+            SmtExpr::Store { array, index, value } => {
+                Self::find_var_width_in_expr(array, target)
+                    .or_else(|| Self::find_var_width_in_expr(index, target))
+                    .or_else(|| Self::find_var_width_in_expr(value, target))
+            }
+            SmtExpr::ConstArray { value, .. } => {
+                Self::find_var_width_in_expr(value, target)
+            }
+            SmtExpr::UF { args, .. } => {
+                for arg in args {
+                    if let Some(w) = Self::find_var_width_in_expr(arg, target) {
+                        return Some(w);
+                    }
+                }
+                None
+            }
+            SmtExpr::FPConst { .. } | SmtExpr::UFDecl { .. } => None,
         }
     }
 }
@@ -643,8 +673,17 @@ fn estimate_expr_cost(expr: &SmtExpr) -> i32 {
         | SmtExpr::BvUgt { lhs, rhs, .. }
         | SmtExpr::BvUle { lhs, rhs, .. }
         | SmtExpr::And { lhs, rhs }
-        | SmtExpr::Or { lhs, rhs } => 1 + estimate_expr_cost(lhs) + estimate_expr_cost(rhs),
-        SmtExpr::BvNeg { operand, .. } | SmtExpr::Not { operand } => {
+        | SmtExpr::Or { lhs, rhs }
+        | SmtExpr::FPEq { lhs, rhs }
+        | SmtExpr::FPLt { lhs, rhs } => 1 + estimate_expr_cost(lhs) + estimate_expr_cost(rhs),
+        SmtExpr::FPAdd { lhs, rhs, .. }
+        | SmtExpr::FPMul { lhs, rhs, .. }
+        | SmtExpr::FPDiv { lhs, rhs, .. } => {
+            3 + estimate_expr_cost(lhs) + estimate_expr_cost(rhs)
+        }
+        SmtExpr::BvNeg { operand, .. }
+        | SmtExpr::Not { operand }
+        | SmtExpr::FPNeg { operand } => {
             1 + estimate_expr_cost(operand)
         }
         SmtExpr::Extract { operand, .. }
@@ -658,6 +697,20 @@ fn estimate_expr_cost(expr: &SmtExpr) -> i32 {
                 + estimate_expr_cost(then_expr)
                 + estimate_expr_cost(else_expr)
         }
+        SmtExpr::Select { array, index } => {
+            2 + estimate_expr_cost(array) + estimate_expr_cost(index)
+        }
+        SmtExpr::Store { array, index, value } => {
+            2 + estimate_expr_cost(array)
+                + estimate_expr_cost(index)
+                + estimate_expr_cost(value)
+        }
+        SmtExpr::ConstArray { value, .. } => estimate_expr_cost(value),
+        SmtExpr::UF { args, .. } => {
+            2 + args.iter().map(|a| estimate_expr_cost(a)).sum::<i32>()
+        }
+        SmtExpr::FPConst { .. } => 0,
+        SmtExpr::UFDecl { .. } => 0,
     }
 }
 
