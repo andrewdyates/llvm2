@@ -46,6 +46,11 @@ pub enum EncodeError {
     MemEncode(#[from] encoding_mem::EncodeError),
     #[error("FP encoding error: {0}")]
     FpEncode(#[from] encoding_fp::FpEncodeError),
+    #[error("unsupported FP size {size:?} for opcode {opcode:?}")]
+    UnsupportedFpSize {
+        opcode: AArch64Opcode,
+        size: FpSize,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -534,8 +539,9 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
                 // FP load: V=1, size from FP register class
                 let fp_sz = fp_size_from_inst(inst);
                 let (size, scale) = match fp_sz {
-                    FpSize::Single => (0b10, 4i64), // 32-bit FP
-                    FpSize::Double | _ => (0b11, 8i64), // 64-bit FP (and 128-bit Q)
+                    FpSize::Half => (0b01, 2i64),     // 16-bit FP (H registers)
+                    FpSize::Single => (0b10, 4i64),   // 32-bit FP (S registers)
+                    FpSize::Double => (0b11, 8i64),   // 64-bit FP (D registers)
                 };
                 let scaled = (offset / scale) as u32 & 0xFFF;
                 Ok(encoding::encode_load_store_ui(size, 1, 0b01, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
@@ -558,8 +564,9 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             if is_fpr(inst, 0) {
                 let fp_sz = fp_size_from_inst(inst);
                 let (size, scale) = match fp_sz {
-                    FpSize::Single => (0b10, 4i64),
-                    FpSize::Double | _ => (0b11, 8i64),
+                    FpSize::Half => (0b01, 2i64),     // 16-bit FP (H registers)
+                    FpSize::Single => (0b10, 4i64),   // 32-bit FP (S registers)
+                    FpSize::Double => (0b11, 8i64),   // 64-bit FP (D registers)
                 };
                 let scaled = (offset / scale) as u32 & 0xFFF;
                 Ok(encoding::encode_load_store_ui(size, 1, 0b00, scaled, preg_hw(inst, 1), preg_hw(inst, 0)))
@@ -1190,12 +1197,13 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             if is_fpr(inst, 0) {
                 // FP register-offset load: V=1
                 let fp_sz = fp_size_from_inst(inst);
-                let size = match fp_sz {
-                    FpSize::Single => 0b10,
-                    FpSize::Double | _ => 0b11,
+                let mem_size = match fp_sz {
+                    FpSize::Half => encoding_mem::LoadStoreSize::Half,       // 16-bit (H registers)
+                    FpSize::Single => encoding_mem::LoadStoreSize::Word,     // 32-bit (S registers)
+                    FpSize::Double => encoding_mem::LoadStoreSize::Double,   // 64-bit (D registers)
                 };
                 Ok(encoding_mem::encode_ldr_str_register(
-                    match size { 0b10 => encoding_mem::LoadStoreSize::Word, _ => encoding_mem::LoadStoreSize::Double },
+                    mem_size,
                     true,
                     encoding_mem::LoadStoreOp::Load,
                     rm as u8,
@@ -1236,12 +1244,13 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             };
             if is_fpr(inst, 0) {
                 let fp_sz = fp_size_from_inst(inst);
-                let size = match fp_sz {
-                    FpSize::Single => encoding_mem::LoadStoreSize::Word,
-                    FpSize::Double | _ => encoding_mem::LoadStoreSize::Double,
+                let mem_size = match fp_sz {
+                    FpSize::Half => encoding_mem::LoadStoreSize::Half,       // 16-bit (H registers)
+                    FpSize::Single => encoding_mem::LoadStoreSize::Word,     // 32-bit (S registers)
+                    FpSize::Double => encoding_mem::LoadStoreSize::Double,   // 64-bit (D registers)
                 };
                 Ok(encoding_mem::encode_ldr_str_register(
-                    size,
+                    mem_size,
                     true,
                     encoding_mem::LoadStoreOp::Store,
                     rm as u8,
@@ -1382,7 +1391,7 @@ mod tests {
     use super::*;
     use llvm2_ir::inst::{AArch64Opcode, MachInst};
     use llvm2_ir::operand::MachOperand;
-    use llvm2_ir::regs::{PReg, SpecialReg, X0, X1, X2, X9, X30, V0, V1, V2, W0, W1, W2, S0, S1, S2};
+    use llvm2_ir::regs::{PReg, SpecialReg, X0, X1, X2, X9, X30, V0, V1, V2, W0, W1, W2, S0, S1, S2, D0, H0};
 
     /// Helper to build a MachInst with given opcode and operands.
     fn mk(opcode: AArch64Opcode, ops: Vec<MachOperand>) -> MachInst {
@@ -2776,6 +2785,121 @@ mod tests {
         // Everything else should be the same (mask out opc bits)
         let mask = !(0b11u32 << 22);
         assert_eq!(ldr_enc & mask, str_enc & mask, "LDR and STR should match except opc");
+    }
+
+    // =========================================================================
+    // FP register-offset load/store tests (LdrRO, StrRO) — issue #155
+    // =========================================================================
+
+    #[test]
+    fn test_ldr_ro_fp_double() {
+        // LDR D0, [X1, X2] — 64-bit FP register-offset load
+        // size=11, V=1, opc=01
+        let inst = mk(AArch64Opcode::LdrRO, vec![preg(D0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding_mem::encode_ldr_str_register(
+            encoding_mem::LoadStoreSize::Double, true, encoding_mem::LoadStoreOp::Load,
+            2, encoding_mem::RegExtend::Lsl, false, 1, 0,
+        ).unwrap();
+        assert_eq!(enc, direct, "LDR D0, [X1, X2] = {enc:#010X}");
+        assert_eq!((enc >> 30) & 0b11, 0b11, "size must be 11 for Double");
+        assert_eq!((enc >> 26) & 1, 1, "V must be 1 for FP");
+    }
+
+    #[test]
+    fn test_ldr_ro_fp_single() {
+        // LDR S0, [X1, X2] — 32-bit FP register-offset load
+        // size=10, V=1, opc=01
+        let inst = mk(AArch64Opcode::LdrRO, vec![preg(S0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding_mem::encode_ldr_str_register(
+            encoding_mem::LoadStoreSize::Word, true, encoding_mem::LoadStoreOp::Load,
+            2, encoding_mem::RegExtend::Lsl, false, 1, 0,
+        ).unwrap();
+        assert_eq!(enc, direct, "LDR S0, [X1, X2] = {enc:#010X}");
+        assert_eq!((enc >> 30) & 0b11, 0b10, "size must be 10 for Single");
+        assert_eq!((enc >> 26) & 1, 1, "V must be 1 for FP");
+    }
+
+    #[test]
+    fn test_ldr_ro_fp_half() {
+        // LDR H0, [X1, X2] — 16-bit FP register-offset load
+        // size=01, V=1, opc=01
+        let inst = mk(AArch64Opcode::LdrRO, vec![preg(H0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding_mem::encode_ldr_str_register(
+            encoding_mem::LoadStoreSize::Half, true, encoding_mem::LoadStoreOp::Load,
+            2, encoding_mem::RegExtend::Lsl, false, 1, 0,
+        ).unwrap();
+        assert_eq!(enc, direct, "LDR H0, [X1, X2] = {enc:#010X}");
+        assert_eq!((enc >> 30) & 0b11, 0b01, "size must be 01 for Half");
+        assert_eq!((enc >> 26) & 1, 1, "V must be 1 for FP");
+    }
+
+    #[test]
+    fn test_str_ro_fp_double() {
+        // STR D0, [X1, X2] — 64-bit FP register-offset store
+        // size=11, V=1, opc=00
+        let inst = mk(AArch64Opcode::StrRO, vec![preg(D0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding_mem::encode_ldr_str_register(
+            encoding_mem::LoadStoreSize::Double, true, encoding_mem::LoadStoreOp::Store,
+            2, encoding_mem::RegExtend::Lsl, false, 1, 0,
+        ).unwrap();
+        assert_eq!(enc, direct, "STR D0, [X1, X2] = {enc:#010X}");
+        assert_eq!((enc >> 30) & 0b11, 0b11, "size must be 11 for Double");
+        assert_eq!((enc >> 26) & 1, 1, "V must be 1 for FP");
+    }
+
+    #[test]
+    fn test_str_ro_fp_single() {
+        // STR S0, [X1, X2] — 32-bit FP register-offset store
+        // size=10, V=1, opc=00
+        let inst = mk(AArch64Opcode::StrRO, vec![preg(S0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding_mem::encode_ldr_str_register(
+            encoding_mem::LoadStoreSize::Word, true, encoding_mem::LoadStoreOp::Store,
+            2, encoding_mem::RegExtend::Lsl, false, 1, 0,
+        ).unwrap();
+        assert_eq!(enc, direct, "STR S0, [X1, X2] = {enc:#010X}");
+        assert_eq!((enc >> 30) & 0b11, 0b10, "size must be 10 for Single");
+        assert_eq!((enc >> 26) & 1, 1, "V must be 1 for FP");
+    }
+
+    #[test]
+    fn test_str_ro_fp_half() {
+        // STR H0, [X1, X2] — 16-bit FP register-offset store
+        // size=01, V=1, opc=00
+        let inst = mk(AArch64Opcode::StrRO, vec![preg(H0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding_mem::encode_ldr_str_register(
+            encoding_mem::LoadStoreSize::Half, true, encoding_mem::LoadStoreOp::Store,
+            2, encoding_mem::RegExtend::Lsl, false, 1, 0,
+        ).unwrap();
+        assert_eq!(enc, direct, "STR H0, [X1, X2] = {enc:#010X}");
+        assert_eq!((enc >> 30) & 0b11, 0b01, "size must be 01 for Half");
+        assert_eq!((enc >> 26) & 1, 1, "V must be 1 for FP");
+    }
+
+    #[test]
+    fn test_ldr_ro_fp_sizes_differ() {
+        // Verify that Half, Single, and Double produce different size fields
+        let half = mk(AArch64Opcode::LdrRO, vec![preg(H0), preg(X1), preg(X2)]);
+        let single = mk(AArch64Opcode::LdrRO, vec![preg(S0), preg(X1), preg(X2)]);
+        let double = mk(AArch64Opcode::LdrRO, vec![preg(D0), preg(X1), preg(X2)]);
+        let h_enc = encode_instruction(&half).unwrap();
+        let s_enc = encode_instruction(&single).unwrap();
+        let d_enc = encode_instruction(&double).unwrap();
+        let h_size = (h_enc >> 30) & 0b11;
+        let s_size = (s_enc >> 30) & 0b11;
+        let d_size = (d_enc >> 30) & 0b11;
+        assert_eq!(h_size, 0b01, "Half size=01");
+        assert_eq!(s_size, 0b10, "Single size=10");
+        assert_eq!(d_size, 0b11, "Double size=11");
+        // All must have V=1
+        assert_eq!((h_enc >> 26) & 1, 1, "Half V=1");
+        assert_eq!((s_enc >> 26) & 1, 1, "Single V=1");
+        assert_eq!((d_enc >> 26) & 1, 1, "Double V=1");
     }
 
     // =========================================================================
