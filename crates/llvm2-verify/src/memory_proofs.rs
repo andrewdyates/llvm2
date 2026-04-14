@@ -522,7 +522,7 @@ fn proof_non_interference_cross_size(
     gap: u64,
 ) -> ProofObligation {
     let store_width = store_size * 8;
-    let load_width = load_size * 8;
+    let _load_width = load_size * 8;
     let mem = symbolic_memory("mem_default");
     let base = SmtExpr::var("base", 64);
     let value = SmtExpr::var("value", store_width);
@@ -570,7 +570,7 @@ fn proof_non_interference_symbolic(
     load_size: u32,
 ) -> ProofObligation {
     let store_width = store_size * 8;
-    let load_width = load_size * 8;
+    let _load_width = load_size * 8;
     let mem = symbolic_memory("mem_default");
     let base = SmtExpr::var("base", 64);
     let addr_b = SmtExpr::var("addr_b", 64);

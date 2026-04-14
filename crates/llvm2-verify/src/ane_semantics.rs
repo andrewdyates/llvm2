@@ -660,6 +660,7 @@ pub fn fp32_array_from_f64(values: &[f64]) -> SmtExpr {
 }
 
 /// Read element at index `i` from an FP array and evaluate to f64.
+#[cfg(test)]
 fn read_array_elem_f64(arr: &SmtExpr, i: u64, env: &std::collections::HashMap<String, u64>) -> f64 {
     let idx = SmtExpr::bv_const(i, 64);
     let elem = SmtExpr::select(arr.clone(), idx);
