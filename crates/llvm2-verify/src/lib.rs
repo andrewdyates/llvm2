@@ -60,6 +60,7 @@ pub mod cfg_proofs;
 pub mod memory_model;
 pub mod verify;
 pub mod z4_bridge;
+pub mod synthesis;
 
 pub use verify::{VerificationResult, Verifier};
 pub use lowering_proof::{ProofObligation, verify_by_evaluation};
