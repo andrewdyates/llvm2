@@ -47,7 +47,8 @@ use tmir_types::{BlockId, Ty, ValueId};
 
 use crate::instructions::Value;
 use crate::target_analysis::{
-    ComputeTarget, ProofAnalyzer, SubgraphDescriptor, SubgraphId, TargetProofContext,
+    ComputeTarget, ProofAnalyzer, SubgraphDescriptor, SubgraphId, TargetLegality,
+    TargetProofContext,
 };
 
 // ---------------------------------------------------------------------------
@@ -191,6 +192,11 @@ pub struct ComputeNode {
     pub produced_values: Vec<ValueId>,
     /// Values consumed by this node (used for edge construction).
     pub consumed_values: Vec<ValueId>,
+    /// Full target legality analysis from ProofAnalyzer, including justifications,
+    /// parallel reduction legality, and per-target judgments.
+    /// `None` for manually constructed nodes that bypass proof analysis.
+    #[serde(skip)]
+    pub target_legality: Option<TargetLegality>,
 }
 
 /// A data dependency edge between two computation nodes.
@@ -294,6 +300,211 @@ impl ComputeGraph {
 impl Default for ComputeGraph {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proof-guided target recommendations
+// ---------------------------------------------------------------------------
+
+/// Per-node target recommendation produced by proof-guided analysis.
+///
+/// Combines the [`TargetLegality`] from [`ProofAnalyzer`] with the cost model
+/// to recommend the cheapest legal target for each computation node.
+#[derive(Debug, Clone)]
+pub struct TargetRecommendation {
+    /// The node this recommendation applies to.
+    pub node_id: ComputeNodeId,
+    /// The recommended compute target (lowest cost among legal targets).
+    pub recommended_target: ComputeTarget,
+    /// All legal targets for this node.
+    pub legal_targets: Vec<ComputeTarget>,
+    /// Human-readable justification for the recommendation.
+    pub reason: String,
+    /// Whether parallel reduction is legal for this node's subgraph.
+    pub parallel_reduction_legal: bool,
+}
+
+impl ComputeGraph {
+    /// Build a graph from a tMIR module with a custom proof context and analyzer.
+    ///
+    /// This is the primary entry point for proof-guided graph construction.
+    /// Each node's `target_legality` is populated with full [`TargetLegality`]
+    /// from the analyzer, including justifications and parallel reduction info.
+    pub fn with_proof_context(
+        module: &TmirModule,
+        proof_ctx: TargetProofContext,
+        analyzer: &ProofAnalyzer,
+    ) -> Self {
+        let mut builder = GraphBuilder::new(analyzer.clone(), proof_ctx);
+        builder.build_from_module(module)
+    }
+
+    /// Return per-node target recommendations using stored proof-guided legality.
+    ///
+    /// For each node, picks the cheapest legal target by `latency_cycles` from
+    /// the node's cost map. Nodes without `target_legality` fall back to
+    /// CpuScalar.
+    pub fn target_recommendations(&self) -> Vec<TargetRecommendation> {
+        self.nodes.iter().map(|node| {
+            let legal = if let Some(ref legality) = node.target_legality {
+                legality.legal_targets()
+            } else {
+                node.legal_targets.clone()
+            };
+
+            // Pick cheapest legal target by latency.
+            let recommended = legal.iter()
+                .filter_map(|t| node.costs.get(t).map(|c| (*t, c.latency_cycles)))
+                .min_by_key(|(_, cost)| *cost)
+                .map(|(t, _)| t)
+                .unwrap_or(ComputeTarget::CpuScalar);
+
+            let parallel_reduction_legal = node.target_legality
+                .as_ref()
+                .map(|l| l.parallel_reduction_legal)
+                .unwrap_or(false);
+
+            let reason = if let Some(ref legality) = node.target_legality {
+                legality.reason(recommended)
+                    .unwrap_or("no justification available")
+                    .to_string()
+            } else {
+                format!("{} selected as cheapest legal target (no proof context)", recommended)
+            };
+
+            TargetRecommendation {
+                node_id: node.id,
+                recommended_target: recommended,
+                legal_targets: legal,
+                reason,
+                parallel_reduction_legal,
+            }
+        }).collect()
+    }
+
+    /// Compute the total cost of the proof-guided optimal assignment.
+    ///
+    /// For each node, assigns the cheapest legal target. Then computes total
+    /// cost including transfer costs for edges between nodes on different targets.
+    /// Returns `None` if any node has no legal targets or no cost data.
+    pub fn proof_guided_partition_cost(&self) -> Option<u64> {
+        let mut assignment = HashMap::new();
+        for node in &self.nodes {
+            let legal = if let Some(ref legality) = node.target_legality {
+                legality.legal_targets()
+            } else {
+                node.legal_targets.clone()
+            };
+
+            let best = legal.iter()
+                .filter_map(|t| node.costs.get(t).map(|c| (*t, c.latency_cycles)))
+                .min_by_key(|(_, cost)| *cost)
+                .map(|(t, _)| t)?;
+
+            assignment.insert(node.id, best);
+        }
+        self.partition_cost(&assignment)
+    }
+
+    /// Re-analyze all nodes with a new proof context, updating target legality
+    /// and legal_targets on each node in-place.
+    ///
+    /// This is useful when proof annotations become available after initial graph
+    /// construction (e.g., after a verification pass discovers new proofs).
+    pub fn annotate_with_proofs(
+        &mut self,
+        module: &TmirModule,
+        proof_ctx: &TargetProofContext,
+        analyzer: &ProofAnalyzer,
+    ) {
+        for node in &mut self.nodes {
+            let subgraph_id = SubgraphId(node.id.0);
+
+            // Build a SubgraphDescriptor from the node.
+            let mut desc = SubgraphDescriptor::new(subgraph_id);
+            desc.data_size_bytes = node.data_size_bytes;
+
+            // Propagate subgraph-level proofs from the proof context.
+            desc.subgraph_proofs = proof_ctx.subgraph_proofs_for(subgraph_id);
+
+            // Map node values into the descriptor.
+            let all_values: Vec<ValueId> = node.consumed_values.iter()
+                .chain(node.produced_values.iter())
+                .copied()
+                .collect();
+
+            // Collect type information from the module for these values.
+            let mut value_types_map: HashMap<ValueId, Ty> = HashMap::new();
+            for func in &module.functions {
+                for block in func.iter_blocks() {
+                    for (vid, ty) in &block.params {
+                        if all_values.contains(vid) {
+                            value_types_map.insert(*vid, ty.clone());
+                        }
+                    }
+                    for instr_node in &block.body {
+                        match &instr_node.instr {
+                            Instr::BinOp { ty, lhs, rhs, .. } => {
+                                if all_values.contains(lhs) {
+                                    value_types_map.entry(*lhs).or_insert_with(|| ty.clone());
+                                }
+                                if all_values.contains(rhs) {
+                                    value_types_map.entry(*rhs).or_insert_with(|| ty.clone());
+                                }
+                                for r in &instr_node.results {
+                                    if all_values.contains(r) {
+                                        value_types_map.insert(*r, ty.clone());
+                                    }
+                                }
+                            }
+                            Instr::UnOp { ty, operand, .. } => {
+                                if all_values.contains(operand) {
+                                    value_types_map.entry(*operand).or_insert_with(|| ty.clone());
+                                }
+                                for r in &instr_node.results {
+                                    if all_values.contains(r) {
+                                        value_types_map.insert(*r, ty.clone());
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            // Map ValueIds -> internal Values for the analyzer.
+            let mut lir_values = Vec::new();
+            for (i, vid) in all_values.iter().enumerate() {
+                let val = Value(i as u32);
+                lir_values.push(val);
+                if let Some(ty) = value_types_map.get(vid) {
+                    if let Ok(lir_ty) = crate::adapter::translate_type(ty) {
+                        desc.value_types.insert(val, lir_ty);
+                    }
+                }
+            }
+            desc.values = lir_values;
+
+            // Run proof-guided analysis.
+            let legality = analyzer.analyze(&desc, proof_ctx);
+            node.legal_targets = legality.legal_targets();
+
+            // Update costs for newly legal targets.
+            for &target in &node.legal_targets {
+                node.costs.entry(target).or_insert_with(|| {
+                    estimate_compute_cost(
+                        node.kind,
+                        node.instructions.len(),
+                        node.data_size_bytes,
+                        target,
+                    )
+                });
+            }
+
+            node.target_legality = Some(legality);
+        }
     }
 }
 
@@ -804,6 +1015,11 @@ impl GraphBuilder {
         let mut subgraph_desc = SubgraphDescriptor::new(subgraph_id);
         subgraph_desc.data_size_bytes = data_size_bytes;
 
+        // Propagate subgraph-level proofs from the TargetProofContext into the
+        // descriptor. This bridges Gap 1: proof annotations flow from the proof
+        // context into each node's legality analysis.
+        subgraph_desc.subgraph_proofs = self.proof_ctx.subgraph_proofs_for(subgraph_id);
+
         // Map ValueIds to internal Values for the analyzer
         let mut lir_values = Vec::new();
         for (i, vid) in consumed_values.iter().chain(produced_values.iter()).enumerate() {
@@ -817,7 +1033,7 @@ impl GraphBuilder {
         }
         subgraph_desc.values = lir_values;
 
-        // Determine target legality
+        // Determine target legality via ProofAnalyzer
         let legality = self.analyzer.analyze(&subgraph_desc, &self.proof_ctx);
         let legal_targets = legality.legal_targets();
 
@@ -842,6 +1058,7 @@ impl GraphBuilder {
             data_size_bytes,
             produced_values,
             consumed_values,
+            target_legality: Some(legality),
         }]
     }
 
@@ -1592,6 +1809,7 @@ mod tests {
             data_size_bytes: 1000,
             produced_values: vec![],
             consumed_values: vec![],
+            target_legality: None,
         });
 
         let mut costs_b = HashMap::new();
@@ -1613,6 +1831,7 @@ mod tests {
             data_size_bytes: 2000,
             produced_values: vec![],
             consumed_values: vec![],
+            target_legality: None,
         });
 
         graph.add_edge(DataEdge {
@@ -1768,5 +1987,378 @@ mod tests {
 
         let graph = ComputeGraph::from_module(&module);
         assert_eq!(graph.num_nodes(), 2, "Two functions should produce two nodes");
+    }
+
+    // ===================================================================
+    // Proof-graph bridge tests (Gap 1: ProofAnalyzer <-> ComputeGraph)
+    // ===================================================================
+
+    // -------------------------------------------------------------------
+    // Test helpers for proof-guided construction
+    // -------------------------------------------------------------------
+
+    use crate::adapter::{Proof, ProofContext};
+    use crate::target_analysis::{
+        SubgraphProof, TargetProofContext, SubgraphId,
+    };
+    use crate::instructions::Value;
+
+    /// Build a TargetProofContext with Pure subgraph proof on node 0,
+    /// plus InBounds+ValidBorrow on the first two values.
+    fn full_proof_context() -> TargetProofContext {
+        let mut proof_ctx = ProofContext::default();
+        // Add InBounds + ValidBorrow proofs on LIR Values 0 and 1.
+        // These correspond to the consumed_values mapped as Value(0), Value(1)
+        // by the graph builder.
+        for i in 0..2 {
+            proof_ctx.value_proofs.insert(
+                Value(i),
+                vec![
+                    Proof::InBounds {
+                        base: tmir_types::ValueId(i as u32),
+                        index: tmir_types::ValueId(i as u32 + 100),
+                    },
+                    Proof::ValidBorrow {
+                        borrow: tmir_types::ValueId(i as u32),
+                    },
+                ],
+            );
+        }
+        let mut ctx = TargetProofContext::new(proof_ctx);
+        // Add Pure proof on subgraph 0 (corresponds to first node).
+        ctx.add_subgraph_proof(SubgraphId(0), SubgraphProof::Pure);
+        ctx
+    }
+
+    /// Build a TargetProofContext with full proofs for GPU+parallel reduction.
+    fn full_gpu_proof_context() -> TargetProofContext {
+        let mut ctx = full_proof_context();
+        ctx.add_subgraph_proof(SubgraphId(0), SubgraphProof::Associative);
+        ctx.add_subgraph_proof(SubgraphId(0), SubgraphProof::Commutative);
+        ctx
+    }
+
+    // -------------------------------------------------------------------
+    // Test: with_proof_context propagates Pure proof to unlock SIMD+GPU
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_with_proof_context_unlocks_gpu() {
+        let module = build_data_parallel_module();
+        let proof_ctx = full_proof_context();
+        let analyzer = ProofAnalyzer::with_defaults();
+
+        let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
+
+        assert_eq!(graph.num_nodes(), 1);
+        let node = &graph.nodes[0];
+
+        // With Pure + InBounds + ValidBorrow, GPU should be legal for
+        // data-parallel array operations (data size is large enough).
+        assert!(
+            node.legal_targets.contains(&ComputeTarget::Gpu),
+            "GPU should be legal with full proofs, got: {:?}",
+            node.legal_targets
+        );
+        assert!(node.legal_targets.contains(&ComputeTarget::CpuScalar));
+        assert!(node.legal_targets.contains(&ComputeTarget::CpuSimd));
+
+        // target_legality should be populated.
+        assert!(node.target_legality.is_some());
+        let legality = node.target_legality.as_ref().unwrap();
+        assert!(legality.is_legal(ComputeTarget::Gpu));
+    }
+
+    // -------------------------------------------------------------------
+    // Test: without proofs, GPU is illegal
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_without_proofs_cpu_only() {
+        let module = build_data_parallel_module();
+        let graph = ComputeGraph::from_module(&module);
+
+        assert_eq!(graph.num_nodes(), 1);
+        let node = &graph.nodes[0];
+
+        // Without proofs, side effects are not proven absent -> CPU/SIMD only.
+        assert!(node.legal_targets.contains(&ComputeTarget::CpuScalar));
+        assert!(node.legal_targets.contains(&ComputeTarget::CpuSimd));
+        assert!(
+            !node.legal_targets.contains(&ComputeTarget::Gpu),
+            "GPU should be illegal without proofs"
+        );
+        assert!(
+            !node.legal_targets.contains(&ComputeTarget::NeuralEngine),
+            "ANE should be illegal without proofs"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Test: target_recommendations picks cheapest legal target
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_target_recommendations_prefer_gpu() {
+        let module = build_data_parallel_module();
+        let proof_ctx = full_proof_context();
+        let analyzer = ProofAnalyzer::with_defaults();
+
+        let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
+        let recs = graph.target_recommendations();
+
+        assert_eq!(recs.len(), 1);
+        let rec = &recs[0];
+
+        // For data-parallel workloads with full proofs, GPU should have lower
+        // latency than CPU scalar (massive parallelism).
+        assert!(
+            rec.legal_targets.contains(&ComputeTarget::Gpu),
+            "GPU should be in legal targets"
+        );
+
+        // The recommendation should be GPU because it has the lowest latency
+        // for data-parallel workloads.
+        assert_eq!(
+            rec.recommended_target,
+            ComputeTarget::Gpu,
+            "Should recommend GPU for data-parallel with full proofs, got: {}",
+            rec.recommended_target
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Test: target_recommendations without proofs -> CPU recommendation
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_target_recommendations_no_proofs_cpu() {
+        let module = build_scalar_add_module();
+        let graph = ComputeGraph::from_module(&module);
+        let recs = graph.target_recommendations();
+
+        assert_eq!(recs.len(), 1);
+        let rec = &recs[0];
+
+        // Without proofs, should recommend CpuScalar (cheapest for scalar ops).
+        assert_eq!(rec.recommended_target, ComputeTarget::CpuScalar);
+        assert!(!rec.parallel_reduction_legal);
+        assert!(
+            !rec.legal_targets.contains(&ComputeTarget::Gpu),
+            "GPU should not be in legal targets without proofs"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Test: proof_guided_partition_cost returns a valid cost
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_guided_partition_cost() {
+        let module = build_data_parallel_module();
+        let proof_ctx = full_proof_context();
+        let analyzer = ProofAnalyzer::with_defaults();
+
+        let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
+        let cost = graph.proof_guided_partition_cost();
+
+        assert!(cost.is_some(), "Should produce a valid partition cost");
+        assert!(cost.unwrap() > 0, "Cost should be positive");
+    }
+
+    // -------------------------------------------------------------------
+    // Test: proof_guided_partition_cost on empty graph
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_guided_partition_cost_empty_graph() {
+        let graph = ComputeGraph::new();
+        let cost = graph.proof_guided_partition_cost();
+        assert_eq!(cost, Some(0));
+    }
+
+    // -------------------------------------------------------------------
+    // Test: subgraph proofs from TargetProofContext propagate to nodes
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_subgraph_proofs_propagate_to_nodes() {
+        let module = build_data_parallel_module();
+        let proof_ctx = full_gpu_proof_context();
+        let analyzer = ProofAnalyzer::with_defaults();
+
+        let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
+
+        let node = &graph.nodes[0];
+        let legality = node.target_legality.as_ref().unwrap();
+
+        // With Associative + Commutative proofs, parallel reduction should be legal.
+        assert!(
+            legality.parallel_reduction_legal,
+            "Parallel reduction should be legal with Associative + Commutative proofs"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Test: target_recommendations reports parallel reduction
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_recommendations_include_parallel_reduction() {
+        let module = build_data_parallel_module();
+        let proof_ctx = full_gpu_proof_context();
+        let analyzer = ProofAnalyzer::with_defaults();
+
+        let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
+        let recs = graph.target_recommendations();
+
+        assert_eq!(recs.len(), 1);
+        assert!(
+            recs[0].parallel_reduction_legal,
+            "Recommendation should report parallel reduction legal"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Test: annotate_with_proofs upgrades node legality post-construction
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_annotate_with_proofs_upgrades_legality() {
+        let module = build_data_parallel_module();
+
+        // Build graph without proofs first.
+        let mut graph = ComputeGraph::from_module(&module);
+        assert!(
+            !graph.nodes[0].legal_targets.contains(&ComputeTarget::Gpu),
+            "GPU should be illegal before annotation"
+        );
+
+        // Now annotate with full proofs.
+        let proof_ctx = full_proof_context();
+        let analyzer = ProofAnalyzer::with_defaults();
+        graph.annotate_with_proofs(&module, &proof_ctx, &analyzer);
+
+        assert!(
+            graph.nodes[0].legal_targets.contains(&ComputeTarget::Gpu),
+            "GPU should be legal after annotation with proofs"
+        );
+        assert!(graph.nodes[0].target_legality.is_some());
+    }
+
+    // -------------------------------------------------------------------
+    // Test: matrix-heavy with full proofs recommends GPU or ANE
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_matrix_heavy_with_proofs_recommends_accelerator() {
+        let module = build_matrix_heavy_module();
+
+        let mut proof_ctx = ProofContext::default();
+        for i in 0..2 {
+            proof_ctx.value_proofs.insert(
+                Value(i),
+                vec![
+                    Proof::InBounds {
+                        base: tmir_types::ValueId(i as u32),
+                        index: tmir_types::ValueId(i as u32 + 100),
+                    },
+                    Proof::ValidBorrow {
+                        borrow: tmir_types::ValueId(i as u32),
+                    },
+                ],
+            );
+        }
+        let mut ctx = TargetProofContext::new(proof_ctx);
+        ctx.add_subgraph_proof(SubgraphId(0), SubgraphProof::Pure);
+
+        let analyzer = ProofAnalyzer::with_defaults();
+        let graph = ComputeGraph::with_proof_context(&module, ctx, &analyzer);
+        let recs = graph.target_recommendations();
+
+        assert_eq!(recs.len(), 1);
+        let rec = &recs[0];
+
+        // Matrix-heavy: GPU or ANE should be recommended (not CPU scalar).
+        assert!(
+            rec.recommended_target == ComputeTarget::Gpu
+                || rec.recommended_target == ComputeTarget::NeuralEngine,
+            "Matrix-heavy with proofs should recommend GPU or ANE, got: {}",
+            rec.recommended_target
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Test: from_module_with_proofs builds graph with proof context
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_from_module_with_proofs() {
+        let module = build_data_parallel_module();
+        let proof_ctx = full_proof_context();
+
+        let graph = ComputeGraph::from_module_with_proofs(&module, proof_ctx);
+
+        assert_eq!(graph.num_nodes(), 1);
+        // from_module_with_proofs uses the default analyzer, but passes proofs.
+        assert!(graph.nodes[0].target_legality.is_some());
+    }
+
+    // -------------------------------------------------------------------
+    // Test: proof_guided_partition_cost < naive CPU-only cost
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_guided_cost_beats_cpu_only() {
+        let module = build_data_parallel_module();
+        let proof_ctx = full_proof_context();
+        let analyzer = ProofAnalyzer::with_defaults();
+
+        let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
+
+        // Compute proof-guided cost (should pick GPU for data-parallel).
+        let guided_cost = graph.proof_guided_partition_cost().unwrap();
+
+        // Compute CPU-only cost.
+        let mut cpu_assignment = HashMap::new();
+        for node in &graph.nodes {
+            cpu_assignment.insert(node.id, ComputeTarget::CpuScalar);
+        }
+        let cpu_cost = graph.partition_cost(&cpu_assignment).unwrap();
+
+        assert!(
+            guided_cost <= cpu_cost,
+            "Proof-guided cost ({}) should be <= CPU-only cost ({})",
+            guided_cost,
+            cpu_cost
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Test: target_legality carries justification strings
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_legality_justification_strings() {
+        let module = build_data_parallel_module();
+        let proof_ctx = full_proof_context();
+        let analyzer = ProofAnalyzer::with_defaults();
+
+        let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
+        let node = &graph.nodes[0];
+        let legality = node.target_legality.as_ref().unwrap();
+
+        // GPU reason should mention proof-related justification.
+        let gpu_reason = legality.reason(ComputeTarget::Gpu);
+        assert!(
+            gpu_reason.is_some(),
+            "GPU should have a justification string"
+        );
+        let reason_text = gpu_reason.unwrap();
+        assert!(
+            reason_text.contains("Pure") || reason_text.contains("legal") || reason_text.contains("InBounds"),
+            "GPU justification should reference proofs: {}",
+            reason_text
+        );
     }
 }

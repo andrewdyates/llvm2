@@ -26,4 +26,5 @@ pub use adapter::{
     translate_module, translate_function, translate_type, extract_proofs,
     AdapterError, Proof, ProofContext,
 };
-pub use target_analysis::{ComputeTarget, ProofAnalyzer, TargetLegality};
+pub use target_analysis::{ComputeTarget, ProofAnalyzer, SubgraphProof, TargetLegality};
+pub use compute_graph::TargetRecommendation;

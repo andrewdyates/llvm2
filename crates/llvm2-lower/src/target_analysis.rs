@@ -395,6 +395,7 @@ impl TargetProofContext {
 ///     println!("{}: legal ({})", target, legality.reason(target).unwrap());
 /// }
 /// ```
+#[derive(Clone)]
 pub struct ProofAnalyzer {
     /// Cost configuration thresholds.
     config: CostConfig,
