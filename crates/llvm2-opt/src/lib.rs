@@ -63,6 +63,7 @@ pub mod passes;
 pub mod peephole;
 pub mod pipeline;
 pub mod proof_opts;
+pub mod vectorize;
 
 // Re-export the most important types at crate root.
 pub use pass_manager::{MachinePass, PassManager, PassStats};
