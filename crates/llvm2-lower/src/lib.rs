@@ -21,7 +21,11 @@ pub mod dispatch;
 
 pub use types::Type;
 pub use function::Function;
-pub use abi::{AppleAArch64ABI, ArgLocation, PReg, gpr};
+pub use abi::{
+    AppleAArch64ABI, ArgLocation, PReg, gpr,
+    UnwindInfo, SavedRegister, CompactUnwindEntry, DwarfCfiOp,
+    generate_compact_unwind, generate_dwarf_cfi,
+};
 pub use isel::{InstructionSelector, ISelError, ISelFunction, ISelInst, ISelBlock, ISelOperand, convert_isel_operand_to_ir};
 pub use adapter::{
     translate_module, translate_function, translate_type, extract_proofs,
