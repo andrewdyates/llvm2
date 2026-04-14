@@ -37,6 +37,8 @@
 
 use std::collections::HashMap;
 
+use serde::Serialize;
+
 use crate::types::InstId;
 
 // ---------------------------------------------------------------------------
@@ -49,7 +51,7 @@ use crate::types::InstId;
 /// It is deliberately a separate type from `tmir_types::ValueId` to keep the
 /// provenance system self-contained within llvm2-ir (no dependency on tMIR stubs
 /// for the core tracking infrastructure).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct TmirInstId(pub u32);
 
 impl core::fmt::Display for TmirInstId {
@@ -63,7 +65,7 @@ impl core::fmt::Display for TmirInstId {
 // ---------------------------------------------------------------------------
 
 /// Identifier for a compiler pass (used in transformation chains).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct PassId(pub String);
 
 impl PassId {

@@ -50,9 +50,12 @@ pub enum CompileError {
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// Verbosity level for compilation tracing.
+/// Verbosity level for the compiler's timing trace.
+///
+/// Distinct from [`llvm2_ir::TraceLevel`] which controls structured event
+/// logging. This enum controls per-phase timing output in the compiler API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TraceLevel {
+pub enum CompilerTraceLevel {
     /// No trace output.
     None,
     /// Summary: total time and pass counts.
@@ -71,7 +74,7 @@ pub struct CompilerConfig {
     /// Whether to emit proof certificates (placeholder for z4 integration).
     pub emit_proofs: bool,
     /// Compilation trace verbosity.
-    pub trace_level: TraceLevel,
+    pub trace_level: CompilerTraceLevel,
 }
 
 impl Default for CompilerConfig {
@@ -80,7 +83,7 @@ impl Default for CompilerConfig {
             opt_level: OptLevel::O2,
             target: Target::Aarch64,
             emit_proofs: false,
-            trace_level: TraceLevel::None,
+            trace_level: CompilerTraceLevel::None,
         }
     }
 }
@@ -113,9 +116,13 @@ pub struct TraceEntry {
     pub detail: Option<String>,
 }
 
-/// Compilation trace containing per-phase timing information.
+/// Compiler-level trace containing per-phase timing information.
+///
+/// Distinct from [`llvm2_ir::CompilationTrace`] which is a thread-safe
+/// structured event collector for instruction-level provenance.
+/// This struct is a simple timing log for the compiler API.
 #[derive(Debug, Clone, Default)]
-pub struct CompilationTrace {
+pub struct CompilerTrace {
     /// Ordered list of phase entries.
     pub entries: Vec<TraceEntry>,
     /// Total wall-clock compilation time.
@@ -141,8 +148,8 @@ pub struct CompilationResult {
     pub object_code: Vec<u8>,
     /// Compilation metrics.
     pub metrics: CompilationMetrics,
-    /// Optional compilation trace (populated when trace_level != None).
-    pub trace: Option<CompilationTrace>,
+    /// Optional compiler trace (populated when trace_level != None).
+    pub trace: Option<CompilerTrace>,
     /// Optional proof certificates (populated when emit_proofs is true).
     pub proofs: Option<Vec<ProofCertificate>>,
 }
@@ -188,7 +195,7 @@ impl Compiler {
         module: &tmir_func::Module,
     ) -> Result<CompilationResult, CompileError> {
         let total_start = Instant::now();
-        let tracing = self.config.trace_level != TraceLevel::None;
+        let tracing = self.config.trace_level != CompilerTraceLevel::None;
         let mut trace_entries = Vec::new();
 
         // Phase 1: Translate tMIR module to internal LIR functions.
@@ -258,7 +265,7 @@ impl Compiler {
         };
 
         let trace = if tracing {
-            Some(CompilationTrace {
+            Some(CompilerTrace {
                 entries: trace_entries,
                 total_duration: total_start.elapsed(),
             })
@@ -309,8 +316,8 @@ impl Compiler {
             optimization_passes_run: opt_passes,
         };
 
-        let trace = if self.config.trace_level != TraceLevel::None {
-            Some(CompilationTrace {
+        let trace = if self.config.trace_level != CompilerTraceLevel::None {
+            Some(CompilerTrace {
                 entries: vec![TraceEntry {
                     phase: "compile_ir_function".to_string(),
                     duration: start.elapsed(),
@@ -359,7 +366,7 @@ mod tests {
         assert_eq!(config.opt_level, OptLevel::O2);
         assert_eq!(config.target, Target::Aarch64);
         assert!(!config.emit_proofs);
-        assert_eq!(config.trace_level, TraceLevel::None);
+        assert_eq!(config.trace_level, CompilerTraceLevel::None);
     }
 
     #[test]
@@ -381,13 +388,13 @@ mod tests {
             opt_level: OptLevel::O0,
             target: Target::X86_64,
             emit_proofs: true,
-            trace_level: TraceLevel::Full,
+            trace_level: CompilerTraceLevel::Full,
         };
         let compiler = Compiler::new(config);
         assert_eq!(compiler.config().opt_level, OptLevel::O0);
         assert_eq!(compiler.config().target, Target::X86_64);
         assert!(compiler.config().emit_proofs);
-        assert_eq!(compiler.config().trace_level, TraceLevel::Full);
+        assert_eq!(compiler.config().trace_level, CompilerTraceLevel::Full);
     }
 
     #[test]
@@ -400,8 +407,8 @@ mod tests {
     }
 
     #[test]
-    fn test_compilation_trace_default() {
-        let trace = CompilationTrace::default();
+    fn test_compiler_trace_default() {
+        let trace = CompilerTrace::default();
         assert!(trace.entries.is_empty());
         assert_eq!(trace.total_duration, Duration::ZERO);
     }
@@ -425,7 +432,7 @@ mod tests {
     fn test_compile_ir_function_with_trace() {
         let mut ir_func = crate::pipeline::build_add_test_function();
         let compiler = Compiler::new(CompilerConfig {
-            trace_level: TraceLevel::Summary,
+            trace_level: CompilerTraceLevel::Summary,
             ..CompilerConfig::default()
         });
         let result = compiler.compile_ir_function(&mut ir_func).unwrap();
@@ -451,9 +458,9 @@ mod tests {
     }
 
     #[test]
-    fn test_trace_level_equality() {
-        assert_eq!(TraceLevel::None, TraceLevel::None);
-        assert_ne!(TraceLevel::None, TraceLevel::Summary);
-        assert_ne!(TraceLevel::Summary, TraceLevel::Full);
+    fn test_compiler_trace_level_equality() {
+        assert_eq!(CompilerTraceLevel::None, CompilerTraceLevel::None);
+        assert_ne!(CompilerTraceLevel::None, CompilerTraceLevel::Summary);
+        assert_ne!(CompilerTraceLevel::Summary, CompilerTraceLevel::Full);
     }
 }

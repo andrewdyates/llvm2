@@ -36,6 +36,8 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::provenance::{PassId, TmirInstId};
+
 // ---------------------------------------------------------------------------
 // Trace level
 // ---------------------------------------------------------------------------
@@ -65,17 +67,11 @@ impl Default for TraceLevel {
 // Typed IDs (serializable, self-contained)
 // ---------------------------------------------------------------------------
 
-/// Identifies a compiler pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub struct PassId(pub u32);
+// PassId and TmirInstId are imported from crate::provenance (canonical definitions).
 
 /// Identifies a transformation rule (e.g., a peephole pattern).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct RuleId(pub u32);
-
-/// Identifies a tMIR instruction (source-level, before lowering).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub struct TmirInstId(pub u32);
 
 // ---------------------------------------------------------------------------
 // EventKind
@@ -325,7 +321,7 @@ mod tests {
         assert!(trace.is_empty());
 
         trace.emit(
-            PassId(1),
+            PassId::new("1"),
             EventKind::Applied {
                 rule: RuleId(10),
                 before: vec![0, 1],
@@ -342,7 +338,7 @@ mod tests {
         assert!(!trace.is_empty());
 
         let events = trace.events();
-        assert_eq!(events[0].pass, PassId(1));
+        assert_eq!(events[0].pass, PassId::new("1"));
         assert_eq!(events[0].seq, 0);
         assert_eq!(events[0].subject, vec![0, 1, 2]);
     }
@@ -354,7 +350,7 @@ mod tests {
         let trace = CompilationTrace::new(TraceLevel::None);
 
         trace.emit(
-            PassId(1),
+            PassId::new("1"),
             EventKind::Applied {
                 rule: RuleId(10),
                 before: vec![0],
@@ -377,7 +373,7 @@ mod tests {
     fn emit_at_full_level() {
         let trace = CompilationTrace::new(TraceLevel::Full);
         trace.emit(
-            PassId(0),
+            PassId::new("0"),
             EventKind::Rejected {
                 rule: RuleId(5),
                 reason: "loop trip count unknown".into(),
@@ -394,7 +390,7 @@ mod tests {
     fn emit_at_debug_level() {
         let trace = CompilationTrace::new(TraceLevel::Debug);
         trace.emit(
-            PassId(0),
+            PassId::new("0"),
             EventKind::Encoded {
                 inst: 7,
                 offset: 0x48,
@@ -414,9 +410,9 @@ mod tests {
     fn sequence_numbers_increment() {
         let trace = CompilationTrace::new(TraceLevel::Full);
 
-        for i in 0..5 {
+        for i in 0..5u32 {
             trace.emit(
-                PassId(i),
+                PassId::new(format!("{}", i)),
                 EventKind::Applied {
                     rule: RuleId(0),
                     before: vec![i],
@@ -443,7 +439,7 @@ mod tests {
         let trace = CompilationTrace::new(TraceLevel::Full);
 
         trace.emit(
-            PassId(1),
+            PassId::new("1"),
             EventKind::Lowered {
                 tmir_inst: TmirInstId(42),
                 mach_insts: vec![100, 101],
@@ -474,7 +470,7 @@ mod tests {
         let trace = CompilationTrace::new(TraceLevel::Summary);
 
         trace.emit(
-            PassId(0),
+            PassId::new("0"),
             EventKind::Applied {
                 rule: RuleId(0),
                 before: vec![0],
@@ -494,7 +490,7 @@ mod tests {
 
         // Seq resets so next event gets seq=0.
         trace.emit(
-            PassId(0),
+            PassId::new("0"),
             EventKind::Applied {
                 rule: RuleId(0),
                 before: vec![0],
@@ -549,7 +545,7 @@ mod tests {
 
         for kind in kinds {
             trace.emit(
-                PassId(0),
+                PassId::new("0"),
                 kind,
                 vec![0],
                 Justification::Legality {
@@ -591,7 +587,7 @@ mod tests {
 
         for j in justifications {
             trace.emit(
-                PassId(0),
+                PassId::new("0"),
                 EventKind::Applied {
                     rule: RuleId(0),
                     before: vec![0],
@@ -628,7 +624,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for i in 0..events_per_thread {
                     trace.emit(
-                        PassId(t as u32),
+                        PassId::new(format!("{}", t)),
                         EventKind::Applied {
                             rule: RuleId(i as u32),
                             before: vec![i as u32],
@@ -678,7 +674,7 @@ mod tests {
         let clone = trace.clone();
 
         trace.emit(
-            PassId(0),
+            PassId::new("0"),
             EventKind::Applied {
                 rule: RuleId(0),
                 before: vec![0],

@@ -27,8 +27,8 @@ pub mod unwind;
 pub mod x86_64;
 
 pub use compiler::{
-    CompilationMetrics, CompilationResult, CompilationTrace, CompileError,
-    Compiler, CompilerConfig, ProofCertificate, TraceLevel,
+    CompilationMetrics, CompilationResult, CompileError,
+    Compiler, CompilerConfig, CompilerTrace, CompilerTraceLevel, ProofCertificate,
 };
 pub use error::CodegenError;
 pub use pipeline::{Pipeline, PipelineConfig, PipelineError, compile_to_object};
