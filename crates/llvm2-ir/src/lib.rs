@@ -43,6 +43,7 @@ pub mod cc;
 pub mod function;
 pub mod inst;
 pub mod operand;
+pub mod provenance;
 pub mod regs;
 pub mod types;
 pub mod x86_64_ops;
@@ -55,5 +56,9 @@ pub use inst::{AArch64Opcode, InstFlags, MachInst, ProofAnnotation};
 pub use operand::MachOperand;
 pub use regs::{CondCode, PReg, RegClass, SpecialReg, VReg};
 pub use types::{BlockId, FrameIdx, InstId, StackSlotId, VRegId};
+pub use provenance::{
+    PassId, ProvenanceEntry, ProvenanceMap, ProvenanceStats, ProvenanceStatus, TmirInstId,
+    TransformKind, TransformRecord,
+};
 pub use x86_64_ops::{X86CondCode, X86Opcode};
 pub use x86_64_regs::{X86PReg, X86RegClass};
