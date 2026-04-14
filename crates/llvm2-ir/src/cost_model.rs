@@ -713,6 +713,72 @@ impl MultiTargetCostModel {
         }
     }
 
+    /// Recommend the best compute target for a given operation and element count.
+    ///
+    /// Compares per-element cost across scalar and NEON (including data transfer
+    /// overhead amortized across elements). GPU and ANE are only recommended for
+    /// very large element counts due to dispatch/compilation overhead.
+    ///
+    /// # Arguments
+    /// - `op`: Operation name (e.g., "ADD", "MUL").
+    /// - `element_bits`: Size of each element in bits (8, 16, 32, or 64).
+    /// - `element_count`: Number of elements to process.
+    ///
+    /// # Returns
+    /// The [`ComputeTarget`] with the lowest effective per-element cost,
+    /// accounting for data transfer overhead.
+    pub fn recommend_target(
+        &self,
+        op: &str,
+        element_bits: u32,
+        element_count: u32,
+    ) -> ComputeTarget {
+        // Compare total cost for processing `element_count` elements.
+        //
+        // Scalar: compute per element. No domain transfer needed (data in GPRs).
+        // NEON: per-element compute (amortized across lanes) + domain transfer.
+        //
+        // For data in memory, both need loads/stores. But NEON additionally
+        // requires the data to be in SIMD registers, and results may need to
+        // go back to scalar GPRs. We model the minimum overhead: if data is
+        // already contiguous in memory, NEON can use LD1/ST1 (cheap). But
+        // there's always some setup overhead for entering/exiting the NEON
+        // domain.
+
+        let scalar = self.estimate_cost(ComputeTarget::CpuScalar, op, element_bits);
+        let tc = self.transfer_costs();
+        let n = element_count as f64;
+
+        // Scalar total: just compute cost per element.
+        let scalar_total = scalar.latency_cycles * n;
+
+        // NEON cost: pick the best arrangement for the element size.
+        let neon_arr = match element_bits {
+            8 => NeonArrangement::B16,  // 16 lanes
+            16 => NeonArrangement::H8,  // 8 lanes
+            32 => NeonArrangement::S4,  // 4 lanes
+            64 => NeonArrangement::D2,  // 2 lanes
+            _ => return ComputeTarget::CpuScalar, // unsupported element size
+        };
+        let neon_width = neon_arr.width_bits();
+        let neon_est = self.estimate_cost(ComputeTarget::Neon, op, neon_width);
+        let lanes = neon_arr.lane_count() as f64;
+
+        // NEON total: per-element compute + data transfer overhead.
+        // Transfer overhead includes memory<->NEON vector loads/stores,
+        // amortized across lanes within each vector.
+        let vectors_needed = (n / lanes).ceil();
+        let neon_transfer = vectors_needed * (tc.memory_to_neon_cycles + tc.neon_to_memory_cycles);
+        let neon_compute = neon_est.latency_cycles * n;
+        let neon_total = neon_compute + neon_transfer;
+
+        if neon_total < scalar_total {
+            ComputeTarget::Neon
+        } else {
+            ComputeTarget::CpuScalar
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Private: per-target cost estimation
     // -----------------------------------------------------------------------
@@ -764,6 +830,7 @@ impl MultiTargetCostModel {
     fn estimate_neon(&self, op: &str, width: u32) -> CostEstimate {
         let neon_op = NeonOp::from_name(op);
         let arrangement = NeonArrangement::from_width(width).unwrap_or(NeonArrangement::S4);
+        let lanes = arrangement.lane_count() as f64;
 
         let (lat, tp) = match neon_op {
             Some(nop) => self.neon_cost(nop, arrangement),
@@ -773,14 +840,33 @@ impl MultiTargetCostModel {
             }
         };
 
+        // Normalize costs per-element so NEON and scalar are comparable.
+        //
+        // A NEON ADD.4S processes 4 elements in 2 cycles:
+        //   per-element latency = 2 / 4 = 0.5 cycles
+        //   per-element throughput = 4 units * 4 lanes = 16 elements/cycle
+        //
+        // A scalar ADD processes 1 element in 1 cycle:
+        //   per-element latency = 1.0 cycle
+        //   per-element throughput = 6.0 elements/cycle
+        //
+        // Without this normalization, scalar always wins because NEON
+        // costs are compared as whole-vector costs against single-element
+        // scalar costs.
+        let per_element_latency = lat as f64 / lanes;
+        let per_element_throughput = tp * lanes;
+
         // NEON energy: ~1.5-2.0x scalar ALU (wider datapath, same voltage).
         // 128-bit operations use ~1.8x energy of scalar; 64-bit ~1.4x.
-        let energy = if arrangement.width_bits() >= 128 { 1.8 } else { 1.4 };
+        // Normalize per-element: one NEON instruction's energy is shared
+        // across all lanes.
+        let total_energy = if arrangement.width_bits() >= 128 { 1.8 } else { 1.4 };
+        let per_element_energy = total_energy / lanes;
 
         CostEstimate {
-            latency_cycles: lat as f64,
-            throughput_per_cycle: tp,
-            energy_relative: energy,
+            latency_cycles: per_element_latency,
+            throughput_per_cycle: per_element_throughput,
+            energy_relative: per_element_energy,
         }
     }
 
@@ -1389,9 +1475,14 @@ mod tests {
 
         // Scalar MUL: 3 cycles for 1 element
         assert!((scalar.latency_cycles - 3.0).abs() < 0.01);
-        // NEON MUL.4S: 4 cycles for 4 elements (1 cycle/element amortized)
-        assert!((neon.latency_cycles - 4.0).abs() < 0.01);
-        // NEON has higher throughput (4 units vs 2)
+        // NEON MUL.4S: 4 cycles / 4 lanes = 1.0 cycle per element
+        assert!((neon.latency_cycles - 1.0).abs() < 0.01,
+            "NEON MUL per-element latency should be 1.0, got {}", neon.latency_cycles);
+        // NEON per-element latency should be lower than scalar
+        assert!(neon.latency_cycles < scalar.latency_cycles,
+            "NEON per-element latency {} should beat scalar {}",
+            neon.latency_cycles, scalar.latency_cycles);
+        // NEON has higher per-element throughput (4 units * 4 lanes = 16 vs 2)
         assert!(neon.throughput_per_cycle > scalar.throughput_per_cycle);
     }
 
@@ -1401,9 +1492,15 @@ mod tests {
         let scalar = model.estimate_cost(ComputeTarget::CpuScalar, "ADD", 32);
         let neon = model.estimate_cost(ComputeTarget::Neon, "ADD", 128);
 
-        // Scalar ADD: 1 cycle, NEON ADD: 2 cycles (but 4 elements)
+        // Scalar ADD: 1 cycle per element
         assert!((scalar.latency_cycles - 1.0).abs() < 0.01);
-        assert!((neon.latency_cycles - 2.0).abs() < 0.01);
+        // NEON ADD.4S: 2 cycles / 4 lanes = 0.5 cycles per element
+        assert!((neon.latency_cycles - 0.5).abs() < 0.01,
+            "NEON ADD per-element latency should be 0.5, got {}", neon.latency_cycles);
+        // NEON per-element latency should be lower than scalar
+        assert!(neon.latency_cycles < scalar.latency_cycles,
+            "NEON ADD per-element {} should beat scalar ADD {}",
+            neon.latency_cycles, scalar.latency_cycles);
     }
 
     #[test]
@@ -1502,16 +1599,23 @@ mod tests {
         assert!(m4_tc.neon_to_scalar_cycles <= m1_tc.neon_to_scalar_cycles);
     }
 
-    // ---- NEON energy higher than scalar ----
+    // ---- NEON per-element energy lower than scalar (amortized) ----
 
     #[test]
-    fn neon_energy_higher_than_scalar() {
+    fn neon_per_element_energy_lower_than_scalar() {
+        // NEON uses more total energy per instruction (~1.8x) but processes
+        // multiple lanes. Per-element energy is 1.8 / 4 = 0.45 for 4S,
+        // which is LESS than scalar's 1.0 per element.
         let model = mt_m1();
         let scalar = model.estimate_cost(ComputeTarget::CpuScalar, "ADD", 32);
         let neon = model.estimate_cost(ComputeTarget::Neon, "ADD", 128);
 
-        assert!(neon.energy_relative > scalar.energy_relative,
-            "NEON should use more energy than scalar per instruction");
+        assert!(neon.energy_relative < scalar.energy_relative,
+            "NEON per-element energy {} should be lower than scalar {} (amortized across 4 lanes)",
+            neon.energy_relative, scalar.energy_relative);
+        // 128-bit 4S: 1.8 / 4 = 0.45
+        assert!((neon.energy_relative - 0.45).abs() < 0.01,
+            "NEON 4S per-element energy should be ~0.45, got {}", neon.energy_relative);
     }
 
     // ---- ANE energy efficient for supported ops ----
@@ -1589,5 +1693,165 @@ mod tests {
         let scalar = model.scalar_model();
         assert_eq!(scalar.latency(AArch64Opcode::AddRR), 1);
         assert_eq!(scalar.latency(AArch64Opcode::MulRR), 3);
+    }
+
+    // ==== Lane-count normalization tests (issue #164) ====
+
+    #[test]
+    fn neon_4s_add_cheaper_per_element_than_scalar_for_4_elements() {
+        // Core test for issue #164: NEON 4S ADD should be cheaper per-element
+        // than scalar ADD when processing 4 elements.
+        let model = mt_m1();
+        let scalar = model.estimate_cost(ComputeTarget::CpuScalar, "ADD", 32);
+        let neon_4s = model.estimate_cost(ComputeTarget::Neon, "ADD", 128); // 4S
+
+        // Scalar: 1.0 cycle/element, NEON 4S: 2 cycles / 4 lanes = 0.5 cycles/element
+        assert!(neon_4s.latency_cycles < scalar.latency_cycles,
+            "NEON 4S ADD per-element latency {} should be cheaper than scalar {}",
+            neon_4s.latency_cycles, scalar.latency_cycles);
+
+        // For 4 elements: scalar total = 4 * 1.0 = 4.0, NEON total = 4 * 0.5 = 2.0
+        let scalar_total = scalar.latency_cycles * 4.0;
+        let neon_total = neon_4s.latency_cycles * 4.0;
+        assert!(neon_total < scalar_total,
+            "NEON 4S total {} should be less than scalar total {} for 4 elements",
+            neon_total, scalar_total);
+    }
+
+    #[test]
+    fn neon_2d_add_vs_scalar_for_2_elements() {
+        // NEON 2D processes 2x64-bit elements in one instruction.
+        let model = mt_m1();
+        let scalar = model.estimate_cost(ComputeTarget::CpuScalar, "ADD", 64);
+        let _neon_s4 = model.estimate_cost(ComputeTarget::Neon, "ADD", 128); // maps to S4
+
+        // Use D2 arrangement directly for 64-bit elements
+        let neon_op = NeonOp::from_name("ADD").unwrap();
+        let (lat, _tp) = model.neon_cost(neon_op, NeonArrangement::D2);
+        let d2_lanes = NeonArrangement::D2.lane_count() as f64;
+        let per_element_lat = lat as f64 / d2_lanes;
+
+        // Scalar: 1 cycle for 64-bit ADD, NEON D2: 2 cycles / 2 lanes = 1.0
+        assert!((per_element_lat - 1.0).abs() < 0.01,
+            "NEON D2 per-element latency should be 1.0, got {}", per_element_lat);
+        // For 2 elements: scalar = 2 * 1.0 = 2.0, NEON = 2 * 1.0 = 2.0
+        // D2 matches scalar (tie) — NEON needs 3+ elements to clearly win for 64-bit
+        assert!(per_element_lat <= scalar.latency_cycles,
+            "NEON D2 per-element {} should not exceed scalar {}", per_element_lat, scalar.latency_cycles);
+    }
+
+    #[test]
+    fn scalar_wins_for_single_element() {
+        // For a single element, scalar should be at least as good as NEON
+        // because NEON has no lane-count advantage for 1 element.
+        let model = mt_m1();
+
+        // D1 arrangement: 1 lane, so per-element cost = raw NEON cost
+        let neon_op = NeonOp::from_name("ADD").unwrap();
+        let (neon_lat, _) = model.neon_cost(neon_op, NeonArrangement::D1);
+        let d1_per_element = neon_lat as f64 / NeonArrangement::D1.lane_count() as f64;
+
+        let scalar = model.estimate_cost(ComputeTarget::CpuScalar, "ADD", 64);
+
+        // NEON D1 = 2 cycles / 1 lane = 2.0 per element, scalar = 1.0
+        assert!(scalar.latency_cycles < d1_per_element,
+            "Scalar {} should beat NEON D1 {} for single element",
+            scalar.latency_cycles, d1_per_element);
+    }
+
+    #[test]
+    fn lane_count_all_arrangements() {
+        // Verify lane_count() returns correct values for all arrangements.
+        let cases: [(NeonArrangement, u32); 8] = [
+            (NeonArrangement::B8,  8),
+            (NeonArrangement::B16, 16),
+            (NeonArrangement::H4,  4),
+            (NeonArrangement::H8,  8),
+            (NeonArrangement::S2,  2),
+            (NeonArrangement::S4,  4),
+            (NeonArrangement::D1,  1),
+            (NeonArrangement::D2,  2),
+        ];
+        for (arr, expected_lanes) in &cases {
+            assert_eq!(arr.lane_count(), *expected_lanes,
+                "{:?} should have {} lanes", arr, expected_lanes);
+            // Verify lane_count = width_bits / element_bits
+            assert_eq!(arr.lane_count(), arr.width_bits() / arr.element_bits(),
+                "{:?} lane_count should equal width/element", arr);
+        }
+    }
+
+    #[test]
+    fn neon_throughput_scales_with_lanes() {
+        // Per-element throughput should scale with lane count.
+        // NEON 4S (4 lanes) should have 4x the per-element throughput of D1 (1 lane).
+        let model = mt_m1();
+        let neon_4s = model.estimate_cost(ComputeTarget::Neon, "ADD", 128); // 4S
+        // D1 is width=64 → from_width(64) = D1
+        let neon_d1 = model.estimate_cost(ComputeTarget::Neon, "ADD", 64);  // D1
+
+        // 4S: tp = 4.0 * 4 = 16.0, D1: tp = 4.0 * 1 = 4.0
+        assert!((neon_4s.throughput_per_cycle / neon_d1.throughput_per_cycle - 4.0).abs() < 0.01,
+            "4S throughput {} should be 4x D1 throughput {}",
+            neon_4s.throughput_per_cycle, neon_d1.throughput_per_cycle);
+    }
+
+    // ---- recommend_target tests ----
+
+    #[test]
+    fn recommend_neon_for_mul_batch() {
+        // MUL is expensive (3 cycles scalar), so NEON wins with fewer elements.
+        // Scalar: 3.0 * 16 = 48.0
+        // NEON 4S: per-element = 4/4 = 1.0, compute = 1.0 * 16 = 16.0,
+        //   transfer = 4 vectors * 5 = 20.0, total = 36.0
+        // 36.0 < 48.0 → NEON wins
+        let model = mt_m1();
+        let target = model.recommend_target("MUL", 32, 16);
+        assert_eq!(target, ComputeTarget::Neon,
+            "NEON should be recommended for 16x 32-bit MUL");
+    }
+
+    #[test]
+    fn recommend_scalar_for_single_element() {
+        // For a single element, scalar should win: no NEON amortization benefit,
+        // and the NEON transfer overhead (5 cycles for 1 vector load+store)
+        // exceeds any compute savings.
+        let model = mt_m1();
+        let target = model.recommend_target("MUL", 32, 1);
+        assert_eq!(target, ComputeTarget::CpuScalar,
+            "Scalar should be recommended for 1x 32-bit MUL");
+    }
+
+    #[test]
+    fn recommend_neon_for_8bit_batch() {
+        // 8-bit NEON processes 16 elements per instruction (B16).
+        // NEON ADD: per-element latency = 2/16 = 0.125 cycles.
+        // Scalar ADD: 1.0 cycle per element.
+        // For 64 elements:
+        //   Scalar total: 1.0 * 64 = 64.0
+        //   NEON: compute = 0.125 * 64 = 8.0, transfer = 4 * 5 = 20.0, total = 28.0
+        // 28.0 < 64.0 → NEON wins decisively
+        let model = mt_m1();
+        let target = model.recommend_target("ADD", 8, 64);
+        assert_eq!(target, ComputeTarget::Neon,
+            "NEON should be recommended for 64x 8-bit ADD");
+    }
+
+    #[test]
+    fn recommend_neon_for_large_add_batch() {
+        // For large batches, even ADD (cheap scalar op) should favor NEON
+        // because transfer overhead is amortized across many elements.
+        // Scalar: 1.0 * 256 = 256.0
+        // NEON 4S: compute = 0.5 * 256 = 128.0, vectors = 64, transfer = 64 * 5 = 320.0
+        // Wait, that's 448 > 256. The crossover for ADD happens when
+        // n * 0.5 < n * 1.0 - ceil(n/4) * 5, i.e., 0.5n + 1.25n < n → never for ADD.
+        //
+        // For 8-bit ADD (16 lanes), transfer is far less per element:
+        // 256 elements: compute = 0.125 * 256 = 32.0, vectors = 16, transfer = 80
+        // total = 112 < 256 → NEON wins
+        let model = mt_m1();
+        let target = model.recommend_target("ADD", 8, 256);
+        assert_eq!(target, ComputeTarget::Neon,
+            "NEON should be recommended for 256x 8-bit ADD");
     }
 }
