@@ -651,8 +651,8 @@ mod tests {
     fn test_verifier_nzcv() {
         let verifier = Verifier::new();
         let report = verifier.verify_nzcv();
-        // 4 flag proofs + 10 comparison (32-bit) + 3 comparison (64-bit) + 4 branch = 21
-        assert_eq!(report.total(), 21);
+        // 4 flag proofs + 10 comparison (32-bit) + 10 comparison (64-bit) + 10 branch (32-bit) + 10 branch (64-bit) = 44
+        assert_eq!(report.total(), 44);
         assert!(report.all_valid(), "NZCV proofs failed:\n{}", report.summary());
     }
 

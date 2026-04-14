@@ -1590,6 +1590,71 @@ pub fn proof_icmp_ult_i64() -> ProofObligation {
     proof_icmp_generic(IntCC::UnsignedLessThan, AArch64CC::LO, 64, "Icmp_ULT_I64 -> CMP+CSET_LO")
 }
 
+/// Proof: tMIR::Icmp(NotEqual, I64) -> CMP Xn, Xm ; CSET Xd, NE
+pub fn proof_icmp_ne_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::NotEqual, AArch64CC::NE, 64, "Icmp_NE_I64 -> CMP+CSET_NE")
+}
+
+/// Proof: tMIR::Icmp(SignedGreaterThanOrEqual, I64) -> CMP + CSET GE (64-bit)
+pub fn proof_icmp_sge_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::SignedGreaterThanOrEqual, AArch64CC::GE, 64, "Icmp_SGE_I64 -> CMP+CSET_GE")
+}
+
+/// Proof: tMIR::Icmp(SignedGreaterThan, I64) -> CMP + CSET GT (64-bit)
+pub fn proof_icmp_sgt_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::SignedGreaterThan, AArch64CC::GT, 64, "Icmp_SGT_I64 -> CMP+CSET_GT")
+}
+
+/// Proof: tMIR::Icmp(SignedLessThanOrEqual, I64) -> CMP + CSET LE (64-bit)
+pub fn proof_icmp_sle_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::SignedLessThanOrEqual, AArch64CC::LE, 64, "Icmp_SLE_I64 -> CMP+CSET_LE")
+}
+
+/// Proof: tMIR::Icmp(UnsignedGreaterThanOrEqual, I64) -> CMP + CSET HS (64-bit)
+pub fn proof_icmp_uge_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::UnsignedGreaterThanOrEqual, AArch64CC::HS, 64, "Icmp_UGE_I64 -> CMP+CSET_HS")
+}
+
+/// Proof: tMIR::Icmp(UnsignedGreaterThan, I64) -> CMP + CSET HI (64-bit)
+pub fn proof_icmp_ugt_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::UnsignedGreaterThan, AArch64CC::HI, 64, "Icmp_UGT_I64 -> CMP+CSET_HI")
+}
+
+/// Proof: tMIR::Icmp(UnsignedLessThanOrEqual, I64) -> CMP + CSET LS (64-bit)
+pub fn proof_icmp_ule_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_icmp_generic(IntCC::UnsignedLessThanOrEqual, AArch64CC::LS, 64, "Icmp_ULE_I64 -> CMP+CSET_LS")
+}
+
+/// Return all 10 comparison lowering proofs (64-bit).
+pub fn all_comparison_proofs_i64() -> Vec<ProofObligation> {
+    vec![
+        proof_icmp_eq_i64(),
+        proof_icmp_ne_i64(),
+        proof_icmp_slt_i64(),
+        proof_icmp_sge_i64(),
+        proof_icmp_sgt_i64(),
+        proof_icmp_sle_i64(),
+        proof_icmp_ult_i64(),
+        proof_icmp_uge_i64(),
+        proof_icmp_ugt_i64(),
+        proof_icmp_ule_i64(),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Branch lowering proofs: tMIR::CondBr(Icmp) -> CMP + B.cond
 // ---------------------------------------------------------------------------
@@ -1668,14 +1733,159 @@ pub fn proof_condbr_ult_i32() -> ProofObligation {
     proof_condbr_generic(IntCC::UnsignedLessThan, AArch64CC::LO, 32, "CondBr_ULT_I32 -> CMP+B.LO")
 }
 
-/// Return all branch lowering proofs.
-pub fn all_branch_proofs() -> Vec<ProofObligation> {
+/// Proof: tMIR::CondBr(Icmp(SignedGreaterThanOrEqual)) -> CMP + B.GE
+pub fn proof_condbr_sge_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::SignedGreaterThanOrEqual, AArch64CC::GE, 32, "CondBr_SGE_I32 -> CMP+B.GE")
+}
+
+/// Proof: tMIR::CondBr(Icmp(SignedGreaterThan)) -> CMP + B.GT
+pub fn proof_condbr_sgt_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::SignedGreaterThan, AArch64CC::GT, 32, "CondBr_SGT_I32 -> CMP+B.GT")
+}
+
+/// Proof: tMIR::CondBr(Icmp(SignedLessThanOrEqual)) -> CMP + B.LE
+pub fn proof_condbr_sle_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::SignedLessThanOrEqual, AArch64CC::LE, 32, "CondBr_SLE_I32 -> CMP+B.LE")
+}
+
+/// Proof: tMIR::CondBr(Icmp(UnsignedGreaterThanOrEqual)) -> CMP + B.HS
+pub fn proof_condbr_uge_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::UnsignedGreaterThanOrEqual, AArch64CC::HS, 32, "CondBr_UGE_I32 -> CMP+B.HS")
+}
+
+/// Proof: tMIR::CondBr(Icmp(UnsignedGreaterThan)) -> CMP + B.HI
+pub fn proof_condbr_ugt_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::UnsignedGreaterThan, AArch64CC::HI, 32, "CondBr_UGT_I32 -> CMP+B.HI")
+}
+
+/// Proof: tMIR::CondBr(Icmp(UnsignedLessThanOrEqual)) -> CMP + B.LS
+pub fn proof_condbr_ule_i32() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::UnsignedLessThanOrEqual, AArch64CC::LS, 32, "CondBr_ULE_I32 -> CMP+B.LS")
+}
+
+/// Return all 10 branch lowering proofs (32-bit).
+pub fn all_branch_proofs_i32() -> Vec<ProofObligation> {
     vec![
         proof_condbr_eq_i32(),
         proof_condbr_ne_i32(),
         proof_condbr_slt_i32(),
+        proof_condbr_sge_i32(),
+        proof_condbr_sgt_i32(),
+        proof_condbr_sle_i32(),
         proof_condbr_ult_i32(),
+        proof_condbr_uge_i32(),
+        proof_condbr_ugt_i32(),
+        proof_condbr_ule_i32(),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// 64-bit branch lowering proofs: tMIR::CondBr(Icmp, I64) -> CMP + B.cond
+// ---------------------------------------------------------------------------
+
+/// Proof: tMIR::CondBr(Icmp(Equal, I64)) -> CMP + B.EQ (64-bit)
+pub fn proof_condbr_eq_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::Equal, AArch64CC::EQ, 64, "CondBr_Eq_I64 -> CMP+B.EQ")
+}
+
+/// Proof: tMIR::CondBr(Icmp(NotEqual, I64)) -> CMP + B.NE (64-bit)
+pub fn proof_condbr_ne_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::NotEqual, AArch64CC::NE, 64, "CondBr_NE_I64 -> CMP+B.NE")
+}
+
+/// Proof: tMIR::CondBr(Icmp(SignedLessThan, I64)) -> CMP + B.LT (64-bit)
+pub fn proof_condbr_slt_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::SignedLessThan, AArch64CC::LT, 64, "CondBr_SLT_I64 -> CMP+B.LT")
+}
+
+/// Proof: tMIR::CondBr(Icmp(SignedGreaterThanOrEqual, I64)) -> CMP + B.GE (64-bit)
+pub fn proof_condbr_sge_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::SignedGreaterThanOrEqual, AArch64CC::GE, 64, "CondBr_SGE_I64 -> CMP+B.GE")
+}
+
+/// Proof: tMIR::CondBr(Icmp(SignedGreaterThan, I64)) -> CMP + B.GT (64-bit)
+pub fn proof_condbr_sgt_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::SignedGreaterThan, AArch64CC::GT, 64, "CondBr_SGT_I64 -> CMP+B.GT")
+}
+
+/// Proof: tMIR::CondBr(Icmp(SignedLessThanOrEqual, I64)) -> CMP + B.LE (64-bit)
+pub fn proof_condbr_sle_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::SignedLessThanOrEqual, AArch64CC::LE, 64, "CondBr_SLE_I64 -> CMP+B.LE")
+}
+
+/// Proof: tMIR::CondBr(Icmp(UnsignedLessThan, I64)) -> CMP + B.LO (64-bit)
+pub fn proof_condbr_ult_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::UnsignedLessThan, AArch64CC::LO, 64, "CondBr_ULT_I64 -> CMP+B.LO")
+}
+
+/// Proof: tMIR::CondBr(Icmp(UnsignedGreaterThanOrEqual, I64)) -> CMP + B.HS (64-bit)
+pub fn proof_condbr_uge_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::UnsignedGreaterThanOrEqual, AArch64CC::HS, 64, "CondBr_UGE_I64 -> CMP+B.HS")
+}
+
+/// Proof: tMIR::CondBr(Icmp(UnsignedGreaterThan, I64)) -> CMP + B.HI (64-bit)
+pub fn proof_condbr_ugt_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::UnsignedGreaterThan, AArch64CC::HI, 64, "CondBr_UGT_I64 -> CMP+B.HI")
+}
+
+/// Proof: tMIR::CondBr(Icmp(UnsignedLessThanOrEqual, I64)) -> CMP + B.LS (64-bit)
+pub fn proof_condbr_ule_i64() -> ProofObligation {
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::isel::AArch64CC;
+    proof_condbr_generic(IntCC::UnsignedLessThanOrEqual, AArch64CC::LS, 64, "CondBr_ULE_I64 -> CMP+B.LS")
+}
+
+/// Return all 10 branch lowering proofs (64-bit).
+pub fn all_branch_proofs_i64() -> Vec<ProofObligation> {
+    vec![
+        proof_condbr_eq_i64(),
+        proof_condbr_ne_i64(),
+        proof_condbr_slt_i64(),
+        proof_condbr_sge_i64(),
+        proof_condbr_sgt_i64(),
+        proof_condbr_sle_i64(),
+        proof_condbr_ult_i64(),
+        proof_condbr_uge_i64(),
+        proof_condbr_ugt_i64(),
+        proof_condbr_ule_i64(),
+    ]
+}
+
+/// Return all branch lowering proofs (both 32-bit and 64-bit).
+pub fn all_branch_proofs() -> Vec<ProofObligation> {
+    let mut proofs = all_branch_proofs_i32();
+    proofs.extend(all_branch_proofs_i64());
+    proofs
 }
 
 /// Return all NZCV-related proofs (flags + comparisons + branches).
@@ -1683,11 +1893,7 @@ pub fn all_nzcv_proofs() -> Vec<ProofObligation> {
     let mut proofs = Vec::new();
     proofs.extend(all_nzcv_flag_proofs());
     proofs.extend(all_comparison_proofs_i32());
-    proofs.extend(vec![
-        proof_icmp_eq_i64(),
-        proof_icmp_slt_i64(),
-        proof_icmp_ult_i64(),
-    ]);
+    proofs.extend(all_comparison_proofs_i64());
     proofs.extend(all_branch_proofs());
     proofs
 }
@@ -2174,7 +2380,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 64-bit comparison proofs
+    // 64-bit comparison proofs (all 10 conditions)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2183,8 +2389,28 @@ mod tests {
     }
 
     #[test]
+    fn test_proof_icmp_ne_i64() {
+        assert_valid(&proof_icmp_ne_i64());
+    }
+
+    #[test]
     fn test_proof_icmp_slt_i64() {
         assert_valid(&proof_icmp_slt_i64());
+    }
+
+    #[test]
+    fn test_proof_icmp_sge_i64() {
+        assert_valid(&proof_icmp_sge_i64());
+    }
+
+    #[test]
+    fn test_proof_icmp_sgt_i64() {
+        assert_valid(&proof_icmp_sgt_i64());
+    }
+
+    #[test]
+    fn test_proof_icmp_sle_i64() {
+        assert_valid(&proof_icmp_sle_i64());
     }
 
     #[test]
@@ -2192,8 +2418,30 @@ mod tests {
         assert_valid(&proof_icmp_ult_i64());
     }
 
+    #[test]
+    fn test_proof_icmp_uge_i64() {
+        assert_valid(&proof_icmp_uge_i64());
+    }
+
+    #[test]
+    fn test_proof_icmp_ugt_i64() {
+        assert_valid(&proof_icmp_ugt_i64());
+    }
+
+    #[test]
+    fn test_proof_icmp_ule_i64() {
+        assert_valid(&proof_icmp_ule_i64());
+    }
+
+    #[test]
+    fn test_all_comparison_proofs_i64() {
+        for obligation in all_comparison_proofs_i64() {
+            assert_valid(&obligation);
+        }
+    }
+
     // -----------------------------------------------------------------------
-    // Branch lowering proof tests
+    // Branch lowering proof tests (32-bit, all 10 conditions)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2212,8 +2460,113 @@ mod tests {
     }
 
     #[test]
+    fn test_proof_condbr_sge_i32() {
+        assert_valid(&proof_condbr_sge_i32());
+    }
+
+    #[test]
+    fn test_proof_condbr_sgt_i32() {
+        assert_valid(&proof_condbr_sgt_i32());
+    }
+
+    #[test]
+    fn test_proof_condbr_sle_i32() {
+        assert_valid(&proof_condbr_sle_i32());
+    }
+
+    #[test]
     fn test_proof_condbr_ult_i32() {
         assert_valid(&proof_condbr_ult_i32());
+    }
+
+    #[test]
+    fn test_proof_condbr_uge_i32() {
+        assert_valid(&proof_condbr_uge_i32());
+    }
+
+    #[test]
+    fn test_proof_condbr_ugt_i32() {
+        assert_valid(&proof_condbr_ugt_i32());
+    }
+
+    #[test]
+    fn test_proof_condbr_ule_i32() {
+        assert_valid(&proof_condbr_ule_i32());
+    }
+
+    #[test]
+    fn test_all_branch_proofs_i32() {
+        for obligation in all_branch_proofs_i32() {
+            assert_valid(&obligation);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Branch lowering proof tests (64-bit, all 10 conditions)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_condbr_eq_i64() {
+        assert_valid(&proof_condbr_eq_i64());
+    }
+
+    #[test]
+    fn test_proof_condbr_ne_i64() {
+        assert_valid(&proof_condbr_ne_i64());
+    }
+
+    #[test]
+    fn test_proof_condbr_slt_i64() {
+        assert_valid(&proof_condbr_slt_i64());
+    }
+
+    #[test]
+    fn test_proof_condbr_sge_i64() {
+        assert_valid(&proof_condbr_sge_i64());
+    }
+
+    #[test]
+    fn test_proof_condbr_sgt_i64() {
+        assert_valid(&proof_condbr_sgt_i64());
+    }
+
+    #[test]
+    fn test_proof_condbr_sle_i64() {
+        assert_valid(&proof_condbr_sle_i64());
+    }
+
+    #[test]
+    fn test_proof_condbr_ult_i64() {
+        assert_valid(&proof_condbr_ult_i64());
+    }
+
+    #[test]
+    fn test_proof_condbr_uge_i64() {
+        assert_valid(&proof_condbr_uge_i64());
+    }
+
+    #[test]
+    fn test_proof_condbr_ugt_i64() {
+        assert_valid(&proof_condbr_ugt_i64());
+    }
+
+    #[test]
+    fn test_proof_condbr_ule_i64() {
+        assert_valid(&proof_condbr_ule_i64());
+    }
+
+    #[test]
+    fn test_all_branch_proofs_i64() {
+        for obligation in all_branch_proofs_i64() {
+            assert_valid(&obligation);
+        }
+    }
+
+    #[test]
+    fn test_all_branch_proofs() {
+        for obligation in all_branch_proofs() {
+            assert_valid(&obligation);
+        }
     }
 
     #[test]
