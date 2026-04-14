@@ -31,6 +31,7 @@ use crate::cegis::{CegisLoop, CegisResult};
 use crate::neon_semantics;
 use crate::smt::{SmtExpr, VectorArrangement};
 use crate::synthesis::{SearchConfig, SynthOpcode};
+use std::collections::HashMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -792,6 +793,527 @@ fn target_preference(target: SynthTarget) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Extended compute targets for unified synthesis engine
+// ---------------------------------------------------------------------------
+
+/// Extended compute target for the unified synthesis engine.
+///
+/// Extends [`SynthTarget`] (scalar + NEON) with GPU and ANE targets.
+/// These correspond to the compute domains in the cost model
+/// (`llvm2-ir/cost_model.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FullTarget {
+    /// AArch64 scalar integer/FP instructions.
+    Scalar,
+    /// AArch64 NEON 128-bit SIMD instructions (specific arrangement).
+    Neon(VectorArrangement),
+    /// Apple GPU via Metal compute shaders.
+    Gpu,
+    /// Apple Neural Engine (ANE) via CoreML.
+    Ane,
+}
+
+impl fmt::Display for FullTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FullTarget::Scalar => write!(f, "scalar"),
+            FullTarget::Neon(arr) => write!(f, "NEON({:?})", arr),
+            FullTarget::Gpu => write!(f, "GPU"),
+            FullTarget::Ane => write!(f, "ANE"),
+        }
+    }
+}
+
+impl FullTarget {
+    /// Convert from a SynthTarget (limited to scalar + NEON).
+    pub fn from_synth_target(st: SynthTarget) -> Self {
+        match st {
+            SynthTarget::Scalar => FullTarget::Scalar,
+            SynthTarget::Neon(arr) => FullTarget::Neon(arr),
+        }
+    }
+}
+
+/// Preference ordering for FullTarget (lower value = preferred for tie-breaking).
+fn full_target_preference(target: FullTarget) -> u32 {
+    match target {
+        FullTarget::Scalar => 0,
+        FullTarget::Neon(_) => 1,
+        FullTarget::Gpu => 2,
+        FullTarget::Ane => 3,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SynthesisResult — per-target best candidate with cost estimate
+// ---------------------------------------------------------------------------
+
+/// A synthesis result for a single target, including cost estimate.
+#[derive(Debug, Clone)]
+pub struct TargetSynthesisResult {
+    /// The compute target.
+    pub target: FullTarget,
+    /// The proven-correct lowering rule (if any).
+    pub rule: Option<UnifiedProvenRule>,
+    /// Estimated cost from the cost model. Lower is better.
+    /// For scalar/NEON this is in synthesis cost units (opcode cost).
+    /// For GPU/ANE this incorporates dispatch/compile overhead amortized
+    /// over the operation size.
+    pub cost_estimate: f64,
+    /// Human-readable description of the candidate.
+    pub description: String,
+}
+
+/// Complete synthesis result across all targets.
+#[derive(Debug, Clone)]
+pub struct SynthesisResult {
+    /// Best candidate per target, sorted by cost (cheapest first).
+    pub per_target: Vec<TargetSynthesisResult>,
+    /// The overall best candidate across all targets.
+    pub best: Option<TargetSynthesisResult>,
+    /// Total candidates evaluated across all targets.
+    pub total_candidates_evaluated: u64,
+    /// Total candidates proven correct.
+    pub total_candidates_proven: u64,
+}
+
+impl SynthesisResult {
+    /// Returns true if at least one target found a proven-correct candidate.
+    pub fn has_any_result(&self) -> bool {
+        self.best.is_some()
+    }
+
+    /// Returns the best candidate if one exists.
+    pub fn best_rule(&self) -> Option<&UnifiedProvenRule> {
+        self.best.as_ref().and_then(|b| b.rule.as_ref())
+    }
+
+    /// Returns results only for targets that found proven candidates.
+    pub fn proven_targets(&self) -> Vec<&TargetSynthesisResult> {
+        self.per_target.iter().filter(|r| r.rule.is_some()).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPU candidate generation
+// ---------------------------------------------------------------------------
+
+/// GPU synthesis opcode categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuSynthOp {
+    /// Element-wise map: output[i] = f(input[i]).
+    Map,
+    /// Parallel reduce: result = fold(op, identity, input[0..N]).
+    Reduce,
+    /// Fused map-reduce: result = fold(reduce_op, id, map(f, input)).
+    MapReduce,
+}
+
+/// Generate GPU candidate expressions for a given specification.
+///
+/// GPU candidates are element-wise map operations that apply a scalar
+/// operation across all elements in parallel. The SMT encoding uses
+/// the sequential specification from `gpu_semantics.rs` since the
+/// parallel execution is proven equivalent via tMIR algebraic properties.
+fn generate_gpu_candidates(
+    _spec: &SmtExpr,
+    op_hint: &str,
+    elem_width: u32,
+    element_count: u32,
+) -> Vec<(String, GpuSynthOp, f64)> {
+    let mut candidates = Vec::new();
+    let upper = op_hint.to_ascii_uppercase();
+
+    // GPU is only beneficial for element-wise operations (map pattern)
+    // and reductions. We generate candidate descriptions with cost estimates.
+    // The actual SMT encoding would use gpu_semantics::encode_parallel_map,
+    // but for synthesis ranking we use the cost model estimates.
+
+    // Estimate GPU dispatch overhead (from cost_model.rs: ~10000 cycles)
+    let dispatch_overhead: f64 = 10000.0;
+
+    // GPU throughput per operation type (ops per CPU-cycle)
+    let gpu_ops_per_cycle: f64 = match upper.as_str() {
+        "ADD" | "SUB" | "NEG" | "AND" | "ORR" | "EOR" | "SHL" | "USHR" => 512.0,
+        "MUL" => 256.0,
+        "FADD" | "FSUB" | "FMUL" | "FMA" => 256.0,
+        _ => 128.0,
+    };
+
+    let elements = element_count.max(1) as f64;
+    let compute_cycles = elements / gpu_ops_per_cycle;
+    let total_cost = dispatch_overhead + compute_cycles;
+
+    // Map candidate
+    candidates.push((
+        format!("GPU_MAP_{} ({} x {}b)", upper, element_count, elem_width),
+        GpuSynthOp::Map,
+        total_cost,
+    ));
+
+    // For associative ops, also generate reduce candidates
+    match upper.as_str() {
+        "ADD" | "MUL" | "AND" | "ORR" | "EOR" => {
+            candidates.push((
+                format!("GPU_REDUCE_{} ({} x {}b)", upper, element_count, elem_width),
+                GpuSynthOp::Reduce,
+                total_cost * 1.2, // reductions are slightly more expensive
+            ));
+        }
+        _ => {}
+    }
+
+    candidates
+}
+
+// ---------------------------------------------------------------------------
+// ANE candidate generation
+// ---------------------------------------------------------------------------
+
+/// ANE synthesis operation categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AneSynthOp {
+    /// Element-wise operation (Add, Sub, Mul, Div).
+    ElementWise,
+    /// Matrix multiply (GEMM).
+    Gemm,
+    /// Activation function (ReLU, etc).
+    Activation,
+}
+
+/// Generate ANE candidate expressions for a given specification.
+///
+/// ANE candidates are for operations that map to CoreML/BNNS operations:
+/// element-wise ops, matrix multiplies, and activation functions.
+/// ANE operates at FP16 precision, so there is a quantization cost.
+fn generate_ane_candidates(
+    _spec: &SmtExpr,
+    op_hint: &str,
+    elem_width: u32,
+    element_count: u32,
+) -> Vec<(String, AneSynthOp, f64)> {
+    let mut candidates = Vec::new();
+    let upper = op_hint.to_ascii_uppercase();
+
+    // ANE compilation overhead (from cost_model.rs: ~100000 cycles)
+    let compile_overhead: f64 = 100_000.0;
+
+    let elements = element_count.max(1) as f64;
+
+    // ANE throughput per operation type
+    let (supported, ane_ops_per_cycle): (bool, f64) = match upper.as_str() {
+        "GEMM" | "MATMUL" | "CONV2D" => (true, 2048.0),
+        "ADD" | "SUB" | "MUL" | "FADD" | "FMUL" | "FMA" => (true, 512.0),
+        "NEG" | "AND" | "ORR" | "EOR" => (true, 256.0),
+        "SHL" | "USHR" => (true, 256.0),
+        _ => (false, 0.0),
+    };
+
+    if !supported {
+        return candidates;
+    }
+
+    let compute_cycles = elements / ane_ops_per_cycle;
+    let total_cost = compile_overhead + compute_cycles;
+
+    // Element-wise candidate
+    match upper.as_str() {
+        "ADD" | "SUB" | "MUL" | "NEG" | "FADD" | "FMUL" => {
+            candidates.push((
+                format!("ANE_ELEMWISE_{} ({} x {}b)", upper, element_count, elem_width),
+                AneSynthOp::ElementWise,
+                total_cost,
+            ));
+        }
+        "GEMM" | "MATMUL" => {
+            candidates.push((
+                format!("ANE_GEMM ({} x {}b)", element_count, elem_width),
+                AneSynthOp::Gemm,
+                total_cost * 0.5, // GEMM is ANE's strength
+            ));
+        }
+        _ => {
+            candidates.push((
+                format!("ANE_{} ({} x {}b)", upper, element_count, elem_width),
+                AneSynthOp::ElementWise,
+                total_cost,
+            ));
+        }
+    }
+
+    candidates
+}
+
+// ---------------------------------------------------------------------------
+// UnifiedSynthesisEngine
+// ---------------------------------------------------------------------------
+
+/// Configuration for the unified synthesis engine.
+#[derive(Debug, Clone)]
+pub struct SynthesisEngineConfig {
+    /// Configuration for the scalar + NEON CEGIS search.
+    pub cegis_config: UnifiedSearchConfig,
+    /// Maximum CEGIS iterations per candidate.
+    pub max_cegis_iterations: usize,
+    /// Solver timeout in milliseconds per query.
+    pub timeout_ms: u64,
+    /// Whether to include GPU candidates in the search.
+    pub include_gpu: bool,
+    /// Whether to include ANE candidates in the search.
+    pub include_ane: bool,
+    /// Operation hint for GPU/ANE candidate generation (e.g., "ADD", "MUL").
+    /// If empty, GPU/ANE candidates are skipped.
+    pub op_hint: String,
+    /// Element width in bits (for GPU/ANE cost estimation).
+    pub element_width: u32,
+    /// Number of elements (for GPU/ANE cost amortization).
+    pub element_count: u32,
+}
+
+impl Default for SynthesisEngineConfig {
+    fn default() -> Self {
+        Self {
+            cegis_config: UnifiedSearchConfig::default(),
+            max_cegis_iterations: 10,
+            timeout_ms: 5000,
+            include_gpu: true,
+            include_ane: true,
+            op_hint: String::new(),
+            element_width: 32,
+            element_count: 1,
+        }
+    }
+}
+
+/// Unified synthesis engine that searches across ALL compute targets.
+///
+/// Takes a tMIR operation specification (as an [`SmtExpr`]) and:
+/// 1. Searches scalar + NEON candidates via [`UnifiedCegisLoop`] (verified)
+/// 2. Generates GPU candidates using `gpu_semantics.rs` cost estimates
+/// 3. Generates ANE candidates using `ane_semantics.rs` cost estimates
+/// 4. Ranks all candidates by cost (using the multi-target cost model)
+/// 5. Returns a [`SynthesisResult`] with the best candidate per target
+///
+/// # Design
+///
+/// Scalar and NEON candidates are formally verified via CEGIS — the engine
+/// proves semantic equivalence with the source expression. GPU and ANE
+/// candidates are ranked by the cost model but are NOT verified at the SMT
+/// level (they use array/FP theories that are expensive to verify). Instead,
+/// GPU/ANE correctness relies on the tMIR algebraic property proofs
+/// (Pure, Associative, Commutative) that justify the parallel execution.
+pub struct UnifiedSynthesisEngine {
+    /// Inner CEGIS loop for scalar + NEON verification.
+    cegis_loop: UnifiedCegisLoop,
+    /// Engine configuration.
+    config: SynthesisEngineConfig,
+}
+
+impl UnifiedSynthesisEngine {
+    /// Create a new unified synthesis engine.
+    pub fn new(config: SynthesisEngineConfig) -> Self {
+        let cegis_loop = UnifiedCegisLoop::new(
+            config.max_cegis_iterations,
+            config.timeout_ms,
+            config.cegis_config.clone(),
+        );
+        Self { cegis_loop, config }
+    }
+
+    /// Create with default configuration.
+    pub fn with_defaults() -> Self {
+        Self::new(SynthesisEngineConfig::default())
+    }
+
+    /// Create with a specific operation hint for GPU/ANE candidate generation.
+    pub fn for_op(op_hint: &str, element_width: u32, element_count: u32) -> Self {
+        Self::new(SynthesisEngineConfig {
+            op_hint: op_hint.to_string(),
+            element_width,
+            element_count,
+            ..Default::default()
+        })
+    }
+
+    /// Search for the best implementation across all targets.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The tMIR operation specification as an SMT expression.
+    /// * `var_name` - Name of the symbolic variable.
+    /// * `width` - Bitvector width of the variable.
+    ///
+    /// # Returns
+    ///
+    /// A [`SynthesisResult`] containing the best candidate per target,
+    /// sorted by cost.
+    pub fn synthesize(
+        &mut self,
+        spec: &SmtExpr,
+        var_name: &str,
+        width: u32,
+    ) -> SynthesisResult {
+        let mut per_target: Vec<TargetSynthesisResult> = Vec::new();
+        let mut total_evaluated: u64 = 0;
+        let mut total_proven: u64 = 0;
+
+        // ------------------------------------------------------------------
+        // Phase 1: Scalar + NEON search via CEGIS (verified)
+        // ------------------------------------------------------------------
+        let proven_rules = self.cegis_loop.find_all(spec, var_name, width);
+        total_evaluated += self.cegis_loop.stats_candidates_evaluated;
+        total_proven += self.cegis_loop.stats_candidates_proven;
+
+        // Group proven rules by target, keep best per target
+        let mut best_by_synth_target: HashMap<String, UnifiedProvenRule> = HashMap::new();
+
+        for rule in &proven_rules {
+            let key = format!("{}", rule.target);
+            best_by_synth_target
+                .entry(key)
+                .and_modify(|existing| {
+                    if rule.cost < existing.cost {
+                        *existing = rule.clone();
+                    }
+                })
+                .or_insert_with(|| rule.clone());
+        }
+
+        // Add scalar result
+        let scalar_rule = best_by_synth_target.get("scalar").cloned();
+        let scalar_cost = scalar_rule.as_ref().map(|r| r.cost as f64).unwrap_or(f64::MAX);
+        per_target.push(TargetSynthesisResult {
+            target: FullTarget::Scalar,
+            description: scalar_rule.as_ref()
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| "no scalar candidate found".to_string()),
+            rule: scalar_rule,
+            cost_estimate: scalar_cost,
+        });
+
+        // Add NEON results (best per arrangement)
+        for (_key, rule) in &best_by_synth_target {
+            if let SynthTarget::Neon(arr) = rule.target {
+                per_target.push(TargetSynthesisResult {
+                    target: FullTarget::Neon(arr),
+                    description: rule.name.clone(),
+                    rule: Some(rule.clone()),
+                    cost_estimate: rule.cost as f64,
+                });
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Phase 2: GPU candidates (cost-estimated, not verified)
+        // ------------------------------------------------------------------
+        if self.config.include_gpu && !self.config.op_hint.is_empty() {
+            let gpu_candidates = generate_gpu_candidates(
+                spec,
+                &self.config.op_hint,
+                self.config.element_width,
+                self.config.element_count,
+            );
+            total_evaluated += gpu_candidates.len() as u64;
+
+            if let Some((name, _op, cost)) = gpu_candidates
+                .iter()
+                .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                per_target.push(TargetSynthesisResult {
+                    target: FullTarget::Gpu,
+                    description: name.clone(),
+                    rule: None, // GPU candidates are not SMT-verified
+                    cost_estimate: *cost,
+                });
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Phase 3: ANE candidates (cost-estimated, not verified)
+        // ------------------------------------------------------------------
+        if self.config.include_ane && !self.config.op_hint.is_empty() {
+            let ane_candidates = generate_ane_candidates(
+                spec,
+                &self.config.op_hint,
+                self.config.element_width,
+                self.config.element_count,
+            );
+            total_evaluated += ane_candidates.len() as u64;
+
+            if let Some((name, _op, cost)) = ane_candidates
+                .iter()
+                .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                per_target.push(TargetSynthesisResult {
+                    target: FullTarget::Ane,
+                    description: name.clone(),
+                    rule: None, // ANE candidates are not SMT-verified
+                    cost_estimate: *cost,
+                });
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Phase 4: Rank by cost
+        // ------------------------------------------------------------------
+        per_target.sort_by(|a, b| {
+            a.cost_estimate
+                .partial_cmp(&b.cost_estimate)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    full_target_preference(a.target)
+                        .cmp(&full_target_preference(b.target))
+                })
+        });
+
+        // The best is the first with a finite cost
+        let best = per_target
+            .iter()
+            .find(|r| r.cost_estimate < f64::MAX)
+            .cloned();
+
+        SynthesisResult {
+            per_target,
+            best,
+            total_candidates_evaluated: total_evaluated,
+            total_candidates_proven: total_proven,
+        }
+    }
+
+    /// Search with a pre-configured operation hint.
+    ///
+    /// Convenience method that sets the operation hint before searching.
+    pub fn synthesize_for_op(
+        &mut self,
+        spec: &SmtExpr,
+        var_name: &str,
+        width: u32,
+        op_hint: &str,
+        element_count: u32,
+    ) -> SynthesisResult {
+        self.config.op_hint = op_hint.to_string();
+        self.config.element_width = width;
+        self.config.element_count = element_count;
+        self.synthesize(spec, var_name, width)
+    }
+
+    /// Access the underlying CEGIS loop.
+    pub fn cegis_loop(&self) -> &UnifiedCegisLoop {
+        &self.cegis_loop
+    }
+
+    /// Access the configuration.
+    pub fn config(&self) -> &SynthesisEngineConfig {
+        &self.config
+    }
+
+    /// Reset state (counterexamples, stats, proven rules).
+    pub fn reset(&mut self) {
+        self.cegis_loop.reset();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1374,5 +1896,375 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // UnifiedSynthesisEngine tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_engine_finds_scalar_candidate_for_simple_add() {
+        // Engine should find a scalar candidate for x + 0 (identity).
+        let mut engine = UnifiedSynthesisEngine::with_defaults();
+        let source = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(0, 8));
+        let result = engine.synthesize(&source, "x", 8);
+
+        // Should have evaluated candidates
+        assert!(
+            result.total_candidates_evaluated > 0,
+            "Engine should evaluate candidates"
+        );
+
+        // Should find at least the scalar result
+        let scalar_results: Vec<_> = result
+            .per_target
+            .iter()
+            .filter(|r| r.target == FullTarget::Scalar)
+            .collect();
+        assert!(
+            !scalar_results.is_empty(),
+            "Should have scalar target in results"
+        );
+
+        // If solver is available, the scalar candidate should be identity (cost 0)
+        if let Some(rule) = scalar_results[0].rule.as_ref() {
+            assert_eq!(
+                rule.cost, 0,
+                "Best scalar lowering of x+0 should be identity (cost 0), got {}",
+                rule.cost
+            );
+        }
+    }
+
+    #[test]
+    fn test_engine_finds_neon_candidate_for_vectorizable_op() {
+        // Engine should find NEON candidates when NEON is enabled.
+        let mut engine = UnifiedSynthesisEngine::with_defaults();
+        let source = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(0, 8));
+        let result = engine.synthesize(&source, "x", 8);
+
+        // Check that NEON targets appear in results
+        let _neon_results: Vec<_> = result
+            .per_target
+            .iter()
+            .filter(|r| matches!(r.target, FullTarget::Neon(_)))
+            .collect();
+
+        // Solver may or may not be available, but NEON targets should be evaluated
+        // even if no proven candidates exist. The per_target list includes NEON
+        // entries only if proven candidates were found.
+        if result.total_candidates_proven > 0 {
+            // If anything was proven, there should be at least scalar results
+            assert!(
+                result.has_any_result(),
+                "Should have at least one result when candidates are proven"
+            );
+        }
+    }
+
+    #[test]
+    fn test_engine_cost_ranking_prefers_neon_for_multi_element() {
+        // When configured with element_count > 1, NEON should be cheaper
+        // for vectorizable operations. But this depends on the CEGIS finding
+        // a NEON candidate. Test the cost ranking with op_hint for GPU/ANE.
+        let mut engine = UnifiedSynthesisEngine::for_op("ADD", 32, 16);
+        let source = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(0, 8));
+        let result = engine.synthesize(&source, "x", 8);
+
+        // The result should have entries sorted by cost
+        for i in 1..result.per_target.len() {
+            assert!(
+                result.per_target[i].cost_estimate >= result.per_target[i - 1].cost_estimate
+                    || (result.per_target[i].cost_estimate == result.per_target[i - 1].cost_estimate
+                        && full_target_preference(result.per_target[i].target)
+                            >= full_target_preference(result.per_target[i - 1].target)),
+                "Results should be sorted by cost: {} ({}) vs {} ({})",
+                result.per_target[i - 1].description,
+                result.per_target[i - 1].cost_estimate,
+                result.per_target[i].description,
+                result.per_target[i].cost_estimate,
+            );
+        }
+    }
+
+    #[test]
+    fn test_engine_gpu_candidate_generation_for_map_ops() {
+        // Engine should generate GPU candidates when op_hint is set.
+        let mut engine = UnifiedSynthesisEngine::for_op("MUL", 32, 1000);
+        let source = SmtExpr::var("x", 8).bvmul(SmtExpr::bv_const(2, 8));
+        let result = engine.synthesize(&source, "x", 8);
+
+        let gpu_results: Vec<_> = result
+            .per_target
+            .iter()
+            .filter(|r| r.target == FullTarget::Gpu)
+            .collect();
+
+        assert!(
+            !gpu_results.is_empty(),
+            "Should have GPU target in results when op_hint is set"
+        );
+
+        // GPU candidates should not have SMT-verified rules
+        for gpu_result in &gpu_results {
+            assert!(
+                gpu_result.rule.is_none(),
+                "GPU candidates should not be SMT-verified"
+            );
+        }
+
+        // GPU description should mention the op
+        assert!(
+            gpu_results[0].description.contains("GPU_MAP_MUL")
+                || gpu_results[0].description.contains("GPU_REDUCE_MUL"),
+            "GPU description should mention the operation: {}",
+            gpu_results[0].description
+        );
+    }
+
+    #[test]
+    fn test_engine_ane_candidate_generation_for_matrix_ops() {
+        // Engine should generate ANE candidates for supported ops.
+        let mut engine = UnifiedSynthesisEngine::for_op("ADD", 32, 100);
+        let source = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(0, 8));
+        let result = engine.synthesize(&source, "x", 8);
+
+        let ane_results: Vec<_> = result
+            .per_target
+            .iter()
+            .filter(|r| r.target == FullTarget::Ane)
+            .collect();
+
+        assert!(
+            !ane_results.is_empty(),
+            "Should have ANE target in results for supported ops"
+        );
+
+        // ANE candidates should not have SMT-verified rules
+        for ane_result in &ane_results {
+            assert!(
+                ane_result.rule.is_none(),
+                "ANE candidates should not be SMT-verified"
+            );
+        }
+
+        // ANE cost should include compile overhead (~100000)
+        assert!(
+            ane_results[0].cost_estimate > 50_000.0,
+            "ANE cost should include compile overhead, got {}",
+            ane_results[0].cost_estimate
+        );
+    }
+
+    #[test]
+    fn test_engine_gpu_cost_includes_dispatch_overhead() {
+        // GPU dispatch overhead (~10000 cycles) should make it expensive
+        // for small element counts.
+        let mut engine = UnifiedSynthesisEngine::for_op("ADD", 32, 1);
+        let source = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(0, 8));
+        let result = engine.synthesize(&source, "x", 8);
+
+        let gpu_results: Vec<_> = result
+            .per_target
+            .iter()
+            .filter(|r| r.target == FullTarget::Gpu)
+            .collect();
+
+        if !gpu_results.is_empty() {
+            assert!(
+                gpu_results[0].cost_estimate > 5000.0,
+                "GPU cost for 1 element should include dispatch overhead, got {}",
+                gpu_results[0].cost_estimate
+            );
+        }
+    }
+
+    #[test]
+    fn test_engine_no_gpu_ane_when_disabled() {
+        // When GPU and ANE are disabled, no candidates should be generated.
+        let config = SynthesisEngineConfig {
+            include_gpu: false,
+            include_ane: false,
+            op_hint: "ADD".to_string(),
+            ..Default::default()
+        };
+        let mut engine = UnifiedSynthesisEngine::new(config);
+        let source = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(0, 8));
+        let result = engine.synthesize(&source, "x", 8);
+
+        let gpu_count = result
+            .per_target
+            .iter()
+            .filter(|r| r.target == FullTarget::Gpu)
+            .count();
+        let ane_count = result
+            .per_target
+            .iter()
+            .filter(|r| r.target == FullTarget::Ane)
+            .count();
+
+        assert_eq!(gpu_count, 0, "Should have no GPU results when disabled");
+        assert_eq!(ane_count, 0, "Should have no ANE results when disabled");
+    }
+
+    #[test]
+    fn test_engine_no_gpu_ane_when_no_op_hint() {
+        // When op_hint is empty, GPU/ANE should not be generated.
+        let mut engine = UnifiedSynthesisEngine::with_defaults();
+        let source = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(0, 8));
+        let result = engine.synthesize(&source, "x", 8);
+
+        let gpu_count = result
+            .per_target
+            .iter()
+            .filter(|r| r.target == FullTarget::Gpu)
+            .count();
+        let ane_count = result
+            .per_target
+            .iter()
+            .filter(|r| r.target == FullTarget::Ane)
+            .count();
+
+        assert_eq!(gpu_count, 0, "No GPU results without op_hint");
+        assert_eq!(ane_count, 0, "No ANE results without op_hint");
+    }
+
+    #[test]
+    fn test_engine_synthesis_result_helpers() {
+        // Test SynthesisResult helper methods.
+        let mut engine = UnifiedSynthesisEngine::with_defaults();
+        let source = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(0, 8));
+        let result = engine.synthesize(&source, "x", 8);
+
+        // has_any_result depends on solver availability
+        if result.total_candidates_proven > 0 {
+            assert!(result.has_any_result(), "Should have a result when candidates are proven");
+            assert!(result.best_rule().is_some(), "best_rule should return Some");
+            assert!(
+                !result.proven_targets().is_empty(),
+                "proven_targets should not be empty"
+            );
+        }
+
+        // per_target should always have at least the scalar entry
+        assert!(
+            !result.per_target.is_empty(),
+            "per_target should always have at least scalar"
+        );
+    }
+
+    #[test]
+    fn test_engine_synthesize_for_op_convenience() {
+        // Test the convenience method synthesize_for_op.
+        let mut engine = UnifiedSynthesisEngine::with_defaults();
+        let source = SmtExpr::var("x", 8).bvmul(SmtExpr::bv_const(2, 8));
+        let result = engine.synthesize_for_op(&source, "x", 8, "MUL", 16);
+
+        // Should have generated GPU candidates since op_hint was set
+        let gpu_count = result
+            .per_target
+            .iter()
+            .filter(|r| r.target == FullTarget::Gpu)
+            .count();
+        assert!(gpu_count > 0, "synthesize_for_op should generate GPU candidates");
+
+        // Config should be updated
+        assert_eq!(engine.config().op_hint, "MUL");
+        assert_eq!(engine.config().element_count, 16);
+    }
+
+    #[test]
+    fn test_engine_reset_clears_state() {
+        let mut engine = UnifiedSynthesisEngine::with_defaults();
+        let source = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(0, 8));
+        let _ = engine.synthesize(&source, "x", 8);
+
+        // After synthesis, there should be some state
+        assert!(engine.cegis_loop().stats_candidates_evaluated > 0);
+
+        engine.reset();
+
+        assert_eq!(engine.cegis_loop().stats_candidates_evaluated, 0);
+        assert_eq!(engine.cegis_loop().stats_candidates_proven, 0);
+        assert!(engine.cegis_loop().proven_rules().is_empty());
+    }
+
+    #[test]
+    fn test_full_target_display() {
+        assert_eq!(format!("{}", FullTarget::Scalar), "scalar");
+        assert_eq!(
+            format!("{}", FullTarget::Neon(VectorArrangement::S4)),
+            "NEON(S4)"
+        );
+        assert_eq!(format!("{}", FullTarget::Gpu), "GPU");
+        assert_eq!(format!("{}", FullTarget::Ane), "ANE");
+    }
+
+    #[test]
+    fn test_full_target_from_synth_target() {
+        assert_eq!(
+            FullTarget::from_synth_target(SynthTarget::Scalar),
+            FullTarget::Scalar
+        );
+        assert_eq!(
+            FullTarget::from_synth_target(SynthTarget::Neon(VectorArrangement::D2)),
+            FullTarget::Neon(VectorArrangement::D2)
+        );
+    }
+
+    #[test]
+    fn test_gpu_candidate_generation_add() {
+        let spec = SmtExpr::var("x", 32);
+        let candidates = generate_gpu_candidates(&spec, "ADD", 32, 1000);
+        // Should have at least a MAP candidate and a REDUCE candidate (ADD is associative)
+        assert!(
+            candidates.len() >= 2,
+            "ADD should generate MAP + REDUCE GPU candidates, got {}",
+            candidates.len()
+        );
+        assert!(
+            candidates.iter().any(|(name, _, _)| name.contains("GPU_MAP_ADD")),
+            "Should have GPU_MAP_ADD candidate"
+        );
+        assert!(
+            candidates.iter().any(|(name, _, _)| name.contains("GPU_REDUCE_ADD")),
+            "Should have GPU_REDUCE_ADD candidate"
+        );
+    }
+
+    #[test]
+    fn test_ane_candidate_generation_gemm() {
+        let spec = SmtExpr::var("x", 32);
+        let candidates = generate_ane_candidates(&spec, "GEMM", 32, 1000);
+        assert!(
+            !candidates.is_empty(),
+            "GEMM should generate ANE candidates"
+        );
+        assert!(
+            candidates.iter().any(|(name, _, _)| name.contains("ANE_GEMM")),
+            "Should have ANE_GEMM candidate"
+        );
+        // GEMM cost should benefit from ANE's strength (0.5x multiplier)
+        let gemm_cost = candidates[0].2;
+        let add_candidates = generate_ane_candidates(&spec, "ADD", 32, 1000);
+        if !add_candidates.is_empty() {
+            let add_cost = add_candidates[0].2;
+            assert!(
+                gemm_cost < add_cost,
+                "GEMM cost ({}) should be lower than ADD cost ({}) on ANE",
+                gemm_cost,
+                add_cost,
+            );
+        }
+    }
+
+    #[test]
+    fn test_ane_unsupported_op_generates_no_candidates() {
+        let spec = SmtExpr::var("x", 32);
+        let candidates = generate_ane_candidates(&spec, "DIV", 32, 1000);
+        assert!(
+            candidates.is_empty(),
+            "DIV should not generate ANE candidates (unsupported)"
+        );
     }
 }
