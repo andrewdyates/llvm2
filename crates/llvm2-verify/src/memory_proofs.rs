@@ -485,6 +485,15 @@ fn proof_non_interference(name: &str, size_bytes: u32, gap: u64) -> ProofObligat
     let mem_after_store = encode_store_le(&mem, &base, &value, size_bytes);
     let after = encode_load_le(&mem_after_store, &addr_b, size_bytes);
 
+    // Precondition: gap must be >= size_bytes to guarantee non-overlapping.
+    // Without this precondition, overlapping regions could produce a false
+    // "Valid" result (the proof would be vacuously true for overlapping
+    // inputs that never get tested, but could fail for specific overlap
+    // patterns). The precondition makes the non-overlap requirement explicit.
+    let gap_const = SmtExpr::bv_const(gap, 64);
+    let size_const = SmtExpr::bv_const(size_bytes as u64, 64);
+    let gap_sufficient = gap_const.bvuge(size_const);
+
     ProofObligation {
         name: name.to_string(),
         tmir_expr: original,
@@ -494,7 +503,115 @@ fn proof_non_interference(name: &str, size_bytes: u32, gap: u64) -> ProofObligat
             ("value".to_string(), result_width),
             ("mem_default".to_string(), 8),
         ],
-        preconditions: vec![],
+        preconditions: vec![gap_sufficient],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build a non-interference proof for cross-size accesses: store `store_size`
+/// bytes at `base`, load `load_size` bytes at `base + gap`.
+///
+/// This guards against the case where a larger store at address A partially
+/// overlaps a smaller load at address B (or vice versa). The precondition
+/// requires that the gap is at least as large as the store size, ensuring
+/// the stored bytes do not touch any byte read by the load.
+fn proof_non_interference_cross_size(
+    name: &str,
+    store_size: u32,
+    load_size: u32,
+    gap: u64,
+) -> ProofObligation {
+    let store_width = store_size * 8;
+    let load_width = load_size * 8;
+    let mem = symbolic_memory("mem_default");
+    let base = SmtExpr::var("base", 64);
+    let value = SmtExpr::var("value", store_width);
+
+    let addr_b = base.clone().bvadd(SmtExpr::bv_const(gap, 64));
+
+    // Load at addr_b before store
+    let original = encode_load_le(&mem, &addr_b, load_size);
+
+    // Store at base, then load at addr_b
+    let mem_after_store = encode_store_le(&mem, &base, &value, store_size);
+    let after = encode_load_le(&mem_after_store, &addr_b, load_size);
+
+    // Precondition: gap >= store_size (store region [base, base+store_size)
+    // does not overlap load region [base+gap, base+gap+load_size)).
+    let gap_const = SmtExpr::bv_const(gap, 64);
+    let store_size_const = SmtExpr::bv_const(store_size as u64, 64);
+    let gap_sufficient = gap_const.bvuge(store_size_const);
+
+    ProofObligation {
+        name: name.to_string(),
+        tmir_expr: original,
+        aarch64_expr: after,
+        inputs: vec![
+            ("base".to_string(), 64),
+            ("value".to_string(), store_width),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![gap_sufficient],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build a non-interference proof with symbolic gap (addr_b is a free variable).
+///
+/// This is the strongest form: for arbitrary addresses A and B, if their
+/// regions do not overlap, then a store at A does not affect a load at B.
+///
+/// Precondition: `addr_b >= base + store_size` OR `base >= addr_b + load_size`
+/// (i.e., the two regions [base, base+store_size) and [addr_b, addr_b+load_size)
+/// are disjoint).
+fn proof_non_interference_symbolic(
+    name: &str,
+    store_size: u32,
+    load_size: u32,
+) -> ProofObligation {
+    let store_width = store_size * 8;
+    let load_width = load_size * 8;
+    let mem = symbolic_memory("mem_default");
+    let base = SmtExpr::var("base", 64);
+    let addr_b = SmtExpr::var("addr_b", 64);
+    let value = SmtExpr::var("value", store_width);
+
+    // Load at addr_b before store
+    let original = encode_load_le(&mem, &addr_b, load_size);
+
+    // Store at base, then load at addr_b
+    let mem_after_store = encode_store_le(&mem, &base, &value, store_size);
+    let after = encode_load_le(&mem_after_store, &addr_b, load_size);
+
+    // Preconditions:
+    // 1. No address wrapping: base + store_size and addr_b + load_size must
+    //    not wrap around the 64-bit address space. Without this, addresses
+    //    near 0xFFFFFFFFFFFFFFFF wrap to low addresses, causing the load
+    //    region to overlap with everything.
+    // 2. Regions are disjoint: addr_b >= base + store_size  OR  base >= addr_b + load_size
+    let store_end = base.clone().bvadd(SmtExpr::bv_const(store_size as u64, 64));
+    let load_end = addr_b.clone().bvadd(SmtExpr::bv_const(load_size as u64, 64));
+
+    // No-wrap: end > start (unsigned)
+    let store_no_wrap = store_end.clone().bvugt(base.clone());
+    let load_no_wrap = load_end.clone().bvugt(addr_b.clone());
+
+    // Disjoint regions (only valid when neither wraps)
+    let b_after_a = addr_b.clone().bvuge(store_end);
+    let a_after_b = base.clone().bvuge(load_end);
+    let disjoint = b_after_a.or_expr(a_after_b);
+
+    ProofObligation {
+        name: name.to_string(),
+        tmir_expr: original,
+        aarch64_expr: after,
+        inputs: vec![
+            ("base".to_string(), 64),
+            ("addr_b".to_string(), 64),
+            ("value".to_string(), store_width),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![store_no_wrap, load_no_wrap, disjoint],
         fp_inputs: vec![],
     }
 }
@@ -507,6 +624,48 @@ pub fn proof_non_interference_i32() -> ProofObligation {
 /// Proof: store 64-bit at addr, load 64-bit at addr+16 is unchanged.
 pub fn proof_non_interference_i64() -> ProofObligation {
     proof_non_interference("NonInterference_I64: store at A, load at A+16", 8, 16)
+}
+
+/// Proof: store 32-bit at addr, load 32-bit at addr+4 is unchanged (adjacent).
+pub fn proof_non_interference_i32_adjacent() -> ProofObligation {
+    proof_non_interference("NonInterference_I32_adjacent: store at A, load at A+4", 4, 4)
+}
+
+/// Proof: store 64-bit at addr, load 64-bit at addr+8 is unchanged (adjacent).
+pub fn proof_non_interference_i64_adjacent() -> ProofObligation {
+    proof_non_interference("NonInterference_I64_adjacent: store at A, load at A+8", 8, 8)
+}
+
+/// Proof: store 64-bit at addr, load 32-bit at addr+8 is unchanged (cross-size).
+pub fn proof_non_interference_i64_store_i32_load() -> ProofObligation {
+    proof_non_interference_cross_size(
+        "NonInterference_cross: store I64 at A, load I32 at A+8",
+        8, 4, 8,
+    )
+}
+
+/// Proof: store 32-bit at addr, load 64-bit at addr+4 is unchanged (cross-size).
+pub fn proof_non_interference_i32_store_i64_load() -> ProofObligation {
+    proof_non_interference_cross_size(
+        "NonInterference_cross: store I32 at A, load I64 at A+4",
+        4, 8, 4,
+    )
+}
+
+/// Proof: non-interference with symbolic gap for 32-bit store/load.
+pub fn proof_non_interference_i32_symbolic() -> ProofObligation {
+    proof_non_interference_symbolic(
+        "NonInterference_symbolic_I32: store I32 at A, load I32 at B (disjoint)",
+        4, 4,
+    )
+}
+
+/// Proof: non-interference with symbolic gap for 64-bit store/load.
+pub fn proof_non_interference_i64_symbolic() -> ProofObligation {
+    proof_non_interference_symbolic(
+        "NonInterference_symbolic_I64: store I64 at A, load I64 at B (disjoint)",
+        8, 8,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -718,11 +877,17 @@ pub fn all_roundtrip_proofs() -> Vec<ProofObligation> {
     ]
 }
 
-/// All non-interference proofs (2 total).
+/// All non-interference proofs (8 total).
 pub fn all_non_interference_proofs() -> Vec<ProofObligation> {
     vec![
         proof_non_interference_i32(),
         proof_non_interference_i64(),
+        proof_non_interference_i32_adjacent(),
+        proof_non_interference_i64_adjacent(),
+        proof_non_interference_i64_store_i32_load(),
+        proof_non_interference_i32_store_i64_load(),
+        proof_non_interference_i32_symbolic(),
+        proof_non_interference_i64_symbolic(),
     ]
 }
 
@@ -735,7 +900,7 @@ pub fn all_endianness_proofs() -> Vec<ProofObligation> {
     ]
 }
 
-/// All array-based memory proofs (21 total).
+/// All array-based memory proofs (27 total).
 pub fn all_memory_proofs() -> Vec<ProofObligation> {
     let mut proofs = Vec::new();
     proofs.extend(all_load_proofs());
@@ -1091,6 +1256,199 @@ mod tests {
     #[test]
     fn test_proof_non_interference_i64() {
         assert_valid(&proof_non_interference_i64());
+    }
+
+    #[test]
+    fn test_proof_non_interference_i32_adjacent() {
+        assert_valid(&proof_non_interference_i32_adjacent());
+    }
+
+    #[test]
+    fn test_proof_non_interference_i64_adjacent() {
+        assert_valid(&proof_non_interference_i64_adjacent());
+    }
+
+    #[test]
+    fn test_proof_non_interference_i64_store_i32_load() {
+        assert_valid(&proof_non_interference_i64_store_i32_load());
+    }
+
+    #[test]
+    fn test_proof_non_interference_i32_store_i64_load() {
+        assert_valid(&proof_non_interference_i32_store_i64_load());
+    }
+
+    #[test]
+    fn test_proof_non_interference_i32_symbolic() {
+        assert_valid(&proof_non_interference_i32_symbolic());
+    }
+
+    #[test]
+    fn test_proof_non_interference_i64_symbolic() {
+        assert_valid(&proof_non_interference_i64_symbolic());
+    }
+
+    // -------------------------------------------------------------------
+    // Proof obligation tests — Overlapping region detection (negative)
+    // -------------------------------------------------------------------
+
+    /// Negative test: store 32-bit at addr, load 32-bit at addr+2 (partial overlap).
+    ///
+    /// The store writes bytes [addr, addr+3]. The load reads [addr+2, addr+5].
+    /// Bytes at addr+2 and addr+3 are shared, so the load after store should
+    /// NOT equal the original load. This verifies that overlapping regions are
+    /// correctly detected as interfering.
+    #[test]
+    fn test_overlapping_i32_partial_detected() {
+        let mem = symbolic_memory("mem_default");
+        let base = SmtExpr::var("base", 64);
+        let value = SmtExpr::var("value", 32);
+
+        // gap=2, but store writes 4 bytes -> overlap at bytes 2 and 3
+        let addr_b = base.clone().bvadd(SmtExpr::bv_const(2, 64));
+
+        let original = encode_load_le(&mem, &addr_b, 4);
+        let mem_after_store = encode_store_le(&mem, &base, &value, 4);
+        let after = encode_load_le(&mem_after_store, &addr_b, 4);
+
+        let obligation = ProofObligation {
+            name: "WRONG: overlapping I32 store/load should interfere".to_string(),
+            tmir_expr: original,
+            aarch64_expr: after,
+            inputs: vec![
+                ("base".to_string(), 64),
+                ("value".to_string(), 32),
+                ("mem_default".to_string(), 8),
+            ],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let result = verify_memory_proof(&obligation);
+        match result {
+            VerificationResult::Invalid { .. } => {} // expected: overlap causes interference
+            other => panic!(
+                "Expected Invalid for overlapping I32 access (gap=2, size=4), got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Negative test: store 64-bit at addr, load 64-bit at addr+4 (partial overlap).
+    ///
+    /// Store writes [addr, addr+7]. Load reads [addr+4, addr+11].
+    /// Bytes 4-7 overlap.
+    #[test]
+    fn test_overlapping_i64_partial_detected() {
+        let mem = symbolic_memory("mem_default");
+        let base = SmtExpr::var("base", 64);
+        let value = SmtExpr::var("value", 64);
+
+        let addr_b = base.clone().bvadd(SmtExpr::bv_const(4, 64));
+
+        let original = encode_load_le(&mem, &addr_b, 8);
+        let mem_after_store = encode_store_le(&mem, &base, &value, 8);
+        let after = encode_load_le(&mem_after_store, &addr_b, 8);
+
+        let obligation = ProofObligation {
+            name: "WRONG: overlapping I64 store/load should interfere".to_string(),
+            tmir_expr: original,
+            aarch64_expr: after,
+            inputs: vec![
+                ("base".to_string(), 64),
+                ("value".to_string(), 64),
+                ("mem_default".to_string(), 8),
+            ],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let result = verify_memory_proof(&obligation);
+        match result {
+            VerificationResult::Invalid { .. } => {}
+            other => panic!(
+                "Expected Invalid for overlapping I64 access (gap=4, size=8), got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Negative test: cross-size overlap — store 64-bit, load 32-bit at addr+6.
+    ///
+    /// Store writes [addr, addr+7]. Load reads [addr+6, addr+9].
+    /// Bytes 6 and 7 overlap.
+    #[test]
+    fn test_overlapping_cross_size_detected() {
+        let mem = symbolic_memory("mem_default");
+        let base = SmtExpr::var("base", 64);
+        let value = SmtExpr::var("value", 64);
+
+        let addr_b = base.clone().bvadd(SmtExpr::bv_const(6, 64));
+
+        let original = encode_load_le(&mem, &addr_b, 4);
+        let mem_after_store = encode_store_le(&mem, &base, &value, 8);
+        let after = encode_load_le(&mem_after_store, &addr_b, 4);
+
+        let obligation = ProofObligation {
+            name: "WRONG: cross-size overlap (store I64, load I32 at +6)".to_string(),
+            tmir_expr: original,
+            aarch64_expr: after,
+            inputs: vec![
+                ("base".to_string(), 64),
+                ("value".to_string(), 64),
+                ("mem_default".to_string(), 8),
+            ],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let result = verify_memory_proof(&obligation);
+        match result {
+            VerificationResult::Invalid { .. } => {}
+            other => panic!(
+                "Expected Invalid for cross-size overlap, got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Negative test: single-byte overlap at boundary.
+    ///
+    /// Store 32-bit at addr (writes bytes 0-3). Load 32-bit at addr+3
+    /// (reads bytes 3-6). Byte 3 overlaps.
+    #[test]
+    fn test_overlapping_single_byte_boundary() {
+        let mem = symbolic_memory("mem_default");
+        let base = SmtExpr::var("base", 64);
+        let value = SmtExpr::var("value", 32);
+
+        let addr_b = base.clone().bvadd(SmtExpr::bv_const(3, 64));
+
+        let original = encode_load_le(&mem, &addr_b, 4);
+        let mem_after_store = encode_store_le(&mem, &base, &value, 4);
+        let after = encode_load_le(&mem_after_store, &addr_b, 4);
+
+        let obligation = ProofObligation {
+            name: "WRONG: single-byte boundary overlap (store I32, load I32 at +3)".to_string(),
+            tmir_expr: original,
+            aarch64_expr: after,
+            inputs: vec![
+                ("base".to_string(), 64),
+                ("value".to_string(), 32),
+                ("mem_default".to_string(), 8),
+            ],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let result = verify_memory_proof(&obligation);
+        match result {
+            VerificationResult::Invalid { .. } => {}
+            other => panic!(
+                "Expected Invalid for single-byte boundary overlap, got {:?}",
+                other
+            ),
+        }
     }
 
     // -------------------------------------------------------------------
