@@ -303,6 +303,123 @@ impl ISelFunction {
             self.block_order.push(block);
         }
     }
+
+    /// Convert this ISel function to the canonical `llvm2_ir::MachFunction`.
+    ///
+    /// This is the Phase 1->2 adapter (previously `isel_to_ir()` in pipeline.rs).
+    /// The ISel uses HashMap-based blocks and ISel-specific operand types.
+    /// The IR uses Vec-based arena storage and canonical types.
+    ///
+    /// Successor edges are copied directly; predecessor edges are computed from
+    /// successors after construction.
+    pub fn to_ir_func(&self) -> llvm2_ir::MachFunction {
+        use llvm2_ir::function::{MachBlock as IrBlock, MachFunction as IrFunc};
+        use llvm2_ir::inst::MachInst as IrInst;
+        use llvm2_ir::types::BlockId;
+
+        let ir_sig: llvm2_ir::function::Signature = (&self.sig).into();
+        let mut ir_func = IrFunc::new(self.name.clone(), ir_sig);
+        ir_func.next_vreg = self.next_vreg;
+
+        // Clear the default entry block that MachFunction::new creates.
+        ir_func.blocks.clear();
+        ir_func.block_order.clear();
+
+        // Create all blocks first.
+        for &block_ref in &self.block_order {
+            let block_id = BlockId(block_ref.0);
+            while ir_func.blocks.len() <= block_id.0 as usize {
+                ir_func.blocks.push(IrBlock::new());
+            }
+            ir_func.block_order.push(block_id);
+        }
+        ir_func.entry = if self.block_order.is_empty() {
+            BlockId(0)
+        } else {
+            BlockId(self.block_order[0].0)
+        };
+
+        // Convert instructions block by block and copy successor edges.
+        for &block_ref in &self.block_order {
+            let block_id = BlockId(block_ref.0);
+            if let Some(isel_block) = self.blocks.get(&block_ref) {
+                for isel_inst in &isel_block.insts {
+                    let ir_operands: Vec<llvm2_ir::MachOperand> = isel_inst
+                        .operands
+                        .iter()
+                        .map(|op| convert_isel_operand_to_ir(op))
+                        .collect();
+                    let ir_inst = IrInst::new(isel_inst.opcode, ir_operands);
+                    let inst_id = ir_func.push_inst(ir_inst);
+                    ir_func.append_inst(block_id, inst_id);
+                }
+
+                // Copy successor edges from ISel blocks to IR blocks.
+                for &succ in &isel_block.successors {
+                    let succ_id = BlockId(succ.0);
+                    ir_func.blocks[block_id.0 as usize].succs.push(succ_id);
+                }
+            }
+        }
+
+        // Compute predecessor edges from successors.
+        let num_blocks = ir_func.blocks.len();
+        let mut preds_map: Vec<Vec<BlockId>> = vec![Vec::new(); num_blocks];
+        for &block_ref in &self.block_order {
+            let block_id = BlockId(block_ref.0);
+            for &succ_id in &ir_func.blocks[block_id.0 as usize].succs {
+                if (succ_id.0 as usize) < num_blocks {
+                    preds_map[succ_id.0 as usize].push(block_id);
+                }
+            }
+        }
+        for (i, preds) in preds_map.into_iter().enumerate() {
+            ir_func.blocks[i].preds = preds;
+        }
+
+        ir_func
+    }
+}
+
+/// Convert an ISel `ISelOperand` to a canonical `llvm2_ir::MachOperand`.
+///
+/// This is the operand-level conversion used by `ISelFunction::to_ir_func()`.
+/// Condition codes are encoded as 4-bit immediates per ARM ARM.
+/// Symbols are preserved as `MachOperand::Symbol` for relocation emission.
+pub fn convert_isel_operand_to_ir(op: &ISelOperand) -> llvm2_ir::MachOperand {
+    use llvm2_ir::MachOperand as IrOp;
+    use llvm2_ir::types::BlockId;
+
+    match op {
+        ISelOperand::VReg(v) => IrOp::VReg(*v),
+        ISelOperand::PReg(p) => IrOp::PReg(*p),
+        ISelOperand::Imm(v) => IrOp::Imm(*v),
+        ISelOperand::FImm(v) => IrOp::FImm(*v),
+        ISelOperand::Block(b) => IrOp::Block(BlockId(b.0)),
+        ISelOperand::CondCode(cc) => {
+            let encoding = match cc {
+                AArch64CC::EQ => 0,
+                AArch64CC::NE => 1,
+                AArch64CC::HS => 2,
+                AArch64CC::LO => 3,
+                AArch64CC::MI => 4,
+                AArch64CC::PL => 5,
+                AArch64CC::VS => 6,
+                AArch64CC::VC => 7,
+                AArch64CC::HI => 8,
+                AArch64CC::LS => 9,
+                AArch64CC::GE => 10,
+                AArch64CC::LT => 11,
+                AArch64CC::GT => 12,
+                AArch64CC::LE => 13,
+            };
+            IrOp::Imm(encoding)
+        }
+        ISelOperand::Symbol(name) => IrOp::Symbol(name.clone()),
+        ISelOperand::StackSlot(idx) => {
+            IrOp::StackSlot(llvm2_ir::types::StackSlotId(*idx))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

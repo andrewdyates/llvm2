@@ -162,6 +162,47 @@ impl Type {
     }
 }
 
+// ---------------------------------------------------------------------------
+// From<llvm2_lower::Type> for llvm2_ir::function::Type
+// ---------------------------------------------------------------------------
+//
+// Centralizes the type conversion that was previously scattered in
+// pipeline.rs (convert_lower_type_to_ir). The llvm2-ir Type has a `Ptr`
+// variant that llvm2-lower's Type lacks; this conversion never produces Ptr.
+//
+// Impl lives here (llvm2-lower) because the orphan rule requires the `From`
+// impl to be in the crate that owns the source type.
+
+impl From<&Type> for llvm2_ir::function::Type {
+    fn from(t: &Type) -> Self {
+        match t {
+            Type::I8 => llvm2_ir::function::Type::I8,
+            Type::I16 => llvm2_ir::function::Type::I16,
+            Type::I32 => llvm2_ir::function::Type::I32,
+            Type::I64 => llvm2_ir::function::Type::I64,
+            Type::I128 => llvm2_ir::function::Type::I128,
+            Type::F32 => llvm2_ir::function::Type::F32,
+            Type::F64 => llvm2_ir::function::Type::F64,
+            Type::B1 => llvm2_ir::function::Type::B1,
+            Type::Struct(fields) => {
+                let ir_fields: Vec<llvm2_ir::function::Type> =
+                    fields.iter().map(|f| f.into()).collect();
+                llvm2_ir::function::Type::Struct(ir_fields)
+            }
+            Type::Array(elem, count) => {
+                let ir_elem: llvm2_ir::function::Type = elem.as_ref().into();
+                llvm2_ir::function::Type::Array(Box::new(ir_elem), *count)
+            }
+        }
+    }
+}
+
+impl From<Type> for llvm2_ir::function::Type {
+    fn from(t: Type) -> Self {
+        (&t).into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +273,44 @@ mod tests {
     fn b1_differs_from_storage() {
         // The key distinction: bits() != storage_bits() only for B1.
         assert_ne!(Type::B1.bits(), Type::B1.storage_bits());
+    }
+
+    // ---- From<Type> for llvm2_ir::function::Type tests ----
+
+    #[test]
+    fn from_scalar_types() {
+        use llvm2_ir::function::Type as IrType;
+        assert_eq!(IrType::from(Type::I8), IrType::I8);
+        assert_eq!(IrType::from(Type::I16), IrType::I16);
+        assert_eq!(IrType::from(Type::I32), IrType::I32);
+        assert_eq!(IrType::from(Type::I64), IrType::I64);
+        assert_eq!(IrType::from(Type::I128), IrType::I128);
+        assert_eq!(IrType::from(Type::F32), IrType::F32);
+        assert_eq!(IrType::from(Type::F64), IrType::F64);
+        assert_eq!(IrType::from(Type::B1), IrType::B1);
+    }
+
+    #[test]
+    fn from_struct_type() {
+        use llvm2_ir::function::Type as IrType;
+        let lower_struct = Type::Struct(vec![Type::I8, Type::I32]);
+        let ir_struct = IrType::from(lower_struct);
+        assert_eq!(ir_struct, IrType::Struct(vec![IrType::I8, IrType::I32]));
+    }
+
+    #[test]
+    fn from_array_type() {
+        use llvm2_ir::function::Type as IrType;
+        let lower_array = Type::Array(Box::new(Type::F64), 3);
+        let ir_array = IrType::from(lower_array);
+        assert_eq!(ir_array, IrType::Array(Box::new(IrType::F64), 3));
+    }
+
+    #[test]
+    fn from_ref_type() {
+        use llvm2_ir::function::Type as IrType;
+        let lower_ty = Type::I64;
+        let ir_ty: IrType = (&lower_ty).into();
+        assert_eq!(ir_ty, IrType::I64);
     }
 }

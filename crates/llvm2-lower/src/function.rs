@@ -49,3 +49,27 @@ impl Function {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// From<llvm2_lower::Signature> for llvm2_ir::Signature
+// ---------------------------------------------------------------------------
+//
+// Centralizes the signature conversion that was previously done inline in
+// pipeline.rs. Uses the From<Type> impl in types.rs for individual type
+// conversion.
+
+impl From<&Signature> for llvm2_ir::function::Signature {
+    fn from(sig: &Signature) -> Self {
+        let params: Vec<llvm2_ir::function::Type> =
+            sig.params.iter().map(|t| t.into()).collect();
+        let returns: Vec<llvm2_ir::function::Type> =
+            sig.returns.iter().map(|t| t.into()).collect();
+        llvm2_ir::function::Signature::new(params, returns)
+    }
+}
+
+impl From<Signature> for llvm2_ir::function::Signature {
+    fn from(sig: Signature) -> Self {
+        (&sig).into()
+    }
+}

@@ -170,120 +170,21 @@ impl CompilationUnit {
 // opcode enum, so no mapping is needed. The `isel_to_ir` adapter below
 // uses `isel_inst.opcode` directly as an `IrOpcode`.
 
-/// Convert an ISel ISelOperand to an IR MachOperand.
-fn convert_isel_operand(op: &llvm2_lower::isel::ISelOperand) -> IrOperand {
-    use llvm2_lower::isel::ISelOperand as IsOp;
-    match op {
-        IsOp::VReg(v) => IrOperand::VReg(*v),
-        IsOp::PReg(p) => IrOperand::PReg(*p),
-        IsOp::Imm(v) => IrOperand::Imm(*v),
-        IsOp::FImm(v) => IrOperand::FImm(*v),
-        IsOp::Block(b) => IrOperand::Block(BlockId(b.0)),
-        IsOp::CondCode(cc) => {
-            // Condition codes are encoded as 4-bit immediates per ARM ARM.
-            use llvm2_lower::isel::AArch64CC;
-            let encoding = match cc {
-                AArch64CC::EQ => 0,
-                AArch64CC::NE => 1,
-                AArch64CC::HS => 2,
-                AArch64CC::LO => 3,
-                AArch64CC::MI => 4,
-                AArch64CC::PL => 5,
-                AArch64CC::VS => 6,
-                AArch64CC::VC => 7,
-                AArch64CC::HI => 8,
-                AArch64CC::LS => 9,
-                AArch64CC::GE => 10,
-                AArch64CC::LT => 11,
-                AArch64CC::GT => 12,
-                AArch64CC::LE => 13,
-            };
-            IrOperand::Imm(encoding)
-        }
-        IsOp::Symbol(name) => {
-            // Symbol references are preserved through the pipeline so the
-            // relocation collector can emit proper linker entries.
-            IrOperand::Symbol(name.clone())
-        }
-        IsOp::StackSlot(idx) => {
-            IrOperand::StackSlot(llvm2_ir::types::StackSlotId(*idx))
-        }
-    }
-}
-
 /// Convert ISel's `ISelFunction` to the canonical `llvm2_ir::MachFunction`.
 ///
-/// This is the Phase 1->2 adapter. The ISel uses HashMap-based blocks and
-/// ISel-specific types. The IR uses Vec-based arena storage and the
-/// canonical types.
+/// Delegates to `ISelFunction::to_ir_func()` which owns the conversion logic
+/// (issue #73 consolidation). This thin wrapper is preserved for backward
+/// compatibility — new code should call `isel_func.to_ir_func()` directly.
 pub fn isel_to_ir(
     isel_func: &llvm2_lower::isel::ISelFunction,
-    param_types: &[llvm2_ir::function::Type],
-    return_types: &[llvm2_ir::function::Type],
+    _param_types: &[llvm2_ir::function::Type],
+    _return_types: &[llvm2_ir::function::Type],
 ) -> IrMachFunction {
-    let sig = IrSignature::new(param_types.to_vec(), return_types.to_vec());
-    let mut ir_func = IrMachFunction::new(isel_func.name.clone(), sig);
-    ir_func.next_vreg = isel_func.next_vreg;
-
-    // Clear the default entry block that MachFunction::new creates.
-    ir_func.blocks.clear();
-    ir_func.block_order.clear();
-
-    // Create all blocks first.
-    for &block_ref in &isel_func.block_order {
-        let block_id = BlockId(block_ref.0);
-        while ir_func.blocks.len() <= block_id.0 as usize {
-            ir_func.blocks.push(llvm2_ir::function::MachBlock::new());
-        }
-        ir_func.block_order.push(block_id);
-    }
-    ir_func.entry = if isel_func.block_order.is_empty() {
-        BlockId(0)
-    } else {
-        BlockId(isel_func.block_order[0].0)
-    };
-
-    // Convert instructions block by block and copy successor edges.
-    for &block_ref in &isel_func.block_order {
-        let block_id = BlockId(block_ref.0);
-        if let Some(isel_block) = isel_func.blocks.get(&block_ref) {
-            for isel_inst in &isel_block.insts {
-                // ISel now uses canonical llvm2_ir::AArch64Opcode directly
-                // (issue #73 unification). No opcode mapping needed.
-                let ir_operands: Vec<IrOperand> = isel_inst
-                    .operands
-                    .iter()
-                    .map(convert_isel_operand)
-                    .collect();
-                let ir_inst = IrMachInst::new(isel_inst.opcode, ir_operands);
-                let inst_id = ir_func.push_inst(ir_inst);
-                ir_func.append_inst(block_id, inst_id);
-            }
-
-            // Copy successor edges from ISel blocks to IR blocks.
-            for &succ in &isel_block.successors {
-                let succ_id = BlockId(succ.0);
-                ir_func.blocks[block_id.0 as usize].succs.push(succ_id);
-            }
-        }
-    }
-
-    // Compute predecessor edges from successors.
-    let num_blocks = ir_func.blocks.len();
-    let mut preds_map: Vec<Vec<BlockId>> = vec![Vec::new(); num_blocks];
-    for &block_ref in &isel_func.block_order {
-        let block_id = BlockId(block_ref.0);
-        for &succ_id in &ir_func.blocks[block_id.0 as usize].succs {
-            if (succ_id.0 as usize) < num_blocks {
-                preds_map[succ_id.0 as usize].push(block_id);
-            }
-        }
-    }
-    for (i, preds) in preds_map.into_iter().enumerate() {
-        ir_func.blocks[i].preds = preds;
-    }
-
-    ir_func
+    // The ISelFunction::to_ir_func() method derives the IR signature from
+    // the ISel's own signature using From<Signature>. The param_types and
+    // return_types arguments are now unused — they were only needed when
+    // the conversion was done externally.
+    isel_func.to_ir_func()
 }
 
 // ---------------------------------------------------------------------------
@@ -617,10 +518,9 @@ impl Pipeline {
         // Phase 1: Instruction Selection
         let isel_func = self.run_isel(input)?;
 
-        // Phase 2: Convert ISel output to shared IR
-        let param_types = self.convert_lower_types_to_ir(&input.signature.params);
-        let return_types = self.convert_lower_types_to_ir(&input.signature.returns);
-        let mut ir_func = isel_to_ir(&isel_func, &param_types, &return_types);
+        // Phase 2: Convert ISel output to shared IR (issue #73 consolidation:
+        // conversion logic now lives in ISelFunction::to_ir_func()).
+        let mut ir_func = isel_func.to_ir_func();
 
         // Debug: verify succs/preds are populated for multi-block functions
         #[cfg(debug_assertions)]
@@ -910,39 +810,6 @@ impl Pipeline {
         writer.write()
     }
 
-    /// Convert llvm2-lower types to llvm2-ir types.
-    fn convert_lower_types_to_ir(
-        &self,
-        types: &[llvm2_lower::types::Type],
-    ) -> Vec<llvm2_ir::function::Type> {
-        types
-            .iter()
-            .map(|t| Self::convert_lower_type_to_ir(t))
-            .collect()
-    }
-
-    /// Convert a single llvm2-lower type to an llvm2-ir type.
-    fn convert_lower_type_to_ir(t: &llvm2_lower::types::Type) -> llvm2_ir::function::Type {
-        match t {
-            llvm2_lower::types::Type::I8 => llvm2_ir::function::Type::I8,
-            llvm2_lower::types::Type::I16 => llvm2_ir::function::Type::I16,
-            llvm2_lower::types::Type::I32 => llvm2_ir::function::Type::I32,
-            llvm2_lower::types::Type::I64 => llvm2_ir::function::Type::I64,
-            llvm2_lower::types::Type::I128 => llvm2_ir::function::Type::I128,
-            llvm2_lower::types::Type::F32 => llvm2_ir::function::Type::F32,
-            llvm2_lower::types::Type::F64 => llvm2_ir::function::Type::F64,
-            llvm2_lower::types::Type::B1 => llvm2_ir::function::Type::B1,
-            llvm2_lower::types::Type::Struct(fields) => {
-                let ir_fields: Vec<llvm2_ir::function::Type> =
-                    fields.iter().map(|f| Self::convert_lower_type_to_ir(f)).collect();
-                llvm2_ir::function::Type::Struct(ir_fields)
-            }
-            llvm2_lower::types::Type::Array(elem, count) => {
-                let ir_elem = Self::convert_lower_type_to_ir(elem);
-                llvm2_ir::function::Type::Array(Box::new(ir_elem), *count)
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
