@@ -1,0 +1,6 @@
+# LLVM2 publish exclusions
+docs/
+reports/
+benchmarks/
+designs/
+CHANGELOG.md
