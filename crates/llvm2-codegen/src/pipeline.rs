@@ -1519,6 +1519,7 @@ mod tests {
         let config = PipelineConfig {
             opt_level: OptLevel::O0,
             emit_debug: true,
+            ..Default::default()
         };
         assert_eq!(config.opt_level, OptLevel::O0);
         assert!(config.emit_debug);
@@ -1529,6 +1530,7 @@ mod tests {
         let config = PipelineConfig {
             opt_level: OptLevel::O3,
             emit_debug: true,
+            ..Default::default()
         };
         let cloned = config.clone();
         assert_eq!(cloned.opt_level, OptLevel::O3);
@@ -1544,6 +1546,7 @@ mod tests {
         let config = PipelineConfig {
             opt_level: OptLevel::O1,
             emit_debug: false,
+            ..Default::default()
         };
         let pipeline = Pipeline::new(config);
         assert_eq!(pipeline.config.opt_level, OptLevel::O1);
