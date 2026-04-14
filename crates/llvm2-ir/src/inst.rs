@@ -368,6 +368,9 @@ impl InstFlags {
     pub const READS_MEMORY: Self = Self(0x40);
     pub const WRITES_MEMORY: Self = Self(0x80);
     pub const IS_PHI: Self = Self(0x100);
+    /// Proof-guided: this memory instruction has been proven safe to reorder
+    /// past other memory operations. Set by the ValidBorrow proof optimization.
+    pub const PROOF_REORDERABLE: Self = Self(0x200);
 
     /// Returns true if all bits in `other` are set in `self`.
     #[inline]
@@ -514,6 +517,7 @@ impl core::fmt::Debug for InstFlags {
             (Self::READS_MEMORY, "READS_MEMORY"),
             (Self::WRITES_MEMORY, "WRITES_MEMORY"),
             (Self::IS_PHI, "IS_PHI"),
+            (Self::PROOF_REORDERABLE, "PROOF_REORDERABLE"),
         ];
         write!(f, "InstFlags(")?;
         for (flag, name) in &flags {
@@ -550,6 +554,7 @@ impl core::fmt::Debug for InstFlags {
 /// - `PositiveRefCount` → eliminate redundant retain/release pairs
 /// - `NonZeroDivisor` → eliminate division-by-zero checks
 /// - `ValidShift` → eliminate shift-amount range checks
+/// - `Pure` → aggressive CSE/LICM of proven-pure memory operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProofAnnotation {
     /// tMIR has proven this arithmetic operation cannot overflow.
@@ -579,6 +584,13 @@ pub enum ProofAnnotation {
     /// tMIR has proven the shift amount is in [0, bitwidth).
     /// Enables: remove CMP+B.GE range check before LSL/LSR/ASR.
     ValidShift,
+
+    /// tMIR has proven this operation is pure (no observable side effects).
+    /// Enables: aggressive CSE of loads, LICM of memory operations.
+    /// A load with Pure proof can be treated as a pure computation for
+    /// CSE purposes: if two loads from the same address exist and the
+    /// address is proven pure (immutable), the second load is redundant.
+    Pure,
 }
 
 impl ProofAnnotation {
@@ -1246,6 +1258,7 @@ mod tests {
             ProofAnnotation::PositiveRefCount,
             ProofAnnotation::NonZeroDivisor,
             ProofAnnotation::ValidShift,
+            ProofAnnotation::Pure,
         ];
         for v in &variants {
             assert_eq!(

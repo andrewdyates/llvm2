@@ -46,7 +46,7 @@
 use std::collections::HashSet;
 
 use llvm2_ir::{
-    AArch64Opcode, InstId, MachFunction, MachOperand, ProofAnnotation,
+    AArch64Opcode, InstFlags, InstId, MachFunction, MachOperand, ProofAnnotation,
 };
 
 use crate::pass_manager::MachinePass;
@@ -68,6 +68,8 @@ pub struct ProofOptStats {
     pub divzero_checks_eliminated: u32,
     /// Number of shift-range checks eliminated (ValidShift).
     pub shift_checks_eliminated: u32,
+    /// Number of loads promoted to pure for aggressive CSE (Pure).
+    pub pure_cse_enabled: u32,
 }
 
 /// Proof-consuming optimization pass.
@@ -165,6 +167,11 @@ impl MachinePass for ProofOptimization {
                             pos,
                             &mut to_delete,
                         ) {
+                            changed = true;
+                        }
+                    }
+                    Some(ProofAnnotation::Pure) => {
+                        if self.apply_pure(func, inst_id) {
                             changed = true;
                         }
                     }
@@ -383,10 +390,13 @@ impl ProofOptimization {
             return false;
         }
 
-        // Mark the instruction's proof as consumed. The refined aliasing
-        // information is encoded by keeping the ValidBorrow annotation
-        // visible to subsequent passes (CSE, LICM) that can check for it.
-        // For now, we just count the refinement.
+        // Mark the instruction as proof-reorderable. This flag tells
+        // subsequent passes (CSE, LICM) that this memory operation can
+        // be safely reordered past other memory operations because the
+        // borrow validity has been formally proven.
+        let inst = func.inst_mut(inst_id);
+        inst.flags.insert(InstFlags::PROOF_REORDERABLE);
+
         self.stats.alias_refinements += 1;
         true
     }
@@ -585,13 +595,116 @@ impl ProofOptimization {
             _ => false,
         }
     }
+
+    /// Pure optimization: when tMIR proves an operation is pure (no observable
+    /// side effects, deterministic), promote it for aggressive CSE.
+    ///
+    /// A load with a Pure proof annotation means the loaded memory location
+    /// is immutable (e.g., a read from a frozen/constant data structure).
+    /// This enables:
+    ///
+    /// 1. **Aggressive CSE**: Two loads from the same address can be CSE'd
+    ///    even with intervening stores (the Pure proof guarantees the loaded
+    ///    value does not change).
+    /// 2. **LICM**: Pure loads can be hoisted out of loops.
+    ///
+    /// Implementation: remove the READS_MEMORY/WRITES_MEMORY and
+    /// HAS_SIDE_EFFECTS flags, making the instruction appear pure to
+    /// downstream CSE/LICM passes. The proof annotation is consumed.
+    fn apply_pure(
+        &mut self,
+        func: &mut MachFunction,
+        inst_id: InstId,
+    ) -> bool {
+        let inst = func.inst(inst_id);
+
+        // Pure proof is meaningful for loads (promotes them to CSE-able).
+        // For already-pure instructions, no change needed.
+        if !inst.reads_memory() && !inst.writes_memory() && !inst.has_side_effects() {
+            return false;
+        }
+
+        // Promote the instruction: remove memory flags so CSE/LICM treat
+        // it as pure. Keep the instruction opcode and operands unchanged.
+        let inst = func.inst_mut(inst_id);
+        inst.flags.remove(InstFlags::READS_MEMORY);
+        inst.flags.remove(InstFlags::WRITES_MEMORY);
+        inst.flags.remove(InstFlags::HAS_SIDE_EFFECTS);
+        inst.proof = None; // Proof consumed.
+
+        self.stats.pure_cse_enabled += 1;
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public API: named functions for each proof-consuming optimization
+// ---------------------------------------------------------------------------
+
+/// Eliminate overflow checks when NoOverflow proof is present.
+///
+/// Converts checked arithmetic (ADDS/SUBS) to unchecked (ADD/SUB) and
+/// removes trailing TrapOverflow instructions.
+///
+/// Returns the number of overflow checks eliminated.
+pub fn eliminate_overflow_checks(func: &mut MachFunction) -> u32 {
+    let mut pass = ProofOptimization::new();
+    pass.run(func);
+    pass.stats().overflow_checks_eliminated
+}
+
+/// Eliminate bounds checks when InBounds proof is present.
+///
+/// Removes CMP+TrapBoundsCheck patterns when the index is proven in-bounds.
+///
+/// Returns the number of bounds checks eliminated.
+pub fn eliminate_bounds_checks(func: &mut MachFunction) -> u32 {
+    let mut pass = ProofOptimization::new();
+    pass.run(func);
+    pass.stats().bounds_checks_eliminated
+}
+
+/// Eliminate null checks when NotNull proof is present.
+///
+/// Removes CBZ/TrapNull patterns and simplifies CBNZ to unconditional branches
+/// when the pointer is proven non-null.
+///
+/// Returns the number of null checks eliminated.
+pub fn eliminate_null_checks(func: &mut MachFunction) -> u32 {
+    let mut pass = ProofOptimization::new();
+    pass.run(func);
+    pass.stats().null_checks_eliminated
+}
+
+/// Enable load/store reordering when ValidBorrow proof is present.
+///
+/// Marks proven-valid memory operations with `PROOF_REORDERABLE` flag,
+/// allowing CSE and LICM to reorder them past other memory operations.
+///
+/// Returns the number of alias refinements applied.
+pub fn enable_load_store_reorder(func: &mut MachFunction) -> u32 {
+    let mut pass = ProofOptimization::new();
+    pass.run(func);
+    pass.stats().alias_refinements
+}
+
+/// Enable aggressive CSE for operations with Pure proof annotation.
+///
+/// Removes memory flags from proven-pure operations (e.g., loads from
+/// immutable data) so they can be CSE'd and LICM'd like pure computations.
+///
+/// Returns the number of operations promoted to pure.
+pub fn aggressive_cse(func: &mut MachFunction) -> u32 {
+    let mut pass = ProofOptimization::new();
+    pass.run(func);
+    pass.stats().pure_cse_enabled
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use llvm2_ir::{
-        AArch64Opcode, BlockId, InstId, MachFunction, MachInst, MachOperand,
+        AArch64Opcode, BlockId, InstFlags, InstId, MachFunction, MachInst, MachOperand,
         ProofAnnotation, RegClass, Signature, VReg,
     };
 
@@ -1542,5 +1655,366 @@ mod tests {
 
         assert_eq!(pass.stats().divzero_checks_eliminated, 1);
         assert_eq!(pass.stats().shift_checks_eliminated, 1);
+    }
+
+    // --- Pure (aggressive CSE) tests ---
+
+    #[test]
+    fn test_pure_promotes_load_to_cse_able() {
+        // A load with Pure proof should have its READS_MEMORY flag removed,
+        // making it eligible for CSE by downstream passes.
+        let ldr = MachInst::new(
+            AArch64Opcode::LdrRI,
+            vec![vreg(0), vreg(1), imm(0)],
+        )
+        .with_proof(ProofAnnotation::Pure);
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![ldr, ret]);
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        // The load should no longer have READS_MEMORY flag.
+        let inst = func.inst(InstId(0));
+        assert!(!inst.flags.contains(InstFlags::READS_MEMORY));
+        // The proof should be consumed.
+        assert!(inst.proof.is_none());
+        assert_eq!(pass.stats().pure_cse_enabled, 1);
+    }
+
+    #[test]
+    fn test_pure_promotes_store_to_cse_able() {
+        // A store with Pure proof should have its WRITES_MEMORY + HAS_SIDE_EFFECTS removed.
+        let str_inst = MachInst::new(
+            AArch64Opcode::StrRI,
+            vec![vreg(0), vreg(1), imm(8)],
+        )
+        .with_proof(ProofAnnotation::Pure);
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![str_inst, ret]);
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let inst = func.inst(InstId(0));
+        assert!(!inst.flags.contains(InstFlags::WRITES_MEMORY));
+        assert!(!inst.flags.contains(InstFlags::HAS_SIDE_EFFECTS));
+        assert!(inst.proof.is_none());
+        assert_eq!(pass.stats().pure_cse_enabled, 1);
+    }
+
+    #[test]
+    fn test_pure_on_already_pure_instruction_no_effect() {
+        // An ADD instruction is already pure — Pure proof has no effect.
+        let add = MachInst::new(
+            AArch64Opcode::AddRR,
+            vec![vreg(0), vreg(1), vreg(2)],
+        )
+        .with_proof(ProofAnnotation::Pure);
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![add, ret]);
+
+        let mut pass = ProofOptimization::new();
+        // Should return false because the ADD is already pure.
+        assert!(!pass.run(&mut func));
+
+        assert_eq!(pass.stats().pure_cse_enabled, 0);
+    }
+
+    #[test]
+    fn test_pure_multiple_loads() {
+        // Two loads with Pure proof: both should be promoted.
+        let ldr1 = MachInst::new(
+            AArch64Opcode::LdrRI,
+            vec![vreg(0), vreg(1), imm(0)],
+        )
+        .with_proof(ProofAnnotation::Pure);
+
+        let ldr2 = MachInst::new(
+            AArch64Opcode::LdrRI,
+            vec![vreg(2), vreg(1), imm(8)],
+        )
+        .with_proof(ProofAnnotation::Pure);
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![ldr1, ldr2, ret]);
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        assert_eq!(pass.stats().pure_cse_enabled, 2);
+
+        // Both loads should have READS_MEMORY removed.
+        assert!(!func.inst(InstId(0)).flags.contains(InstFlags::READS_MEMORY));
+        assert!(!func.inst(InstId(1)).flags.contains(InstFlags::READS_MEMORY));
+    }
+
+    #[test]
+    fn test_pure_without_proof_load_unchanged() {
+        // A load without Pure proof should keep its READS_MEMORY flag.
+        let ldr = MachInst::new(
+            AArch64Opcode::LdrRI,
+            vec![vreg(0), vreg(1), imm(0)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![ldr, ret]);
+
+        let mut pass = ProofOptimization::new();
+        assert!(!pass.run(&mut func));
+
+        assert!(func.inst(InstId(0)).flags.contains(InstFlags::READS_MEMORY));
+        assert_eq!(pass.stats().pure_cse_enabled, 0);
+    }
+
+    // --- ValidBorrow reordering flag tests ---
+
+    #[test]
+    fn test_valid_borrow_sets_reorderable_flag_on_load() {
+        // A load with ValidBorrow should get the PROOF_REORDERABLE flag.
+        let ldr = MachInst::new(
+            AArch64Opcode::LdrRI,
+            vec![vreg(0), vreg(1), imm(0)],
+        )
+        .with_proof(ProofAnnotation::ValidBorrow);
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![ldr, ret]);
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let inst = func.inst(InstId(0));
+        assert!(inst.flags.contains(InstFlags::PROOF_REORDERABLE));
+        assert_eq!(pass.stats().alias_refinements, 1);
+    }
+
+    #[test]
+    fn test_valid_borrow_sets_reorderable_flag_on_store() {
+        // A store with ValidBorrow should get the PROOF_REORDERABLE flag.
+        let str_inst = MachInst::new(
+            AArch64Opcode::StrRI,
+            vec![vreg(0), vreg(1), imm(8)],
+        )
+        .with_proof(ProofAnnotation::ValidBorrow);
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![str_inst, ret]);
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let inst = func.inst(InstId(0));
+        assert!(inst.flags.contains(InstFlags::PROOF_REORDERABLE));
+        // Store should keep its existing memory flags since it still writes.
+        assert!(inst.flags.contains(InstFlags::WRITES_MEMORY));
+    }
+
+    #[test]
+    fn test_valid_borrow_load_store_pair_both_reorderable() {
+        // Both a load and store with ValidBorrow get PROOF_REORDERABLE.
+        let ldr = MachInst::new(
+            AArch64Opcode::LdrRI,
+            vec![vreg(0), vreg(1), imm(0)],
+        )
+        .with_proof(ProofAnnotation::ValidBorrow);
+
+        let str_inst = MachInst::new(
+            AArch64Opcode::StrRI,
+            vec![vreg(2), vreg(1), imm(8)],
+        )
+        .with_proof(ProofAnnotation::ValidBorrow);
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![ldr, str_inst, ret]);
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        assert!(func.inst(InstId(0)).flags.contains(InstFlags::PROOF_REORDERABLE));
+        assert!(func.inst(InstId(1)).flags.contains(InstFlags::PROOF_REORDERABLE));
+        assert_eq!(pass.stats().alias_refinements, 2);
+    }
+
+    // --- Public API function tests ---
+
+    #[test]
+    fn test_eliminate_overflow_checks_public_api() {
+        let adds = MachInst::new(
+            AArch64Opcode::AddsRR,
+            vec![vreg(0), vreg(1), vreg(2)],
+        )
+        .with_proof(ProofAnnotation::NoOverflow);
+
+        let trap = MachInst::new(
+            AArch64Opcode::TrapOverflow,
+            vec![imm(0x06), MachOperand::Block(BlockId(1))],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![adds, trap, ret]);
+        func.create_block();
+
+        let count = eliminate_overflow_checks(&mut func);
+        assert_eq!(count, 1);
+
+        // ADDS should now be ADD.
+        assert_eq!(func.inst(InstId(0)).opcode, AArch64Opcode::AddRR);
+    }
+
+    #[test]
+    fn test_eliminate_bounds_checks_public_api() {
+        let cmp = MachInst::new(
+            AArch64Opcode::CmpRR,
+            vec![vreg(0), vreg(1)],
+        )
+        .with_proof(ProofAnnotation::InBounds);
+
+        let trap = MachInst::new(
+            AArch64Opcode::TrapBoundsCheck,
+            vec![MachOperand::Block(BlockId(1))],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cmp, trap, ret]);
+        func.create_block();
+
+        let count = eliminate_bounds_checks(&mut func);
+        assert_eq!(count, 1);
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 1); // only ret
+    }
+
+    #[test]
+    fn test_eliminate_null_checks_public_api() {
+        let cbz = MachInst::new(
+            AArch64Opcode::Cbz,
+            vec![vreg(0), MachOperand::Block(BlockId(1))],
+        )
+        .with_proof(ProofAnnotation::NotNull);
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cbz, ret]);
+        func.create_block();
+
+        let count = eliminate_null_checks(&mut func);
+        assert_eq!(count, 1);
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 1); // only ret
+    }
+
+    #[test]
+    fn test_enable_load_store_reorder_public_api() {
+        let ldr = MachInst::new(
+            AArch64Opcode::LdrRI,
+            vec![vreg(0), vreg(1), imm(0)],
+        )
+        .with_proof(ProofAnnotation::ValidBorrow);
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![ldr, ret]);
+
+        let count = enable_load_store_reorder(&mut func);
+        assert_eq!(count, 1);
+
+        assert!(func.inst(InstId(0)).flags.contains(InstFlags::PROOF_REORDERABLE));
+    }
+
+    #[test]
+    fn test_aggressive_cse_public_api() {
+        let ldr = MachInst::new(
+            AArch64Opcode::LdrRI,
+            vec![vreg(0), vreg(1), imm(0)],
+        )
+        .with_proof(ProofAnnotation::Pure);
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![ldr, ret]);
+
+        let count = aggressive_cse(&mut func);
+        assert_eq!(count, 1);
+
+        assert!(!func.inst(InstId(0)).flags.contains(InstFlags::READS_MEMORY));
+    }
+
+    // --- Combined new + existing: all proof types in one function ---
+
+    #[test]
+    fn test_all_proof_types_in_one_function() {
+        let mut func = MachFunction::new(
+            "test_all_proofs".to_string(),
+            Signature::new(vec![], vec![]),
+        );
+
+        // Block 0: NoOverflow (adds -> add) + ValidBorrow (load reorderable)
+        let adds = MachInst::new(
+            AArch64Opcode::AddsRR,
+            vec![vreg(0), vreg(1), vreg(2)],
+        )
+        .with_proof(ProofAnnotation::NoOverflow);
+        let trap_ov = MachInst::new(
+            AArch64Opcode::TrapOverflow,
+            vec![imm(0x06), MachOperand::Block(BlockId(2))],
+        );
+        let ldr_reorder = MachInst::new(
+            AArch64Opcode::LdrRI,
+            vec![vreg(3), vreg(0), imm(0)],
+        )
+        .with_proof(ProofAnnotation::ValidBorrow);
+        let ldr_pure = MachInst::new(
+            AArch64Opcode::LdrRI,
+            vec![vreg(4), vreg(0), imm(8)],
+        )
+        .with_proof(ProofAnnotation::Pure);
+        let branch = MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(BlockId(1))],
+        );
+
+        let adds_id = func.push_inst(adds);
+        let trap_ov_id = func.push_inst(trap_ov);
+        let ldr_reorder_id = func.push_inst(ldr_reorder);
+        let ldr_pure_id = func.push_inst(ldr_pure);
+        let branch_id = func.push_inst(branch);
+        func.append_inst(BlockId(0), adds_id);
+        func.append_inst(BlockId(0), trap_ov_id);
+        func.append_inst(BlockId(0), ldr_reorder_id);
+        func.append_inst(BlockId(0), ldr_pure_id);
+        func.append_inst(BlockId(0), branch_id);
+
+        // Block 1: ret
+        let bb1 = func.create_block();
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let ret_id = func.push_inst(ret);
+        func.append_inst(bb1, ret_id);
+
+        // Block 2: panic (unused)
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        // Block 0: adds→add (trap removed), ldr_reorder (reorderable flag), ldr_pure (pure), branch
+        let block0 = func.block(BlockId(0));
+        assert_eq!(block0.insts.len(), 4); // add + ldr_reorder + ldr_pure + b
+
+        // Verify: adds → add
+        assert_eq!(func.inst(adds_id).opcode, AArch64Opcode::AddRR);
+
+        // Verify: ValidBorrow load has PROOF_REORDERABLE
+        assert!(func.inst(ldr_reorder_id).flags.contains(InstFlags::PROOF_REORDERABLE));
+
+        // Verify: Pure load has READS_MEMORY removed
+        assert!(!func.inst(ldr_pure_id).flags.contains(InstFlags::READS_MEMORY));
+
+        // Verify stats
+        assert_eq!(pass.stats().overflow_checks_eliminated, 1);
+        assert_eq!(pass.stats().alias_refinements, 1);
+        assert_eq!(pass.stats().pure_cse_enabled, 1);
     }
 }
