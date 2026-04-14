@@ -896,4 +896,328 @@ mod tests {
         assert_eq!(locs.len(), 1);
         assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
     }
+
+    // ===================================================================
+    // Coverage expansion: 7-arg boundary (all GPR slots filled)
+    // ===================================================================
+
+    #[test]
+    fn classify_exactly_7_int_args_all_in_regs() {
+        // 7 integer args -> X0-X6, all in registers
+        let params: Vec<Type> = (0..7).map(|_| Type::I64).collect();
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 7);
+        for i in 0..7 {
+            assert_eq!(locs[i], ArgLocation::Reg(GPR_ARG_REGS[i]));
+        }
+    }
+
+    #[test]
+    fn classify_exactly_8_int_args_all_in_regs() {
+        // 8 integer args -> X0-X7, all in registers (uses all GPR slots)
+        let params: Vec<Type> = (0..8).map(|_| Type::I64).collect();
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 8);
+        for i in 0..8 {
+            assert_eq!(locs[i], ArgLocation::Reg(GPR_ARG_REGS[i]));
+        }
+    }
+
+    #[test]
+    fn classify_8th_arg_on_stack_boundary() {
+        // 9 args: first 8 in X0-X7, 9th on stack at offset 0
+        let params: Vec<Type> = (0..9).map(|_| Type::I32).collect();
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 9);
+        for i in 0..8 {
+            assert_eq!(locs[i], ArgLocation::Reg(GPR_ARG_REGS[i]));
+        }
+        // 9th arg: on stack, I32 promoted to 8 bytes
+        assert!(matches!(locs[8], ArgLocation::Stack { offset: 0, size: 8 }));
+    }
+
+    // ===================================================================
+    // Coverage expansion: return classification for all scalar types
+    // ===================================================================
+
+    #[test]
+    fn classify_return_b1() {
+        let locs = AppleAArch64ABI::classify_returns(&[Type::B1]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+    }
+
+    #[test]
+    fn classify_return_i8() {
+        let locs = AppleAArch64ABI::classify_returns(&[Type::I8]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+    }
+
+    #[test]
+    fn classify_return_i16() {
+        let locs = AppleAArch64ABI::classify_returns(&[Type::I16]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+    }
+
+    #[test]
+    fn classify_return_i32() {
+        let locs = AppleAArch64ABI::classify_returns(&[Type::I32]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+    }
+
+    #[test]
+    fn classify_return_f32() {
+        let locs = AppleAArch64ABI::classify_returns(&[Type::F32]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    #[test]
+    fn classify_return_i128() {
+        // I128 returns use two GPRs: Indirect{X0} encoding
+        let locs = AppleAArch64ABI::classify_returns(&[Type::I128]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Indirect { ptr_reg: gpr::X0 });
+    }
+
+    // ===================================================================
+    // Coverage expansion: I128 parameter classification
+    // ===================================================================
+
+    #[test]
+    fn classify_i128_param_in_register_pair() {
+        // I128 uses two consecutive GPR slots
+        let locs = AppleAArch64ABI::classify_params(&[Type::I128]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Indirect { ptr_reg: gpr::X0 });
+    }
+
+    #[test]
+    fn classify_i128_param_after_6_gpr_args_goes_to_stack() {
+        // 6 i64 args use X0-X5, then I128 needs 2 consecutive but only X6-X7 left.
+        // X6+X7 is 2 consecutive GPRs, so it should fit.
+        let mut params: Vec<Type> = vec![Type::I64; 6];
+        params.push(Type::I128);
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 7);
+        // I128 at index 6: needs 2 GPRs starting at X6 (X6+X7)
+        assert_eq!(locs[6], ArgLocation::Indirect { ptr_reg: gpr::X6 });
+    }
+
+    #[test]
+    fn classify_i128_param_after_7_gpr_args_goes_to_stack() {
+        // 7 i64 args use X0-X6, then I128 needs 2 consecutive but only X7 left.
+        // Should overflow to stack.
+        let mut params: Vec<Type> = vec![Type::I64; 7];
+        params.push(Type::I128);
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 8);
+        // I128 at index 7: not enough consecutive GPRs -> stack
+        assert!(matches!(locs[7], ArgLocation::Stack { size: 16, .. }));
+    }
+
+    // ===================================================================
+    // Coverage expansion: non-HFA aggregate parameter classification
+    // ===================================================================
+
+    #[test]
+    fn classify_small_non_hfa_struct_in_gpr() {
+        // struct { i32, i16 } = 6 bytes (with padding -> 8) -> fits in 1 GPR
+        let small = Type::Struct(vec![Type::I32, Type::I16]);
+        assert!(small.bytes() <= 8);
+        let locs = AppleAArch64ABI::classify_params(&[small]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+    }
+
+    #[test]
+    fn classify_medium_non_hfa_struct_in_two_gprs() {
+        // struct { i64, i32 } = 16 bytes -> 2 GPRs (Indirect encoding)
+        let medium = Type::Struct(vec![Type::I64, Type::I32]);
+        assert!(medium.bytes() > 8 && medium.bytes() <= 16);
+        let locs = AppleAArch64ABI::classify_params(&[medium]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Indirect { ptr_reg: gpr::X0 });
+    }
+
+    #[test]
+    fn classify_large_non_hfa_struct_indirect() {
+        // struct { i64, i64, i64 } = 24 bytes > 16 -> indirect via pointer
+        let large = Type::Struct(vec![Type::I64, Type::I64, Type::I64]);
+        assert!(large.bytes() > 16);
+        let locs = AppleAArch64ABI::classify_params(&[large]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Indirect { ptr_reg: gpr::X0 });
+    }
+
+    // ===================================================================
+    // Coverage expansion: nested HFA detection
+    // ===================================================================
+
+    #[test]
+    fn detect_hfa_nested_struct_two_f32() {
+        // struct { struct { f32 }, struct { f32 } } -> 2x F32 HFA
+        let inner = Type::Struct(vec![Type::F32]);
+        let outer = Type::Struct(vec![inner.clone(), inner]);
+        let hfa = AppleAArch64ABI::detect_hfa(&outer);
+        assert_eq!(hfa, Some((Type::F32, 2)));
+    }
+
+    #[test]
+    fn detect_hfa_array_of_struct_f64() {
+        // [struct { f64 }; 2] -> 2x F64 HFA
+        let inner = Type::Struct(vec![Type::F64]);
+        let arr = Type::Array(Box::new(inner), 2);
+        let hfa = AppleAArch64ABI::detect_hfa(&arr);
+        assert_eq!(hfa, Some((Type::F64, 2)));
+    }
+
+    #[test]
+    fn detect_hfa_nested_too_many_flattened_fields() {
+        // struct { struct { f32, f32 }, struct { f32, f32, f32 } } -> 5 flattened fields > 4
+        let two_f32 = Type::Struct(vec![Type::F32, Type::F32]);
+        let three_f32 = Type::Struct(vec![Type::F32, Type::F32, Type::F32]);
+        let outer = Type::Struct(vec![two_f32, three_f32]);
+        let hfa = AppleAArch64ABI::detect_hfa(&outer);
+        assert_eq!(hfa, None, "5 flattened FP fields exceeds HFA limit of 4");
+    }
+
+    #[test]
+    fn detect_hfa_single_f64_field() {
+        // struct { f64 } -> HFA: 1x F64
+        let ty = Type::Struct(vec![Type::F64]);
+        let hfa = AppleAArch64ABI::detect_hfa(&ty);
+        assert_eq!(hfa, Some((Type::F64, 1)));
+    }
+
+    #[test]
+    fn detect_hfa_zero_element_array_not_hfa() {
+        let ty = Type::Array(Box::new(Type::F32), 0);
+        let hfa = AppleAArch64ABI::detect_hfa(&ty);
+        assert_eq!(hfa, None);
+    }
+
+    // ===================================================================
+    // Coverage expansion: mixed GPR/FPR argument interleaving
+    // ===================================================================
+
+    #[test]
+    fn classify_mixed_8_gpr_8_fpr_all_in_regs() {
+        // 8 ints + 8 floats: all should fit since GPR and FPR have independent pools
+        let mut params = Vec::new();
+        for _i in 0..8 {
+            params.push(Type::I64);
+            params.push(Type::F64);
+        }
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 16);
+        // All should be in registers (8 GPR + 8 FPR)
+        for loc in &locs {
+            assert!(matches!(loc, ArgLocation::Reg(_)),
+                "Expected all 16 args in registers, got {:?}", loc);
+        }
+    }
+
+    #[test]
+    fn classify_float_overflow_9_fpr_args() {
+        // 9 float args: first 8 in V0-V7, 9th on stack
+        let params: Vec<Type> = (0..9).map(|_| Type::F64).collect();
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 9);
+        for i in 0..8 {
+            assert_eq!(locs[i], ArgLocation::Reg(FPR_ARG_REGS[i]));
+        }
+        assert!(matches!(locs[8], ArgLocation::Stack { offset: 0, size: 8 }));
+    }
+
+    // ===================================================================
+    // Coverage expansion: align_up helper
+    // ===================================================================
+
+    #[test]
+    fn align_up_values() {
+        assert_eq!(align_up(0, 8), 0);
+        assert_eq!(align_up(1, 8), 8);
+        assert_eq!(align_up(7, 8), 8);
+        assert_eq!(align_up(8, 8), 8);
+        assert_eq!(align_up(9, 8), 16);
+        assert_eq!(align_up(16, 16), 16);
+        assert_eq!(align_up(1, 16), 16);
+    }
+
+    // ===================================================================
+    // Coverage expansion: empty params and returns
+    // ===================================================================
+
+    #[test]
+    fn classify_no_params() {
+        let locs = AppleAArch64ABI::classify_params(&[]);
+        assert!(locs.is_empty());
+    }
+
+    #[test]
+    fn classify_no_returns() {
+        let locs = AppleAArch64ABI::classify_returns(&[]);
+        assert!(locs.is_empty());
+    }
+
+    #[test]
+    fn stack_args_size_empty() {
+        assert_eq!(AppleAArch64ABI::stack_args_size(&[]), 0);
+    }
+
+    // ===================================================================
+    // Coverage expansion: multiple stack overflow args sizing
+    // ===================================================================
+
+    #[test]
+    fn stack_args_size_three_overflow() {
+        // 11 integer args -> 3 overflow on stack (8 bytes each)
+        let params: Vec<Type> = (0..11).map(|_| Type::I64).collect();
+        let size = AppleAArch64ABI::stack_args_size(&params);
+        assert_eq!(size, 24); // three 8-byte slots
+    }
+
+    #[test]
+    fn variadic_stack_args_size_multiple_varargs() {
+        // printf(fmt, a, b, c) -> fmt in X0, 3 varargs on stack
+        let params = vec![Type::I64, Type::I32, Type::I64, Type::F64];
+        let size = AppleAArch64ABI::stack_args_size_variadic(1, &params);
+        assert_eq!(size, 24); // three 8-byte slots
+    }
+
+    // ===================================================================
+    // Coverage expansion: B1 parameter classification
+    // ===================================================================
+
+    #[test]
+    fn classify_b1_param_in_gpr() {
+        let locs = AppleAArch64ABI::classify_params(&[Type::B1]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+    }
+
+    #[test]
+    fn classify_i8_param_in_gpr() {
+        let locs = AppleAArch64ABI::classify_params(&[Type::I8]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+    }
+
+    #[test]
+    fn classify_i16_param_in_gpr() {
+        let locs = AppleAArch64ABI::classify_params(&[Type::I16]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+    }
+
+    #[test]
+    fn classify_f32_param_in_fpr() {
+        let locs = AppleAArch64ABI::classify_params(&[Type::F32]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+    }
 }

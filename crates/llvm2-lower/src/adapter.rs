@@ -3133,4 +3133,620 @@ mod tests {
             other => panic!("expected Call, got {:?}", other),
         }
     }
+
+    // ===================================================================
+    // Coverage expansion: type translation edge cases
+    // ===================================================================
+
+    #[test]
+    fn test_translate_type_uint_variants() {
+        // Unsigned types should map to the same LIR type as signed
+        assert_eq!(translate_type(&Ty::UInt(8)).unwrap(), Type::I8);
+        assert_eq!(translate_type(&Ty::UInt(16)).unwrap(), Type::I16);
+        assert_eq!(translate_type(&Ty::UInt(128)).unwrap(), Type::I128);
+    }
+
+    #[test]
+    fn test_translate_type_unsupported_bitwidth_errors() {
+        assert!(translate_type(&Ty::Int(7)).is_err());
+        assert!(translate_type(&Ty::UInt(3)).is_err());
+        assert!(translate_type(&Ty::Float(16)).is_err());
+    }
+
+    #[test]
+    fn test_translate_type_func_errors() {
+        let func_ty = Ty::Func(tmir_types::FuncTy {
+            params: vec![Ty::Int(32)],
+            returns: vec![Ty::Int(32)],
+        });
+        assert!(translate_type(&func_ty).is_err());
+    }
+
+    #[test]
+    fn test_translate_type_nested_ptr() {
+        // Ptr(Ptr(Int(32))) -> I64 (all pointers are 64-bit)
+        let ty = Ty::Ptr(Box::new(Ty::Ptr(Box::new(Ty::Int(32)))));
+        assert_eq!(translate_type(&ty).unwrap(), Type::I64);
+    }
+
+    #[test]
+    fn test_translate_type_struct_with_defs() {
+        use tmir_types::{StructId, StructDef, FieldDef};
+        let structs = vec![StructDef {
+            id: StructId(0),
+            name: "Point".to_string(),
+            fields: vec![
+                FieldDef { name: "x".to_string(), ty: Ty::Float(64), offset: None },
+                FieldDef { name: "y".to_string(), ty: Ty::Float(64), offset: None },
+            ],
+            size: None,
+            align: None,
+        }];
+        let result = translate_type_with_structs(&Ty::Struct(StructId(0)), &structs).unwrap();
+        assert_eq!(result, Type::Struct(vec![Type::F64, Type::F64]));
+    }
+
+    #[test]
+    fn test_translate_type_array_of_array() {
+        // Array of arrays: [[i32; 3]; 2]
+        let inner = Ty::Array(Box::new(Ty::Int(32)), 3);
+        let outer = Ty::Array(Box::new(inner), 2);
+        let result = translate_type(&outer).unwrap();
+        assert_eq!(result, Type::Array(
+            Box::new(Type::Array(Box::new(Type::I32), 3)),
+            2
+        ));
+    }
+
+    // ===================================================================
+    // Coverage expansion: proof extraction and ProofContext
+    // ===================================================================
+
+    #[test]
+    fn test_proof_context_no_overflow() {
+        let mut ctx = ProofContext::default();
+        let val = Value(0);
+        ctx.value_proofs.insert(val, vec![Proof::NoOverflow { signed: true }]);
+
+        assert!(ctx.has_no_overflow(&val));
+        assert!(!ctx.has_not_null(&val));
+        assert!(!ctx.has_in_bounds(&val));
+    }
+
+    #[test]
+    fn test_proof_context_not_null() {
+        let mut ctx = ProofContext::default();
+        let val = Value(1);
+        ctx.value_proofs.insert(val, vec![Proof::NotNull { ptr: ValueId(0) }]);
+
+        assert!(ctx.has_not_null(&val));
+        assert!(!ctx.has_no_overflow(&val));
+    }
+
+    #[test]
+    fn test_proof_context_in_bounds() {
+        let mut ctx = ProofContext::default();
+        let val = Value(2);
+        ctx.value_proofs.insert(val, vec![Proof::InBounds {
+            base: ValueId(0),
+            index: ValueId(1),
+        }]);
+
+        assert!(ctx.has_in_bounds(&val));
+    }
+
+    #[test]
+    fn test_proof_context_non_zero_divisor() {
+        let mut ctx = ProofContext::default();
+        let val = Value(3);
+        ctx.value_proofs.insert(val, vec![Proof::NonZeroDivisor { divisor: ValueId(1) }]);
+
+        assert!(ctx.has_non_zero_divisor(&val));
+    }
+
+    #[test]
+    fn test_proof_context_range() {
+        let mut ctx = ProofContext::default();
+        let val = Value(4);
+        ctx.value_proofs.insert(val, vec![Proof::InRange { lo: 0, hi: 255 }]);
+
+        let range = ctx.get_range(&val);
+        assert_eq!(range, Some((0, 255)));
+    }
+
+    #[test]
+    fn test_proof_context_valid_borrow() {
+        let mut ctx = ProofContext::default();
+        let val = Value(5);
+        ctx.value_proofs.insert(val, vec![Proof::ValidBorrow { borrow: ValueId(0) }]);
+
+        assert!(ctx.has_valid_borrow(&val));
+    }
+
+    #[test]
+    fn test_proof_context_valid_shift() {
+        let mut ctx = ProofContext::default();
+        let val = Value(6);
+        ctx.value_proofs.insert(val, vec![Proof::ValidShift {
+            amount: ValueId(1),
+            bitwidth: 32,
+        }]);
+
+        assert!(ctx.has_valid_shift(&val));
+    }
+
+    #[test]
+    fn test_proof_context_multiple_proofs() {
+        let mut ctx = ProofContext::default();
+        let val = Value(7);
+        ctx.value_proofs.insert(val, vec![
+            Proof::NoOverflow { signed: false },
+            Proof::InRange { lo: 0, hi: 100 },
+        ]);
+
+        assert!(ctx.has_no_overflow(&val));
+        assert_eq!(ctx.get_range(&val), Some((0, 100)));
+        assert_eq!(ctx.proofs_for(&val).len(), 2);
+    }
+
+    #[test]
+    fn test_proof_context_missing_value() {
+        let ctx = ProofContext::default();
+        let val = Value(99);
+
+        assert!(!ctx.has_no_overflow(&val));
+        assert!(!ctx.has_not_null(&val));
+        assert_eq!(ctx.get_range(&val), None);
+        assert!(ctx.proofs_for(&val).is_empty());
+    }
+
+    // ===================================================================
+    // Coverage expansion: proof extraction from tMIR
+    // ===================================================================
+
+    #[test]
+    fn test_extract_no_overflow_proof() {
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "no_overflow".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::Int(32), Ty::Int(32)],
+                returns: vec![Ty::Int(32)],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![
+                    (ValueId(0), Ty::Int(32)),
+                    (ValueId(1), Ty::Int(32)),
+                ],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::Int(32),
+                            lhs: ValueId(0),
+                            rhs: ValueId(1),
+                        },
+                        results: vec![ValueId(2)],
+                        proofs: vec![TmirProof::NoOverflow { signed: true }],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
+
+        let (_, proof_ctx) = translate_function(&func, &[]).unwrap();
+        // The NoOverflow proof should be attached to the result value
+        let _result_val = Value(2); // adapter maps ValueId(2) -> Value(2) (0-based allocation)
+        // Check that some value has a no_overflow proof
+        let has_overflow_proof = proof_ctx.value_proofs.values()
+            .any(|proofs| proofs.iter().any(|p| matches!(p, Proof::NoOverflow { .. })));
+        assert!(has_overflow_proof, "NoOverflow proof should be extracted");
+    }
+
+    // ===================================================================
+    // Coverage expansion: unop FNeg translation
+    // ===================================================================
+
+    #[test]
+    fn test_translate_unop_fneg() {
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "fneg".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::Float(64)],
+                returns: vec![Ty::Float(64)],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![(ValueId(0), Ty::Float(64))],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::UnOp {
+                            op: UnOp::FNeg,
+                            ty: Ty::Float(64),
+                            operand: ValueId(0),
+                        },
+                        results: vec![ValueId(1)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(1)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
+
+        let (lir_func, _) = translate_function(&func, &[]).unwrap();
+        let entry = &lir_func.blocks[&lir_func.entry_block];
+
+        assert_eq!(entry.instructions.len(), 2);
+        assert!(matches!(entry.instructions[0].opcode, Opcode::Fneg));
+    }
+
+    // ===================================================================
+    // Coverage expansion: borrow/ownership instruction translation
+    // ===================================================================
+
+    #[test]
+    fn test_translate_borrow_as_copy() {
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "borrow".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::Ptr(Box::new(Ty::Int(32)))],
+                returns: vec![Ty::Ptr(Box::new(Ty::Int(32)))],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![(ValueId(0), Ty::Ptr(Box::new(Ty::Int(32))))],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Borrow {
+                            ty: Ty::Ptr(Box::new(Ty::Int(32))),
+                            value: ValueId(0),
+                        },
+                        results: vec![ValueId(1)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(1)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
+
+        let (lir_func, _) = translate_function(&func, &[]).unwrap();
+        let entry = &lir_func.blocks[&lir_func.entry_block];
+
+        // Borrow is lowered as a copy (Iadd with single arg)
+        assert_eq!(entry.instructions.len(), 2);
+        assert!(matches!(entry.instructions[0].opcode, Opcode::Iadd));
+        assert_eq!(entry.instructions[0].args.len(), 1, "Borrow should be a single-arg copy");
+    }
+
+    // ===================================================================
+    // Coverage expansion: nop instruction translation (empty func)
+    // ===================================================================
+
+    #[test]
+    fn test_translate_nop_empty_func() {
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "nop".to_string(),
+            ty: FuncTy {
+                params: vec![],
+                returns: vec![],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Nop,
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return { values: vec![] },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
+
+        let (lir_func, _) = translate_function(&func, &[]).unwrap();
+        let entry = &lir_func.blocks[&lir_func.entry_block];
+
+        // Nop should produce no instructions, so only Return remains
+        assert_eq!(entry.instructions.len(), 1);
+        assert!(matches!(entry.instructions[0].opcode, Opcode::Return));
+    }
+
+    // ===================================================================
+    // Coverage expansion: multi-block function with value mapping
+    // ===================================================================
+
+    #[test]
+    fn test_translate_multi_block_with_phi() {
+        // Simple diamond: entry -> then/else -> (implicit merge via return)
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "diamond".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::Bool, Ty::Int(32)],
+                returns: vec![Ty::Int(32)],
+            },
+            entry: BlockId(0),
+            blocks: vec![
+                TmirBlockDef {
+                    id: BlockId(0),
+                    params: vec![
+                        (ValueId(0), Ty::Bool),
+                        (ValueId(1), Ty::Int(32)),
+                    ],
+                    body: vec![
+                        InstrNode {
+                            instr: Instr::Const { ty: Ty::Int(32), value: 42 },
+                            results: vec![ValueId(2)],
+                            proofs: vec![],
+                        },
+                        InstrNode {
+                            instr: Instr::CondBr {
+                                cond: ValueId(0),
+                                then_target: BlockId(1),
+                                then_args: vec![],
+                                else_target: BlockId(2),
+                                else_args: vec![],
+                            },
+                            results: vec![],
+                            proofs: vec![],
+                        },
+                    ],
+                },
+                TmirBlockDef {
+                    id: BlockId(1),
+                    params: vec![],
+                    body: vec![InstrNode {
+                        instr: Instr::Return { values: vec![ValueId(1)] },
+                        results: vec![],
+                        proofs: vec![],
+                    }],
+                },
+                TmirBlockDef {
+                    id: BlockId(2),
+                    params: vec![],
+                    body: vec![InstrNode {
+                        instr: Instr::Return { values: vec![ValueId(2)] },
+                        results: vec![],
+                        proofs: vec![],
+                    }],
+                },
+            ],
+            proofs: vec![],
+        };
+
+        let (lir_func, _) = translate_function(&func, &[]).unwrap();
+        assert_eq!(lir_func.blocks.len(), 3);
+
+        // Entry block should have: Iconst + Brif = 2 instructions
+        let entry = &lir_func.blocks[&lir_func.entry_block];
+        assert_eq!(entry.instructions.len(), 2);
+        assert!(matches!(entry.instructions[0].opcode, Opcode::Iconst { .. }));
+        assert!(matches!(entry.instructions[1].opcode, Opcode::Brif { .. }));
+    }
+
+    // ===================================================================
+    // Coverage expansion: translate_module with multiple functions
+    // ===================================================================
+
+    #[test]
+    fn test_translate_module_two_functions() {
+        let module = TmirModule {
+            name: "two_funcs".to_string(),
+            functions: vec![
+                TmirFunc {
+                    id: FuncId(0),
+                    name: "first".to_string(),
+                    ty: FuncTy {
+                        params: vec![],
+                        returns: vec![Ty::Int(32)],
+                    },
+                    entry: BlockId(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId(0),
+                        params: vec![],
+                        body: vec![
+                            InstrNode {
+                                instr: Instr::Const { ty: Ty::Int(32), value: 1 },
+                                results: vec![ValueId(0)],
+                                proofs: vec![],
+                            },
+                            InstrNode {
+                                instr: Instr::Return { values: vec![ValueId(0)] },
+                                results: vec![],
+                                proofs: vec![],
+                            },
+                        ],
+                    }],
+                    proofs: vec![],
+                },
+                TmirFunc {
+                    id: FuncId(1),
+                    name: "second".to_string(),
+                    ty: FuncTy {
+                        params: vec![Ty::Float(64)],
+                        returns: vec![Ty::Float(64)],
+                    },
+                    entry: BlockId(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId(0),
+                        params: vec![(ValueId(0), Ty::Float(64))],
+                        body: vec![InstrNode {
+                            instr: Instr::Return { values: vec![ValueId(0)] },
+                            results: vec![],
+                            proofs: vec![],
+                        }],
+                    }],
+                    proofs: vec![],
+                },
+            ],
+            structs: vec![],
+        };
+
+        let results = translate_module(&module).unwrap();
+        assert_eq!(results.len(), 2);
+
+        let (func1, _) = &results[0];
+        assert_eq!(func1.name, "first");
+        assert_eq!(func1.signature.params.len(), 0);
+        assert_eq!(func1.signature.returns, vec![Type::I32]);
+
+        let (func2, _) = &results[1];
+        assert_eq!(func2.name, "second");
+        assert_eq!(func2.signature.params, vec![Type::F64]);
+        assert_eq!(func2.signature.returns, vec![Type::F64]);
+    }
+
+    // ===================================================================
+    // Coverage expansion: IsUnique instruction translation
+    // ===================================================================
+
+    #[test]
+    fn test_translate_is_unique() {
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "is_unique".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::Ptr(Box::new(Ty::Int(32)))],
+                returns: vec![Ty::Bool],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![(ValueId(0), Ty::Ptr(Box::new(Ty::Int(32))))],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::IsUnique { value: ValueId(0) },
+                        results: vec![ValueId(1)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return { values: vec![ValueId(1)] },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
+
+        let (lir_func, _) = translate_function(&func, &[]).unwrap();
+        let entry = &lir_func.blocks[&lir_func.entry_block];
+
+        // IsUnique is lowered as constant true (Iconst B1, 1)
+        assert_eq!(entry.instructions.len(), 2);
+        match &entry.instructions[0].opcode {
+            Opcode::Iconst { ty, imm } => {
+                assert_eq!(*ty, Type::B1);
+                assert_eq!(*imm, 1);
+            }
+            other => panic!("expected Iconst, got {:?}", other),
+        }
+    }
+
+    // ===================================================================
+    // Coverage expansion: all float comparison predicates with CC check
+    // ===================================================================
+
+    #[test]
+    fn test_translate_all_float_cmp_variants_with_cc_check() {
+        let float_cmp_ops = vec![
+            (CmpOp::FOeq, FloatCC::Equal),
+            (CmpOp::FOne, FloatCC::NotEqual),
+            (CmpOp::FOlt, FloatCC::LessThan),
+            (CmpOp::FOle, FloatCC::LessThanOrEqual),
+            (CmpOp::FOgt, FloatCC::GreaterThan),
+            (CmpOp::FOge, FloatCC::GreaterThanOrEqual),
+            // Unordered variants map to ordered for now
+            (CmpOp::FUeq, FloatCC::Equal),
+            (CmpOp::FUne, FloatCC::NotEqual),
+            (CmpOp::FUlt, FloatCC::LessThan),
+            (CmpOp::FUle, FloatCC::LessThanOrEqual),
+            (CmpOp::FUgt, FloatCC::GreaterThan),
+            (CmpOp::FUge, FloatCC::GreaterThanOrEqual),
+        ];
+
+        for (tmir_op, expected_cc) in float_cmp_ops {
+            let func = TmirFunc {
+                id: FuncId(0),
+                name: format!("fcmp_{:?}", tmir_op),
+                ty: FuncTy {
+                    params: vec![Ty::Float(64), Ty::Float(64)],
+                    returns: vec![Ty::Bool],
+                },
+                entry: BlockId(0),
+                blocks: vec![TmirBlockDef {
+                    id: BlockId(0),
+                    params: vec![
+                        (ValueId(0), Ty::Float(64)),
+                        (ValueId(1), Ty::Float(64)),
+                    ],
+                    body: vec![
+                        InstrNode {
+                            instr: Instr::Cmp {
+                                op: tmir_op,
+                                ty: Ty::Float(64),
+                                lhs: ValueId(0),
+                                rhs: ValueId(1),
+                            },
+                            results: vec![ValueId(2)],
+                            proofs: vec![],
+                        },
+                        InstrNode {
+                            instr: Instr::Return { values: vec![ValueId(2)] },
+                            results: vec![],
+                            proofs: vec![],
+                        },
+                    ],
+                }],
+                proofs: vec![],
+            };
+
+            let result = translate_function(&func, &[]);
+            assert!(result.is_ok(), "Float cmp {:?} should translate", tmir_op);
+            let (lir_func, _) = result.unwrap();
+            let entry = &lir_func.blocks[&lir_func.entry_block];
+            match &entry.instructions[0].opcode {
+                Opcode::Fcmp { cond } => {
+                    assert_eq!(*cond, expected_cc,
+                        "Float cmp {:?} should map to {:?}", tmir_op, expected_cc);
+                }
+                other => panic!("expected Fcmp, got {:?}", other),
+            }
+        }
+    }
 }

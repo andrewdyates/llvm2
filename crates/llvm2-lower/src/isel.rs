@@ -6452,4 +6452,681 @@ mod tests {
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::B);
         assert_eq!(mblock.insts[0].operands[0], ISelOperand::Block(block_default));
     }
+
+    // =======================================================================
+    // Coverage expansion: multiplication and division ISel
+    // =======================================================================
+
+    #[test]
+    fn select_imul_i32() {
+        let (mut isel, entry) = make_add_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Imul,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::MulRR);
+    }
+
+    #[test]
+    fn select_imul_i64() {
+        let (mut isel, entry) = make_i64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Imul,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::MulRR);
+    }
+
+    #[test]
+    fn select_sdiv_i32() {
+        let (mut isel, entry) = make_add_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Sdiv,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::SDiv);
+    }
+
+    #[test]
+    fn select_sdiv_i64() {
+        let (mut isel, entry) = make_i64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Sdiv,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::SDiv);
+    }
+
+    #[test]
+    fn select_udiv_i32() {
+        let (mut isel, entry) = make_add_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Udiv,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::UDiv);
+    }
+
+    #[test]
+    fn select_udiv_i64() {
+        let (mut isel, entry) = make_i64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Udiv,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::UDiv);
+    }
+
+    // =======================================================================
+    // Coverage expansion: unconditional jump
+    // =======================================================================
+
+    #[test]
+    fn select_jump_unconditional() {
+        let (mut isel, entry) = make_empty_isel();
+        let target = Block(1);
+        isel.func.ensure_block(target);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Jump { dest: target },
+                args: vec![],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 1);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::B);
+        assert_eq!(mblock.insts[0].operands[0], ISelOperand::Block(target));
+        assert_eq!(mblock.successors.len(), 1);
+        assert_eq!(mblock.successors[0], target);
+    }
+
+    // =======================================================================
+    // Coverage expansion: load/store for 32-bit, 64-bit, and float types
+    // =======================================================================
+
+    #[test]
+    fn select_load_i32_emits_ldr() {
+        let (mut isel, entry) = make_empty_isel();
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Load { ty: Type::I32 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::LdrRI,
+            "Load I32 should emit LDR (word load)");
+    }
+
+    #[test]
+    fn select_load_i64_emits_ldr() {
+        let (mut isel, entry) = make_empty_isel();
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Load { ty: Type::I64 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::LdrRI,
+            "Load I64 should emit LDR (doubleword load)");
+    }
+
+    #[test]
+    fn select_load_f32_emits_ldr_s() {
+        let (mut isel, entry) = make_empty_isel();
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Load { ty: Type::F32 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        // F32 loads use LdrRI with FPR destination register class
+        assert_eq!(inst.opcode, AArch64Opcode::LdrRI,
+            "Load F32 should emit LDR (float single load)");
+    }
+
+    #[test]
+    fn select_load_f64_emits_ldr_d() {
+        let (mut isel, entry) = make_empty_isel();
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Load { ty: Type::F64 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::LdrRI,
+            "Load F64 should emit LDR (float double load)");
+    }
+
+    #[test]
+    fn select_store_i32_emits_str() {
+        let (mut isel, entry) = make_empty_isel();
+        let val_vreg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(0), ISelOperand::VReg(val_vreg), Type::I32);
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Store,
+                args: vec![Value(0), Value(1)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::StrRI,
+            "Store I32 should emit STR (word store)");
+    }
+
+    #[test]
+    fn select_store_i64_emits_str() {
+        let (mut isel, entry) = make_empty_isel();
+        let val_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(val_vreg), Type::I64);
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Store,
+                args: vec![Value(0), Value(1)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::StrRI,
+            "Store I64 should emit STR (doubleword store)");
+    }
+
+    // =======================================================================
+    // Coverage expansion: fconst materialization
+    // =======================================================================
+
+    #[test]
+    fn select_fconst_f32() {
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fconst { ty: Type::F32, imm: 1.0 },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::FmovImm);
+        assert_eq!(inst.operands[1], ISelOperand::FImm(1.0));
+    }
+
+    #[test]
+    fn select_fconst_f64() {
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fconst { ty: Type::F64, imm: 3.14 },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::FmovImm);
+    }
+
+    #[test]
+    fn select_fconst_invalid_type_errors() {
+        let (mut isel, entry) = make_empty_isel();
+        let result = isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fconst { ty: Type::I32, imm: 1.0 },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        );
+        assert!(result.is_err(), "Fconst with integer type should error");
+    }
+
+    // =======================================================================
+    // Coverage expansion: copy (single-arg Iadd adapter pattern)
+    // =======================================================================
+
+    #[test]
+    fn select_copy_single_arg_iadd() {
+        let (mut isel, entry) = make_empty_isel();
+        // Define a source value
+        let vreg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), Type::I32);
+
+        // Single-arg Iadd = COPY
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iadd,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 1);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::MovR,
+            "Single-arg Iadd should emit MOV (register copy)");
+    }
+
+    // =======================================================================
+    // Coverage expansion: select_block batch processing
+    // =======================================================================
+
+    #[test]
+    fn select_block_multiple_instructions() {
+        let sig = Signature {
+            params: vec![Type::I32, Type::I32],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("batch".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        // Select an entire block of instructions at once
+        let instructions = vec![
+            Instruction {
+                opcode: Opcode::Iadd,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            Instruction {
+                opcode: Opcode::Return,
+                args: vec![Value(2)],
+                results: vec![],
+            },
+        ];
+        isel.select_block(entry, &instructions).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 2 COPY (formal args) + 1 AddRR + 1 MovR (to X0) + 1 Ret = 5
+        assert_eq!(mblock.insts.len(), 5);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::AddRR);
+        assert_eq!(mblock.insts[4].opcode, AArch64Opcode::Ret);
+    }
+
+    // =======================================================================
+    // Coverage expansion: to_ir_func conversion
+    // =======================================================================
+
+    #[test]
+    fn isel_to_ir_func_conversion() {
+        let sig = Signature {
+            params: vec![Type::I32, Type::I32],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("add".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iadd,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Return,
+                args: vec![Value(2)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let ir_func = mfunc.to_ir_func();
+
+        // Verify basic properties of the converted IR function
+        assert_eq!(ir_func.name, "add");
+        assert_eq!(ir_func.block_order.len(), 1);
+        assert_eq!(ir_func.next_vreg, 3);
+        // Verify instructions were transferred
+        let entry_block = &ir_func.blocks[ir_func.entry.0 as usize];
+        assert_eq!(entry_block.insts.len(), 5); // 2 COPY + AddRR + MovR + Ret
+    }
+
+    // =======================================================================
+    // Coverage expansion: error handling edge cases
+    // =======================================================================
+
+    #[test]
+    fn select_binop_missing_args_errors() {
+        let (mut isel, entry) = make_empty_isel();
+        let vreg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), Type::I32);
+
+        // Iadd with only 1 arg when 2 are needed for binop path
+        // (Note: 1-arg Iadd goes to select_copy, but 0-arg would fail)
+        let result = isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Isub, // requires 2 args
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+        assert!(result.is_err(), "Isub with 1 arg should error");
+    }
+
+    #[test]
+    fn select_binop_missing_result_errors() {
+        let (mut isel, entry) = make_add_isel();
+        let result = isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iadd,
+                args: vec![Value(0), Value(1)],
+                results: vec![], // no result
+            },
+            entry,
+        );
+        assert!(result.is_err(), "Iadd with no result should error");
+    }
+
+    #[test]
+    fn select_undefined_value_errors() {
+        let (mut isel, entry) = make_empty_isel();
+        let result = isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iadd,
+                args: vec![Value(99), Value(100)], // never defined
+                results: vec![Value(101)],
+            },
+            entry,
+        );
+        assert!(result.is_err(), "Using undefined values should error");
+    }
+
+    // =======================================================================
+    // Coverage expansion: all IntCC condition code mappings
+    // =======================================================================
+
+    #[test]
+    fn condition_code_mapping_all_variants() {
+        // Exhaustively test all IntCC -> AArch64CC mappings
+        assert_eq!(AArch64CC::from_intcc(IntCC::Equal), AArch64CC::EQ);
+        assert_eq!(AArch64CC::from_intcc(IntCC::NotEqual), AArch64CC::NE);
+        assert_eq!(AArch64CC::from_intcc(IntCC::SignedLessThan), AArch64CC::LT);
+        assert_eq!(AArch64CC::from_intcc(IntCC::SignedGreaterThanOrEqual), AArch64CC::GE);
+        assert_eq!(AArch64CC::from_intcc(IntCC::SignedGreaterThan), AArch64CC::GT);
+        assert_eq!(AArch64CC::from_intcc(IntCC::SignedLessThanOrEqual), AArch64CC::LE);
+        assert_eq!(AArch64CC::from_intcc(IntCC::UnsignedLessThan), AArch64CC::LO);
+        assert_eq!(AArch64CC::from_intcc(IntCC::UnsignedGreaterThanOrEqual), AArch64CC::HS);
+        assert_eq!(AArch64CC::from_intcc(IntCC::UnsignedGreaterThan), AArch64CC::HI);
+        assert_eq!(AArch64CC::from_intcc(IntCC::UnsignedLessThanOrEqual), AArch64CC::LS);
+    }
+
+    #[test]
+    fn condition_code_inversion_round_trip() {
+        // Inverting twice should return to original
+        let codes = [
+            AArch64CC::EQ, AArch64CC::NE, AArch64CC::HS, AArch64CC::LO,
+            AArch64CC::MI, AArch64CC::PL, AArch64CC::VS, AArch64CC::VC,
+            AArch64CC::HI, AArch64CC::LS, AArch64CC::GE, AArch64CC::LT,
+            AArch64CC::GT, AArch64CC::LE,
+        ];
+        for cc in &codes {
+            assert_eq!(cc.invert().invert(), *cc,
+                "Double inversion should be identity for {:?}", cc);
+        }
+    }
+
+    // =======================================================================
+    // Coverage expansion: comparison selection for all IntCC variants
+    // =======================================================================
+
+    #[test]
+    fn select_icmp_all_signed_conditions() {
+        for (cc, expected_aarch64_cc) in &[
+            (IntCC::SignedLessThan, AArch64CC::LT),
+            (IntCC::SignedGreaterThan, AArch64CC::GT),
+            (IntCC::SignedLessThanOrEqual, AArch64CC::LE),
+            (IntCC::SignedGreaterThanOrEqual, AArch64CC::GE),
+        ] {
+            let (mut isel, entry) = make_add_isel();
+            isel.select_instruction(
+                &Instruction {
+                    opcode: Opcode::Icmp { cond: *cc },
+                    args: vec![Value(0), Value(1)],
+                    results: vec![Value(2)],
+                },
+                entry,
+            ).unwrap();
+            let mfunc = isel.finalize();
+            let mblock = &mfunc.blocks[&entry];
+            // Find the CSET instruction and verify condition code
+            let cset = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::CSet).unwrap();
+            assert_eq!(cset.operands[1], ISelOperand::CondCode(*expected_aarch64_cc),
+                "IntCC::{:?} should map to AArch64CC::{:?}", cc, expected_aarch64_cc);
+        }
+    }
+
+    #[test]
+    fn select_icmp_all_unsigned_conditions() {
+        for (cc, expected_aarch64_cc) in &[
+            (IntCC::UnsignedLessThan, AArch64CC::LO),
+            (IntCC::UnsignedGreaterThan, AArch64CC::HI),
+            (IntCC::UnsignedLessThanOrEqual, AArch64CC::LS),
+            (IntCC::UnsignedGreaterThanOrEqual, AArch64CC::HS),
+        ] {
+            let (mut isel, entry) = make_add_isel();
+            isel.select_instruction(
+                &Instruction {
+                    opcode: Opcode::Icmp { cond: *cc },
+                    args: vec![Value(0), Value(1)],
+                    results: vec![Value(2)],
+                },
+                entry,
+            ).unwrap();
+            let mfunc = isel.finalize();
+            let mblock = &mfunc.blocks[&entry];
+            let cset = mblock.insts.iter().find(|i| i.opcode == AArch64Opcode::CSet).unwrap();
+            assert_eq!(cset.operands[1], ISelOperand::CondCode(*expected_aarch64_cc),
+                "IntCC::{:?} should map to AArch64CC::{:?}", cc, expected_aarch64_cc);
+        }
+    }
+
+    // =======================================================================
+    // Coverage expansion: iconst edge cases
+    // =======================================================================
+
+    #[test]
+    fn select_iconst_zero() {
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iconst { ty: Type::I32, imm: 0 },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::Movz);
+        assert_eq!(inst.operands[1], ISelOperand::Imm(0));
+    }
+
+    #[test]
+    fn select_iconst_max_movz_range() {
+        // 0xFFFF is the max value for a single MOVZ
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iconst { ty: Type::I32, imm: 0xFFFF },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // Should be a single MOVZ (no MOVK needed)
+        assert_eq!(mblock.insts.len(), 1);
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Movz);
+        assert_eq!(mblock.insts[0].operands[1], ISelOperand::Imm(0xFFFF));
+    }
+
+    #[test]
+    fn select_iconst_just_above_movz_range() {
+        // 0x10000 requires MOVZ + MOVK
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iconst { ty: Type::I32, imm: 0x10000 },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // MOVZ low16=0x0000 + MOVK high16=0x0001
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Movz);
+        assert_eq!(mblock.insts[0].operands[1], ISelOperand::Imm(0));
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::Movk);
+        assert_eq!(mblock.insts[1].operands[1], ISelOperand::Imm(1));
+    }
+
+    #[test]
+    fn select_iconst_negative_boundary() {
+        // -0x10000 is the boundary of MOVN range
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iconst { ty: Type::I64, imm: -0x10000 },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Movn);
+        // MOVN encodes ~(-0x10000) = 0xFFFF
+        assert_eq!(mblock.insts[0].operands[1], ISelOperand::Imm(0xFFFF));
+    }
+
+    // =======================================================================
+    // Coverage expansion: reg_class_for_type helper
+    // =======================================================================
+
+    #[test]
+    fn reg_class_for_all_types() {
+        assert_eq!(reg_class_for_type(&Type::B1), RegClass::Gpr32);
+        assert_eq!(reg_class_for_type(&Type::I8), RegClass::Gpr32);
+        assert_eq!(reg_class_for_type(&Type::I16), RegClass::Gpr32);
+        assert_eq!(reg_class_for_type(&Type::I32), RegClass::Gpr32);
+        assert_eq!(reg_class_for_type(&Type::I64), RegClass::Gpr64);
+        assert_eq!(reg_class_for_type(&Type::I128), RegClass::Gpr64);
+        assert_eq!(reg_class_for_type(&Type::F32), RegClass::Fpr32);
+        assert_eq!(reg_class_for_type(&Type::F64), RegClass::Fpr64);
+        // Aggregates are pointers at machine level
+        assert_eq!(reg_class_for_type(&Type::Struct(vec![Type::I32])), RegClass::Gpr64);
+        assert_eq!(reg_class_for_type(&Type::Array(Box::new(Type::I32), 4)), RegClass::Gpr64);
+    }
+
+    // =======================================================================
+    // Coverage expansion: is_32bit helper
+    // =======================================================================
+
+    #[test]
+    fn is_32bit_classification() {
+        assert!(InstructionSelector::is_32bit(&Type::B1));
+        assert!(InstructionSelector::is_32bit(&Type::I8));
+        assert!(InstructionSelector::is_32bit(&Type::I16));
+        assert!(InstructionSelector::is_32bit(&Type::I32));
+        assert!(InstructionSelector::is_32bit(&Type::F32));
+        assert!(!InstructionSelector::is_32bit(&Type::I64));
+        assert!(!InstructionSelector::is_32bit(&Type::I128));
+        assert!(!InstructionSelector::is_32bit(&Type::F64));
+    }
 }
