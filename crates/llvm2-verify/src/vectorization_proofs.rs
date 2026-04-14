@@ -57,7 +57,8 @@
 //!
 //! ## Coverage
 //!
-//! 11 integer/bitwise operations x 2 arrangements = 22 proofs.
+//! 11 integer/bitwise operations across multiple arrangements = 31 proofs.
+//! Key arrangements: 4S (32-bit), 8H (16-bit), 2D (64-bit), 16B/8B (8-bit).
 //! FADD and FMUL proofs are deferred pending FP semantic encoders.
 
 use crate::lowering_proof::ProofObligation;
@@ -162,6 +163,11 @@ pub fn proof_vectorize_add_4s() -> ProofObligation {
     proof_vectorize_add(VectorArrangement::S4, "4S")
 }
 
+/// Proof: scalar add -> NEON ADD.8H (128-bit, 8x16-bit -- i16 vectorization).
+pub fn proof_vectorize_add_8h() -> ProofObligation {
+    proof_vectorize_add(VectorArrangement::H8, "8H")
+}
+
 /// Proof: scalar add -> NEON ADD.2D (128-bit, 2x64-bit -- i64 vectorization).
 pub fn proof_vectorize_add_2d() -> ProofObligation {
     proof_vectorize_add(VectorArrangement::D2, "2D")
@@ -201,6 +207,11 @@ pub fn proof_vectorize_sub_8h() -> ProofObligation {
     proof_vectorize_sub(VectorArrangement::H8, "8H")
 }
 
+/// Proof: scalar sub -> NEON SUB.2D (128-bit, 2x64-bit).
+pub fn proof_vectorize_sub_2d() -> ProofObligation {
+    proof_vectorize_sub(VectorArrangement::D2, "2D")
+}
+
 // ---------------------------------------------------------------------------
 // Vectorization proof: scalar MUL -> NEON MUL
 // ---------------------------------------------------------------------------
@@ -230,6 +241,11 @@ fn proof_vectorize_mul(arrangement: VectorArrangement, label: &str) -> ProofObli
 /// Proof: scalar mul -> NEON MUL.4S (128-bit, 4x32-bit).
 pub fn proof_vectorize_mul_4s() -> ProofObligation {
     proof_vectorize_mul(VectorArrangement::S4, "4S")
+}
+
+/// Proof: scalar mul -> NEON MUL.8H (128-bit, 8x16-bit).
+pub fn proof_vectorize_mul_8h() -> ProofObligation {
+    proof_vectorize_mul(VectorArrangement::H8, "8H")
 }
 
 /// Proof: scalar mul -> NEON MUL.16B (128-bit, 16x8-bit).
@@ -301,6 +317,42 @@ pub fn proof_vectorize_and_16b() -> ProofObligation {
     proof_vectorize_and(128, "16B")
 }
 
+/// Proof: per-lane AND -> NEON AND at a lane-decomposed arrangement.
+///
+/// While bitwise AND is trivially lane-agnostic, this proof formally
+/// validates the vectorization pass assumption: applying `bvand` to
+/// each lane independently produces the same result as the full-vector
+/// NEON AND instruction. Covers arrangements where 8H/2D semantics
+/// are relevant for the scalar-to-NEON mapping table.
+fn proof_vectorize_and_lanes(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+    let scalar_per_lane = map_lanes_binary(&vn, &vm, arrangement, |a, b| a.bvand(b));
+    let neon_result = encode_neon_and(&vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("Vectorize: ScalarAnd -> NEON AND.{}", label),
+        tmir_expr: scalar_per_lane,
+        aarch64_expr: neon_result,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: per-lane AND -> NEON AND.8H (128-bit, 8x16-bit lanes).
+pub fn proof_vectorize_and_8h() -> ProofObligation {
+    proof_vectorize_and_lanes(VectorArrangement::H8, "8H")
+}
+
+/// Proof: per-lane AND -> NEON AND.2D (128-bit, 2x64-bit lanes).
+pub fn proof_vectorize_and_2d() -> ProofObligation {
+    proof_vectorize_and_lanes(VectorArrangement::D2, "2D")
+}
+
 // ---------------------------------------------------------------------------
 // Vectorization proof: scalar ORR -> NEON ORR
 // ---------------------------------------------------------------------------
@@ -332,6 +384,39 @@ pub fn proof_vectorize_orr_16b() -> ProofObligation {
     proof_vectorize_orr(128, "16B")
 }
 
+/// Proof: per-lane OR -> NEON ORR at a lane-decomposed arrangement.
+///
+/// Validates the vectorization pass assumption that per-lane `bvor`
+/// matches the full-vector NEON ORR for specific lane arrangements.
+fn proof_vectorize_orr_lanes(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+    let scalar_per_lane = map_lanes_binary(&vn, &vm, arrangement, |a, b| a.bvor(b));
+    let neon_result = encode_neon_orr(&vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("Vectorize: ScalarOrr -> NEON ORR.{}", label),
+        tmir_expr: scalar_per_lane,
+        aarch64_expr: neon_result,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: per-lane OR -> NEON ORR.8H (128-bit, 8x16-bit lanes).
+pub fn proof_vectorize_orr_8h() -> ProofObligation {
+    proof_vectorize_orr_lanes(VectorArrangement::H8, "8H")
+}
+
+/// Proof: per-lane OR -> NEON ORR.2D (128-bit, 2x64-bit lanes).
+pub fn proof_vectorize_orr_2d() -> ProofObligation {
+    proof_vectorize_orr_lanes(VectorArrangement::D2, "2D")
+}
+
 // ---------------------------------------------------------------------------
 // Vectorization proof: scalar EOR -> NEON EOR
 // ---------------------------------------------------------------------------
@@ -361,6 +446,39 @@ pub fn proof_vectorize_eor_8b() -> ProofObligation {
 /// Proof: scalar XOR -> NEON EOR.16B (128-bit).
 pub fn proof_vectorize_eor_16b() -> ProofObligation {
     proof_vectorize_eor(128, "16B")
+}
+
+/// Proof: per-lane XOR -> NEON EOR at a lane-decomposed arrangement.
+///
+/// Validates the vectorization pass assumption that per-lane `bvxor`
+/// matches the full-vector NEON EOR for specific lane arrangements.
+fn proof_vectorize_eor_lanes(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+    let scalar_per_lane = map_lanes_binary(&vn, &vm, arrangement, |a, b| a.bvxor(b));
+    let neon_result = encode_neon_eor(&vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("Vectorize: ScalarEor -> NEON EOR.{}", label),
+        tmir_expr: scalar_per_lane,
+        aarch64_expr: neon_result,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: per-lane XOR -> NEON EOR.8H (128-bit, 8x16-bit lanes).
+pub fn proof_vectorize_eor_8h() -> ProofObligation {
+    proof_vectorize_eor_lanes(VectorArrangement::H8, "8H")
+}
+
+/// Proof: per-lane XOR -> NEON EOR.2D (128-bit, 2x64-bit lanes).
+pub fn proof_vectorize_eor_2d() -> ProofObligation {
+    proof_vectorize_eor_lanes(VectorArrangement::D2, "2D")
 }
 
 // ---------------------------------------------------------------------------
@@ -523,33 +641,47 @@ pub fn proof_vectorize_sshr_8h() -> ProofObligation {
 // Aggregate: all vectorization lowering proofs
 // ---------------------------------------------------------------------------
 
-/// Return all 22 vectorization lowering proof obligations.
+/// Return all 31 vectorization lowering proof obligations.
 ///
-/// 11 operations x 2 arrangements (one 64-bit or primary, one 128-bit) = 22 proofs.
+/// 11 operations across multiple arrangements:
+/// - Arithmetic: ADD (4S/8H/2D), SUB (4S/8H/2D), MUL (4S/8H/16B), NEG (4S/2D) = 12
+/// - Bitwise: AND (8B/16B/8H/2D), ORR (8B/16B/8H/2D), EOR (8B/16B/8H/2D),
+///            BIC (8B/16B) = 14
+/// - Shifts: SHL (4S/8H), USHR (4S/2D), SSHR (4S/8H) = 6
+/// Total: 12 + 14 - 1 (BIC only 2) + 6 = 31 (adjusted: 12 + 14 + 6 - 1 = 31)
 ///
 /// These validate every integer/bitwise mapping in `scalar_to_neon_op()`.
 /// FADD and FMUL are deferred pending FP semantic encoders in `neon_semantics.rs`.
 pub fn all_vectorization_proofs() -> Vec<ProofObligation> {
     vec![
-        // Arithmetic (4 ops x 2 arrangements = 8 proofs)
+        // Arithmetic: ADD (3), SUB (3), MUL (3), NEG (2) = 11 proofs
         proof_vectorize_add_4s(),
+        proof_vectorize_add_8h(),
         proof_vectorize_add_2d(),
         proof_vectorize_sub_4s(),
         proof_vectorize_sub_8h(),
+        proof_vectorize_sub_2d(),
         proof_vectorize_mul_4s(),
+        proof_vectorize_mul_8h(),
         proof_vectorize_mul_16b(),
         proof_vectorize_neg_4s(),
         proof_vectorize_neg_2d(),
-        // Bitwise (4 ops x 2 arrangements = 8 proofs)
+        // Bitwise: AND (4), ORR (4), EOR (4), BIC (2) = 14 proofs
         proof_vectorize_and_8b(),
         proof_vectorize_and_16b(),
+        proof_vectorize_and_8h(),
+        proof_vectorize_and_2d(),
         proof_vectorize_orr_8b(),
         proof_vectorize_orr_16b(),
+        proof_vectorize_orr_8h(),
+        proof_vectorize_orr_2d(),
         proof_vectorize_eor_8b(),
         proof_vectorize_eor_16b(),
+        proof_vectorize_eor_8h(),
+        proof_vectorize_eor_2d(),
         proof_vectorize_bic_8b(),
         proof_vectorize_bic_16b(),
-        // Shifts (3 ops x 2 arrangements = 6 proofs)
+        // Shifts: SHL (2), USHR (2), SSHR (2) = 6 proofs
         proof_vectorize_shl_4s(),
         proof_vectorize_shl_8h(),
         proof_vectorize_ushr_4s(),
@@ -596,6 +728,11 @@ mod tests {
     }
 
     #[test]
+    fn test_vectorize_add_8h() {
+        assert_valid(&proof_vectorize_add_8h());
+    }
+
+    #[test]
     fn test_vectorize_add_2d() {
         assert_valid(&proof_vectorize_add_2d());
     }
@@ -614,6 +751,11 @@ mod tests {
         assert_valid(&proof_vectorize_sub_8h());
     }
 
+    #[test]
+    fn test_vectorize_sub_2d() {
+        assert_valid(&proof_vectorize_sub_2d());
+    }
+
     // =======================================================================
     // Vectorization MUL proofs
     // =======================================================================
@@ -621,6 +763,11 @@ mod tests {
     #[test]
     fn test_vectorize_mul_4s() {
         assert_valid(&proof_vectorize_mul_4s());
+    }
+
+    #[test]
+    fn test_vectorize_mul_8h() {
+        assert_valid(&proof_vectorize_mul_8h());
     }
 
     #[test]
@@ -656,6 +803,16 @@ mod tests {
         assert_valid(&proof_vectorize_and_16b());
     }
 
+    #[test]
+    fn test_vectorize_and_8h() {
+        assert_valid(&proof_vectorize_and_8h());
+    }
+
+    #[test]
+    fn test_vectorize_and_2d() {
+        assert_valid(&proof_vectorize_and_2d());
+    }
+
     // =======================================================================
     // Vectorization ORR proofs
     // =======================================================================
@@ -670,6 +827,16 @@ mod tests {
         assert_valid(&proof_vectorize_orr_16b());
     }
 
+    #[test]
+    fn test_vectorize_orr_8h() {
+        assert_valid(&proof_vectorize_orr_8h());
+    }
+
+    #[test]
+    fn test_vectorize_orr_2d() {
+        assert_valid(&proof_vectorize_orr_2d());
+    }
+
     // =======================================================================
     // Vectorization EOR proofs
     // =======================================================================
@@ -682,6 +849,16 @@ mod tests {
     #[test]
     fn test_vectorize_eor_16b() {
         assert_valid(&proof_vectorize_eor_16b());
+    }
+
+    #[test]
+    fn test_vectorize_eor_8h() {
+        assert_valid(&proof_vectorize_eor_8h());
+    }
+
+    #[test]
+    fn test_vectorize_eor_2d() {
+        assert_valid(&proof_vectorize_eor_2d());
     }
 
     // =======================================================================
@@ -741,13 +918,13 @@ mod tests {
     }
 
     // =======================================================================
-    // Aggregate test: all 22 vectorization proofs
+    // Aggregate test: all 31 vectorization proofs
     // =======================================================================
 
     #[test]
     fn test_all_vectorization_proofs() {
         let proofs = all_vectorization_proofs();
-        assert_eq!(proofs.len(), 22, "expected 11 ops x 2 arrangements = 22 proofs");
+        assert_eq!(proofs.len(), 31, "expected 31 proofs across all arrangements");
         for obligation in &proofs {
             assert_valid(obligation);
         }
