@@ -1100,10 +1100,203 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
         | AArch64Opcode::Retain
         | AArch64Opcode::Release => Ok(NOP),
 
-        // New opcodes added for ISel unification (issue #73).
-        // These are encodable hardware instructions that don't yet have
-        // dedicated encoding logic. Emit NOP as a safe placeholder —
-        // the pipeline should not produce these until encoding is implemented.
+        // =================================================================
+        // Bitfield move instructions (ARM ARM C6.2)
+        // =================================================================
+
+        // UBFM Rd, Rn, #immr, #imms — unsigned bitfield move
+        // sf | 10 | 100110 | N | immr(6) | imms(6) | Rn(5) | Rd(5)
+        // Aliases: LSL/LSR (imm), UBFX, UXTB, UXTH
+        // Operands: [Rd, Rn, Imm(immr), Imm(imms)]
+        AArch64Opcode::Ubfm => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let immr = imm_val(inst, 2) as u32 & 0x3F;
+            let imms = imm_val(inst, 3) as u32 & 0x3F;
+            let n = sf; // N = sf for 64-bit, 0 for 32-bit
+            Ok((sf << 31)
+                | (0b10 << 29) // opc = 10 (UBFM)
+                | (0b100110 << 23)
+                | (n << 22)
+                | (immr << 16)
+                | (imms << 10)
+                | (rn << 5)
+                | rd)
+        }
+
+        // SBFM Rd, Rn, #immr, #imms — signed bitfield move
+        // sf | 00 | 100110 | N | immr(6) | imms(6) | Rn(5) | Rd(5)
+        // Aliases: ASR (imm), SBFX, SXTB, SXTH, SXTW
+        // Operands: [Rd, Rn, Imm(immr), Imm(imms)]
+        AArch64Opcode::Sbfm => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let immr = imm_val(inst, 2) as u32 & 0x3F;
+            let imms = imm_val(inst, 3) as u32 & 0x3F;
+            let n = sf;
+            Ok((sf << 31)
+                | (0b00 << 29) // opc = 00 (SBFM)
+                | (0b100110 << 23)
+                | (n << 22)
+                | (immr << 16)
+                | (imms << 10)
+                | (rn << 5)
+                | rd)
+        }
+
+        // BFM Rd, Rn, #immr, #imms — bitfield move (insert)
+        // sf | 01 | 100110 | N | immr(6) | imms(6) | Rn(5) | Rd(5)
+        // Aliases: BFI, BFXIL
+        // Operands: [Rd, Rn, Imm(immr), Imm(imms)]
+        AArch64Opcode::Bfm => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let immr = imm_val(inst, 2) as u32 & 0x3F;
+            let imms = imm_val(inst, 3) as u32 & 0x3F;
+            let n = sf;
+            Ok((sf << 31)
+                | (0b01 << 29) // opc = 01 (BFM)
+                | (0b100110 << 23)
+                | (n << 22)
+                | (immr << 16)
+                | (imms << 10)
+                | (rn << 5)
+                | rd)
+        }
+
+        // =================================================================
+        // Load/Store register offset (ARM ARM C6.2)
+        // =================================================================
+
+        // LDR Rt, [Rn, Rm{, extend {#amount}}] — register offset load
+        // size | 111 | V | 00 | opc | 1 | Rm(5) | option(3) | S(1) | 10 | Rn(5) | Rt(5)
+        // Operands: [Rt, Rn, Rm] — default LSL, no shift (S=0)
+        // Optional 4th operand: Imm(extend_option_and_shift) packed as (option<<1)|S
+        AArch64Opcode::LdrRO => {
+            let sf = sf_from_operand(inst, 0);
+            let rt = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let rm = preg_hw(inst, 2);
+            // Default: LSL extend (option=011), no shift (S=0)
+            let (option, s) = if inst.operands.len() > 3 {
+                let packed = imm_val(inst, 3) as u32;
+                ((packed >> 1) & 0b111, packed & 1)
+            } else {
+                (0b011, 0)
+            };
+            if is_fpr(inst, 0) {
+                // FP register-offset load: V=1
+                let fp_sz = fp_size_from_inst(inst);
+                let size = match fp_sz {
+                    FpSize::Single => 0b10,
+                    FpSize::Double | _ => 0b11,
+                };
+                Ok(encoding_mem::encode_ldr_str_register(
+                    match size { 0b10 => encoding_mem::LoadStoreSize::Word, _ => encoding_mem::LoadStoreSize::Double },
+                    true,
+                    encoding_mem::LoadStoreOp::Load,
+                    rm as u8,
+                    match option { 0b010 => encoding_mem::RegExtend::Uxtw, 0b110 => encoding_mem::RegExtend::Sxtw, 0b111 => encoding_mem::RegExtend::Sxtx, _ => encoding_mem::RegExtend::Lsl },
+                    s != 0,
+                    rn as u8,
+                    rt as u8,
+                )?)
+            } else {
+                // Integer register-offset load: V=0
+                let size = if sf == 1 { encoding_mem::LoadStoreSize::Double } else { encoding_mem::LoadStoreSize::Word };
+                Ok(encoding_mem::encode_ldr_str_register(
+                    size,
+                    false,
+                    encoding_mem::LoadStoreOp::Load,
+                    rm as u8,
+                    match option { 0b010 => encoding_mem::RegExtend::Uxtw, 0b110 => encoding_mem::RegExtend::Sxtw, 0b111 => encoding_mem::RegExtend::Sxtx, _ => encoding_mem::RegExtend::Lsl },
+                    s != 0,
+                    rn as u8,
+                    rt as u8,
+                )?)
+            }
+        }
+
+        // STR Rt, [Rn, Rm{, extend {#amount}}] — register offset store
+        // Same encoding format as LdrRO but with opc=00 (store)
+        // Operands: [Rt, Rn, Rm] — default LSL, no shift (S=0)
+        AArch64Opcode::StrRO => {
+            let sf = sf_from_operand(inst, 0);
+            let rt = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let rm = preg_hw(inst, 2);
+            let (option, s) = if inst.operands.len() > 3 {
+                let packed = imm_val(inst, 3) as u32;
+                ((packed >> 1) & 0b111, packed & 1)
+            } else {
+                (0b011, 0)
+            };
+            if is_fpr(inst, 0) {
+                let fp_sz = fp_size_from_inst(inst);
+                let size = match fp_sz {
+                    FpSize::Single => encoding_mem::LoadStoreSize::Word,
+                    FpSize::Double | _ => encoding_mem::LoadStoreSize::Double,
+                };
+                Ok(encoding_mem::encode_ldr_str_register(
+                    size,
+                    true,
+                    encoding_mem::LoadStoreOp::Store,
+                    rm as u8,
+                    match option { 0b010 => encoding_mem::RegExtend::Uxtw, 0b110 => encoding_mem::RegExtend::Sxtw, 0b111 => encoding_mem::RegExtend::Sxtx, _ => encoding_mem::RegExtend::Lsl },
+                    s != 0,
+                    rn as u8,
+                    rt as u8,
+                )?)
+            } else {
+                let size = if sf == 1 { encoding_mem::LoadStoreSize::Double } else { encoding_mem::LoadStoreSize::Word };
+                Ok(encoding_mem::encode_ldr_str_register(
+                    size,
+                    false,
+                    encoding_mem::LoadStoreOp::Store,
+                    rm as u8,
+                    match option { 0b010 => encoding_mem::RegExtend::Uxtw, 0b110 => encoding_mem::RegExtend::Sxtw, 0b111 => encoding_mem::RegExtend::Sxtx, _ => encoding_mem::RegExtend::Lsl },
+                    s != 0,
+                    rn as u8,
+                    rt as u8,
+                )?)
+            }
+        }
+
+        // =================================================================
+        // GOT and TLV loads
+        // =================================================================
+
+        // LdrGot — LDR Xd, [Xn, #offset] from GOT slot
+        // Encoded as a standard 64-bit unsigned-offset load. The relocation
+        // for the GOT page offset is handled by the relocation layer; the
+        // encoder just emits: LDR Xd, [Xn, #imm12] (size=11, V=0, opc=01).
+        // Operands: [Rd, Rn, Imm(scaled_offset)]
+        AArch64Opcode::LdrGot => {
+            let rd = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
+            let scaled = (offset / 8) as u32 & 0xFFF;
+            // Always 64-bit load (GOT entries are pointer-sized)
+            Ok(encoding::encode_load_store_ui(0b11, 0, 0b01, scaled, rn, rd))
+        }
+
+        // LdrTlvp — LDR Xd, [Xn, #offset] from TLV descriptor
+        // Same encoding as LdrGot: standard 64-bit unsigned-offset load.
+        // The TLV page offset relocation is handled separately.
+        // Operands: [Rd, Rn, Imm(scaled_offset)]
+        AArch64Opcode::LdrTlvp => {
+            let rd = preg_hw(inst, 0);
+            let rn = preg_hw(inst, 1);
+            let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
+            let scaled = (offset / 8) as u32 & 0xFFF;
+            // Always 64-bit load (TLV descriptors are pointer-sized)
+            Ok(encoding::encode_load_store_ui(0b11, 0, 0b01, scaled, rn, rd))
+        }
+
+        // Still-unimplemented opcodes from ISel unification (issue #73).
         AArch64Opcode::AndRI
         | AArch64Opcode::OrrRI
         | AArch64Opcode::EorRI
@@ -1112,14 +1305,7 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
         | AArch64Opcode::Csinv
         | AArch64Opcode::Csneg
         | AArch64Opcode::Movn
-        | AArch64Opcode::FmovImm
-        | AArch64Opcode::LdrRO
-        | AArch64Opcode::StrRO
-        | AArch64Opcode::LdrGot
-        | AArch64Opcode::LdrTlvp
-        | AArch64Opcode::Ubfm
-        | AArch64Opcode::Sbfm
-        | AArch64Opcode::Bfm => {
+        | AArch64Opcode::FmovImm => {
             // TODO(#73): Implement proper encoding for these opcodes.
             Err(EncodeError::UnsupportedOpcode(inst.opcode))
         }
@@ -1738,6 +1924,13 @@ mod tests {
             (AArch64Opcode::Uxtw, vec![preg(X0), preg(X1)]),
             (AArch64Opcode::Sxtb, vec![preg(X0), preg(X1)]),
             (AArch64Opcode::Sxth, vec![preg(X0), preg(X1)]),
+            (AArch64Opcode::Ubfm, vec![preg(X0), preg(X1), imm(0), imm(7)]),
+            (AArch64Opcode::Sbfm, vec![preg(X0), preg(X1), imm(0), imm(7)]),
+            (AArch64Opcode::Bfm, vec![preg(X0), preg(X1), imm(0), imm(7)]),
+            (AArch64Opcode::LdrRO, vec![preg(X0), preg(X1), preg(X2)]),
+            (AArch64Opcode::StrRO, vec![preg(X0), preg(X1), preg(X2)]),
+            (AArch64Opcode::LdrGot, vec![preg(X0), preg(X1)]),
+            (AArch64Opcode::LdrTlvp, vec![preg(X0), preg(X1)]),
             (AArch64Opcode::FaddRR, vec![preg(V0), preg(V1), preg(V2)]),
             (AArch64Opcode::FsubRR, vec![preg(V0), preg(V1), preg(V2)]),
             (AArch64Opcode::FmulRR, vec![preg(V0), preg(V1), preg(V2)]),
@@ -2263,5 +2456,346 @@ mod tests {
         assert_ne!(enc, NOP, "LSR X0, X1, #63 must not emit NOP");
         assert_eq!((enc >> 16) & 0x3F, 63, "immr=63");
         assert_eq!((enc >> 10) & 0x3F, 63, "imms=63");
+    }
+
+    // =========================================================================
+    // Bitfield move instruction tests (UBFM, SBFM, BFM) — issue #137
+    // =========================================================================
+
+    #[test]
+    fn test_ubfm_64bit() {
+        // UBFM X0, X1, #0, #7 — extract bits [7:0] (alias: UXTB X0, X1)
+        // ARM ARM: sf=1 opc=10 100110 N=1 immr=0 imms=7 Rn=1 Rd=0
+        let inst = mk(AArch64Opcode::Ubfm, vec![preg(X0), preg(X1), imm(0), imm(7)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b10 << 29)
+            | (0b100110 << 23)
+            | (1 << 22) // N=1
+            | (0 << 16) // immr=0
+            | (7 << 10) // imms=7
+            | (1 << 5)
+            | 0;
+        assert_eq!(enc, expected, "UBFM X0, X1, #0, #7 = {enc:#010X}");
+        // Verify fixed field: bits [28:23] = 100110
+        assert_eq!((enc >> 23) & 0x3F, 0b100110);
+    }
+
+    #[test]
+    fn test_ubfm_32bit() {
+        // UBFM W0, W1, #0, #7 — sf=0, N=0
+        let inst = mk(AArch64Opcode::Ubfm, vec![preg(W0), preg(W1), imm(0), imm(7)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc >> 31, 0, "UBFM W0 must have sf=0");
+        assert_eq!((enc >> 22) & 1, 0, "UBFM W0 must have N=0 for 32-bit");
+        assert_eq!((enc >> 29) & 0b11, 0b10, "UBFM opc must be 10");
+    }
+
+    #[test]
+    fn test_ubfm_lsr_alias() {
+        // LSR X0, X1, #3 is encoded as UBFM X0, X1, #3, #63
+        // Verify that UBFM with immr=3, imms=63 matches the LSR encoding.
+        let ubfm = mk(AArch64Opcode::Ubfm, vec![preg(X0), preg(X1), imm(3), imm(63)]);
+        let lsr = mk(AArch64Opcode::LsrRI, vec![preg(X0), preg(X1), imm(3)]);
+        let ubfm_enc = encode_instruction(&ubfm).unwrap();
+        let lsr_enc = encode_instruction(&lsr).unwrap();
+        assert_eq!(ubfm_enc, lsr_enc, "UBFM X0, X1, #3, #63 must match LSR X0, X1, #3");
+    }
+
+    #[test]
+    fn test_sbfm_64bit() {
+        // SBFM X0, X1, #0, #31 — sign-extend bits [31:0] (alias: SXTW X0, X1)
+        // ARM ARM: sf=1 opc=00 100110 N=1 immr=0 imms=31 Rn=1 Rd=0
+        let inst = mk(AArch64Opcode::Sbfm, vec![preg(X0), preg(X1), imm(0), imm(31)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b00 << 29)
+            | (0b100110 << 23)
+            | (1 << 22) // N=1
+            | (0 << 16) // immr=0
+            | (31 << 10) // imms=31
+            | (1 << 5)
+            | 0;
+        assert_eq!(enc, expected, "SBFM X0, X1, #0, #31 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_sbfm_sxtw_matches() {
+        // SBFM X0, X1, #0, #31 must match the existing SXTW encoding
+        let sbfm = mk(AArch64Opcode::Sbfm, vec![preg(X0), preg(X1), imm(0), imm(31)]);
+        let sxtw = mk(AArch64Opcode::Sxtw, vec![preg(X0), preg(X1)]);
+        let sbfm_enc = encode_instruction(&sbfm).unwrap();
+        let sxtw_enc = encode_instruction(&sxtw).unwrap();
+        assert_eq!(sbfm_enc, sxtw_enc, "SBFM X0, X1, #0, #31 must match SXTW X0, X1");
+    }
+
+    #[test]
+    fn test_sbfm_asr_alias() {
+        // ASR X0, X1, #3 is encoded as SBFM X0, X1, #3, #63
+        let sbfm = mk(AArch64Opcode::Sbfm, vec![preg(X0), preg(X1), imm(3), imm(63)]);
+        let asr = mk(AArch64Opcode::AsrRI, vec![preg(X0), preg(X1), imm(3)]);
+        let sbfm_enc = encode_instruction(&sbfm).unwrap();
+        let asr_enc = encode_instruction(&asr).unwrap();
+        assert_eq!(sbfm_enc, asr_enc, "SBFM X0, X1, #3, #63 must match ASR X0, X1, #3");
+    }
+
+    #[test]
+    fn test_sbfm_32bit() {
+        // SBFM W0, W1, #0, #7 — sf=0, N=0, opc=00
+        let inst = mk(AArch64Opcode::Sbfm, vec![preg(W0), preg(W1), imm(0), imm(7)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc >> 31, 0, "SBFM W0 must have sf=0");
+        assert_eq!((enc >> 22) & 1, 0, "SBFM W0 must have N=0 for 32-bit");
+        assert_eq!((enc >> 29) & 0b11, 0b00, "SBFM opc must be 00");
+    }
+
+    #[test]
+    fn test_bfm_64bit() {
+        // BFM X0, X1, #4, #11 — bitfield insert bits [11:4] of Rn into Rd
+        // ARM ARM: sf=1 opc=01 100110 N=1 immr=4 imms=11 Rn=1 Rd=0
+        let inst = mk(AArch64Opcode::Bfm, vec![preg(X0), preg(X1), imm(4), imm(11)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b01 << 29)
+            | (0b100110 << 23)
+            | (1 << 22) // N=1
+            | (4 << 16) // immr=4
+            | (11 << 10) // imms=11
+            | (1 << 5)
+            | 0;
+        assert_eq!(enc, expected, "BFM X0, X1, #4, #11 = {enc:#010X}");
+        assert_eq!((enc >> 29) & 0b11, 0b01, "BFM opc must be 01");
+    }
+
+    #[test]
+    fn test_bfm_32bit() {
+        // BFM W0, W1, #4, #11 — sf=0, N=0, opc=01
+        let inst = mk(AArch64Opcode::Bfm, vec![preg(W0), preg(W1), imm(4), imm(11)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc >> 31, 0, "BFM W0 must have sf=0");
+        assert_eq!((enc >> 22) & 1, 0, "BFM W0 must have N=0 for 32-bit");
+        assert_eq!((enc >> 29) & 0b11, 0b01, "BFM opc must be 01");
+    }
+
+    #[test]
+    fn test_bitfield_opc_encoding() {
+        // Verify the opc field distinguishes UBFM/SBFM/BFM correctly
+        let ubfm = mk(AArch64Opcode::Ubfm, vec![preg(X0), preg(X1), imm(0), imm(0)]);
+        let sbfm = mk(AArch64Opcode::Sbfm, vec![preg(X0), preg(X1), imm(0), imm(0)]);
+        let bfm = mk(AArch64Opcode::Bfm, vec![preg(X0), preg(X1), imm(0), imm(0)]);
+        let ubfm_enc = encode_instruction(&ubfm).unwrap();
+        let sbfm_enc = encode_instruction(&sbfm).unwrap();
+        let bfm_enc = encode_instruction(&bfm).unwrap();
+        assert_eq!((ubfm_enc >> 29) & 0b11, 0b10, "UBFM opc=10");
+        assert_eq!((sbfm_enc >> 29) & 0b11, 0b00, "SBFM opc=00");
+        assert_eq!((bfm_enc >> 29) & 0b11, 0b01, "BFM opc=01");
+        // All three share the same fixed field at bits [28:23]
+        assert_eq!((ubfm_enc >> 23) & 0x3F, 0b100110);
+        assert_eq!((sbfm_enc >> 23) & 0x3F, 0b100110);
+        assert_eq!((bfm_enc >> 23) & 0x3F, 0b100110);
+    }
+
+    // =========================================================================
+    // Register-offset load/store tests (LdrRO, StrRO) — issue #137
+    // =========================================================================
+
+    #[test]
+    fn test_ldr_ro_64bit() {
+        // LDR X0, [X1, X2] — 64-bit register-offset load, default LSL, S=0
+        // size=11, V=0, opc=01, Rm=2, option=011(LSL), S=0, Rn=1, Rt=0
+        let inst = mk(AArch64Opcode::LdrRO, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding_mem::encode_ldr_str_register(
+            encoding_mem::LoadStoreSize::Double, false, encoding_mem::LoadStoreOp::Load,
+            2, encoding_mem::RegExtend::Lsl, false, 1, 0,
+        ).unwrap();
+        assert_eq!(enc, direct, "LDR X0, [X1, X2] = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_ldr_ro_32bit() {
+        // LDR W0, [X1, X2] — 32-bit register-offset load
+        // size=10, V=0, opc=01, Rm=2, option=011(LSL), S=0, Rn=1, Rt=0
+        let inst = mk(AArch64Opcode::LdrRO, vec![preg(W0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding_mem::encode_ldr_str_register(
+            encoding_mem::LoadStoreSize::Word, false, encoding_mem::LoadStoreOp::Load,
+            2, encoding_mem::RegExtend::Lsl, false, 1, 0,
+        ).unwrap();
+        assert_eq!(enc, direct, "LDR W0, [X1, X2] = {enc:#010X}");
+        // Verify size field (bits 31:30)
+        assert_eq!((enc >> 30) & 0b11, 0b10, "LDR W must have size=10");
+    }
+
+    #[test]
+    fn test_ldr_ro_with_shift() {
+        // LDR X0, [X1, X2, LSL #3] — option=011, S=1
+        // 4th operand packs extend info: (option << 1) | S = (0b011 << 1) | 1 = 7
+        let inst = mk(AArch64Opcode::LdrRO, vec![preg(X0), preg(X1), preg(X2), imm(7)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding_mem::encode_ldr_str_register(
+            encoding_mem::LoadStoreSize::Double, false, encoding_mem::LoadStoreOp::Load,
+            2, encoding_mem::RegExtend::Lsl, true, 1, 0,
+        ).unwrap();
+        assert_eq!(enc, direct, "LDR X0, [X1, X2, LSL #3] = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_ldr_ro_sxtw() {
+        // LDR X0, [X1, W2, SXTW] — option=110, S=0
+        // packed = (0b110 << 1) | 0 = 12
+        let inst = mk(AArch64Opcode::LdrRO, vec![preg(X0), preg(X1), preg(X2), imm(12)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding_mem::encode_ldr_str_register(
+            encoding_mem::LoadStoreSize::Double, false, encoding_mem::LoadStoreOp::Load,
+            2, encoding_mem::RegExtend::Sxtw, false, 1, 0,
+        ).unwrap();
+        assert_eq!(enc, direct, "LDR X0, [X1, W2, SXTW] = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_str_ro_64bit() {
+        // STR X0, [X1, X2] — 64-bit register-offset store
+        // size=11, V=0, opc=00, Rm=2, option=011(LSL), S=0, Rn=1, Rt=0
+        let inst = mk(AArch64Opcode::StrRO, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding_mem::encode_ldr_str_register(
+            encoding_mem::LoadStoreSize::Double, false, encoding_mem::LoadStoreOp::Store,
+            2, encoding_mem::RegExtend::Lsl, false, 1, 0,
+        ).unwrap();
+        assert_eq!(enc, direct, "STR X0, [X1, X2] = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_str_ro_32bit() {
+        // STR W0, [X1, X2] — 32-bit register-offset store
+        let inst = mk(AArch64Opcode::StrRO, vec![preg(W0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding_mem::encode_ldr_str_register(
+            encoding_mem::LoadStoreSize::Word, false, encoding_mem::LoadStoreOp::Store,
+            2, encoding_mem::RegExtend::Lsl, false, 1, 0,
+        ).unwrap();
+        assert_eq!(enc, direct, "STR W0, [X1, X2] = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_str_ro_with_shift() {
+        // STR X0, [X1, X2, LSL #3] — option=011, S=1 (packed=7)
+        let inst = mk(AArch64Opcode::StrRO, vec![preg(X0), preg(X1), preg(X2), imm(7)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding_mem::encode_ldr_str_register(
+            encoding_mem::LoadStoreSize::Double, false, encoding_mem::LoadStoreOp::Store,
+            2, encoding_mem::RegExtend::Lsl, true, 1, 0,
+        ).unwrap();
+        assert_eq!(enc, direct, "STR X0, [X1, X2, LSL #3] = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_ldr_ro_str_ro_differ_by_opc() {
+        // LDR and STR with same operands should differ only in opc field
+        let ldr = mk(AArch64Opcode::LdrRO, vec![preg(X0), preg(X1), preg(X2)]);
+        let str_inst = mk(AArch64Opcode::StrRO, vec![preg(X0), preg(X1), preg(X2)]);
+        let ldr_enc = encode_instruction(&ldr).unwrap();
+        let str_enc = encode_instruction(&str_inst).unwrap();
+        // opc is at bits [23:22]
+        assert_eq!((ldr_enc >> 22) & 0b11, 0b01, "LDR opc=01");
+        assert_eq!((str_enc >> 22) & 0b11, 0b00, "STR opc=00");
+        // Everything else should be the same (mask out opc bits)
+        let mask = !(0b11u32 << 22);
+        assert_eq!(ldr_enc & mask, str_enc & mask, "LDR and STR should match except opc");
+    }
+
+    // =========================================================================
+    // GOT/TLV load tests (LdrGot, LdrTlvp) — issue #137
+    // =========================================================================
+
+    #[test]
+    fn test_ldr_got_zero_offset() {
+        // LDR X0, [X1, #0] (GOT load with zero offset)
+        let inst = mk(AArch64Opcode::LdrGot, vec![preg(X0), preg(X1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        // 64-bit load: size=11, V=0, opc=01, imm12=0, Rn=1, Rt=0
+        let direct = encoding::encode_load_store_ui(0b11, 0, 0b01, 0, 1, 0);
+        assert_eq!(enc, direct, "LDR X0, [X1] (GOT) = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_ldr_got_with_offset() {
+        // LDR X0, [X1, #8] (GOT load, offset=8 -> scaled=1)
+        let inst = mk(AArch64Opcode::LdrGot, vec![preg(X0), preg(X1), imm(8)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_load_store_ui(0b11, 0, 0b01, 1, 1, 0);
+        assert_eq!(enc, direct, "LDR X0, [X1, #8] (GOT) = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_ldr_tlvp_zero_offset() {
+        // LDR X0, [X1, #0] (TLV descriptor load)
+        let inst = mk(AArch64Opcode::LdrTlvp, vec![preg(X0), preg(X1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_load_store_ui(0b11, 0, 0b01, 0, 1, 0);
+        assert_eq!(enc, direct, "LDR X0, [X1] (TLV) = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_ldr_tlvp_with_offset() {
+        // LDR X0, [X1, #16] (TLV load, offset=16 -> scaled=2)
+        let inst = mk(AArch64Opcode::LdrTlvp, vec![preg(X0), preg(X1), imm(16)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_load_store_ui(0b11, 0, 0b01, 2, 1, 0);
+        assert_eq!(enc, direct, "LDR X0, [X1, #16] (TLV) = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_ldr_got_and_tlvp_same_encoding() {
+        // LdrGot and LdrTlvp with the same operands should produce identical encodings.
+        // They differ only in relocation semantics, not in instruction encoding.
+        let got = mk(AArch64Opcode::LdrGot, vec![preg(X0), preg(X1), imm(8)]);
+        let tlvp = mk(AArch64Opcode::LdrTlvp, vec![preg(X0), preg(X1), imm(8)]);
+        let got_enc = encode_instruction(&got).unwrap();
+        let tlvp_enc = encode_instruction(&tlvp).unwrap();
+        assert_eq!(got_enc, tlvp_enc, "LdrGot and LdrTlvp must produce identical encoding");
+    }
+
+    // =========================================================================
+    // ARM ARM bit-pattern verification against known encodings
+    // =========================================================================
+
+    #[test]
+    fn test_ubfm_known_encoding() {
+        // UBFM X0, X1, #16, #31 — extract unsigned bitfield [31:16]
+        // ARM ARM: 1_10_100110_1_010000_011111_00001_00000
+        let inst = mk(AArch64Opcode::Ubfm, vec![preg(X0), preg(X1), imm(16), imm(31)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31) // sf=1
+            | (0b10 << 29)         // opc=10
+            | (0b100110 << 23)
+            | (1 << 22)            // N=1
+            | (16 << 16)           // immr=16
+            | (31 << 10)           // imms=31
+            | (1 << 5)            // Rn=1
+            | 0;                   // Rd=0
+        assert_eq!(enc, expected, "UBFM X0, X1, #16, #31 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_sbfm_sxtb_alias() {
+        // SXTB X0, X1 = SBFM X0, X1, #0, #7
+        // Both paths should produce identical encoding
+        let sbfm = mk(AArch64Opcode::Sbfm, vec![preg(X0), preg(X1), imm(0), imm(7)]);
+        let sxtb = mk(AArch64Opcode::Sxtb, vec![preg(X0), preg(X1)]);
+        let sbfm_enc = encode_instruction(&sbfm).unwrap();
+        let sxtb_enc = encode_instruction(&sxtb).unwrap();
+        assert_eq!(sbfm_enc, sxtb_enc, "SBFM X0, X1, #0, #7 must match SXTB X0, X1");
+    }
+
+    #[test]
+    fn test_sbfm_sxth_alias() {
+        // SXTH X0, X1 = SBFM X0, X1, #0, #15
+        let sbfm = mk(AArch64Opcode::Sbfm, vec![preg(X0), preg(X1), imm(0), imm(15)]);
+        let sxth = mk(AArch64Opcode::Sxth, vec![preg(X0), preg(X1)]);
+        let sbfm_enc = encode_instruction(&sbfm).unwrap();
+        let sxth_enc = encode_instruction(&sxth).unwrap();
+        assert_eq!(sbfm_enc, sxth_enc, "SBFM X0, X1, #0, #15 must match SXTH X0, X1");
     }
 }
