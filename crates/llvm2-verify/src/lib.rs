@@ -69,6 +69,7 @@ pub mod ane_semantics;
 pub mod gpu_semantics;
 pub mod unified_synthesis;
 pub mod neon_lowering_proofs;
+pub mod ane_precision_proofs;
 
 pub use verify::{VerificationResult, VerificationReport, ProofResult, Verifier};
 pub use lowering_proof::{ProofObligation, verify_by_evaluation};
