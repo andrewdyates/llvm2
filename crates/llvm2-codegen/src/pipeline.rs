@@ -80,12 +80,17 @@ use llvm2_ir::operand::MachOperand as IrOperand;
 use llvm2_ir::regs::{PReg, VReg};
 use llvm2_ir::types::BlockId;
 
-use llvm2_lower::compute_graph::ComputeGraph;
+use llvm2_lower::compute_graph::{ComputeGraph, ComputeNode, ComputeNodeId};
 use llvm2_lower::dispatch::{
-    DispatchPlan, VerificationReport,
+    DispatchPlan, DispatchOp, VerificationReport,
     generate_dispatch_plan, verify_dispatch_plan_properties,
 };
+use llvm2_lower::target_analysis::ComputeTarget;
 use llvm2_lower::TargetRecommendation;
+
+use crate::coreml_emitter::{
+    CoreMLEmitError, CoreMLEmitter, MilProgram, validate_ane_compatibility,
+};
 
 // ---------------------------------------------------------------------------
 // Pipeline errors
@@ -112,6 +117,8 @@ pub enum PipelineError {
         summary: String,
         report: VerificationReport,
     },
+    #[error("CoreML MIL emission failed: {0}")]
+    CoreMLEmit(#[from] CoreMLEmitError),
 }
 
 // ---------------------------------------------------------------------------
@@ -875,6 +882,101 @@ impl Pipeline {
         let plan = generate_dispatch_plan(graph, recommendations);
         self.verify_dispatch_plan(graph, plan, recommendations)
     }
+}
+
+// ---------------------------------------------------------------------------
+// CoreML MIL generation from dispatch plan
+// ---------------------------------------------------------------------------
+
+/// Output of CoreML MIL program generation from a dispatch plan.
+///
+/// Contains the generated MIL program, any ANE compatibility warnings, and
+/// an estimated latency based on the dispatch plan's cycle estimates for
+/// ANE-targeted nodes.
+#[derive(Debug, Clone)]
+pub struct CoreMLOutput {
+    /// The generated MIL program representing ANE-targeted operations.
+    pub program: MilProgram,
+    /// ANE compatibility warnings (empty if fully compatible).
+    pub warnings: Vec<String>,
+    /// Estimated latency in microseconds for the ANE subgraph, derived from
+    /// the dispatch plan's per-node cycle estimates at an assumed 1 GHz
+    /// Neural Engine clock.
+    pub estimated_latency_us: u64,
+}
+
+/// Collect ANE-targeted nodes from a dispatch plan and generate a CoreML MIL
+/// program from the corresponding compute graph nodes.
+///
+/// This is the primary integration point between the dispatch pipeline and
+/// the CoreML emitter. It:
+/// 1. Collects all node IDs assigned to `NeuralEngine` in the plan
+/// 2. Resolves those IDs to `ComputeNode` references from the graph
+/// 3. Generates a MIL program via [`CoreMLEmitter::emit_program_from_nodes`]
+/// 4. Validates ANE compatibility via [`validate_ane_compatibility`]
+/// 5. Estimates latency from the plan's per-node cycle costs
+///
+/// Returns `Ok(CoreMLOutput)` on success, or `Err(PipelineError::CoreMLEmit)`
+/// if no ANE nodes are found or MIL emission fails.
+pub fn emit_coreml_program(
+    plan: &DispatchPlan,
+    graph: &ComputeGraph,
+) -> Result<CoreMLOutput, PipelineError> {
+    // Step 1: Collect ANE-targeted node IDs from the dispatch plan assignment.
+    let mut ane_node_ids: Vec<ComputeNodeId> = plan
+        .assignment
+        .iter()
+        .filter(|(_, target)| **target == ComputeTarget::NeuralEngine)
+        .map(|(id, _)| *id)
+        .collect();
+
+    if ane_node_ids.is_empty() {
+        return Err(PipelineError::CoreMLEmit(CoreMLEmitError::EmptyNodeList));
+    }
+
+    // Sort by node ID for deterministic ordering.
+    ane_node_ids.sort_by_key(|id| id.0);
+
+    // Step 2: Resolve node IDs to ComputeNode references from the graph.
+    let mut ane_nodes: Vec<ComputeNode> = Vec::with_capacity(ane_node_ids.len());
+    for node_id in &ane_node_ids {
+        if let Some(node) = graph.node(*node_id) {
+            ane_nodes.push(node.clone());
+        }
+        // Skip nodes not found in graph (shouldn't happen with a valid plan).
+    }
+
+    if ane_nodes.is_empty() {
+        return Err(PipelineError::CoreMLEmit(CoreMLEmitError::EmptyNodeList));
+    }
+
+    // Step 3: Generate MIL program from ANE nodes.
+    let mut emitter = CoreMLEmitter::new();
+    let program = emitter.emit_program_from_nodes(&ane_nodes)?;
+
+    // Step 4: Validate ANE compatibility.
+    let warnings = validate_ane_compatibility(&program);
+
+    // Step 5: Estimate latency from dispatch plan cycle costs.
+    // Sum the estimated_cycles from KernelLaunch ops targeting NeuralEngine
+    // nodes. Convert cycles to microseconds assuming ~1 GHz ANE clock.
+    let total_ane_cycles: u64 = plan.ops.iter().filter_map(|op| {
+        match op {
+            DispatchOp::KernelLaunch { target: ComputeTarget::NeuralEngine, estimated_cycles, .. } => {
+                Some(*estimated_cycles)
+            }
+            _ => None,
+        }
+    }).sum();
+
+    // 1 GHz = 1 cycle per ns. Convert cycles to microseconds: cycles / 1000.
+    let estimated_latency_us = total_ane_cycles.saturating_div(1000).max(1);
+
+    Ok(CoreMLOutput {
+        program,
+        warnings,
+        estimated_latency_us,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2122,5 +2224,402 @@ mod dispatch_verification_tests {
         assert!(display.contains("violation"),
             "Error display should contain 'violation', got: {}",
             display);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — CoreML MIL generation from dispatch plan
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod coreml_dispatch_tests {
+    use super::*;
+    use llvm2_lower::compute_graph::{
+        ComputeCost, ComputeNode, ComputeNodeId, DataEdge, NodeKind, TransferCost,
+    };
+    use llvm2_lower::target_analysis::ComputeTarget;
+    use llvm2_lower::dispatch::DispatchOp;
+
+    // -----------------------------------------------------------------------
+    // Test helpers
+    // -----------------------------------------------------------------------
+
+    fn make_graph(nodes: Vec<ComputeNode>, edges: Vec<DataEdge>) -> ComputeGraph {
+        let mut graph = ComputeGraph::new();
+        graph.nodes = nodes;
+        graph.edges = edges;
+        graph
+    }
+
+    fn make_ane_node(id: u32, kind: NodeKind, dominant_op: &str, data_size: u64) -> ComputeNode {
+        let mut costs = HashMap::new();
+        costs.insert(
+            ComputeTarget::NeuralEngine,
+            ComputeCost {
+                latency_cycles: 100,
+                throughput_ops_per_kcycle: 5000,
+            },
+        );
+        costs.insert(
+            ComputeTarget::CpuScalar,
+            ComputeCost {
+                latency_cycles: 500,
+                throughput_ops_per_kcycle: 1000,
+            },
+        );
+        ComputeNode {
+            id: ComputeNodeId(id),
+            instructions: vec![],
+            costs,
+            legal_targets: vec![ComputeTarget::NeuralEngine, ComputeTarget::CpuScalar],
+            kind,
+            data_size_bytes: data_size,
+            produced_values: vec![],
+            consumed_values: vec![],
+            dominant_op: dominant_op.to_string(),
+            target_legality: None,
+        }
+    }
+
+    fn make_cpu_only_node(id: u32, dominant_op: &str, data_size: u64) -> ComputeNode {
+        let mut costs = HashMap::new();
+        costs.insert(
+            ComputeTarget::CpuScalar,
+            ComputeCost {
+                latency_cycles: 50,
+                throughput_ops_per_kcycle: 1000,
+            },
+        );
+        ComputeNode {
+            id: ComputeNodeId(id),
+            instructions: vec![],
+            costs,
+            legal_targets: vec![ComputeTarget::CpuScalar],
+            kind: NodeKind::Scalar,
+            data_size_bytes: data_size,
+            produced_values: vec![],
+            consumed_values: vec![],
+            dominant_op: dominant_op.to_string(),
+            target_legality: None,
+        }
+    }
+
+    /// Build a dispatch plan with explicit ANE assignments and kernel launches.
+    fn make_ane_plan(node_ids: &[u32], cycles_per_node: u64) -> DispatchPlan {
+        let mut assignment = HashMap::new();
+        let mut ops = Vec::new();
+        let mut total_cycles: u64 = 0;
+
+        for &id in node_ids {
+            let nid = ComputeNodeId(id);
+            assignment.insert(nid, ComputeTarget::NeuralEngine);
+            ops.push(DispatchOp::KernelLaunch {
+                target: ComputeTarget::NeuralEngine,
+                node_id: nid,
+                estimated_cycles: cycles_per_node,
+            });
+            total_cycles += cycles_per_node;
+        }
+
+        DispatchPlan {
+            ops,
+            assignment,
+            estimated_total_cycles: total_cycles,
+        }
+    }
+
+    /// Build a mixed plan with some ANE and some CPU nodes.
+    fn make_mixed_plan(
+        ane_ids: &[u32],
+        cpu_ids: &[u32],
+        ane_cycles: u64,
+        cpu_cycles: u64,
+    ) -> DispatchPlan {
+        let mut assignment = HashMap::new();
+        let mut ops = Vec::new();
+        let mut total_cycles: u64 = 0;
+
+        for &id in cpu_ids {
+            let nid = ComputeNodeId(id);
+            assignment.insert(nid, ComputeTarget::CpuScalar);
+            ops.push(DispatchOp::CpuFallback {
+                node_id: nid,
+                reason: "CPU-only node".to_string(),
+            });
+            total_cycles += cpu_cycles;
+        }
+
+        for &id in ane_ids {
+            let nid = ComputeNodeId(id);
+            assignment.insert(nid, ComputeTarget::NeuralEngine);
+            ops.push(DispatchOp::KernelLaunch {
+                target: ComputeTarget::NeuralEngine,
+                node_id: nid,
+                estimated_cycles: ane_cycles,
+            });
+            total_cycles += ane_cycles;
+        }
+
+        DispatchPlan {
+            ops,
+            assignment,
+            estimated_total_cycles: total_cycles,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1: Single ANE GEMM node produces valid CoreMLOutput
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_emit_coreml_single_gemm() {
+        let node = make_ane_node(0, NodeKind::MatrixHeavy, "GEMM", 8192);
+        let graph = make_graph(vec![node], vec![]);
+        let plan = make_ane_plan(&[0], 5000);
+
+        let output = emit_coreml_program(&plan, &graph).unwrap();
+
+        assert_eq!(output.program.op_count(), 1);
+        assert_eq!(output.program.operations[0].op_type(), "matmul");
+        assert!(output.program.validate().is_ok());
+        assert!(output.estimated_latency_us >= 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2: Multi-node ANE subgraph (GEMM -> ADD -> RELU) with fusion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_emit_coreml_gemm_bias_relu_fusion() {
+        let nodes = vec![
+            make_ane_node(0, NodeKind::MatrixHeavy, "GEMM", 8192),
+            make_ane_node(1, NodeKind::DataParallel, "ADD", 256),
+            make_ane_node(2, NodeKind::DataParallel, "RELU", 256),
+        ];
+        let graph = make_graph(nodes, vec![]);
+        let plan = make_ane_plan(&[0, 1, 2], 3000);
+
+        let output = emit_coreml_program(&plan, &graph).unwrap();
+
+        // GEMM-Bias-Act fusion produces 3 MIL ops (matmul + add + relu)
+        assert_eq!(output.program.op_count(), 3);
+        assert_eq!(output.program.operations[0].op_type(), "matmul");
+        assert_eq!(output.program.operations[1].op_type(), "add");
+        assert_eq!(output.program.operations[2].op_type(), "relu");
+        assert!(output.program.validate().is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3: Mixed plan filters only ANE nodes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_emit_coreml_mixed_plan_filters_ane_only() {
+        let nodes = vec![
+            make_cpu_only_node(0, "ADD", 64),
+            make_ane_node(1, NodeKind::MatrixHeavy, "GEMM", 8192),
+            make_cpu_only_node(2, "SUB", 64),
+        ];
+        let graph = make_graph(nodes, vec![]);
+        let plan = make_mixed_plan(&[1], &[0, 2], 5000, 50);
+
+        let output = emit_coreml_program(&plan, &graph).unwrap();
+
+        // Only node 1 (GEMM) should be in the MIL program
+        assert_eq!(output.program.op_count(), 1);
+        assert_eq!(output.program.operations[0].op_type(), "matmul");
+        assert!(output.program.validate().is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4: Empty plan (no ANE nodes) returns error
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_emit_coreml_no_ane_nodes_returns_error() {
+        let node = make_cpu_only_node(0, "ADD", 64);
+        let graph = make_graph(vec![node], vec![]);
+
+        // Plan with only CPU assignments
+        let mut assignment = HashMap::new();
+        assignment.insert(ComputeNodeId(0), ComputeTarget::CpuScalar);
+        let plan = DispatchPlan {
+            ops: vec![DispatchOp::CpuFallback {
+                node_id: ComputeNodeId(0),
+                reason: "CPU-only".to_string(),
+            }],
+            assignment,
+            estimated_total_cycles: 50,
+        };
+
+        let result = emit_coreml_program(&plan, &graph);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PipelineError::CoreMLEmit(CoreMLEmitError::EmptyNodeList) => {}
+            other => panic!("expected CoreMLEmit(EmptyNodeList), got: {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5: ANE compatibility warnings are propagated
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_emit_coreml_propagates_ane_warnings() {
+        // The GEMM + RELU program with FP16 should have no warnings
+        let nodes = vec![
+            make_ane_node(0, NodeKind::MatrixHeavy, "GEMM", 8192),
+            make_ane_node(1, NodeKind::DataParallel, "RELU", 2048),
+        ];
+        let graph = make_graph(nodes, vec![]);
+        let plan = make_ane_plan(&[0, 1], 2000);
+
+        let output = emit_coreml_program(&plan, &graph).unwrap();
+
+        // Standard FP16 matmul+relu should produce zero warnings
+        assert!(output.warnings.is_empty(),
+            "Expected no warnings for FP16 matmul+relu, got: {:?}", output.warnings);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6: Estimated latency calculation from plan cycles
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_emit_coreml_estimated_latency() {
+        let node = make_ane_node(0, NodeKind::MatrixHeavy, "GEMM", 8192);
+        let graph = make_graph(vec![node], vec![]);
+
+        // 10000 cycles at 1GHz = 10000 ns = 10 us
+        let plan = make_ane_plan(&[0], 10000);
+
+        let output = emit_coreml_program(&plan, &graph).unwrap();
+        assert_eq!(output.estimated_latency_us, 10,
+            "10000 cycles / 1000 = 10 us");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7: Multiple ANE nodes produce correct latency sum
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_emit_coreml_multi_node_latency() {
+        let nodes = vec![
+            make_ane_node(0, NodeKind::MatrixHeavy, "GEMM", 8192),
+            make_ane_node(1, NodeKind::DataParallel, "RELU", 2048),
+            make_ane_node(2, NodeKind::MatrixHeavy, "GEMM", 4096),
+        ];
+        let graph = make_graph(nodes, vec![]);
+
+        // 3 nodes * 5000 cycles each = 15000 cycles = 15 us
+        let plan = make_ane_plan(&[0, 1, 2], 5000);
+
+        let output = emit_coreml_program(&plan, &graph).unwrap();
+        assert_eq!(output.estimated_latency_us, 15,
+            "3 * 5000 cycles / 1000 = 15 us");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: Node ordering is deterministic (sorted by ID)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_emit_coreml_deterministic_ordering() {
+        // Insert nodes in reverse order to verify sorting
+        let nodes = vec![
+            make_ane_node(2, NodeKind::DataParallel, "RELU", 2048),
+            make_ane_node(0, NodeKind::MatrixHeavy, "GEMM", 8192),
+            make_ane_node(1, NodeKind::DataParallel, "ADD", 256),
+        ];
+        let graph = make_graph(nodes, vec![]);
+        let plan = make_ane_plan(&[0, 1, 2], 1000);
+
+        let output = emit_coreml_program(&plan, &graph).unwrap();
+
+        // Nodes should be processed in ID order (0, 1, 2) = GEMM, ADD, RELU
+        // GEMM -> ADD -> RELU triggers the GemmBiasAct fusion
+        assert_eq!(output.program.op_count(), 3);
+        assert_eq!(output.program.operations[0].op_type(), "matmul");
+        assert_eq!(output.program.operations[1].op_type(), "add");
+        assert_eq!(output.program.operations[2].op_type(), "relu");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: CoreMLOutput struct fields are populated correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_coreml_output_struct_fields() {
+        let node = make_ane_node(0, NodeKind::DataParallel, "RELU", 2048);
+        let graph = make_graph(vec![node], vec![]);
+        let plan = make_ane_plan(&[0], 2000);
+
+        let output = emit_coreml_program(&plan, &graph).unwrap();
+
+        // program field: should have operations
+        assert!(!output.program.operations.is_empty());
+        // program should have inputs and outputs
+        assert!(!output.program.inputs.is_empty());
+        assert!(!output.program.outputs.is_empty());
+        // warnings field: Vec<String>
+        let _: &Vec<String> = &output.warnings;
+        // estimated_latency_us: u64, must be positive
+        assert!(output.estimated_latency_us >= 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10: Conv node produces correct MIL op type
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_emit_coreml_conv_node() {
+        let node = make_ane_node(0, NodeKind::DataParallel, "CONV", 4096);
+        let graph = make_graph(vec![node], vec![]);
+        let plan = make_ane_plan(&[0], 3000);
+
+        let output = emit_coreml_program(&plan, &graph).unwrap();
+
+        assert_eq!(output.program.op_count(), 1);
+        assert_eq!(output.program.operations[0].op_type(), "conv");
+        assert!(output.program.validate().is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11: MatMul + GELU fusion pattern
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_emit_coreml_matmul_gelu_fusion() {
+        let nodes = vec![
+            make_ane_node(0, NodeKind::MatrixHeavy, "GEMM", 8192),
+            make_ane_node(1, NodeKind::DataParallel, "GELU", 4096),
+        ];
+        let graph = make_graph(nodes, vec![]);
+        let plan = make_ane_plan(&[0, 1], 4000);
+
+        let output = emit_coreml_program(&plan, &graph).unwrap();
+
+        // MatMul-GELU fusion: matmul + gelu = 2 ops
+        assert_eq!(output.program.op_count(), 2);
+        assert_eq!(output.program.operations[0].op_type(), "matmul");
+        assert_eq!(output.program.operations[1].op_type(), "gelu");
+        assert!(output.program.validate().is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12: Minimum latency is clamped to 1 us
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_emit_coreml_minimum_latency_clamp() {
+        let node = make_ane_node(0, NodeKind::DataParallel, "RELU", 64);
+        let graph = make_graph(vec![node], vec![]);
+
+        // Very small cycle count: 100 cycles / 1000 = 0, clamped to 1
+        let plan = make_ane_plan(&[0], 100);
+
+        let output = emit_coreml_program(&plan, &graph).unwrap();
+        assert_eq!(output.estimated_latency_us, 1,
+            "Latency should be clamped to minimum 1 us");
     }
 }
