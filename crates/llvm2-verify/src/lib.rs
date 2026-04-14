@@ -61,8 +61,10 @@ pub mod memory_model;
 pub mod verify;
 pub mod z4_bridge;
 pub mod synthesis;
+pub mod cegis;
 
 pub use verify::{VerificationResult, Verifier};
 pub use lowering_proof::{ProofObligation, verify_by_evaluation};
 pub use smt::{SmtError, SmtExpr, SmtSort};
 pub use z4_bridge::{Z4Config, Z4Result, verify_with_z4};
+pub use cegis::{CegisLoop, CegisResult, ConcreteInput};
