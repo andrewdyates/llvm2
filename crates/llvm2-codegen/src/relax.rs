@@ -91,6 +91,86 @@ pub struct RelaxedCode {
     pub block_offsets: Vec<u32>,
 }
 
+// ---------------------------------------------------------------------------
+// BranchRelaxation pass struct
+// ---------------------------------------------------------------------------
+
+/// Branch relaxation pass for the compilation pipeline.
+///
+/// This pass runs after block layout and frame lowering. It computes byte
+/// offsets for each basic block, detects branches whose targets exceed their
+/// encoding range, and rewrites them into longer instruction sequences
+/// (inverting the condition and inserting an unconditional branch trampoline).
+///
+/// The pass uses a fixed-point algorithm because relaxation can insert
+/// instructions that push other branches out of range.
+///
+/// # Example
+///
+/// ```ignore
+/// let pass = BranchRelaxation::new();
+/// let relaxed = pass.run(&mut func)?;
+/// // relaxed.instructions contains the final instruction sequence
+/// // with all branch offsets resolved to immediates
+/// ```
+pub struct BranchRelaxation;
+
+impl BranchRelaxation {
+    /// Create a new branch relaxation pass.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Run branch relaxation on a function.
+    ///
+    /// This is the primary entry point for the pass. It delegates to
+    /// [`relax_branches`] which implements the fixed-point algorithm.
+    pub fn run(&self, func: &mut MachFunction) -> Result<RelaxedCode, RelaxError> {
+        relax_branches(func)
+    }
+
+    /// Check if any branches in the function are out of range without
+    /// modifying the function. Useful for diagnostics.
+    pub fn has_out_of_range_branches(&self, func: &MachFunction) -> bool {
+        let infos = compute_block_offsets(func);
+
+        for &block_id in &func.block_order {
+            let block_offset = infos[block_id.0 as usize].offset;
+            let blk = func.block(block_id);
+
+            let mut inst_byte_offset = block_offset;
+            for &inst_id in &blk.insts {
+                let inst = func.inst(inst_id);
+                if inst.opcode.is_pseudo() {
+                    continue;
+                }
+
+                if is_branch_with_block_target(inst) {
+                    if let Some(target_bid) = get_branch_target_block(inst) {
+                        let target_offset = infos[target_bid.0 as usize].offset;
+                        let displacement =
+                            target_offset as i64 - inst_byte_offset as i64;
+
+                        if !in_range(inst.opcode, displacement) {
+                            return true;
+                        }
+                    }
+                }
+
+                inst_byte_offset += 4;
+            }
+        }
+
+        false
+    }
+}
+
+impl Default for BranchRelaxation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Run branch relaxation on a function after block layout.
 ///
 /// This is a fixed-point algorithm:
@@ -1135,6 +1215,557 @@ mod tests {
 
         // Second should be unconditional B.
         assert_eq!(result.instructions[1].opcode, AArch64Opcode::B);
+    }
+
+    // -----------------------------------------------------------------------
+    // test_bcond_relaxation_large_offset
+    // -----------------------------------------------------------------------
+    /// BCond EQ forward over 262145 instructions (>1MB, exceeds 19-bit range).
+    /// Verifies BCond EQ becomes BCond NE (inverted) + B through the
+    /// fixed-point loop.
+    #[test]
+    fn test_bcond_relaxation_large_offset() {
+        let count = 262145u32; // 262145 * 4 = 1,048,580 bytes > 1MB BCond range
+        let mut func = make_func("bcond_large", 3);
+        let bb0 = BlockId(0);
+        let bb1 = BlockId(1);
+        let bb2 = BlockId(2);
+
+        // bb0: BCond EQ -> bb2
+        add_inst(
+            &mut func,
+            bb0,
+            MachInst::new(
+                AArch64Opcode::BCond,
+                vec![MachOperand::Imm(AArch64CC::EQ as i64), MachOperand::Block(bb2)],
+            ),
+        );
+
+        // bb1: `count` filler instructions
+        for _ in 0..count {
+            add_inst(
+                &mut func,
+                bb1,
+                MachInst::new(AArch64Opcode::AddRI, vec![]),
+            );
+        }
+
+        // bb2: Ret
+        add_inst(
+            &mut func,
+            bb2,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        );
+
+        let result = relax_branches(&mut func).unwrap();
+
+        // After relaxation: BCond NE (1) + B (1) + count filler + Ret (1) = count + 3.
+        assert_eq!(result.instructions.len(), (count + 3) as usize);
+
+        // First instruction: BCond with inverted condition (NE instead of EQ).
+        assert_eq!(
+            result.instructions[0].opcode,
+            AArch64Opcode::BCond,
+            "should still be BCond opcode"
+        );
+        // First operand is the inverted condition code.
+        assert_eq!(
+            result.instructions[0].operands[0].as_imm().unwrap(),
+            AArch64CC::NE as i64,
+            "EQ should be inverted to NE"
+        );
+
+        // Second instruction: unconditional B to far target.
+        assert_eq!(result.instructions[1].opcode, AArch64Opcode::B);
+    }
+
+    // -----------------------------------------------------------------------
+    // test_tbnz_relaxation_large_offset
+    // -----------------------------------------------------------------------
+    /// TBNZ forward over 9000 instructions (>32KB, exceeds TBZ/TBNZ 14-bit range).
+    /// Verifies TBNZ becomes TBZ (inverted) + B.
+    #[test]
+    fn test_tbnz_relaxation_large_offset() {
+        let mut func = make_func("tbnz_large", 3);
+        let bb0 = BlockId(0);
+        let bb1 = BlockId(1);
+        let bb2 = BlockId(2);
+
+        // bb0: TBNZ Rt=0, bit=7, target=bb2
+        add_inst(
+            &mut func,
+            bb0,
+            MachInst::new(
+                AArch64Opcode::Tbnz,
+                vec![
+                    MachOperand::Imm(0),  // Rt
+                    MachOperand::Imm(7),  // bit number
+                    MachOperand::Block(bb2),
+                ],
+            ),
+        );
+
+        // bb1: 9000 filler instructions (36000 bytes > 32KB)
+        for _ in 0..9000 {
+            add_inst(
+                &mut func,
+                bb1,
+                MachInst::new(AArch64Opcode::AddRI, vec![]),
+            );
+        }
+
+        // bb2: Ret
+        add_inst(
+            &mut func,
+            bb2,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        );
+
+        let result = relax_branches(&mut func).unwrap();
+
+        // After relaxation: TBZ (1) + B (1) + 9000 (filler) + 1 (Ret) = 9003.
+        assert_eq!(result.instructions.len(), 9003);
+
+        // First instruction: TBZ (inverted from TBNZ).
+        assert_eq!(
+            result.instructions[0].opcode,
+            AArch64Opcode::Tbz,
+            "TBNZ should be relaxed to TBZ"
+        );
+
+        // Second instruction: unconditional B.
+        assert_eq!(
+            result.instructions[1].opcode,
+            AArch64Opcode::B,
+            "inserted far branch should be unconditional B"
+        );
+
+        // Verify the far B has correct displacement.
+        // bb2 offset = (2 + 9000) * 4 = 36008 bytes.
+        // B at offset 4 bytes (index 1): displacement = (36008 - 4) / 4 = 9001.
+        let far_offset = result.instructions[1]
+            .operands
+            .iter()
+            .find_map(|op| op.as_imm())
+            .unwrap();
+        assert_eq!(far_offset, 9001, "B should jump 9001 instructions to bb2");
+    }
+
+    // -----------------------------------------------------------------------
+    // test_empty_function
+    // -----------------------------------------------------------------------
+    /// A single block with just Ret. No relaxation needed.
+    #[test]
+    fn test_empty_function_no_relaxation() {
+        let mut func = make_func("empty", 1);
+        let bb0 = BlockId(0);
+
+        add_inst(
+            &mut func,
+            bb0,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        );
+
+        let result = relax_branches(&mut func).unwrap();
+
+        assert_eq!(result.instructions.len(), 1);
+        assert_eq!(result.instructions[0].opcode, AArch64Opcode::Ret);
+        assert_eq!(result.block_offsets[0], 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // test_single_block_no_branches
+    // -----------------------------------------------------------------------
+    /// A single block with multiple non-branch instructions.
+    #[test]
+    fn test_single_block_no_branches() {
+        let mut func = make_func("no_branches", 1);
+        let bb0 = BlockId(0);
+
+        add_inst(&mut func, bb0, MachInst::new(AArch64Opcode::AddRI, vec![]));
+        add_inst(&mut func, bb0, MachInst::new(AArch64Opcode::AddRI, vec![]));
+        add_inst(&mut func, bb0, MachInst::new(AArch64Opcode::AddRI, vec![]));
+        add_inst(&mut func, bb0, MachInst::new(AArch64Opcode::Ret, vec![]));
+
+        let result = relax_branches(&mut func).unwrap();
+
+        assert_eq!(result.instructions.len(), 4);
+        assert_eq!(result.block_offsets[0], 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // test_bcond_boundary_in_range
+    // -----------------------------------------------------------------------
+    /// BCond with displacement exactly at BCOND_MAX_RANGE. Should NOT be relaxed.
+    #[test]
+    fn test_bcond_boundary_in_range() {
+        // BCOND_MAX_RANGE = (1 << 20) - 4 = 1,048,572 bytes.
+        // Need bb2 at offset = BCOND_MAX_RANGE from the BCond instruction.
+        // BCond is the only instruction in bb0 (offset 0), so bb1 starts at 4.
+        // bb2 offset = 4 + N*4 = BCOND_MAX_RANGE = 1,048,572.
+        // N = (1,048,572 - 4) / 4 = 262,142.
+        let filler = 262142u32;
+        let mut func = make_func("bcond_boundary_in", 3);
+        let bb0 = BlockId(0);
+        let bb1 = BlockId(1);
+        let bb2 = BlockId(2);
+
+        add_inst(
+            &mut func,
+            bb0,
+            MachInst::new(
+                AArch64Opcode::BCond,
+                vec![MachOperand::Imm(AArch64CC::EQ as i64), MachOperand::Block(bb2)],
+            ),
+        );
+
+        for _ in 0..filler {
+            add_inst(
+                &mut func,
+                bb1,
+                MachInst::new(AArch64Opcode::AddRI, vec![]),
+            );
+        }
+
+        add_inst(
+            &mut func,
+            bb2,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        );
+
+        let result = relax_branches(&mut func).unwrap();
+
+        // Should NOT be relaxed: 1 (BCond) + filler + 1 (Ret) = filler + 2.
+        assert_eq!(result.instructions.len(), (filler + 2) as usize);
+
+        // First instruction should still be BCond (not relaxed, no extra B inserted).
+        assert_eq!(result.instructions[0].opcode, AArch64Opcode::BCond);
+
+        // Verify the resolved displacement is correct.
+        // BCond at offset 0, bb2 at offset 4 + filler*4 = 1,048,572.
+        // displacement in instruction units = 1,048,572 / 4 = 262,143.
+        let offset_imm = result.instructions[0]
+            .operands
+            .iter()
+            .filter_map(|op| op.as_imm())
+            .last()
+            .unwrap();
+        assert_eq!(offset_imm, 262143, "displacement in instruction units");
+    }
+
+    // -----------------------------------------------------------------------
+    // test_bcond_boundary_out_of_range
+    // -----------------------------------------------------------------------
+    /// BCond with displacement at BCOND_MAX_RANGE + 4. Should be relaxed.
+    #[test]
+    fn test_bcond_boundary_out_of_range() {
+        // BCOND_MAX_RANGE + 4 = 1,048,576 bytes.
+        // Need bb2 at offset 1,048,576 from the BCond at offset 0.
+        // bb2 offset = 4 + N*4 = 1,048,576 => N = (1,048,576 - 4) / 4 = 262,143.
+        let filler = 262143u32;
+        let mut func = make_func("bcond_boundary_out", 3);
+        let bb0 = BlockId(0);
+        let bb1 = BlockId(1);
+        let bb2 = BlockId(2);
+
+        add_inst(
+            &mut func,
+            bb0,
+            MachInst::new(
+                AArch64Opcode::BCond,
+                vec![MachOperand::Imm(AArch64CC::GE as i64), MachOperand::Block(bb2)],
+            ),
+        );
+
+        for _ in 0..filler {
+            add_inst(
+                &mut func,
+                bb1,
+                MachInst::new(AArch64Opcode::AddRI, vec![]),
+            );
+        }
+
+        add_inst(
+            &mut func,
+            bb2,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        );
+
+        let result = relax_branches(&mut func).unwrap();
+
+        // Should be relaxed: BCond LT (1) + B (1) + filler + Ret (1) = filler + 3.
+        assert_eq!(result.instructions.len(), (filler + 3) as usize);
+
+        // First instruction: BCond with inverted condition (LT instead of GE).
+        assert_eq!(result.instructions[0].opcode, AArch64Opcode::BCond);
+        assert_eq!(
+            result.instructions[0].operands[0].as_imm().unwrap(),
+            AArch64CC::LT as i64,
+            "GE should be inverted to LT"
+        );
+
+        // Second instruction: unconditional B.
+        assert_eq!(result.instructions[1].opcode, AArch64Opcode::B);
+    }
+
+    // -----------------------------------------------------------------------
+    // test_cbz_backward_relaxation
+    // -----------------------------------------------------------------------
+    /// CBZ backward over many instructions (>1MB). Verifies backward CBZ
+    /// relaxation.
+    #[test]
+    fn test_cbz_backward_relaxation() {
+        let count = 262145u32;
+        let mut func = make_func("cbz_backward", 2);
+        let bb0 = BlockId(0);
+        let bb1 = BlockId(1);
+
+        // bb0: count filler instructions
+        for _ in 0..count {
+            add_inst(
+                &mut func,
+                bb0,
+                MachInst::new(AArch64Opcode::AddRI, vec![]),
+            );
+        }
+
+        // bb1: CBZ backward to bb0
+        add_inst(
+            &mut func,
+            bb1,
+            MachInst::new(
+                AArch64Opcode::Cbz,
+                vec![MachOperand::Imm(0), MachOperand::Block(bb0)],
+            ),
+        );
+        add_inst(
+            &mut func,
+            bb1,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        );
+
+        let result = relax_branches(&mut func).unwrap();
+
+        // After relaxation: count filler + CBNZ (1) + B (1) + Ret (1) = count + 3.
+        assert_eq!(result.instructions.len(), (count + 3) as usize);
+
+        // Instruction at count index should be CBNZ (inverted from CBZ).
+        assert_eq!(
+            result.instructions[count as usize].opcode,
+            AArch64Opcode::Cbnz,
+            "backward CBZ should be inverted to CBNZ"
+        );
+
+        // Next instruction: unconditional B.
+        assert_eq!(
+            result.instructions[(count + 1) as usize].opcode,
+            AArch64Opcode::B,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // test_tbnz_relaxation_pattern
+    // -----------------------------------------------------------------------
+    /// Manually triggered TBNZ relaxation pattern test.
+    #[test]
+    fn test_tbnz_relaxation_pattern() {
+        let mut func = make_func("tbnz_relax", 2);
+        let bb0 = BlockId(0);
+        let bb1 = BlockId(1);
+
+        // bb0: TBNZ Rt=0, bit=15, target=bb1
+        add_inst(
+            &mut func,
+            bb0,
+            MachInst::new(
+                AArch64Opcode::Tbnz,
+                vec![
+                    MachOperand::Imm(0),   // Rt
+                    MachOperand::Imm(15),  // bit number
+                    MachOperand::Block(bb1),
+                ],
+            ),
+        );
+
+        add_inst(
+            &mut func,
+            bb1,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        );
+
+        relax_one_branch(&mut func, bb0, 0).unwrap();
+
+        let blk = func.block(bb0);
+        assert_eq!(blk.insts.len(), 2);
+
+        let inv = func.inst(blk.insts[0]);
+        assert_eq!(inv.opcode, AArch64Opcode::Tbz, "TBNZ should be inverted to TBZ");
+        // Verify the bit number operand is preserved.
+        // Operands: [Imm(Rt=0), Imm(bit=15), Imm(skip=2)]
+        assert_eq!(inv.operands[1].as_imm().unwrap(), 15, "bit number should be preserved");
+
+        let far = func.inst(blk.insts[1]);
+        assert_eq!(far.opcode, AArch64Opcode::B);
+        assert_eq!(get_branch_target_block(far), Some(bb1));
+    }
+
+    // -----------------------------------------------------------------------
+    // test_branch_relaxation_pass_struct
+    // -----------------------------------------------------------------------
+    /// Test the BranchRelaxation pass struct API.
+    #[test]
+    fn test_branch_relaxation_pass_struct() {
+        let mut func = make_func("pass_test", 2);
+        let bb0 = BlockId(0);
+        let bb1 = BlockId(1);
+
+        add_inst(
+            &mut func,
+            bb0,
+            MachInst::new(AArch64Opcode::B, vec![MachOperand::Block(bb1)]),
+        );
+        add_inst(
+            &mut func,
+            bb1,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        );
+
+        let pass = BranchRelaxation::new();
+        let result = pass.run(&mut func).unwrap();
+
+        assert_eq!(result.instructions.len(), 2);
+        assert_eq!(result.instructions[0].opcode, AArch64Opcode::B);
+        assert_eq!(result.instructions[1].opcode, AArch64Opcode::Ret);
+    }
+
+    // -----------------------------------------------------------------------
+    // test_has_out_of_range_branches
+    // -----------------------------------------------------------------------
+    /// Test the has_out_of_range_branches diagnostic.
+    #[test]
+    fn test_has_out_of_range_branches() {
+        let pass = BranchRelaxation::new();
+
+        // Small function: no out-of-range branches.
+        let mut small_func = make_func("small_diag", 2);
+        let s_bb0 = BlockId(0);
+        let s_bb1 = BlockId(1);
+        add_inst(
+            &mut small_func,
+            s_bb0,
+            MachInst::new(
+                AArch64Opcode::BCond,
+                vec![MachOperand::Imm(AArch64CC::EQ as i64), MachOperand::Block(s_bb1)],
+            ),
+        );
+        add_inst(
+            &mut small_func,
+            s_bb1,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        );
+        assert!(!pass.has_out_of_range_branches(&small_func));
+
+        // Large function with TBZ: out of range.
+        let mut large_func = make_func("large_diag", 3);
+        let l_bb0 = BlockId(0);
+        let l_bb1 = BlockId(1);
+        let l_bb2 = BlockId(2);
+        add_inst(
+            &mut large_func,
+            l_bb0,
+            MachInst::new(
+                AArch64Opcode::Tbz,
+                vec![
+                    MachOperand::Imm(0),
+                    MachOperand::Imm(3),
+                    MachOperand::Block(l_bb2),
+                ],
+            ),
+        );
+        for _ in 0..9000 {
+            add_inst(
+                &mut large_func,
+                l_bb1,
+                MachInst::new(AArch64Opcode::AddRI, vec![]),
+            );
+        }
+        add_inst(
+            &mut large_func,
+            l_bb2,
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        );
+        assert!(pass.has_out_of_range_branches(&large_func));
+    }
+
+    // -----------------------------------------------------------------------
+    // test_default_impl
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_branch_relaxation_default() {
+        let pass = BranchRelaxation::default();
+        let mut func = make_func("default_test", 1);
+        let bb0 = BlockId(0);
+        add_inst(&mut func, bb0, MachInst::new(AArch64Opcode::Ret, vec![]));
+        let result = pass.run(&mut func).unwrap();
+        assert_eq!(result.instructions.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // test_multiple_branches_in_one_block
+    // -----------------------------------------------------------------------
+    /// Multiple branch instructions in a single block, all in range.
+    #[test]
+    fn test_multiple_branches_one_block_all_in_range() {
+        let mut func = make_func("multi_branch", 4);
+        let bb0 = BlockId(0);
+        let bb1 = BlockId(1);
+        let bb2 = BlockId(2);
+        let bb3 = BlockId(3);
+
+        // bb0: BCond -> bb1 ; BCond -> bb2 ; B -> bb3
+        add_inst(
+            &mut func,
+            bb0,
+            MachInst::new(
+                AArch64Opcode::BCond,
+                vec![MachOperand::Imm(AArch64CC::EQ as i64), MachOperand::Block(bb1)],
+            ),
+        );
+        add_inst(
+            &mut func,
+            bb0,
+            MachInst::new(
+                AArch64Opcode::BCond,
+                vec![MachOperand::Imm(AArch64CC::GT as i64), MachOperand::Block(bb2)],
+            ),
+        );
+        add_inst(
+            &mut func,
+            bb0,
+            MachInst::new(AArch64Opcode::B, vec![MachOperand::Block(bb3)]),
+        );
+
+        // bb1: Ret
+        add_inst(&mut func, bb1, MachInst::new(AArch64Opcode::Ret, vec![]));
+        // bb2: Ret
+        add_inst(&mut func, bb2, MachInst::new(AArch64Opcode::Ret, vec![]));
+        // bb3: Ret
+        add_inst(&mut func, bb3, MachInst::new(AArch64Opcode::Ret, vec![]));
+
+        let result = relax_branches(&mut func).unwrap();
+
+        // 3 branches + 3 Rets = 6 instructions, no relaxation.
+        assert_eq!(result.instructions.len(), 6);
+
+        // Verify all branches were resolved to Imm offsets.
+        for inst in &result.instructions {
+            for op in &inst.operands {
+                assert!(
+                    !matches!(op, MachOperand::Block(_)),
+                    "all Block operands should be resolved"
+                );
+            }
+        }
     }
 
     /// Verify block_offsets array is consistent after TBZ relaxation.
