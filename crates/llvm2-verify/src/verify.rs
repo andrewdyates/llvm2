@@ -635,7 +635,7 @@ mod tests {
     fn test_verifier_arithmetic() {
         let verifier = Verifier::new();
         let report = verifier.verify_arithmetic();
-        assert_eq!(report.total(), 16);
+        assert_eq!(report.total(), 20);
         assert!(report.all_valid(), "Arithmetic proofs failed:\n{}", report.summary());
     }
 
