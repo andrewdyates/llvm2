@@ -841,3 +841,726 @@ pub fn build_add_test_function() -> IrMachFunction {
 
     func
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use llvm2_ir::function::{MachFunction as IrMachFunction, Signature as IrSignature, Type};
+    use llvm2_ir::inst::{AArch64Opcode as IrOpcode, InstFlags, MachInst as IrMachInst};
+    use llvm2_ir::operand::MachOperand as IrOperand;
+    use llvm2_ir::regs::{RegClass, VReg, X0, X1, X2};
+    use llvm2_ir::types::BlockId;
+
+    // -- Helper: create an instruction with specific flags --
+
+    fn make_inst(opcode: IrOpcode, operands: Vec<IrOperand>) -> IrMachInst {
+        IrMachInst::new(opcode, operands)
+    }
+
+    fn make_inst_with_flags(opcode: IrOpcode, operands: Vec<IrOperand>, flags: InstFlags) -> IrMachInst {
+        IrMachInst::with_flags(opcode, operands, flags)
+    }
+
+    // =========================================================================
+    // classify_def_use tests
+    // =========================================================================
+
+    #[test]
+    fn classify_def_use_alu_instruction_first_operand_is_def() {
+        // AddRR: [dst, src1, src2] -> defs=[dst], uses=[src1, src2]
+        let v0 = VReg::new(0, RegClass::Gpr64);
+        let v1 = VReg::new(1, RegClass::Gpr64);
+        let v2 = VReg::new(2, RegClass::Gpr64);
+        let inst = make_inst(
+            IrOpcode::AddRR,
+            vec![IrOperand::VReg(v0), IrOperand::VReg(v1), IrOperand::VReg(v2)],
+        );
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(uses.len(), 2);
+        assert_eq!(defs[0].as_vreg(), Some(v0));
+        assert_eq!(uses[0].as_vreg(), Some(v1));
+        assert_eq!(uses[1].as_vreg(), Some(v2));
+    }
+
+    #[test]
+    fn classify_def_use_add_immediate() {
+        // AddRI: [dst, src, imm] -> defs=[dst], uses=[src, imm]
+        let v0 = VReg::new(0, RegClass::Gpr64);
+        let v1 = VReg::new(1, RegClass::Gpr64);
+        let inst = make_inst(
+            IrOpcode::AddRI,
+            vec![IrOperand::VReg(v0), IrOperand::VReg(v1), IrOperand::Imm(42)],
+        );
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(uses.len(), 2);
+        assert_eq!(defs[0].as_vreg(), Some(v0));
+    }
+
+    #[test]
+    fn classify_def_use_store_all_uses_no_defs() {
+        // StrRI has WRITES_MEMORY flag -> all operands are uses
+        let inst = make_inst(
+            IrOpcode::StrRI,
+            vec![
+                IrOperand::PReg(X0),
+                IrOperand::PReg(X1),
+                IrOperand::Imm(8),
+            ],
+        );
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert!(defs.is_empty(), "store should have no defs");
+        assert_eq!(uses.len(), 3);
+    }
+
+    #[test]
+    fn classify_def_use_branch_all_uses_no_defs() {
+        // B has IS_BRANCH flag -> all operands are uses
+        let inst = make_inst(
+            IrOpcode::B,
+            vec![IrOperand::Block(BlockId(1))],
+        );
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert!(defs.is_empty(), "branch should have no defs");
+        assert_eq!(uses.len(), 1);
+    }
+
+    #[test]
+    fn classify_def_use_conditional_branch() {
+        // BCond has IS_BRANCH flag -> all uses
+        let inst = make_inst(
+            IrOpcode::BCond,
+            vec![IrOperand::Imm(0), IrOperand::Block(BlockId(2))],
+        );
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert!(defs.is_empty());
+        assert_eq!(uses.len(), 2);
+    }
+
+    #[test]
+    fn classify_def_use_return_all_uses_no_defs() {
+        // Ret has IS_RETURN flag -> all uses
+        let inst = make_inst(IrOpcode::Ret, vec![]);
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert!(defs.is_empty());
+        assert!(uses.is_empty());
+    }
+
+    #[test]
+    fn classify_def_use_compare_all_uses_no_defs() {
+        // CmpRR -> classified as compare, all uses
+        let inst = make_inst(
+            IrOpcode::CmpRR,
+            vec![IrOperand::PReg(X0), IrOperand::PReg(X1)],
+        );
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert!(defs.is_empty(), "compare should have no defs");
+        assert_eq!(uses.len(), 2);
+    }
+
+    #[test]
+    fn classify_def_use_compare_immediate() {
+        let inst = make_inst(
+            IrOpcode::CmpRI,
+            vec![IrOperand::PReg(X0), IrOperand::Imm(0)],
+        );
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert!(defs.is_empty());
+        assert_eq!(uses.len(), 2);
+    }
+
+    #[test]
+    fn classify_def_use_fcmp_all_uses() {
+        let v0 = VReg::new(0, RegClass::Fpr64);
+        let v1 = VReg::new(1, RegClass::Fpr64);
+        let inst = make_inst(
+            IrOpcode::Fcmp,
+            vec![IrOperand::VReg(v0), IrOperand::VReg(v1)],
+        );
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert!(defs.is_empty(), "fcmp should have no defs");
+        assert_eq!(uses.len(), 2);
+    }
+
+    #[test]
+    fn classify_def_use_load_first_operand_is_def() {
+        // LdrRI: [dst, base, offset] -> defs=[dst], uses=[base, offset]
+        let v0 = VReg::new(0, RegClass::Gpr64);
+        let inst = make_inst(
+            IrOpcode::LdrRI,
+            vec![IrOperand::VReg(v0), IrOperand::PReg(X1), IrOperand::Imm(0)],
+        );
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(uses.len(), 2);
+        assert_eq!(defs[0].as_vreg(), Some(v0));
+    }
+
+    #[test]
+    fn classify_def_use_empty_operands_no_defs_no_uses() {
+        // An instruction with no operands -> empty defs and uses regardless of flags
+        let inst = make_inst(IrOpcode::Nop, vec![]);
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert!(defs.is_empty());
+        assert!(uses.is_empty());
+    }
+
+    #[test]
+    fn classify_def_use_mov_immediate() {
+        // MovI: [dst, imm] -> defs=[dst], uses=[imm]
+        let v0 = VReg::new(0, RegClass::Gpr64);
+        let inst = make_inst(
+            IrOpcode::MovI,
+            vec![IrOperand::VReg(v0), IrOperand::Imm(100)],
+        );
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(uses.len(), 1);
+        assert_eq!(defs[0].as_vreg(), Some(v0));
+    }
+
+    #[test]
+    fn classify_def_use_physical_register_operands() {
+        // Post-regalloc instruction with PRegs
+        let inst = make_inst(
+            IrOpcode::AddRR,
+            vec![IrOperand::PReg(X0), IrOperand::PReg(X1), IrOperand::PReg(X2)],
+        );
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(uses.len(), 2);
+        assert_eq!(defs[0].as_preg(), Some(X0));
+        assert_eq!(uses[0].as_preg(), Some(X1));
+    }
+
+    #[test]
+    fn classify_def_use_rejects_frame_index_operand() {
+        // FrameIndex should be lowered before regalloc; classify_def_use should error
+        let inst = make_inst(
+            IrOpcode::AddRR,
+            vec![
+                IrOperand::FrameIndex(llvm2_ir::types::FrameIdx(-8)),
+                IrOperand::PReg(X0),
+            ],
+        );
+
+        let result = classify_def_use(&inst);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PipelineError::InvalidOperand(msg) => {
+                assert!(msg.contains("FrameIndex"));
+            }
+            other => panic!("expected InvalidOperand, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_def_use_rejects_memop_operand() {
+        let inst = make_inst(
+            IrOpcode::AddRR,
+            vec![
+                IrOperand::MemOp { base: X0, offset: 16 },
+                IrOperand::PReg(X1),
+            ],
+        );
+
+        let result = classify_def_use(&inst);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn classify_def_use_rejects_special_operand() {
+        let inst = make_inst(
+            IrOpcode::AddRR,
+            vec![
+                IrOperand::Special(llvm2_ir::regs::SpecialReg::SP),
+                IrOperand::PReg(X0),
+            ],
+        );
+
+        let result = classify_def_use(&inst);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn classify_def_use_store_with_writes_memory_flag() {
+        // Verify the WRITES_MEMORY flag drives the "all uses" classification
+        // even with a non-standard opcode that has WRITES_MEMORY set manually
+        let inst = make_inst_with_flags(
+            IrOpcode::StpRI,
+            vec![IrOperand::PReg(X0), IrOperand::PReg(X1), IrOperand::PReg(X2), IrOperand::Imm(0)],
+            InstFlags::WRITES_MEMORY | InstFlags::HAS_SIDE_EFFECTS,
+        );
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert!(defs.is_empty());
+        assert_eq!(uses.len(), 4);
+    }
+
+    #[test]
+    fn classify_def_use_cbz_branch() {
+        let inst = make_inst(
+            IrOpcode::Cbz,
+            vec![IrOperand::PReg(X0), IrOperand::Block(BlockId(3))],
+        );
+
+        let (defs, uses) = classify_def_use(&inst).unwrap();
+        assert!(defs.is_empty(), "cbz is a branch, no defs");
+        assert_eq!(uses.len(), 2);
+    }
+
+    // =========================================================================
+    // apply_regalloc tests
+    // =========================================================================
+
+    #[test]
+    fn apply_regalloc_rewrites_vregs_to_pregs() {
+        let sig = IrSignature::new(vec![Type::I64, Type::I64], vec![Type::I64]);
+        let mut func = IrMachFunction::new("test".to_string(), sig);
+
+        let v0 = VReg::new(0, RegClass::Gpr64);
+        let v1 = VReg::new(1, RegClass::Gpr64);
+        let v2 = VReg::new(2, RegClass::Gpr64);
+
+        let inst = IrMachInst::new(
+            IrOpcode::AddRR,
+            vec![IrOperand::VReg(v0), IrOperand::VReg(v1), IrOperand::VReg(v2)],
+        );
+        func.push_inst(inst);
+
+        let mut allocation = HashMap::new();
+        allocation.insert(v0, X0);
+        allocation.insert(v1, X1);
+        allocation.insert(v2, X2);
+
+        apply_regalloc(&mut func, &allocation);
+
+        assert_eq!(func.insts[0].operands[0], IrOperand::PReg(X0));
+        assert_eq!(func.insts[0].operands[1], IrOperand::PReg(X1));
+        assert_eq!(func.insts[0].operands[2], IrOperand::PReg(X2));
+    }
+
+    #[test]
+    fn apply_regalloc_leaves_pregs_unchanged() {
+        let sig = IrSignature::new(vec![], vec![]);
+        let mut func = IrMachFunction::new("test".to_string(), sig);
+
+        let inst = IrMachInst::new(
+            IrOpcode::AddRR,
+            vec![IrOperand::PReg(X0), IrOperand::PReg(X1), IrOperand::PReg(X2)],
+        );
+        func.push_inst(inst);
+
+        let allocation = HashMap::new();
+        apply_regalloc(&mut func, &allocation);
+
+        assert_eq!(func.insts[0].operands[0], IrOperand::PReg(X0));
+        assert_eq!(func.insts[0].operands[1], IrOperand::PReg(X1));
+        assert_eq!(func.insts[0].operands[2], IrOperand::PReg(X2));
+    }
+
+    #[test]
+    fn apply_regalloc_leaves_immediates_unchanged() {
+        let sig = IrSignature::new(vec![], vec![]);
+        let mut func = IrMachFunction::new("test".to_string(), sig);
+
+        let v0 = VReg::new(0, RegClass::Gpr64);
+        let inst = IrMachInst::new(
+            IrOpcode::AddRI,
+            vec![IrOperand::VReg(v0), IrOperand::PReg(X1), IrOperand::Imm(42)],
+        );
+        func.push_inst(inst);
+
+        let mut allocation = HashMap::new();
+        allocation.insert(v0, X0);
+
+        apply_regalloc(&mut func, &allocation);
+
+        assert_eq!(func.insts[0].operands[0], IrOperand::PReg(X0));
+        assert_eq!(func.insts[0].operands[2], IrOperand::Imm(42));
+    }
+
+    #[test]
+    fn apply_regalloc_unallocated_vreg_stays_vreg() {
+        // VRegs not in the allocation map are left as-is (spilled)
+        let sig = IrSignature::new(vec![], vec![]);
+        let mut func = IrMachFunction::new("test".to_string(), sig);
+
+        let v0 = VReg::new(0, RegClass::Gpr64);
+        let inst = IrMachInst::new(IrOpcode::MovI, vec![IrOperand::VReg(v0), IrOperand::Imm(0)]);
+        func.push_inst(inst);
+
+        let allocation = HashMap::new(); // empty allocation
+        apply_regalloc(&mut func, &allocation);
+
+        assert_eq!(func.insts[0].operands[0], IrOperand::VReg(v0));
+    }
+
+    // =========================================================================
+    // lower_copies tests
+    // =========================================================================
+
+    #[test]
+    fn lower_copies_converts_copy_to_movr() {
+        let sig = IrSignature::new(vec![], vec![]);
+        let mut func = IrMachFunction::new("test".to_string(), sig);
+
+        let copy = IrMachInst::new(
+            IrOpcode::Copy,
+            vec![IrOperand::PReg(X0), IrOperand::PReg(X1)],
+        );
+        // Copy starts as pseudo
+        assert!(copy.flags.contains(InstFlags::IS_PSEUDO));
+        func.push_inst(copy);
+
+        lower_copies(&mut func);
+
+        assert_eq!(func.insts[0].opcode, IrOpcode::MovR);
+        assert!(!func.insts[0].flags.contains(InstFlags::IS_PSEUDO),
+            "MovR should not be pseudo after lowering");
+    }
+
+    #[test]
+    fn lower_copies_eliminates_redundant_copy() {
+        let sig = IrSignature::new(vec![], vec![]);
+        let mut func = IrMachFunction::new("test".to_string(), sig);
+
+        // Copy X0 -> X0 (redundant)
+        let copy = IrMachInst::new(
+            IrOpcode::Copy,
+            vec![IrOperand::PReg(X0), IrOperand::PReg(X0)],
+        );
+        func.push_inst(copy);
+
+        lower_copies(&mut func);
+
+        assert_eq!(func.insts[0].opcode, IrOpcode::Nop,
+            "redundant copy should become Nop");
+    }
+
+    #[test]
+    fn lower_copies_leaves_non_copy_instructions() {
+        let sig = IrSignature::new(vec![], vec![]);
+        let mut func = IrMachFunction::new("test".to_string(), sig);
+
+        let add = IrMachInst::new(
+            IrOpcode::AddRR,
+            vec![IrOperand::PReg(X0), IrOperand::PReg(X1), IrOperand::PReg(X2)],
+        );
+        func.push_inst(add);
+
+        lower_copies(&mut func);
+
+        assert_eq!(func.insts[0].opcode, IrOpcode::AddRR);
+    }
+
+    #[test]
+    fn lower_copies_handles_mixed_instructions() {
+        let sig = IrSignature::new(vec![], vec![]);
+        let mut func = IrMachFunction::new("test".to_string(), sig);
+
+        // Non-redundant copy
+        func.push_inst(IrMachInst::new(
+            IrOpcode::Copy,
+            vec![IrOperand::PReg(X0), IrOperand::PReg(X1)],
+        ));
+        // Regular instruction
+        func.push_inst(IrMachInst::new(
+            IrOpcode::AddRR,
+            vec![IrOperand::PReg(X0), IrOperand::PReg(X0), IrOperand::PReg(X2)],
+        ));
+        // Redundant copy
+        func.push_inst(IrMachInst::new(
+            IrOpcode::Copy,
+            vec![IrOperand::PReg(X2), IrOperand::PReg(X2)],
+        ));
+
+        lower_copies(&mut func);
+
+        assert_eq!(func.insts[0].opcode, IrOpcode::MovR);
+        assert_eq!(func.insts[1].opcode, IrOpcode::AddRR);
+        assert_eq!(func.insts[2].opcode, IrOpcode::Nop);
+    }
+
+    // =========================================================================
+    // resolve_branches tests
+    // =========================================================================
+
+    #[test]
+    fn resolve_branches_single_block_no_branches() {
+        let sig = IrSignature::new(vec![], vec![]);
+        let mut func = IrMachFunction::new("test".to_string(), sig);
+        let entry = func.entry;
+
+        let add = IrMachInst::new(
+            IrOpcode::AddRR,
+            vec![IrOperand::PReg(X0), IrOperand::PReg(X0), IrOperand::PReg(X1)],
+        );
+        let add_id = func.push_inst(add);
+        func.append_inst(entry, add_id);
+
+        let ret = IrMachInst::new(IrOpcode::Ret, vec![]);
+        let ret_id = func.push_inst(ret);
+        func.append_inst(entry, ret_id);
+
+        resolve_branches(&mut func);
+
+        // No branches, nothing should change
+        assert_eq!(func.insts[add_id.0 as usize].operands.len(), 3);
+    }
+
+    #[test]
+    fn resolve_branches_replaces_block_operand_with_offset() {
+        let sig = IrSignature::new(vec![], vec![]);
+        let mut func = IrMachFunction::new("test".to_string(), sig);
+        let entry = func.entry;
+        let bb1 = func.create_block();
+
+        // bb0: B bb1
+        let br = IrMachInst::new(IrOpcode::B, vec![IrOperand::Block(bb1)]);
+        let br_id = func.push_inst(br);
+        func.append_inst(entry, br_id);
+
+        // bb1: RET
+        let ret = IrMachInst::new(IrOpcode::Ret, vec![]);
+        let ret_id = func.push_inst(ret);
+        func.append_inst(bb1, ret_id);
+
+        resolve_branches(&mut func);
+
+        // Branch at offset 0 targets bb1 at offset 1 -> relative offset = 1
+        let resolved_operand = &func.insts[br_id.0 as usize].operands[0];
+        assert!(
+            matches!(resolved_operand, IrOperand::Imm(1)),
+            "expected Imm(1), got {:?}", resolved_operand
+        );
+    }
+
+    // =========================================================================
+    // PipelineConfig / OptLevel tests
+    // =========================================================================
+
+    #[test]
+    fn pipeline_config_default_is_o2() {
+        let config = PipelineConfig::default();
+        assert_eq!(config.opt_level, OptLevel::O2);
+        assert!(!config.emit_debug);
+    }
+
+    #[test]
+    fn opt_level_equality() {
+        assert_eq!(OptLevel::O0, OptLevel::O0);
+        assert_eq!(OptLevel::O1, OptLevel::O1);
+        assert_eq!(OptLevel::O2, OptLevel::O2);
+        assert_eq!(OptLevel::O3, OptLevel::O3);
+        assert_ne!(OptLevel::O0, OptLevel::O3);
+        assert_ne!(OptLevel::O1, OptLevel::O2);
+    }
+
+    #[test]
+    fn pipeline_config_custom() {
+        let config = PipelineConfig {
+            opt_level: OptLevel::O0,
+            emit_debug: true,
+        };
+        assert_eq!(config.opt_level, OptLevel::O0);
+        assert!(config.emit_debug);
+    }
+
+    #[test]
+    fn pipeline_config_clone() {
+        let config = PipelineConfig {
+            opt_level: OptLevel::O3,
+            emit_debug: true,
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.opt_level, OptLevel::O3);
+        assert!(cloned.emit_debug);
+    }
+
+    // =========================================================================
+    // Pipeline constructor tests
+    // =========================================================================
+
+    #[test]
+    fn pipeline_new_with_config() {
+        let config = PipelineConfig {
+            opt_level: OptLevel::O1,
+            emit_debug: false,
+        };
+        let pipeline = Pipeline::new(config);
+        assert_eq!(pipeline.config.opt_level, OptLevel::O1);
+    }
+
+    #[test]
+    fn pipeline_default_o2() {
+        let pipeline = Pipeline::default_o2();
+        assert_eq!(pipeline.config.opt_level, OptLevel::O2);
+        assert!(!pipeline.config.emit_debug);
+    }
+
+    // =========================================================================
+    // CompilationUnit tests
+    // =========================================================================
+
+    #[test]
+    fn compilation_unit_new() {
+        let sig = IrSignature::new(vec![Type::I64], vec![Type::I64]);
+        let func = IrMachFunction::new("my_func".to_string(), sig);
+        let config = PipelineConfig::default();
+        let unit = CompilationUnit::new(func, config);
+
+        assert_eq!(unit.name, "my_func");
+        assert!(unit.code.is_empty());
+        assert_eq!(unit.config.opt_level, OptLevel::O2);
+    }
+
+    // =========================================================================
+    // build_add_test_function tests
+    // =========================================================================
+
+    #[test]
+    fn build_add_test_function_structure() {
+        let func = build_add_test_function();
+
+        assert_eq!(func.name, "add");
+        assert_eq!(func.signature.params.len(), 2);
+        assert_eq!(func.signature.returns.len(), 1);
+        assert_eq!(func.num_blocks(), 1);
+        // Should have 2 instructions: ADD + RET
+        assert_eq!(func.block(func.entry).len(), 2);
+    }
+
+    #[test]
+    fn build_add_test_function_instructions() {
+        let func = build_add_test_function();
+        let entry_block = func.block(func.entry);
+
+        let add_inst = func.inst(entry_block.insts[0]);
+        assert_eq!(add_inst.opcode, IrOpcode::AddRR);
+        assert_eq!(add_inst.operands.len(), 3);
+        assert_eq!(add_inst.operands[0], IrOperand::PReg(X0));
+        assert_eq!(add_inst.operands[1], IrOperand::PReg(X0));
+        assert_eq!(add_inst.operands[2], IrOperand::PReg(X1));
+
+        let ret_inst = func.inst(entry_block.insts[1]);
+        assert_eq!(ret_inst.opcode, IrOpcode::Ret);
+        assert!(ret_inst.operands.is_empty());
+    }
+
+    // =========================================================================
+    // ir_to_regalloc adapter tests
+    // =========================================================================
+
+    #[test]
+    fn ir_to_regalloc_preserves_function_name() {
+        let sig = IrSignature::new(vec![], vec![]);
+        let mut func = IrMachFunction::new("my_function".to_string(), sig);
+        let entry = func.entry;
+
+        let ret = IrMachInst::new(IrOpcode::Ret, vec![]);
+        let ret_id = func.push_inst(ret);
+        func.append_inst(entry, ret_id);
+
+        let ra_func = ir_to_regalloc(&func).unwrap();
+        assert_eq!(ra_func.name, "my_function");
+    }
+
+    #[test]
+    fn ir_to_regalloc_converts_stack_slots() {
+        let sig = IrSignature::new(vec![], vec![]);
+        let mut func = IrMachFunction::new("test".to_string(), sig);
+        func.alloc_stack_slot(llvm2_ir::function::StackSlot::new(8, 8));
+        func.alloc_stack_slot(llvm2_ir::function::StackSlot::new(16, 16));
+
+        let entry = func.entry;
+        let ret = IrMachInst::new(IrOpcode::Ret, vec![]);
+        let ret_id = func.push_inst(ret);
+        func.append_inst(entry, ret_id);
+
+        let ra_func = ir_to_regalloc(&func).unwrap();
+        assert_eq!(ra_func.stack_slots.len(), 2);
+        assert_eq!(ra_func.next_stack_slot, 2);
+    }
+
+    #[test]
+    fn ir_to_regalloc_preserves_block_order() {
+        let sig = IrSignature::new(vec![], vec![]);
+        let mut func = IrMachFunction::new("test".to_string(), sig);
+        let entry = func.entry;
+        let bb1 = func.create_block();
+
+        // Add instructions to both blocks
+        let nop1 = IrMachInst::new(IrOpcode::Nop, vec![]);
+        let nop1_id = func.push_inst(nop1);
+        func.append_inst(entry, nop1_id);
+
+        let nop2 = IrMachInst::new(IrOpcode::Nop, vec![]);
+        let nop2_id = func.push_inst(nop2);
+        func.append_inst(bb1, nop2_id);
+
+        let ra_func = ir_to_regalloc(&func).unwrap();
+        assert_eq!(ra_func.block_order.len(), 2);
+        assert_eq!(ra_func.block_order[0], BlockId(0));
+        assert_eq!(ra_func.block_order[1], BlockId(1));
+        assert_eq!(ra_func.entry_block, BlockId(0));
+    }
+
+    // =========================================================================
+    // PipelineError Display tests
+    // =========================================================================
+
+    #[test]
+    fn pipeline_error_display_isel() {
+        let err = PipelineError::ISel("something went wrong".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("instruction selection failed"));
+        assert!(msg.contains("something went wrong"));
+    }
+
+    #[test]
+    fn pipeline_error_display_regalloc() {
+        let err = PipelineError::RegAlloc("out of registers".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("register allocation failed"));
+    }
+
+    #[test]
+    fn pipeline_error_display_encoding() {
+        let err = PipelineError::Encoding("bad instruction".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("encoding failed"));
+    }
+
+    #[test]
+    fn pipeline_error_display_unsupported_opcode() {
+        let err = PipelineError::UnsupportedOpcode(IrOpcode::Phi);
+        let msg = format!("{}", err);
+        assert!(msg.contains("unsupported opcode"));
+    }
+
+    #[test]
+    fn pipeline_error_display_invalid_operand() {
+        let err = PipelineError::InvalidOperand("FrameIndex must be eliminated".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("invalid operand"));
+    }
+}
