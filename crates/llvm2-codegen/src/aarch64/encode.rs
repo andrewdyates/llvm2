@@ -1407,7 +1407,7 @@ mod tests {
     use super::*;
     use llvm2_ir::inst::{AArch64Opcode, MachInst};
     use llvm2_ir::operand::MachOperand;
-    use llvm2_ir::regs::{PReg, SpecialReg, X0, X1, X2, X9, X30, V0, V1, V2, W0, W1, W2, S0, S1, S2, D0, H0};
+    use llvm2_ir::regs::{PReg, SpecialReg, X0, X1, X2, X9, X30, V0, V1, V2, W0, W1, W2, W3, W4, W5, S0, S1, S2, D0, H0};
 
     /// Helper to build a MachInst with given opcode and operands.
     fn mk(opcode: AArch64Opcode, ops: Vec<MachOperand>) -> MachInst {
@@ -3098,5 +3098,483 @@ mod tests {
         let inst = mk(AArch64Opcode::MulRR, vec![preg(X0), preg(X1)]);
         let result = encode_instruction(&inst);
         assert!(result.is_err(), "MulRR with missing Rm must error");
+    }
+
+    // =========================================================================
+    // ARM Architecture Reference Manual (DDI 0487) encoding verification
+    //
+    // Each test verifies the full 32-bit instruction word against the expected
+    // bit pattern derived from the ARM ARM encoding tables. These are not
+    // cross-checked against internal helpers — they are independent ground
+    // truth assertions.
+    //
+    // Encoding derivations follow the format:
+    //   bit[31] | bit[30] | ... | bit[4:0]
+    // with the ARM ARM section referenced for each instruction class.
+    // =========================================================================
+
+    // --- ADD/SUB register (ARM ARM C6.2.5/C6.2.294) ---
+    // Add/Subtract (shifted register): sf|op|S|01011|shift|0|Rm|imm6|Rn|Rd
+
+    #[test]
+    fn test_arm_arm_add_x0_x1_x2() {
+        // ADD X0, X1, X2
+        // ARM ARM C6.2.5: sf=1 op=0 S=0 01011 shift=00 0 Rm=00010 imm6=000000 Rn=00001 Rd=00000
+        // = 1_0_0_01011_00_0_00010_000000_00001_00000
+        // = 0x8B020020
+        let inst = mk(AArch64Opcode::AddRR, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x8B020020, "ADD X0, X1, X2 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_arm_arm_add_w3_w4_w5() {
+        // ADD W3, W4, W5
+        // ARM ARM: sf=0 op=0 S=0 01011 shift=00 0 Rm=00101 imm6=000000 Rn=00100 Rd=00011
+        // = 0_0_0_01011_00_0_00101_000000_00100_00011
+        // = 0x0B050083
+        let inst = mk(AArch64Opcode::AddRR, vec![preg(W3), preg(W4), preg(W5)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x0B050083, "ADD W3, W4, W5 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_arm_arm_sub_x0_x1_x2() {
+        // SUB X0, X1, X2
+        // ARM ARM C6.2.294: sf=1 op=1 S=0 01011 00 0 Rm=00010 000000 Rn=00001 Rd=00000
+        // = 1_1_0_01011_00_0_00010_000000_00001_00000
+        // = 0xCB020020
+        let inst = mk(AArch64Opcode::SubRR, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xCB020020, "SUB X0, X1, X2 = {enc:#010X}");
+    }
+
+    // --- ADD/SUB immediate (ARM ARM C6.2.4/C6.2.293) ---
+    // sf|op|S|100010|sh|imm12|Rn|Rd
+
+    #[test]
+    fn test_arm_arm_add_x0_x1_imm100() {
+        // ADD X0, X1, #100
+        // ARM ARM C6.2.4: sf=1 op=0 S=0 100010 sh=0 imm12=000001100100 Rn=00001 Rd=00000
+        // = 1_0_0_100010_0_000001100100_00001_00000
+        // = 0x91019020
+        let inst = mk(AArch64Opcode::AddRI, vec![preg(X0), preg(X1), imm(100)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x91019020, "ADD X0, X1, #100 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_arm_arm_sub_x0_x1_imm100() {
+        // SUB X0, X1, #100
+        // ARM ARM C6.2.293: sf=1 op=1 S=0 100010 sh=0 imm12=000001100100 Rn=00001 Rd=00000
+        // = 1_1_0_100010_0_000001100100_00001_00000
+        // = 0xD1019020
+        let inst = mk(AArch64Opcode::SubRI, vec![preg(X0), preg(X1), imm(100)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xD1019020, "SUB X0, X1, #100 = {enc:#010X}");
+    }
+
+    // --- MOV register (ARM ARM C6.2.186) ---
+    // MOV Xd, Xm is alias for ORR Xd, XZR, Xm
+    // Logical shifted reg: sf|opc|01010|shift|N|Rm|imm6|Rn|Rd
+
+    #[test]
+    fn test_arm_arm_mov_x0_x1() {
+        // MOV X0, X1 = ORR X0, XZR, X1
+        // ARM ARM C6.2.186/C6.2.215: sf=1 opc=01 01010 shift=00 N=0 Rm=00001 imm6=000000 Rn=11111 Rd=00000
+        // = 1_01_01010_00_0_00001_000000_11111_00000
+        // = 0xAA0103E0
+        let inst = mk(AArch64Opcode::MovR, vec![preg(X0), preg(X1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xAA0103E0, "MOV X0, X1 = {enc:#010X}");
+    }
+
+    // --- MOVZ (ARM ARM C6.2.191) ---
+    // sf|opc=10|100101|hw|imm16|Rd
+
+    #[test]
+    fn test_arm_arm_movz_x0_0x1234() {
+        // MOVZ X0, #0x1234
+        // ARM ARM C6.2.191: sf=1 opc=10 100101 hw=00 imm16=0001001000110100 Rd=00000
+        // Encoding: (1<<31)|(0b10<<29)|(0b100101<<23)|(0<<21)|(0x1234<<5)|0
+        //         = 0x80000000|0x40000000|0x12800000|0x00024680
+        //         = 0xD2824680
+        let inst = mk(AArch64Opcode::Movz, vec![preg(X0), imm(0x1234)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xD2824680, "MOVZ X0, #0x1234 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_arm_arm_movz_w0_0x_ffff() {
+        // MOVZ W0, #0xFFFF
+        // ARM ARM: sf=0 opc=10 100101 hw=00 imm16=1111111111111111 Rd=00000
+        // Encoding: (0<<31)|(0b10<<29)|(0b100101<<23)|(0<<21)|(0xFFFF<<5)|0
+        //         = 0x00000000|0x40000000|0x12800000|0x001FFFE0
+        //         = 0x529FFFE0
+        let inst = mk(AArch64Opcode::Movz, vec![preg(W0), imm(0xFFFF)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x529FFFE0, "MOVZ W0, #0xFFFF = {enc:#010X}");
+    }
+
+    // --- MOVK (ARM ARM C6.2.189) ---
+    // sf|opc=11|100101|hw|imm16|Rd
+
+    #[test]
+    fn test_arm_arm_movk_x0_0x5678() {
+        // MOVK X0, #0x5678
+        // ARM ARM C6.2.189: sf=1 opc=11 100101 hw=00 imm16=0101011001111000 Rd=00000
+        // Encoding: (1<<31)|(0b11<<29)|(0b100101<<23)|(0<<21)|(0x5678<<5)|0
+        //         = 0x80000000|0x60000000|0x12800000|0x000ACF00
+        //         = 0xF28ACF00
+        let inst = mk(AArch64Opcode::Movk, vec![preg(X0), imm(0x5678)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xF28ACF00, "MOVK X0, #0x5678 = {enc:#010X}");
+    }
+
+    // --- LDR unsigned immediate (ARM ARM C6.2.132) ---
+    // size|111|V|01|opc|imm12|Rn|Rt
+
+    #[test]
+    fn test_arm_arm_ldr_x0_x1_imm16() {
+        // LDR X0, [X1, #16]
+        // ARM ARM C6.2.132: size=11 111 V=0 01 opc=01 imm12=000000000010 Rn=00001 Rt=00000
+        // imm12 = byte_offset / 8 = 16 / 8 = 2
+        // = 11_111_0_01_01_000000000010_00001_00000
+        // = 0xF9400820
+        let inst = mk(AArch64Opcode::LdrRI, vec![preg(X0), preg(X1), imm(16)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xF9400820, "LDR X0, [X1, #16] = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_arm_arm_ldr_w0_w1_imm0() {
+        // LDR W0, [X1]  (no offset)
+        // ARM ARM: size=10 111 V=0 01 opc=01 imm12=000000000000 Rn=00001 Rt=00000
+        // = 10_111_0_01_01_000000000000_00001_00000
+        // = 0xB9400020
+        let inst = mk(AArch64Opcode::LdrRI, vec![preg(W0), preg(X1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xB9400020, "LDR W0, [X1] = {enc:#010X}");
+    }
+
+    // --- STR unsigned immediate (ARM ARM C6.2.280) ---
+    // size|111|V|01|opc|imm12|Rn|Rt
+
+    #[test]
+    fn test_arm_arm_str_x0_x1_imm0() {
+        // STR X0, [X1]
+        // ARM ARM C6.2.280: size=11 111 V=0 01 opc=00 imm12=000000000000 Rn=00001 Rt=00000
+        // = 11_111_0_01_00_000000000000_00001_00000
+        // = 0xF9000020
+        let inst = mk(AArch64Opcode::StrRI, vec![preg(X0), preg(X1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xF9000020, "STR X0, [X1] = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_arm_arm_str_x0_x1_imm8() {
+        // STR X0, [X1, #8]
+        // ARM ARM: size=11 111 V=0 01 opc=00 imm12=000000000001 Rn=00001 Rt=00000
+        // imm12 = 8 / 8 = 1
+        // = 11_111_0_01_00_000000000001_00001_00000
+        // = 0xF9000420
+        let inst = mk(AArch64Opcode::StrRI, vec![preg(X0), preg(X1), imm(8)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xF9000420, "STR X0, [X1, #8] = {enc:#010X}");
+    }
+
+    // --- B unconditional (ARM ARM C6.2.33) ---
+    // op=0|00101|imm26
+
+    #[test]
+    fn test_arm_arm_b_offset4() {
+        // B +16 (imm26 = 4, since offset is in units of 4 bytes)
+        // ARM ARM C6.2.33: op=0 00101 imm26=00_0000_0000_0000_0000_0000_0100
+        // = 0_00101_00000000000000000000000100
+        // = 0x14000004
+        let inst = mk(AArch64Opcode::B, vec![imm(4)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x14000004, "B +16 = {enc:#010X}");
+    }
+
+    // --- BL (ARM ARM C6.2.35) ---
+    // op=1|00101|imm26
+
+    #[test]
+    fn test_arm_arm_bl_offset4() {
+        // BL +16 (imm26 = 4)
+        // ARM ARM C6.2.35: op=1 00101 imm26=00000000000000000000000100
+        // = 1_00101_00000000000000000000000100
+        // = 0x94000004
+        let inst = mk(AArch64Opcode::Bl, vec![imm(4)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x94000004, "BL +16 = {enc:#010X}");
+    }
+
+    // --- CMP register (ARM ARM C6.2.68) ---
+    // CMP Xn, Xm = SUBS XZR, Xn, Xm
+    // sf|op=1|S=1|01011|shift|0|Rm|imm6|Rn|Rd=11111
+
+    #[test]
+    fn test_arm_arm_cmp_x1_x2() {
+        // CMP X1, X2 = SUBS XZR, X1, X2
+        // ARM ARM: sf=1 op=1 S=1 01011 00 0 Rm=00010 000000 Rn=00001 Rd=11111
+        // = 1_1_1_01011_00_0_00010_000000_00001_11111
+        // = 0xEB02003F
+        let inst = mk(AArch64Opcode::CmpRR, vec![preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xEB02003F, "CMP X1, X2 = {enc:#010X}");
+    }
+
+    // --- CMP immediate (ARM ARM C6.2.69) ---
+    // CMP Xn, #imm = SUBS XZR, Xn, #imm
+    // sf|op=1|S=1|100010|sh|imm12|Rn|Rd=11111
+
+    #[test]
+    fn test_arm_arm_cmp_x1_imm10() {
+        // CMP X1, #10 = SUBS XZR, X1, #10
+        // ARM ARM: sf=1 op=1 S=1 100010 sh=0 imm12=000000001010 Rn=00001 Rd=11111
+        // = 1_1_1_100010_0_000000001010_00001_11111
+        // = 0xF100283F
+        let inst = mk(AArch64Opcode::CmpRI, vec![preg(X1), imm(10)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xF100283F, "CMP X1, #10 = {enc:#010X}");
+    }
+
+    // --- AND register (ARM ARM C6.2.12) ---
+    // Logical shifted register: sf|opc=00|01010|shift|N=0|Rm|imm6|Rn|Rd
+
+    #[test]
+    fn test_arm_arm_and_x0_x1_x2() {
+        // AND X0, X1, X2
+        // ARM ARM C6.2.12: sf=1 opc=00 01010 shift=00 N=0 Rm=00010 imm6=000000 Rn=00001 Rd=00000
+        // = 1_00_01010_00_0_00010_000000_00001_00000
+        // = 0x8A020020
+        let inst = mk(AArch64Opcode::AndRR, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x8A020020, "AND X0, X1, X2 = {enc:#010X}");
+    }
+
+    // --- ORR register (ARM ARM C6.2.215) ---
+    // sf|opc=01|01010|shift|N=0|Rm|imm6|Rn|Rd
+
+    #[test]
+    fn test_arm_arm_orr_x0_x1_x2() {
+        // ORR X0, X1, X2
+        // ARM ARM C6.2.215: sf=1 opc=01 01010 shift=00 N=0 Rm=00010 imm6=000000 Rn=00001 Rd=00000
+        // = 1_01_01010_00_0_00010_000000_00001_00000
+        // = 0xAA020020
+        let inst = mk(AArch64Opcode::OrrRR, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xAA020020, "ORR X0, X1, X2 = {enc:#010X}");
+    }
+
+    // --- EOR register (ARM ARM C6.2.92) ---
+    // sf|opc=10|01010|shift|N=0|Rm|imm6|Rn|Rd
+
+    #[test]
+    fn test_arm_arm_eor_x0_x1_x2() {
+        // EOR X0, X1, X2
+        // ARM ARM C6.2.92: sf=1 opc=10 01010 shift=00 N=0 Rm=00010 imm6=000000 Rn=00001 Rd=00000
+        // = 1_10_01010_00_0_00010_000000_00001_00000
+        // = 0xCA020020
+        let inst = mk(AArch64Opcode::EorRR, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xCA020020, "EOR X0, X1, X2 = {enc:#010X}");
+    }
+
+    // --- RET (ARM ARM C6.2.241) ---
+    // 1101011|opc=0010|11111|000000|Rn|00000
+
+    #[test]
+    fn test_arm_arm_ret() {
+        // RET (X30)
+        // ARM ARM C6.2.241: 1101011 0010 11111 000000 Rn=11110 00000
+        // = 1101011_0_0010_11111_000000_11110_00000
+        // = 0xD65F03C0
+        let inst = mk(AArch64Opcode::Ret, vec![]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xD65F03C0, "RET = {enc:#010X}");
+    }
+
+    // --- BLR (ARM ARM C6.2.36) ---
+    // 1101011|opc=0001|11111|000000|Rn|00000
+
+    #[test]
+    fn test_arm_arm_blr_x0() {
+        // BLR X0
+        // ARM ARM C6.2.36: 1101011 0001 11111 000000 Rn=00000 00000
+        // = 1101011_0_0001_11111_000000_00000_00000
+        // = 0xD63F0000
+        let inst = mk(AArch64Opcode::Blr, vec![preg(X0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xD63F0000, "BLR X0 = {enc:#010X}");
+    }
+
+    // --- NOP (ARM ARM C6.2.202) ---
+
+    #[test]
+    fn test_arm_arm_nop() {
+        // NOP = 0xD503201F (system hint instruction)
+        let inst = mk(AArch64Opcode::Nop, vec![]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xD503201F, "NOP = {enc:#010X}");
+    }
+
+    // --- CSEL (ARM ARM C6.2.76) ---
+    // sf|op=0|S=0|11010100|Rm|cond|op2=00|Rn|Rd
+
+    #[test]
+    fn test_arm_arm_csel_x0_x1_x2_eq() {
+        // CSEL X0, X1, X2, EQ
+        // ARM ARM C6.2.76: sf=1 op=0 S=0 11010100 Rm=00010 cond=0000 op2=00 Rn=00001 Rd=00000
+        // = 1_0_0_11010100_00010_0000_00_00001_00000
+        // = 0x9A820020
+        let inst = mk(AArch64Opcode::Csel, vec![preg(X0), preg(X1), preg(X2), imm(0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x9A820020, "CSEL X0, X1, X2, EQ = {enc:#010X}");
+    }
+
+    // --- CSET (ARM ARM C6.2.70) ---
+    // CSET Xd, cond = CSINC Xd, XZR, XZR, invert(cond)
+    // sf|op=0|S=0|11010100|Rm=11111|inv_cond|op2=01|Rn=11111|Rd
+
+    #[test]
+    fn test_arm_arm_cset_x0_eq() {
+        // CSET X0, EQ = CSINC X0, XZR, XZR, NE (inv of EQ=0000 is 0001)
+        // ARM ARM: sf=1 0 0 11010100 Rm=11111 cond=0001 01 Rn=11111 Rd=00000
+        // = 1_0_0_11010100_11111_0001_01_11111_00000
+        // = 0x9A9F17E0
+        let inst = mk(AArch64Opcode::CSet, vec![preg(X0), imm(0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x9A9F17E0, "CSET X0, EQ = {enc:#010X}");
+    }
+
+    // --- B.cond (ARM ARM C6.2.34) ---
+    // 01010100|imm19|0|cond
+
+    #[test]
+    fn test_arm_arm_b_eq_offset2() {
+        // B.EQ +8 (imm19=2, in instruction units)
+        // ARM ARM C6.2.34: 01010100 imm19=0000000000000000010 0 cond=0000
+        // = 01010100_0000000000000000010_0_0000
+        // = 0x54000040
+        let inst = mk(AArch64Opcode::BCond, vec![imm(0), imm(2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x54000040, "B.EQ +8 = {enc:#010X}");
+    }
+
+    // --- CBZ (ARM ARM C6.2.44) ---
+    // sf|011010|op=0|imm19|Rt
+
+    #[test]
+    fn test_arm_arm_cbz_x1_offset2() {
+        // CBZ X1, +8 (imm19=2)
+        // ARM ARM: sf=1 011010 op=0 imm19=0000000000000000010 Rt=00001
+        // = 1_011010_0_0000000000000000010_00001
+        // = 0xB4000041
+        let inst = mk(AArch64Opcode::Cbz, vec![preg(X1), imm(2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xB4000041, "CBZ X1, +8 = {enc:#010X}");
+    }
+
+    // --- SXTW (ARM ARM C6.2.300) ---
+    // SXTW Xd, Wn = SBFM Xd, Xn, #0, #31
+    // sf=1|opc=00|100110|N=1|immr=000000|imms=011111|Rn|Rd
+
+    #[test]
+    fn test_arm_arm_sxtw_x0_x1() {
+        // SXTW X0, X1 = SBFM X0, X1, #0, #31
+        // ARM ARM: 1_00_100110_1_000000_011111_00001_00000
+        // = 0x93407C20
+        let inst = mk(AArch64Opcode::Sxtw, vec![preg(X0), preg(X1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x93407C20, "SXTW X0, X1 = {enc:#010X}");
+    }
+
+    // --- MUL (ARM ARM C6.2.199) ---
+    // MUL Xd, Xn, Xm = MADD Xd, Xn, Xm, XZR
+    // sf|00|11011|000|Rm|o0=0|Ra=11111|Rn|Rd
+
+    #[test]
+    fn test_arm_arm_mul_x0_x1_x2() {
+        // MUL X0, X1, X2 = MADD X0, X1, X2, XZR
+        // ARM ARM: sf=1 00 11011 000 Rm=00010 o0=0 Ra=11111 Rn=00001 Rd=00000
+        // = 1_00_11011_000_00010_0_11111_00001_00000
+        // = 0x9B027C20
+        let inst = mk(AArch64Opcode::MulRR, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x9B027C20, "MUL X0, X1, X2 = {enc:#010X}");
+    }
+
+    // --- SDIV (ARM ARM C6.2.253) ---
+    // sf|0|0011010110|Rm|000011|Rn|Rd
+
+    #[test]
+    fn test_arm_arm_sdiv_x0_x1_x2() {
+        // SDIV X0, X1, X2
+        // ARM ARM: sf=1 0 0011010110 Rm=00010 000011 Rn=00001 Rd=00000
+        // = 1_0_0011010110_00010_000011_00001_00000
+        // = 0x9AC20C20
+        let inst = mk(AArch64Opcode::SDiv, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x9AC20C20, "SDIV X0, X1, X2 = {enc:#010X}");
+    }
+
+    // --- TST register (ARM ARM C6.2.311) ---
+    // TST Xn, Xm = ANDS XZR, Xn, Xm
+    // sf|opc=11|01010|shift=00|N=0|Rm|imm6=000000|Rn|Rd=11111
+
+    #[test]
+    fn test_arm_arm_tst_x1_x2() {
+        // TST X1, X2 = ANDS XZR, X1, X2
+        // ARM ARM: sf=1 opc=11 01010 00 0 Rm=00010 000000 Rn=00001 Rd=11111
+        // = 1_11_01010_00_0_00010_000000_00001_11111
+        // = 0xEA02003F
+        let inst = mk(AArch64Opcode::Tst, vec![preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xEA02003F, "TST X1, X2 = {enc:#010X}");
+    }
+
+    // --- BR (ARM ARM C6.2.38) ---
+    // 1101011|opc=0000|11111|000000|Rn|00000
+
+    #[test]
+    fn test_arm_arm_br_x0() {
+        // BR X0
+        // ARM ARM: 1101011 0000 11111 000000 Rn=00000 00000
+        // = 1101011_0_0000_11111_000000_00000_00000
+        // = 0xD61F0000
+        let inst = mk(AArch64Opcode::Br, vec![preg(X0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xD61F0000, "BR X0 = {enc:#010X}");
+    }
+
+    // --- ADDS flag-setting (ARM ARM C6.2.6) ---
+    // sf|op=0|S=1|01011|shift|0|Rm|imm6|Rn|Rd
+
+    #[test]
+    fn test_arm_arm_adds_x0_x1_x2() {
+        // ADDS X0, X1, X2
+        // ARM ARM: sf=1 op=0 S=1 01011 00 0 Rm=00010 000000 Rn=00001 Rd=00000
+        // = 1_0_1_01011_00_0_00010_000000_00001_00000
+        // = 0xAB020020
+        let inst = mk(AArch64Opcode::AddsRR, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xAB020020, "ADDS X0, X1, X2 = {enc:#010X}");
+    }
+
+    // --- SUBS flag-setting (ARM ARM C6.2.297) ---
+    // sf|op=1|S=1|01011|shift|0|Rm|imm6|Rn|Rd
+
+    #[test]
+    fn test_arm_arm_subs_x0_x1_x2() {
+        // SUBS X0, X1, X2
+        // ARM ARM: sf=1 op=1 S=1 01011 00 0 Rm=00010 000000 Rn=00001 Rd=00000
+        // = 1_1_1_01011_00_0_00010_000000_00001_00000
+        // = 0xEB020020
+        let inst = mk(AArch64Opcode::SubsRR, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xEB020020, "SUBS X0, X1, X2 = {enc:#010X}");
     }
 }
