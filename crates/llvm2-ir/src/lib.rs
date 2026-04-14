@@ -40,6 +40,7 @@
 
 pub mod aarch64_regs;
 pub mod cc;
+pub mod cost_model;
 pub mod function;
 pub mod inst;
 pub mod operand;
