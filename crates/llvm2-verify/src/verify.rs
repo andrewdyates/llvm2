@@ -246,13 +246,13 @@ impl Verifier {
         run_proofs(&all_peephole_proofs(), "peephole")
     }
 
-    /// Verify all array-based memory model proofs (21 obligations).
+    /// Verify all array-based memory model proofs (27 obligations).
     ///
     /// Includes:
     /// - 6 load equivalence proofs (tMIR Load == AArch64 LDR)
     /// - 6 store equivalence proofs (tMIR Store == AArch64 STR)
     /// - 4 store-load roundtrip proofs (store then load returns original)
-    /// - 2 non-interference proofs (store at A doesn't affect B)
+    /// - 8 non-interference proofs (store at A doesn't affect B, with overlap guards)
     /// - 3 endianness proofs (little-endian byte ordering)
     pub fn verify_memory_model(&self) -> VerificationReport {
         use crate::memory_proofs::all_memory_proofs;
@@ -437,7 +437,7 @@ mod tests {
     fn test_verifier_memory_model() {
         let verifier = Verifier::new();
         let report = verifier.verify_memory_model();
-        assert_eq!(report.total(), 21);
+        assert_eq!(report.total(), 27);
         assert!(report.all_valid(), "Memory proofs failed:\n{}", report.summary());
     }
 
