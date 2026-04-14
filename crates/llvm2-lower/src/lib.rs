@@ -18,6 +18,7 @@ pub mod adapter;
 pub mod target_analysis;
 pub mod compute_graph;
 pub mod dispatch;
+pub mod x86_64_isel;
 
 pub use types::Type;
 pub use function::Function;
@@ -27,6 +28,10 @@ pub use abi::{
     generate_compact_unwind, generate_dwarf_cfi,
 };
 pub use isel::{InstructionSelector, ISelError, ISelFunction, ISelInst, ISelBlock, ISelOperand, convert_isel_operand_to_ir};
+pub use x86_64_isel::{
+    X86InstructionSelector, X86ISelError, X86ISelFunction, X86ISelInst, X86ISelBlock,
+    X86ISelOperand, x86cc_from_intcc, x86cc_from_floatcc,
+};
 pub use adapter::{
     translate_module, translate_function, translate_type, extract_proofs,
     AdapterError, Proof, ProofContext,
