@@ -202,6 +202,7 @@ fn build_fibonacci_tmir() -> TmirFunction {
                             value: 1,
                         },
                         results: vec![ValueId(1)], // const_1
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Cmp {
@@ -211,6 +212,7 @@ fn build_fibonacci_tmir() -> TmirFunction {
                             rhs: ValueId(1), // 1
                         },
                         results: vec![ValueId(2)], // cmp_result
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::CondBr {
@@ -221,6 +223,7 @@ fn build_fibonacci_tmir() -> TmirFunction {
                             else_args: vec![],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -233,6 +236,7 @@ fn build_fibonacci_tmir() -> TmirFunction {
                         values: vec![ValueId(0)], // n from bb0
                     },
                     results: vec![],
+                    proofs: vec![],
                 }],
             },
             // bb2 (loop_init): setup a=0, b=1, i=2, jump to loop
@@ -246,6 +250,7 @@ fn build_fibonacci_tmir() -> TmirFunction {
                             value: 0,
                         },
                         results: vec![ValueId(10)], // a_init = 0
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Const {
@@ -253,6 +258,7 @@ fn build_fibonacci_tmir() -> TmirFunction {
                             value: 1,
                         },
                         results: vec![ValueId(11)], // b_init = 1
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Const {
@@ -260,6 +266,7 @@ fn build_fibonacci_tmir() -> TmirFunction {
                             value: 2,
                         },
                         results: vec![ValueId(12)], // i_init = 2
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Br {
@@ -267,6 +274,7 @@ fn build_fibonacci_tmir() -> TmirFunction {
                             args: vec![ValueId(10), ValueId(11), ValueId(12)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -288,6 +296,7 @@ fn build_fibonacci_tmir() -> TmirFunction {
                             rhs: ValueId(21), // b
                         },
                         results: vec![ValueId(23)], // tmp
+                        proofs: vec![],
                     },
                     // new_i = i + 1
                     InstrNode {
@@ -296,6 +305,7 @@ fn build_fibonacci_tmir() -> TmirFunction {
                             value: 1,
                         },
                         results: vec![ValueId(24)], // const_1
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::BinOp {
@@ -305,6 +315,7 @@ fn build_fibonacci_tmir() -> TmirFunction {
                             rhs: ValueId(24), // 1
                         },
                         results: vec![ValueId(25)], // new_i
+                        proofs: vec![],
                     },
                     // cmp new_i <= n
                     InstrNode {
@@ -315,6 +326,7 @@ fn build_fibonacci_tmir() -> TmirFunction {
                             rhs: ValueId(0),  // n (from entry)
                         },
                         results: vec![ValueId(26)], // loop_cond
+                        proofs: vec![],
                     },
                     // condbr: loop back or exit
                     InstrNode {
@@ -326,6 +338,7 @@ fn build_fibonacci_tmir() -> TmirFunction {
                             else_args: vec![ValueId(23)], // result = tmp (= a+b = new b)
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -338,9 +351,11 @@ fn build_fibonacci_tmir() -> TmirFunction {
                         values: vec![ValueId(30)],
                     },
                     results: vec![],
+                    proofs: vec![],
                 }],
             },
         ],
+        proofs: vec![],
     }
 }
 
@@ -378,6 +393,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                     InstrNode {
                         instr: Instr::Const { ty: Ty::Int(64), value: 1 },
                         results: vec![ValueId(1)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Cmp {
@@ -387,6 +403,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                             rhs: ValueId(1),
                         },
                         results: vec![ValueId(2)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::CondBr {
@@ -397,6 +414,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                             else_args: vec![],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -408,10 +426,12 @@ fn build_is_prime_tmir() -> TmirFunction {
                     InstrNode {
                         instr: Instr::Const { ty: Ty::Int(64), value: 0 },
                         results: vec![ValueId(3)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return { values: vec![ValueId(3)] },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -423,6 +443,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                     InstrNode {
                         instr: Instr::Const { ty: Ty::Int(64), value: 3 },
                         results: vec![ValueId(4)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Cmp {
@@ -432,6 +453,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                             rhs: ValueId(4),
                         },
                         results: vec![ValueId(5)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::CondBr {
@@ -442,6 +464,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                             else_args: vec![],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -453,10 +476,12 @@ fn build_is_prime_tmir() -> TmirFunction {
                     InstrNode {
                         instr: Instr::Const { ty: Ty::Int(64), value: 1 },
                         results: vec![ValueId(6)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return { values: vec![ValueId(6)] },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -468,6 +493,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                     InstrNode {
                         instr: Instr::Const { ty: Ty::Int(64), value: 2 },
                         results: vec![ValueId(7)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Br {
@@ -475,6 +501,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                             args: vec![ValueId(7)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -492,6 +519,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                             rhs: ValueId(10),
                         },
                         results: vec![ValueId(11)],
+                        proofs: vec![],
                     },
                     // cmp i_sq > n
                     InstrNode {
@@ -502,6 +530,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                             rhs: ValueId(0),
                         },
                         results: vec![ValueId(12)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::CondBr {
@@ -512,6 +541,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                             else_args: vec![],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -529,6 +559,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                             rhs: ValueId(10),
                         },
                         results: vec![ValueId(13)],
+                        proofs: vec![],
                     },
                     // qi = q * i
                     InstrNode {
@@ -539,6 +570,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                             rhs: ValueId(10),
                         },
                         results: vec![ValueId(14)],
+                        proofs: vec![],
                     },
                     // r = n - qi
                     InstrNode {
@@ -549,11 +581,13 @@ fn build_is_prime_tmir() -> TmirFunction {
                             rhs: ValueId(14),
                         },
                         results: vec![ValueId(15)],
+                        proofs: vec![],
                     },
                     // cmp r == 0
                     InstrNode {
                         instr: Instr::Const { ty: Ty::Int(64), value: 0 },
                         results: vec![ValueId(16)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Cmp {
@@ -563,6 +597,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                             rhs: ValueId(16),
                         },
                         results: vec![ValueId(17)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::CondBr {
@@ -573,6 +608,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                             else_args: vec![],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -584,6 +620,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                     InstrNode {
                         instr: Instr::Const { ty: Ty::Int(64), value: 1 },
                         results: vec![ValueId(18)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::BinOp {
@@ -593,6 +630,7 @@ fn build_is_prime_tmir() -> TmirFunction {
                             rhs: ValueId(18),
                         },
                         results: vec![ValueId(19)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Br {
@@ -600,10 +638,12 @@ fn build_is_prime_tmir() -> TmirFunction {
                             args: vec![ValueId(19)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
         ],
+        proofs: vec![],
     }
 }
 
@@ -645,10 +685,12 @@ fn build_sum_array_tmir() -> TmirFunction {
                     InstrNode {
                         instr: Instr::Const { ty: Ty::Int(64), value: 0 },
                         results: vec![ValueId(2)], // sum_init = 0
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Const { ty: Ty::Int(64), value: 0 },
                         results: vec![ValueId(3)], // i_init = 0
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Br {
@@ -656,6 +698,7 @@ fn build_sum_array_tmir() -> TmirFunction {
                             args: vec![ValueId(2), ValueId(3)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -676,6 +719,7 @@ fn build_sum_array_tmir() -> TmirFunction {
                             rhs: ValueId(1),  // len
                         },
                         results: vec![ValueId(12)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::CondBr {
@@ -686,6 +730,7 @@ fn build_sum_array_tmir() -> TmirFunction {
                             else_args: vec![],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -696,6 +741,7 @@ fn build_sum_array_tmir() -> TmirFunction {
                 body: vec![InstrNode {
                     instr: Instr::Return { values: vec![ValueId(20)] },
                     results: vec![],
+                    proofs: vec![],
                 }],
             },
             // bb3 (loop body): load arr[i], accumulate, increment
@@ -707,6 +753,7 @@ fn build_sum_array_tmir() -> TmirFunction {
                     InstrNode {
                         instr: Instr::Const { ty: Ty::Int(64), value: 8 },
                         results: vec![ValueId(13)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::BinOp {
@@ -716,6 +763,7 @@ fn build_sum_array_tmir() -> TmirFunction {
                             rhs: ValueId(13), // 8
                         },
                         results: vec![ValueId(14)], // offset
+                        proofs: vec![],
                     },
                     // ptr = arr + offset (pointer arithmetic as integer add on I64)
                     // We cast arr (Ptr) to I64 first, then add, then cast back
@@ -727,6 +775,7 @@ fn build_sum_array_tmir() -> TmirFunction {
                             operand: ValueId(0), // arr
                         },
                         results: vec![ValueId(15)], // arr_int
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::BinOp {
@@ -736,6 +785,7 @@ fn build_sum_array_tmir() -> TmirFunction {
                             rhs: ValueId(14), // offset
                         },
                         results: vec![ValueId(16)], // elem_ptr_int
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Cast {
@@ -745,6 +795,7 @@ fn build_sum_array_tmir() -> TmirFunction {
                             operand: ValueId(16),
                         },
                         results: vec![ValueId(17)], // elem_ptr
+                        proofs: vec![],
                     },
                     // val = load(elem_ptr)
                     InstrNode {
@@ -753,6 +804,7 @@ fn build_sum_array_tmir() -> TmirFunction {
                             ptr: ValueId(17),
                         },
                         results: vec![ValueId(18)], // val
+                        proofs: vec![],
                     },
                     // new_sum = sum + val
                     InstrNode {
@@ -763,11 +815,13 @@ fn build_sum_array_tmir() -> TmirFunction {
                             rhs: ValueId(18), // val
                         },
                         results: vec![ValueId(19)], // new_sum
+                        proofs: vec![],
                     },
                     // new_i = i + 1
                     InstrNode {
                         instr: Instr::Const { ty: Ty::Int(64), value: 1 },
                         results: vec![ValueId(21)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::BinOp {
@@ -777,6 +831,7 @@ fn build_sum_array_tmir() -> TmirFunction {
                             rhs: ValueId(21),
                         },
                         results: vec![ValueId(22)], // new_i
+                        proofs: vec![],
                     },
                     // loop back
                     InstrNode {
@@ -785,10 +840,12 @@ fn build_sum_array_tmir() -> TmirFunction {
                             args: vec![ValueId(19), ValueId(22)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
         ],
+        proofs: vec![],
     }
 }
 
@@ -819,15 +876,18 @@ fn build_simple_add_tmir() -> TmirFunction {
                         rhs: ValueId(1),
                     },
                     results: vec![ValueId(2)],
+                    proofs: vec![],
                 },
                 InstrNode {
                     instr: Instr::Return {
                         values: vec![ValueId(2)],
                     },
                     results: vec![],
+                    proofs: vec![],
                 },
             ],
         }],
+        proofs: vec![],
     }
 }
 

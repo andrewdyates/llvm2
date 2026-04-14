@@ -1417,15 +1417,18 @@ mod tests {
                                 rhs: ValueId(1),
                             },
                             results: vec![ValueId(2)],
+                            proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
                                 values: vec![ValueId(2)],
                             },
                             results: vec![],
+                            proofs: vec![],
                         },
                     ],
                 }],
+                proofs: vec![],
             }],
             structs: vec![],
         }
@@ -1461,15 +1464,18 @@ mod tests {
                                 rhs: ValueId(1),
                             },
                             results: vec![ValueId(2)],
+                            proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
                                 values: vec![ValueId(2)],
                             },
                             results: vec![],
+                            proofs: vec![],
                         },
                     ],
                 }],
+                proofs: vec![],
             }],
             structs: vec![],
         }
@@ -1506,6 +1512,7 @@ mod tests {
                                 rhs: ValueId(1),
                             },
                             results: vec![ValueId(2)],
+                            proofs: vec![],
                         },
                         // FAdd: accumulate (MAC pattern)
                         InstrNode {
@@ -1516,15 +1523,18 @@ mod tests {
                                 rhs: ValueId(2),
                             },
                             results: vec![ValueId(3)],
+                            proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
                                 values: vec![ValueId(3)],
                             },
                             results: vec![],
+                            proofs: vec![],
                         },
                     ],
                 }],
+                proofs: vec![],
             }],
             structs: vec![],
         }
@@ -1660,6 +1670,7 @@ mod tests {
                                     rhs: ValueId(1),
                                 },
                                 results: vec![ValueId(2)],
+                                proofs: vec![],
                             },
                             InstrNode {
                                 instr: Instr::Br {
@@ -1667,6 +1678,7 @@ mod tests {
                                     args: vec![ValueId(2)],
                                 },
                                 results: vec![],
+                                proofs: vec![],
                             },
                         ],
                     },
@@ -1682,16 +1694,19 @@ mod tests {
                                     rhs: ValueId(3),
                                 },
                                 results: vec![ValueId(4)],
+                                proofs: vec![],
                             },
                             InstrNode {
                                 instr: Instr::Return {
                                     values: vec![ValueId(4)],
                                 },
                                 results: vec![],
+                                proofs: vec![],
                             },
                         ],
                     },
                 ],
+                proofs: vec![],
             }],
             structs: vec![],
         }
@@ -2003,6 +2018,7 @@ mod tests {
                 rhs: ValueId(1),
             },
             results: vec![ValueId(2)],
+            proofs: vec![],
         }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
@@ -2027,6 +2043,7 @@ mod tests {
                 rhs: ValueId(1),
             },
             results: vec![ValueId(2)],
+            proofs: vec![],
         }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
@@ -2052,6 +2069,7 @@ mod tests {
                 rhs: ValueId(1),
             },
             results: vec![ValueId(2)],
+            proofs: vec![],
         }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
@@ -2076,6 +2094,7 @@ mod tests {
                     rhs: ValueId(1),
                 },
                 results: vec![ValueId(2)],
+                proofs: vec![],
             },
             InstrNode {
                 instr: Instr::BinOp {
@@ -2085,6 +2104,7 @@ mod tests {
                     rhs: ValueId(2),
                 },
                 results: vec![ValueId(3)],
+                proofs: vec![],
             },
         ];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
@@ -2298,8 +2318,10 @@ mod tests {
                         body: vec![InstrNode {
                             instr: Instr::Return { values: vec![ValueId(0)] },
                             results: vec![],
+                            proofs: vec![],
                         }],
                     }],
+                    proofs: vec![],
                 },
                 TmirFunction {
                     id: FuncId(1),
@@ -2315,8 +2337,10 @@ mod tests {
                         body: vec![InstrNode {
                             instr: Instr::Return { values: vec![ValueId(10)] },
                             results: vec![],
+                            proofs: vec![],
                         }],
                     }],
+                    proofs: vec![],
                 },
             ],
             structs: vec![],
@@ -2721,6 +2745,7 @@ mod tests {
                 rhs: ValueId(1),
             },
             results: vec![ValueId(2)],
+            proofs: vec![],
         }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
@@ -2750,6 +2775,7 @@ mod tests {
                 rhs: ValueId(1),
             },
             results: vec![ValueId(2)],
+            proofs: vec![],
         }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
@@ -2780,6 +2806,7 @@ mod tests {
                 rhs: ValueId(1),
             },
             results: vec![ValueId(2)],
+            proofs: vec![],
         }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
@@ -2810,6 +2837,7 @@ mod tests {
                     rhs: ValueId(1),
                 },
                 results: vec![ValueId(2)],
+                proofs: vec![],
             },
             InstrNode {
                 instr: Instr::BinOp {
@@ -2819,6 +2847,7 @@ mod tests {
                     rhs: ValueId(4), // NOT ValueId(2)
                 },
                 results: vec![ValueId(5)],
+                proofs: vec![],
             },
         ];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
@@ -2851,6 +2880,7 @@ mod tests {
                     rhs: ValueId(1),
                 },
                 results: vec![ValueId(2)],
+                proofs: vec![],
             },
             InstrNode {
                 instr: Instr::BinOp {
@@ -2860,6 +2890,7 @@ mod tests {
                     rhs: ValueId(2),
                 },
                 results: vec![ValueId(3)],
+                proofs: vec![],
             },
         ];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
@@ -2892,6 +2923,7 @@ mod tests {
                     rhs: ValueId(1),
                 },
                 results: vec![ValueId(2)],
+                proofs: vec![],
             },
             InstrNode {
                 instr: Instr::BinOp {
@@ -2901,6 +2933,7 @@ mod tests {
                     rhs: ValueId(2),
                 },
                 results: vec![ValueId(3)],
+                proofs: vec![],
             },
         ];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
@@ -2931,6 +2964,7 @@ mod tests {
                     rhs: ValueId(1),
                 },
                 results: vec![ValueId(2)],
+                proofs: vec![],
             },
             InstrNode {
                 instr: Instr::BinOp {
@@ -2940,6 +2974,7 @@ mod tests {
                     rhs: ValueId(2),
                 },
                 results: vec![ValueId(3)],
+                proofs: vec![],
             },
         ];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
@@ -2990,15 +3025,18 @@ mod tests {
                                 rhs: ValueId(1),
                             },
                             results: vec![ValueId(2)],
+                            proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
                                 values: vec![ValueId(2)],
                             },
                             results: vec![],
+                            proofs: vec![],
                         },
                     ],
                 }],
+                proofs: vec![],
             }],
             structs: vec![],
         };

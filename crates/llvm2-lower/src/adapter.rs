@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use tmir_func::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule};
 use tmir_instrs::{BinOp, CastOp, CmpOp, Instr, InstrNode, UnOp};
-use tmir_types::{BlockId, FuncId, StructDef, Ty, ValueId};
+use tmir_types::{BlockId, FuncId, StructDef, TmirProof, Ty, ValueId};
 
 use crate::function::{BasicBlock, Function, Signature};
 use crate::instructions::{Block, FloatCC, Instruction, IntCC, Opcode, Value};
@@ -147,6 +147,28 @@ impl ProofContext {
                 _ => None,
             })
         })
+    }
+
+    /// Check if a value has a valid borrow proof.
+    pub fn has_valid_borrow(&self, val: &Value) -> bool {
+        self.value_proofs
+            .get(val)
+            .is_some_and(|proofs| proofs.iter().any(|p| matches!(p, Proof::ValidBorrow { .. })))
+    }
+
+    /// Check if a value has a valid shift proof.
+    pub fn has_valid_shift(&self, val: &Value) -> bool {
+        self.value_proofs
+            .get(val)
+            .is_some_and(|proofs| proofs.iter().any(|p| matches!(p, Proof::ValidShift { .. })))
+    }
+
+    /// Get all proofs attached to a value.
+    pub fn proofs_for(&self, val: &Value) -> &[Proof] {
+        self.value_proofs
+            .get(val)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 }
 
@@ -401,6 +423,20 @@ impl<'a> TmirAdapter<'a> {
 
         // Translate each instruction in the block body.
         for node in &tmir_block.body {
+            // Extract proof annotations from the tMIR instruction and
+            // attach them to the result values in the proof context.
+            let proofs = extract_proofs(node);
+            if !proofs.is_empty() {
+                for vid in &node.results {
+                    let val = self.map_value(*vid);
+                    self.proof_ctx
+                        .value_proofs
+                        .entry(val)
+                        .or_default()
+                        .extend(proofs.clone());
+                }
+            }
+
             let instrs = self.translate_instruction(node)?;
             bb.instructions.extend(instrs);
         }
@@ -1227,13 +1263,38 @@ pub fn translate_function_with_names(
 
 /// Extract proof annotations from a tMIR instruction node.
 ///
-/// Currently tMIR stubs do not carry explicit proof annotations.
-/// This function is a placeholder for when the real tMIR crate
-/// provides proof metadata. Returns an empty Vec for now.
-pub fn extract_proofs(_node: &InstrNode) -> Vec<Proof> {
-    // TODO: When tMIR stubs gain proof annotation fields,
-    // extract NoOverflow, InBounds, NotNull, etc. from here.
-    Vec::new()
+/// Translates `TmirProof` annotations from the tMIR instruction into
+/// the adapter's internal `Proof` representation. Each proof type maps
+/// directly to an optimization opportunity in downstream passes.
+pub fn extract_proofs(node: &InstrNode) -> Vec<Proof> {
+    node.proofs
+        .iter()
+        .filter_map(|p| match p {
+            TmirProof::NoOverflow { signed } => Some(Proof::NoOverflow { signed: *signed }),
+            TmirProof::InBounds { base, index } => {
+                Some(Proof::InBounds {
+                    base: *base,
+                    index: *index,
+                })
+            }
+            TmirProof::NotNull { ptr } => Some(Proof::NotNull { ptr: *ptr }),
+            TmirProof::ValidBorrow { borrow } => Some(Proof::ValidBorrow { borrow: *borrow }),
+            TmirProof::InRange { lo, hi } => Some(Proof::InRange { lo: *lo, hi: *hi }),
+            TmirProof::NonZeroDivisor { divisor } => {
+                Some(Proof::NonZeroDivisor { divisor: *divisor })
+            }
+            TmirProof::ValidShift { amount, bitwidth } => {
+                Some(Proof::ValidShift {
+                    amount: *amount,
+                    bitwidth: *bitwidth,
+                })
+            }
+            // Pure, Associative, Commutative are function/subgraph-level proofs,
+            // not instruction-level. They are handled separately by the adapter
+            // when translating function-level proofs.
+            TmirProof::Pure | TmirProof::Associative | TmirProof::Commutative => None,
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1271,15 +1332,18 @@ mod tests {
                             rhs: ValueId(1),
                         },
                         results: vec![ValueId(2)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
                             values: vec![ValueId(2)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             }],
+            proofs: vec![],
         };
 
         Module {
@@ -1384,15 +1448,18 @@ mod tests {
                             value: 42,
                         },
                         results: vec![ValueId(0)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
                             values: vec![ValueId(0)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             }],
+            proofs: vec![],
         };
 
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
@@ -1428,15 +1495,18 @@ mod tests {
                             value: 3.14,
                         },
                         results: vec![ValueId(0)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
                             values: vec![ValueId(0)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             }],
+            proofs: vec![],
         };
 
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
@@ -1476,15 +1546,18 @@ mod tests {
                             rhs: ValueId(1),
                         },
                         results: vec![ValueId(2)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
                             values: vec![ValueId(2)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             }],
+            proofs: vec![],
         };
 
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
@@ -1523,15 +1596,18 @@ mod tests {
                             rhs: ValueId(1),
                         },
                         results: vec![ValueId(2)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
                             values: vec![ValueId(2)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             }],
+            proofs: vec![],
         };
 
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
@@ -1567,15 +1643,18 @@ mod tests {
                             operand: ValueId(0),
                         },
                         results: vec![ValueId(1)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
                             values: vec![ValueId(1)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             }],
+            proofs: vec![],
         };
 
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
@@ -1610,6 +1689,7 @@ mod tests {
                             ptr: ValueId(0),
                         },
                         results: vec![ValueId(1)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Store {
@@ -1618,13 +1698,16 @@ mod tests {
                             value: ValueId(1),
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return { values: vec![] },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             }],
+            proofs: vec![],
         };
 
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
@@ -1661,15 +1744,18 @@ mod tests {
                             operand: ValueId(0),
                         },
                         results: vec![ValueId(1)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
                             values: vec![ValueId(1)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             }],
+            proofs: vec![],
         };
 
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
@@ -1702,15 +1788,18 @@ mod tests {
                             operand: ValueId(0),
                         },
                         results: vec![ValueId(1)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
                             values: vec![ValueId(1)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             }],
+            proofs: vec![],
         };
 
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
@@ -1747,15 +1836,18 @@ mod tests {
                             rhs: ValueId(1),
                         },
                         results: vec![ValueId(2)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
                             values: vec![ValueId(2)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             }],
+            proofs: vec![],
         };
 
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
@@ -1788,6 +1880,7 @@ mod tests {
                             args: vec![ValueId(0)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     }],
                 },
                 TmirBlockDef {
@@ -1798,9 +1891,11 @@ mod tests {
                             values: vec![ValueId(1)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     }],
                 },
             ],
+            proofs: vec![],
         };
 
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
@@ -1844,6 +1939,7 @@ mod tests {
                             else_args: vec![],
                         },
                         results: vec![],
+                        proofs: vec![],
                     }],
                 },
                 TmirBlockDef {
@@ -1854,6 +1950,7 @@ mod tests {
                             values: vec![ValueId(1)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     }],
                 },
                 TmirBlockDef {
@@ -1864,9 +1961,11 @@ mod tests {
                             values: vec![ValueId(2)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     }],
                 },
             ],
+            proofs: vec![],
         };
 
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
@@ -1925,15 +2024,18 @@ mod tests {
                                 rhs: ValueId(1),
                             },
                             results: vec![ValueId(2)],
+                            proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
                                 values: vec![ValueId(2)],
                             },
                             results: vec![],
+                            proofs: vec![],
                         },
                     ],
                 }],
+                proofs: vec![],
             };
 
             let result = translate_function(&func, &[]);
@@ -1985,15 +2087,18 @@ mod tests {
                                 rhs: ValueId(1),
                             },
                             results: vec![ValueId(2)],
+                            proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
                                 values: vec![ValueId(2)],
                             },
                             results: vec![],
+                            proofs: vec![],
                         },
                     ],
                 }],
+                proofs: vec![],
             };
 
             let result = translate_function(&func, &[]);
@@ -2047,15 +2152,18 @@ mod tests {
                                 rhs: ValueId(1),
                             },
                             results: vec![ValueId(2)],
+                            proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
                                 values: vec![ValueId(2)],
                             },
                             results: vec![],
+                            proofs: vec![],
                         },
                     ],
                 }],
+                proofs: vec![],
             };
 
             let result = translate_function(&func, &[]);
@@ -2114,13 +2222,16 @@ mod tests {
                     InstrNode {
                         instr: Instr::Nop,
                         results: vec![],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return { values: vec![] },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             }],
+            proofs: vec![],
         };
 
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
@@ -2131,7 +2242,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_proofs_placeholder() {
+    fn test_extract_proofs_empty_when_no_annotations() {
         let node = InstrNode {
             instr: Instr::BinOp {
                 op: BinOp::Add,
@@ -2140,9 +2251,418 @@ mod tests {
                 rhs: ValueId(1),
             },
             results: vec![ValueId(2)],
+            proofs: vec![],
         };
         let proofs = extract_proofs(&node);
-        assert!(proofs.is_empty()); // Stubs don't carry proofs yet.
+        assert!(proofs.is_empty());
+    }
+
+    #[test]
+    fn test_extract_proofs_no_overflow() {
+        use tmir_types::TmirProof;
+        let node = InstrNode {
+            instr: Instr::BinOp {
+                op: BinOp::Add,
+                ty: Ty::Int(32),
+                lhs: ValueId(0),
+                rhs: ValueId(1),
+            },
+            results: vec![ValueId(2)],
+            proofs: vec![TmirProof::NoOverflow { signed: true }],
+        };
+        let proofs = extract_proofs(&node);
+        assert_eq!(proofs.len(), 1);
+        assert!(matches!(proofs[0], Proof::NoOverflow { signed: true }));
+    }
+
+    #[test]
+    fn test_extract_proofs_in_bounds() {
+        use tmir_types::TmirProof;
+        let node = InstrNode {
+            instr: Instr::Index {
+                ty: Ty::Array(Box::new(Ty::Int(32)), 10),
+                base: ValueId(0),
+                index: ValueId(1),
+            },
+            results: vec![ValueId(2)],
+            proofs: vec![TmirProof::InBounds {
+                base: ValueId(0),
+                index: ValueId(1),
+            }],
+        };
+        let proofs = extract_proofs(&node);
+        assert_eq!(proofs.len(), 1);
+        match &proofs[0] {
+            Proof::InBounds { base, index } => {
+                assert_eq!(*base, ValueId(0));
+                assert_eq!(*index, ValueId(1));
+            }
+            other => panic!("expected InBounds, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_proofs_not_null() {
+        use tmir_types::TmirProof;
+        let node = InstrNode {
+            instr: Instr::Load {
+                ty: Ty::Int(32),
+                ptr: ValueId(0),
+            },
+            results: vec![ValueId(1)],
+            proofs: vec![TmirProof::NotNull { ptr: ValueId(0) }],
+        };
+        let proofs = extract_proofs(&node);
+        assert_eq!(proofs.len(), 1);
+        assert!(matches!(proofs[0], Proof::NotNull { ptr: ValueId(0) }));
+    }
+
+    #[test]
+    fn test_extract_proofs_valid_borrow() {
+        use tmir_types::TmirProof;
+        let node = InstrNode {
+            instr: Instr::Borrow {
+                ty: Ty::Ptr(Box::new(Ty::Int(32))),
+                value: ValueId(0),
+            },
+            results: vec![ValueId(1)],
+            proofs: vec![TmirProof::ValidBorrow {
+                borrow: ValueId(1),
+            }],
+        };
+        let proofs = extract_proofs(&node);
+        assert_eq!(proofs.len(), 1);
+        assert!(matches!(
+            proofs[0],
+            Proof::ValidBorrow {
+                borrow: ValueId(1)
+            }
+        ));
+    }
+
+    #[test]
+    fn test_extract_proofs_multiple_annotations() {
+        use tmir_types::TmirProof;
+        let node = InstrNode {
+            instr: Instr::BinOp {
+                op: BinOp::Add,
+                ty: Ty::Int(32),
+                lhs: ValueId(0),
+                rhs: ValueId(1),
+            },
+            results: vec![ValueId(2)],
+            proofs: vec![
+                TmirProof::NoOverflow { signed: false },
+                TmirProof::InRange { lo: 0, hi: 255 },
+            ],
+        };
+        let proofs = extract_proofs(&node);
+        assert_eq!(proofs.len(), 2);
+        assert!(matches!(proofs[0], Proof::NoOverflow { signed: false }));
+        assert!(matches!(proofs[1], Proof::InRange { lo: 0, hi: 255 }));
+    }
+
+    #[test]
+    fn test_extract_proofs_skips_function_level_proofs() {
+        use tmir_types::TmirProof;
+        // Pure, Associative, Commutative are function-level proofs
+        // and should be filtered out by extract_proofs.
+        let node = InstrNode {
+            instr: Instr::BinOp {
+                op: BinOp::Add,
+                ty: Ty::Int(32),
+                lhs: ValueId(0),
+                rhs: ValueId(1),
+            },
+            results: vec![ValueId(2)],
+            proofs: vec![
+                TmirProof::Pure,
+                TmirProof::Associative,
+                TmirProof::Commutative,
+                TmirProof::NoOverflow { signed: true },
+            ],
+        };
+        let proofs = extract_proofs(&node);
+        // Only NoOverflow should be extracted (Pure/Associative/Commutative filtered)
+        assert_eq!(proofs.len(), 1);
+        assert!(matches!(proofs[0], Proof::NoOverflow { signed: true }));
+    }
+
+    #[test]
+    fn test_extract_proofs_non_zero_divisor() {
+        use tmir_types::TmirProof;
+        let node = InstrNode {
+            instr: Instr::BinOp {
+                op: BinOp::SDiv,
+                ty: Ty::Int(32),
+                lhs: ValueId(0),
+                rhs: ValueId(1),
+            },
+            results: vec![ValueId(2)],
+            proofs: vec![TmirProof::NonZeroDivisor {
+                divisor: ValueId(1),
+            }],
+        };
+        let proofs = extract_proofs(&node);
+        assert_eq!(proofs.len(), 1);
+        assert!(matches!(
+            proofs[0],
+            Proof::NonZeroDivisor {
+                divisor: ValueId(1)
+            }
+        ));
+    }
+
+    #[test]
+    fn test_extract_proofs_valid_shift() {
+        use tmir_types::TmirProof;
+        let node = InstrNode {
+            instr: Instr::BinOp {
+                op: BinOp::Shl,
+                ty: Ty::Int(64),
+                lhs: ValueId(0),
+                rhs: ValueId(1),
+            },
+            results: vec![ValueId(2)],
+            proofs: vec![TmirProof::ValidShift {
+                amount: ValueId(1),
+                bitwidth: 64,
+            }],
+        };
+        let proofs = extract_proofs(&node);
+        assert_eq!(proofs.len(), 1);
+        match &proofs[0] {
+            Proof::ValidShift { amount, bitwidth } => {
+                assert_eq!(*amount, ValueId(1));
+                assert_eq!(*bitwidth, 64);
+            }
+            other => panic!("expected ValidShift, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_proof_propagation_through_adapter() {
+        // Build a tMIR function where the add instruction has NoOverflow proof.
+        // Verify that after translation, the ProofContext has the proof on the
+        // corresponding LIR value.
+        use tmir_types::TmirProof;
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "add_no_overflow".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::Int(32), Ty::Int(32)],
+                returns: vec![Ty::Int(32)],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![
+                    (ValueId(0), Ty::Int(32)),
+                    (ValueId(1), Ty::Int(32)),
+                ],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::Int(32),
+                            lhs: ValueId(0),
+                            rhs: ValueId(1),
+                        },
+                        results: vec![ValueId(2)],
+                        proofs: vec![TmirProof::NoOverflow { signed: true }],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
+
+        let (_lir_func, proof_ctx) = translate_function(&func, &[]).unwrap();
+
+        // The result of the add (ValueId(2) -> some Value) should have NoOverflow.
+        // Find the value that has proofs.
+        assert!(
+            !proof_ctx.value_proofs.is_empty(),
+            "ProofContext should have proofs after translation"
+        );
+
+        // There should be exactly one value with proofs.
+        let values_with_proofs: Vec<_> = proof_ctx
+            .value_proofs
+            .iter()
+            .filter(|(_, proofs)| !proofs.is_empty())
+            .collect();
+        assert_eq!(
+            values_with_proofs.len(),
+            1,
+            "Expected 1 value with proofs, got {}",
+            values_with_proofs.len()
+        );
+
+        let (val, proofs) = values_with_proofs[0];
+        assert!(
+            proof_ctx.has_no_overflow(val),
+            "The add result should have NoOverflow proof"
+        );
+        assert_eq!(proofs.len(), 1);
+    }
+
+    #[test]
+    fn test_proof_propagation_multiple_proofs() {
+        // Build a function with an indexed load that has both InBounds and NotNull proofs.
+        use tmir_types::TmirProof;
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "safe_load".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::Ptr(Box::new(Ty::Int(32)))],
+                returns: vec![Ty::Int(32)],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![(ValueId(0), Ty::Ptr(Box::new(Ty::Int(32))))],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Load {
+                            ty: Ty::Int(32),
+                            ptr: ValueId(0),
+                        },
+                        results: vec![ValueId(1)],
+                        proofs: vec![
+                            TmirProof::NotNull { ptr: ValueId(0) },
+                            TmirProof::InBounds {
+                                base: ValueId(0),
+                                index: ValueId(0),
+                            },
+                        ],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(1)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
+
+        let (_lir_func, proof_ctx) = translate_function(&func, &[]).unwrap();
+
+        let values_with_proofs: Vec<_> = proof_ctx
+            .value_proofs
+            .iter()
+            .filter(|(_, proofs)| !proofs.is_empty())
+            .collect();
+        assert_eq!(values_with_proofs.len(), 1);
+
+        let (val, proofs) = values_with_proofs[0];
+        assert_eq!(proofs.len(), 2);
+        assert!(proof_ctx.has_not_null(val));
+        assert!(proof_ctx.has_in_bounds(val));
+    }
+
+    #[test]
+    fn test_proof_context_query_methods() {
+        let mut ctx = ProofContext::default();
+        let v0 = Value(0);
+        let v1 = Value(1);
+        let v2 = Value(2);
+
+        ctx.value_proofs.insert(
+            v0,
+            vec![
+                Proof::NoOverflow { signed: true },
+                Proof::InRange { lo: -128, hi: 127 },
+            ],
+        );
+        ctx.value_proofs.insert(
+            v1,
+            vec![
+                Proof::NotNull { ptr: ValueId(10) },
+                Proof::ValidBorrow { borrow: ValueId(11) },
+            ],
+        );
+        ctx.value_proofs.insert(
+            v2,
+            vec![Proof::ValidShift {
+                amount: ValueId(5),
+                bitwidth: 64,
+            }],
+        );
+
+        // v0 queries
+        assert!(ctx.has_no_overflow(&v0));
+        assert!(!ctx.has_not_null(&v0));
+        assert!(!ctx.has_in_bounds(&v0));
+        assert_eq!(ctx.get_range(&v0), Some((-128, 127)));
+
+        // v1 queries
+        assert!(ctx.has_not_null(&v1));
+        assert!(ctx.has_valid_borrow(&v1));
+        assert!(!ctx.has_no_overflow(&v1));
+
+        // v2 queries
+        assert!(ctx.has_valid_shift(&v2));
+        assert!(!ctx.has_not_null(&v2));
+
+        // proofs_for helper
+        assert_eq!(ctx.proofs_for(&v0).len(), 2);
+        assert_eq!(ctx.proofs_for(&v1).len(), 2);
+        assert_eq!(ctx.proofs_for(&v2).len(), 1);
+        assert_eq!(ctx.proofs_for(&Value(99)).len(), 0);
+    }
+
+    #[test]
+    fn test_all_seven_proof_types_extract_correctly() {
+        use tmir_types::TmirProof;
+        let node = InstrNode {
+            instr: Instr::BinOp {
+                op: BinOp::Add,
+                ty: Ty::Int(32),
+                lhs: ValueId(0),
+                rhs: ValueId(1),
+            },
+            results: vec![ValueId(2)],
+            proofs: vec![
+                TmirProof::NoOverflow { signed: false },
+                TmirProof::InBounds {
+                    base: ValueId(0),
+                    index: ValueId(1),
+                },
+                TmirProof::NotNull { ptr: ValueId(0) },
+                TmirProof::ValidBorrow {
+                    borrow: ValueId(0),
+                },
+                TmirProof::NonZeroDivisor {
+                    divisor: ValueId(1),
+                },
+                TmirProof::ValidShift {
+                    amount: ValueId(1),
+                    bitwidth: 32,
+                },
+                TmirProof::InRange { lo: 0, hi: 100 },
+            ],
+        };
+        let proofs = extract_proofs(&node);
+        assert_eq!(proofs.len(), 7, "All 7 instruction-level proof types should extract");
+
+        // Verify each type
+        assert!(matches!(proofs[0], Proof::NoOverflow { signed: false }));
+        assert!(matches!(proofs[1], Proof::InBounds { .. }));
+        assert!(matches!(proofs[2], Proof::NotNull { .. }));
+        assert!(matches!(proofs[3], Proof::ValidBorrow { .. }));
+        assert!(matches!(proofs[4], Proof::NonZeroDivisor { .. }));
+        assert!(matches!(proofs[5], Proof::ValidShift { .. }));
+        assert!(matches!(proofs[6], Proof::InRange { lo: 0, hi: 100 }));
     }
 
     #[test]
@@ -2166,31 +2686,37 @@ mod tests {
                             value: ValueId(0),
                         },
                         results: vec![ValueId(1)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::EndBorrow {
                             borrow: ValueId(1),
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Retain {
                             value: ValueId(0),
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Release {
                             value: ValueId(0),
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return { values: vec![] },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             }],
+            proofs: vec![],
         };
 
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
@@ -2224,8 +2750,10 @@ mod tests {
                                 values: vec![ValueId(0)],
                             },
                             results: vec![],
+                            proofs: vec![],
                         }],
                     }],
+                    proofs: vec![],
                 },
                 TmirFunc {
                     id: FuncId(1),
@@ -2243,8 +2771,10 @@ mod tests {
                                 values: vec![ValueId(0)],
                             },
                             results: vec![],
+                            proofs: vec![],
                         }],
                     }],
+                    proofs: vec![],
                 },
             ],
             structs: vec![],
@@ -2278,8 +2808,10 @@ mod tests {
                                 values: vec![ValueId(0)],
                             },
                             results: vec![],
+                            proofs: vec![],
                         }],
                     }],
+                    proofs: vec![],
                 },
                 TmirFunc {
                     id: FuncId(1),
@@ -2300,15 +2832,18 @@ mod tests {
                                     ret_ty: vec![Ty::Int(32)],
                                 },
                                 results: vec![ValueId(1)],
+                                proofs: vec![],
                             },
                             InstrNode {
                                 instr: Instr::Return {
                                     values: vec![ValueId(1)],
                                 },
                                 results: vec![],
+                                proofs: vec![],
                             },
                         ],
                     }],
+                    proofs: vec![],
                 },
             ],
             structs: vec![],
@@ -2358,15 +2893,18 @@ mod tests {
                             ret_ty: vec![Ty::Int(32)],
                         },
                         results: vec![ValueId(0)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
                             values: vec![ValueId(0)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             }],
+            proofs: vec![],
         };
 
         // translate_function (standalone) has empty func_names, so gets synthetic name.
@@ -2410,6 +2948,7 @@ mod tests {
                                 rhs: ValueId(1),
                             },
                             results: vec![ValueId(2)],
+                            proofs: vec![],
                         },
                         // CondBr: branch on comparison result
                         InstrNode {
@@ -2421,6 +2960,7 @@ mod tests {
                                 else_args: vec![],
                             },
                             results: vec![],
+                            proofs: vec![],
                         },
                     ],
                 },
@@ -2432,6 +2972,7 @@ mod tests {
                             values: vec![ValueId(0)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     }],
                 },
                 TmirBlockDef {
@@ -2442,9 +2983,11 @@ mod tests {
                             values: vec![ValueId(1)],
                         },
                         results: vec![],
+                        proofs: vec![],
                     }],
                 },
             ],
+            proofs: vec![],
         };
 
         let (lir_func, _) = translate_function(&func, &[]).unwrap();
@@ -2495,13 +3038,16 @@ mod tests {
                             InstrNode {
                                 instr: Instr::Const { ty: Ty::Int(32), value: 1 },
                                 results: vec![ValueId(0)],
+                                proofs: vec![],
                             },
                             InstrNode {
                                 instr: Instr::Return { values: vec![ValueId(0)] },
                                 results: vec![],
+                                proofs: vec![],
                             },
                         ],
                     }],
+                    proofs: vec![],
                 },
                 TmirFunc {
                     id: FuncId(1),
@@ -2518,13 +3064,16 @@ mod tests {
                             InstrNode {
                                 instr: Instr::Const { ty: Ty::Int(32), value: 2 },
                                 results: vec![ValueId(0)],
+                                proofs: vec![],
                             },
                             InstrNode {
                                 instr: Instr::Return { values: vec![ValueId(0)] },
                                 results: vec![],
+                                proofs: vec![],
                             },
                         ],
                     }],
+                    proofs: vec![],
                 },
                 TmirFunc {
                     id: FuncId(2),
@@ -2545,6 +3094,7 @@ mod tests {
                                     ret_ty: vec![Ty::Int(32)],
                                 },
                                 results: vec![ValueId(0)],
+                                proofs: vec![],
                             },
                             InstrNode {
                                 instr: Instr::Call {
@@ -2553,13 +3103,16 @@ mod tests {
                                     ret_ty: vec![Ty::Int(32)],
                                 },
                                 results: vec![ValueId(1)],
+                                proofs: vec![],
                             },
                             InstrNode {
                                 instr: Instr::Return { values: vec![ValueId(1)] },
                                 results: vec![],
+                                proofs: vec![],
                             },
                         ],
                     }],
+                    proofs: vec![],
                 },
             ],
             structs: vec![],
