@@ -17,6 +17,7 @@ pub mod isel;
 pub mod adapter;
 pub mod target_analysis;
 pub mod compute_graph;
+pub mod dispatch;
 
 pub use types::Type;
 pub use function::Function;
@@ -28,3 +29,4 @@ pub use adapter::{
 };
 pub use target_analysis::{ComputeTarget, ProofAnalyzer, SubgraphProof, TargetLegality};
 pub use compute_graph::TargetRecommendation;
+pub use dispatch::{DispatchPlan, DispatchOp, DispatchError, generate_dispatch_plan, validate_dispatch_plan};
