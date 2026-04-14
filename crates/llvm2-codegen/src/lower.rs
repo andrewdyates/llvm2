@@ -803,11 +803,44 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             };
             Ok(encoding::encode_cmp_branch(sf, 1, imm19, rt))
         }
-        AArch64Opcode::Tbz | AArch64Opcode::Tbnz => {
-            // TBZ/TBNZ: sf | 011011 | op | b40 | imm14 | Rt
-            // For now emit NOP; these are rare and relaxation handles range.
-            // TODO: Implement TBZ/TBNZ encoding.
-            Ok(0xD503201F) // NOP
+        AArch64Opcode::Tbz => {
+            // TBZ Rt, #bit, <offset>
+            // Encoding: b5 | 011011 | 0 | b40 | imm14 | Rt
+            // b5 = bit[5] (high bit of bit number), b40 = bit[4:0]
+            let rt = preg_hw(0)?;
+            let bit = imm_val(1) as u32;
+            let imm14 = if inst.operands.len() > 2 {
+                imm_val(2) as u32 & 0x3FFF
+            } else {
+                0
+            };
+            let b5 = (bit >> 5) & 1;
+            let b40 = bit & 0x1F;
+            Ok((b5 << 31)
+                | (0b011011 << 25)
+                | (0 << 24) // op=0 for TBZ
+                | (b40 << 19)
+                | (imm14 << 5)
+                | rt)
+        }
+        AArch64Opcode::Tbnz => {
+            // TBNZ Rt, #bit, <offset>
+            // Encoding: b5 | 011011 | 1 | b40 | imm14 | Rt
+            let rt = preg_hw(0)?;
+            let bit = imm_val(1) as u32;
+            let imm14 = if inst.operands.len() > 2 {
+                imm_val(2) as u32 & 0x3FFF
+            } else {
+                0
+            };
+            let b5 = (bit >> 5) & 1;
+            let b40 = bit & 0x1F;
+            Ok((b5 << 31)
+                | (0b011011 << 25)
+                | (1 << 24) // op=1 for TBNZ
+                | (b40 << 19)
+                | (imm14 << 5)
+                | rt)
         }
         AArch64Opcode::Bl => {
             let offset = imm_val(0) as u32 & 0x3FFFFFF;
@@ -1402,7 +1435,7 @@ mod tests {
     use llvm2_ir::function::{MachFunction, Signature, Type};
     use llvm2_ir::inst::{AArch64Opcode, MachInst};
     use llvm2_ir::operand::MachOperand;
-    use llvm2_ir::regs::{X0, X1, X19};
+    use llvm2_ir::regs::{X0, X1, X2, X19};
     use llvm2_ir::types::BlockId;
 
     /// Helper: create a minimal function with instructions in the entry block.
@@ -1497,6 +1530,99 @@ mod tests {
         let word = encode_inst(&inst).unwrap();
         let expected = (0b01010100u32 << 24) | (2 << 5);
         assert_eq!(word, expected, "B.EQ +2 = 0x{word:08X}");
+    }
+
+    #[test]
+    fn test_encode_tbz_bit3() {
+        // TBZ X0, #3, +2  (bit 3, offset 2)
+        let inst = MachInst::new(
+            AArch64Opcode::Tbz,
+            vec![MachOperand::PReg(X0), MachOperand::Imm(3), MachOperand::Imm(2)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let expected = (0u32 << 31)
+            | (0b011011 << 25)
+            | (0 << 24)
+            | (3 << 19)
+            | (2 << 5)
+            | 0;
+        assert_eq!(word, expected, "TBZ X0, #3, +2 = 0x{word:08X}");
+        assert_ne!(word, 0xD503201F, "TBZ must not emit NOP");
+    }
+
+    #[test]
+    fn test_encode_tbnz_bit3() {
+        let inst = MachInst::new(
+            AArch64Opcode::Tbnz,
+            vec![MachOperand::PReg(X0), MachOperand::Imm(3), MachOperand::Imm(2)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let expected = (0u32 << 31)
+            | (0b011011 << 25)
+            | (1 << 24)
+            | (3 << 19)
+            | (2 << 5)
+            | 0;
+        assert_eq!(word, expected, "TBNZ X0, #3, +2 = 0x{word:08X}");
+        assert_ne!(word, 0xD503201F, "TBNZ must not emit NOP");
+    }
+
+    #[test]
+    fn test_encode_tbz_high_bit() {
+        // TBZ X0, #32, +5  (bit 32 means b5=1, b40=0)
+        let inst = MachInst::new(
+            AArch64Opcode::Tbz,
+            vec![MachOperand::PReg(X0), MachOperand::Imm(32), MachOperand::Imm(5)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b011011 << 25)
+            | (0 << 24)
+            | (0 << 19)
+            | (5 << 5)
+            | 0;
+        assert_eq!(word, expected, "TBZ X0, #32, +5 = 0x{word:08X}");
+    }
+
+    #[test]
+    fn test_encode_tbnz_bit63() {
+        // TBNZ X1, #63, +10  (bit 63: b5=1, b40=31)
+        let inst = MachInst::new(
+            AArch64Opcode::Tbnz,
+            vec![MachOperand::PReg(X1), MachOperand::Imm(63), MachOperand::Imm(10)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b011011 << 25)
+            | (1 << 24)
+            | (31 << 19)
+            | (10 << 5)
+            | 1;
+        assert_eq!(word, expected, "TBNZ X1, #63, +10 = 0x{word:08X}");
+    }
+
+    #[test]
+    fn test_encode_tbz_matches_unified_encoder() {
+        let inst = MachInst::new(
+            AArch64Opcode::Tbz,
+            vec![MachOperand::PReg(X2), MachOperand::Imm(7), MachOperand::Imm(100)],
+        );
+        let lower_word = encode_inst(&inst).unwrap();
+        let unified_word = crate::aarch64::encode::encode_instruction(&inst).unwrap();
+        assert_eq!(lower_word, unified_word,
+            "lower encode_inst and unified encode_instruction must agree for TBZ: lower=0x{lower_word:08X}, unified=0x{unified_word:08X}");
+    }
+
+    #[test]
+    fn test_encode_tbnz_matches_unified_encoder() {
+        let inst = MachInst::new(
+            AArch64Opcode::Tbnz,
+            vec![MachOperand::PReg(X2), MachOperand::Imm(15), MachOperand::Imm(50)],
+        );
+        let lower_word = encode_inst(&inst).unwrap();
+        let unified_word = crate::aarch64::encode::encode_instruction(&inst).unwrap();
+        assert_eq!(lower_word, unified_word,
+            "lower encode_inst and unified encode_instruction must agree for TBNZ: lower=0x{lower_word:08X}, unified=0x{unified_word:08X}");
     }
 
     #[test]

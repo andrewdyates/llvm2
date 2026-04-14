@@ -1716,6 +1716,79 @@ mod tests {
     }
 
     #[test]
+    fn test_tbz_bit3() {
+        // TBZ X0, #3, +2
+        let inst = mk(AArch64Opcode::Tbz, vec![preg(X0), imm(3), imm(2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (0u32 << 31)
+            | (0b011011 << 25)
+            | (0 << 24)       // op=0 (TBZ)
+            | (3 << 19)       // b40=3
+            | (2 << 5)        // imm14=2
+            | 0;              // Rt=X0=0
+        assert_eq!(enc, expected, "TBZ X0, #3, +2 = {enc:#010X}");
+        assert_ne!(enc, NOP, "TBZ must not emit NOP");
+    }
+
+    #[test]
+    fn test_tbnz_bit3() {
+        let inst = mk(AArch64Opcode::Tbnz, vec![preg(X0), imm(3), imm(2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (0u32 << 31)
+            | (0b011011 << 25)
+            | (1 << 24)       // op=1 (TBNZ)
+            | (3 << 19)
+            | (2 << 5)
+            | 0;
+        assert_eq!(enc, expected, "TBNZ X0, #3, +2 = {enc:#010X}");
+        assert_ne!(enc, NOP, "TBNZ must not emit NOP");
+    }
+
+    #[test]
+    fn test_tbz_high_bit() {
+        // TBZ X0, #32, +5  (bit 32: b5=1, b40=0)
+        let inst = mk(AArch64Opcode::Tbz, vec![preg(X0), imm(32), imm(5)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b011011 << 25)
+            | (0 << 24)
+            | (0 << 19)       // b40 = 32 & 0x1F = 0
+            | (5 << 5)
+            | 0;
+        assert_eq!(enc, expected, "TBZ X0, #32, +5 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_tbnz_bit63() {
+        // TBNZ X1, #63, +10  (bit 63: b5=1, b40=31)
+        let inst = mk(AArch64Opcode::Tbnz, vec![preg(X1), imm(63), imm(10)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b011011 << 25)
+            | (1 << 24)
+            | (31 << 19)      // b40 = 63 & 0x1F = 31
+            | (10 << 5)
+            | 1;              // Rt=X1=1
+        assert_eq!(enc, expected, "TBNZ X1, #63, +10 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_tbz_known_encoding() {
+        // TBZ W0, #0, +0 should encode as 0x36000000
+        let inst = mk(AArch64Opcode::Tbz, vec![preg(X0), imm(0), imm(0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x36000000, "TBZ X0, #0, +0 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_tbnz_known_encoding() {
+        // TBNZ W0, #0, +0 should encode as 0x37000000
+        let inst = mk(AArch64Opcode::Tbnz, vec![preg(X0), imm(0), imm(0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x37000000, "TBNZ X0, #0, +0 = {enc:#010X}");
+    }
+
+    #[test]
     fn test_cmp_rr() {
         let inst = mk(AArch64Opcode::CmpRR, vec![preg(X0), preg(X1)]);
         let enc = encode_instruction(&inst).unwrap();
