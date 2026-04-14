@@ -1121,9 +1121,19 @@ impl InstructionSelector {
         // Move each return value into its designated physical register
         for (i, (val, loc)) in inst.args.iter().zip(ret_locs.iter()).enumerate() {
             let src = self.use_value(val)?;
+            let ty = ret_types[i].clone();
+
+            // Aggregate types (structs/arrays) need special handling even when
+            // the ABI says Reg: the source operand is a pointer to the aggregate
+            // in memory, so we must load the value(s) into the target register(s).
+            // The select_aggregate_return helper handles all size categories.
+            if ty.is_aggregate() {
+                self.select_aggregate_return(src, &ty, block)?;
+                continue;
+            }
+
             match loc {
                 ArgLocation::Reg(preg) => {
-                    let ty = ret_types[i].clone();
                     let opc = if Self::is_32bit(&ty) {
                         AArch64Opcode::MovR
                     } else {
@@ -1139,10 +1149,10 @@ impl InstructionSelector {
                     );
                 }
                 ArgLocation::Indirect { .. } => {
-                    // Aggregate return: dispatch to aggregate return lowering.
-                    // src is a pointer to the aggregate in memory.
-                    let agg_ty = ret_types[i].clone();
-                    self.select_aggregate_return(src, &agg_ty, block)?;
+                    // Non-aggregate indirect return (e.g., I128 pair).
+                    // Dispatch to aggregate return lowering which handles
+                    // memory-to-register copying.
+                    self.select_aggregate_return(src, &ty, block)?;
                 }
                 ArgLocation::Stack { .. } => {
                     return Err(ISelError::UnsupportedReturnLocation);
@@ -5418,8 +5428,9 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
 
-        // ABI classifies Struct return as Indirect{X8}, so aggregate return
-        // is invoked. For 8-byte struct: single LDR X0, [src]
+        // ABI classifies 8-byte Struct return as Reg(X0). The isel layer
+        // detects aggregate types and uses select_aggregate_return which
+        // loads the struct from memory: single LDR X0, [src].
         let insts = &mblock.insts;
         // Find the LDR X0 instruction
         let ldr_inst = insts.iter().find(|i| {

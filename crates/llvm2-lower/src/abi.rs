@@ -109,11 +109,94 @@ const CALL_CLOBBER_GPRS: [PReg; 19] = [
 pub struct AppleAArch64ABI;
 
 impl AppleAArch64ABI {
+    /// Detect if a type is a Homogeneous Floating-point Aggregate (HFA).
+    ///
+    /// An HFA is a struct or array of 1-4 members of the same floating-point type
+    /// (F32 or F64). Per AAPCS64 and Apple ABI, HFAs are passed/returned in
+    /// consecutive FPR registers (V0-V7 for args, V0-V3 for returns).
+    ///
+    /// Returns `Some((element_type, count))` if HFA, `None` otherwise.
+    ///
+    /// Reference: AAPCS64 sec. 6.4.2 "Homogeneous Aggregates"
+    /// Reference: Apple ARM64 ABI documentation
+    fn detect_hfa(ty: &Type) -> Option<(Type, usize)> {
+        match ty {
+            Type::Struct(fields) => {
+                if fields.is_empty() || fields.len() > 4 {
+                    return None;
+                }
+                // All fields must be the same FP type (F32 or F64).
+                // Nested structs/arrays: recursively flatten to check.
+                let mut flat_fields = Vec::new();
+                for field in fields {
+                    Self::flatten_hfa_fields(field, &mut flat_fields);
+                }
+                if flat_fields.is_empty() || flat_fields.len() > 4 {
+                    return None;
+                }
+                let base = &flat_fields[0];
+                if !matches!(base, Type::F32 | Type::F64) {
+                    return None;
+                }
+                if flat_fields.iter().all(|f| f == base) {
+                    Some((base.clone(), flat_fields.len()))
+                } else {
+                    None
+                }
+            }
+            Type::Array(elem, count) => {
+                let count = *count as usize;
+                if count == 0 || count > 4 {
+                    return None;
+                }
+                // Element must be F32 or F64 (or itself an HFA that flattens to same type).
+                match elem.as_ref() {
+                    Type::F32 => Some((Type::F32, count)),
+                    Type::F64 => Some((Type::F64, count)),
+                    _ => {
+                        // Check if element is itself an HFA (e.g., array of float-structs)
+                        if let Some((base, inner_count)) = Self::detect_hfa(elem) {
+                            let total = count * inner_count;
+                            if total <= 4 {
+                                Some((base, total))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Recursively flatten struct/array fields to their leaf FP types for HFA detection.
+    fn flatten_hfa_fields(ty: &Type, out: &mut Vec<Type>) {
+        match ty {
+            Type::F32 | Type::F64 => out.push(ty.clone()),
+            Type::Struct(fields) => {
+                for field in fields {
+                    Self::flatten_hfa_fields(field, out);
+                }
+            }
+            Type::Array(elem, count) => {
+                for _ in 0..*count {
+                    Self::flatten_hfa_fields(elem, out);
+                }
+            }
+            // Any non-FP leaf type makes this not an HFA
+            _ => out.push(ty.clone()),
+        }
+    }
+
     /// Classify function parameters into register/stack locations.
     ///
     /// Rules (Apple arm64, non-variadic):
     /// - Integer/pointer types (I8, I16, I32, I64, B1): next available X0-X7
     /// - Float types (F32, F64): next available V0-V7
+    /// - HFA (Homogeneous Floating-point Aggregate): consecutive V0-V7 registers
     /// - I128: uses two consecutive GPR slots (must start on even register for
     ///   alignment on standard AAPCS; Apple relaxes this but we follow the
     ///   conservative rule for correctness)
@@ -180,21 +263,62 @@ impl AppleAArch64ABI {
                     }
                 }
 
-                // Aggregate types: pass by pointer (indirect) if > 16 bytes,
-                // otherwise pack into register(s).
+                // Aggregate types: check for HFA first, then size-based classification.
                 Type::Struct(_) | Type::Array(_, _) => {
-                    let size = ty.bytes();
-                    if size <= 16 && gpr_idx < GPR_ARG_REGS.len() {
-                        // Small aggregates: pass in register(s)
-                        if size <= 8 {
-                            result.push(ArgLocation::Reg(GPR_ARG_REGS[gpr_idx]));
-                            gpr_idx += 1;
-                        } else if gpr_idx + 1 < GPR_ARG_REGS.len() {
-                            // 9-16 bytes: two registers
-                            result.push(ArgLocation::Indirect {
-                                ptr_reg: GPR_ARG_REGS[gpr_idx],
+                    // HFA: 1-4 same-type FP fields -> consecutive FPR registers.
+                    // Per AAPCS64, if there aren't enough FPR slots for the
+                    // entire HFA, the whole thing goes on the stack.
+                    if let Some((_base_ty, count)) = Self::detect_hfa(ty) {
+                        if fpr_idx + count <= FPR_ARG_REGS.len() {
+                            // Pass in consecutive FPR registers.
+                            // We record the first register; the ABI lowering
+                            // layer knows to use `count` consecutive V registers.
+                            result.push(ArgLocation::Reg(FPR_ARG_REGS[fpr_idx]));
+                            fpr_idx += count;
+                        } else {
+                            // Not enough FPR slots: entire HFA goes on stack.
+                            let size = ty.bytes();
+                            result.push(ArgLocation::Stack {
+                                offset: stack_offset,
+                                size,
                             });
-                            gpr_idx += 2;
+                            stack_offset += align_up(size as i64, 8);
+                        }
+                    } else {
+                        // Non-HFA aggregate: pass in GPRs or indirect.
+                        let size = ty.bytes();
+                        if size <= 16 && gpr_idx < GPR_ARG_REGS.len() {
+                            // Small aggregates: pass in register(s)
+                            if size <= 8 {
+                                result.push(ArgLocation::Reg(GPR_ARG_REGS[gpr_idx]));
+                                gpr_idx += 1;
+                            } else if gpr_idx + 1 < GPR_ARG_REGS.len() {
+                                // 9-16 bytes: two registers
+                                result.push(ArgLocation::Indirect {
+                                    ptr_reg: GPR_ARG_REGS[gpr_idx],
+                                });
+                                gpr_idx += 2;
+                            } else {
+                                result.push(ArgLocation::Stack {
+                                    offset: stack_offset,
+                                    size,
+                                });
+                                stack_offset += align_up(size as i64, 8);
+                            }
+                        } else if size > 16 {
+                            // Large aggregates: pass indirect via pointer
+                            if gpr_idx < GPR_ARG_REGS.len() {
+                                result.push(ArgLocation::Indirect {
+                                    ptr_reg: GPR_ARG_REGS[gpr_idx],
+                                });
+                                gpr_idx += 1;
+                            } else {
+                                result.push(ArgLocation::Stack {
+                                    offset: stack_offset,
+                                    size: 8, // pointer size
+                                });
+                                stack_offset += 8;
+                            }
                         } else {
                             result.push(ArgLocation::Stack {
                                 offset: stack_offset,
@@ -202,26 +326,6 @@ impl AppleAArch64ABI {
                             });
                             stack_offset += align_up(size as i64, 8);
                         }
-                    } else if size > 16 {
-                        // Large aggregates: pass indirect via pointer
-                        if gpr_idx < GPR_ARG_REGS.len() {
-                            result.push(ArgLocation::Indirect {
-                                ptr_reg: GPR_ARG_REGS[gpr_idx],
-                            });
-                            gpr_idx += 1;
-                        } else {
-                            result.push(ArgLocation::Stack {
-                                offset: stack_offset,
-                                size: 8, // pointer size
-                            });
-                            stack_offset += 8;
-                        }
-                    } else {
-                        result.push(ArgLocation::Stack {
-                            offset: stack_offset,
-                            size,
-                        });
-                        stack_offset += align_up(size as i64, 8);
                     }
                 }
             }
@@ -235,7 +339,9 @@ impl AppleAArch64ABI {
     /// Rules:
     /// - Integer: X0 (single), X0+X1 (pair)
     /// - Float: V0 (single), V0+V1 (pair)
-    /// - Large aggregate returns: indirect via X8 pointer (sret)
+    /// - HFA aggregate: V0-V3 (1-4 FP registers)
+    /// - Small aggregate (<= 16 bytes, non-HFA): X0 (<=8 bytes), X0+X1 (<=16 bytes)
+    /// - Large aggregate (> 16 bytes): indirect via X8 pointer (sret)
     /// - Up to 4 return values in registers per AAPCS64
     pub fn classify_returns(returns: &[Type]) -> Vec<ArgLocation> {
         let mut result = Vec::with_capacity(returns.len());
@@ -274,9 +380,34 @@ impl AppleAArch64ABI {
                     }
                 }
 
-                // Aggregate returns: indirect via X8 (sret convention)
+                // Aggregate returns: HFA in V regs, small structs in X regs, large via sret.
                 Type::Struct(_) | Type::Array(_, _) => {
-                    result.push(ArgLocation::Indirect { ptr_reg: gpr::X8 });
+                    // Check for HFA: return in consecutive V registers.
+                    if let Some((_base_ty, count)) = Self::detect_hfa(ty) {
+                        if fpr_idx + count <= 4 {
+                            // HFA return in V0-V3 (max 4 FPR return registers).
+                            result.push(ArgLocation::Reg(FPR_ARG_REGS[fpr_idx]));
+                            fpr_idx += count;
+                        } else {
+                            result.push(ArgLocation::Indirect { ptr_reg: gpr::X8 });
+                        }
+                    } else {
+                        // Non-HFA aggregate: small structs in X0/X1, large via sret.
+                        let size = ty.bytes();
+                        if size <= 8 && gpr_idx < GPR_ARG_REGS.len() {
+                            result.push(ArgLocation::Reg(GPR_ARG_REGS[gpr_idx]));
+                            gpr_idx += 1;
+                        } else if size <= 16 && gpr_idx + 1 < GPR_ARG_REGS.len() {
+                            // 9-16 bytes: two GPRs. Record the first; second is implicit.
+                            result.push(ArgLocation::Indirect {
+                                ptr_reg: GPR_ARG_REGS[gpr_idx],
+                            });
+                            gpr_idx += 2;
+                        } else {
+                            // > 16 bytes or no registers left: indirect via X8.
+                            result.push(ArgLocation::Indirect { ptr_reg: gpr::X8 });
+                        }
+                    }
                 }
             }
         }
@@ -569,5 +700,200 @@ mod tests {
         // Both on stack
         assert!(matches!(locs[0], ArgLocation::Stack { offset: 0, size: 8 }));
         assert!(matches!(locs[1], ArgLocation::Stack { offset: 8, size: 8 }));
+    }
+
+    // ===================================================================
+    // HFA (Homogeneous Floating-point Aggregate) tests
+    // ===================================================================
+
+    #[test]
+    fn detect_hfa_two_f32_fields() {
+        // struct Complex32 { float re, im; } -> HFA: 2x F32
+        let ty = Type::Struct(vec![Type::F32, Type::F32]);
+        let hfa = AppleAArch64ABI::detect_hfa(&ty);
+        assert_eq!(hfa, Some((Type::F32, 2)));
+    }
+
+    #[test]
+    fn detect_hfa_four_f32_fields() {
+        // struct Vec4 { float x, y, z, w; } -> HFA: 4x F32
+        let ty = Type::Struct(vec![Type::F32, Type::F32, Type::F32, Type::F32]);
+        let hfa = AppleAArch64ABI::detect_hfa(&ty);
+        assert_eq!(hfa, Some((Type::F32, 4)));
+    }
+
+    #[test]
+    fn detect_hfa_two_f64_fields() {
+        // struct Complex64 { double re, im; } -> HFA: 2x F64
+        let ty = Type::Struct(vec![Type::F64, Type::F64]);
+        let hfa = AppleAArch64ABI::detect_hfa(&ty);
+        assert_eq!(hfa, Some((Type::F64, 2)));
+    }
+
+    #[test]
+    fn detect_hfa_mixed_types_not_hfa() {
+        // struct { float x; int y; } -> NOT HFA (mixed types)
+        let ty = Type::Struct(vec![Type::F32, Type::I32]);
+        let hfa = AppleAArch64ABI::detect_hfa(&ty);
+        assert_eq!(hfa, None);
+    }
+
+    #[test]
+    fn detect_hfa_five_fields_not_hfa() {
+        // struct { float a, b, c, d, e; } -> NOT HFA (> 4 fields)
+        let ty = Type::Struct(vec![Type::F32, Type::F32, Type::F32, Type::F32, Type::F32]);
+        let hfa = AppleAArch64ABI::detect_hfa(&ty);
+        assert_eq!(hfa, None);
+    }
+
+    #[test]
+    fn detect_hfa_array_of_f32() {
+        // float[3] -> HFA: 3x F32
+        let ty = Type::Array(Box::new(Type::F32), 3);
+        let hfa = AppleAArch64ABI::detect_hfa(&ty);
+        assert_eq!(hfa, Some((Type::F32, 3)));
+    }
+
+    #[test]
+    fn detect_hfa_array_of_f64_too_large() {
+        // double[5] -> NOT HFA (> 4 elements)
+        let ty = Type::Array(Box::new(Type::F64), 5);
+        let hfa = AppleAArch64ABI::detect_hfa(&ty);
+        assert_eq!(hfa, None);
+    }
+
+    #[test]
+    fn detect_hfa_empty_struct_not_hfa() {
+        let ty = Type::Struct(vec![]);
+        let hfa = AppleAArch64ABI::detect_hfa(&ty);
+        assert_eq!(hfa, None);
+    }
+
+    #[test]
+    fn detect_hfa_integer_struct_not_hfa() {
+        let ty = Type::Struct(vec![Type::I32, Type::I32]);
+        let hfa = AppleAArch64ABI::detect_hfa(&ty);
+        assert_eq!(hfa, None);
+    }
+
+    #[test]
+    fn classify_hfa_param_two_f32_in_v_regs() {
+        // struct { float, float } passed as HFA -> V0 (consumes V0 + V1)
+        let hfa = Type::Struct(vec![Type::F32, Type::F32]);
+        let locs = AppleAArch64ABI::classify_params(&[hfa]);
+        assert_eq!(locs.len(), 1);
+        // First FPR register is V0; the ABI layer knows 2 consecutive are consumed.
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    #[test]
+    fn classify_hfa_param_four_f32_in_v_regs() {
+        // struct { float, float, float, float } -> V0 (consumes V0-V3)
+        let hfa = Type::Struct(vec![Type::F32, Type::F32, Type::F32, Type::F32]);
+        let locs = AppleAArch64ABI::classify_params(&[hfa]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    #[test]
+    fn classify_hfa_param_with_preceding_floats() {
+        // fn(f64, HFA{f32, f32}) -> V0 for f64, V1 for HFA (consumes V1+V2)
+        let hfa = Type::Struct(vec![Type::F32, Type::F32]);
+        let locs = AppleAArch64ABI::classify_params(&[Type::F64, hfa]);
+        assert_eq!(locs.len(), 2);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+        assert_eq!(locs[1], ArgLocation::Reg(gpr::V1));
+    }
+
+    #[test]
+    fn classify_hfa_param_overflow_to_stack() {
+        // 7 floats used up V0-V6, then HFA(2x F32) can't fit -> stack
+        let mut params: Vec<Type> = vec![Type::F32; 7];
+        params.push(Type::Struct(vec![Type::F32, Type::F32])); // needs 2 FPR slots
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 8);
+        // V0-V6 for the 7 scalars
+        for i in 0..7 {
+            assert_eq!(locs[i], ArgLocation::Reg(FPR_ARG_REGS[i]));
+        }
+        // HFA needs 2 slots but only 1 left -> stack
+        assert!(matches!(locs[7], ArgLocation::Stack { .. }));
+    }
+
+    #[test]
+    fn classify_non_hfa_struct_in_gpr() {
+        // struct { i32, f32 } -> NOT HFA (mixed types), small (8 bytes) -> X0
+        let non_hfa = Type::Struct(vec![Type::I32, Type::F32]);
+        let locs = AppleAArch64ABI::classify_params(&[non_hfa]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+    }
+
+    // ===================================================================
+    // Small struct register return tests
+    // ===================================================================
+
+    #[test]
+    fn return_small_struct_8_bytes_in_x0() {
+        // struct { i32, i32 } = 8 bytes -> return in X0
+        let ty = Type::Struct(vec![Type::I32, Type::I32]);
+        let locs = AppleAArch64ABI::classify_returns(&[ty]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+    }
+
+    #[test]
+    fn return_small_struct_16_bytes_in_x0_x1() {
+        // struct { i64, i64 } = 16 bytes -> return in X0+X1 (Indirect{X0} encoding)
+        let ty = Type::Struct(vec![Type::I64, Type::I64]);
+        let locs = AppleAArch64ABI::classify_returns(&[ty]);
+        assert_eq!(locs.len(), 1);
+        // 16-byte struct uses the Indirect{X0} encoding (two GPRs, first recorded).
+        assert_eq!(locs[0], ArgLocation::Indirect { ptr_reg: gpr::X0 });
+    }
+
+    #[test]
+    fn return_large_struct_via_sret() {
+        // struct { i64, i64, i64 } = 24 bytes -> indirect via X8
+        let ty = Type::Struct(vec![Type::I64, Type::I64, Type::I64]);
+        let locs = AppleAArch64ABI::classify_returns(&[ty]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Indirect { ptr_reg: gpr::X8 });
+    }
+
+    #[test]
+    fn return_hfa_two_f32_in_v0() {
+        // struct { float, float } -> HFA return in V0 (consumes V0+V1)
+        let hfa = Type::Struct(vec![Type::F32, Type::F32]);
+        let locs = AppleAArch64ABI::classify_returns(&[hfa]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    #[test]
+    fn return_hfa_four_f64_in_v0() {
+        // struct { double, double, double, double } -> HFA return in V0 (consumes V0-V3)
+        let hfa = Type::Struct(vec![Type::F64, Type::F64, Type::F64, Type::F64]);
+        let locs = AppleAArch64ABI::classify_returns(&[hfa]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    #[test]
+    fn return_hfa_array_three_f32() {
+        // float[3] -> HFA return in V0
+        let hfa = Type::Array(Box::new(Type::F32), 3);
+        let locs = AppleAArch64ABI::classify_returns(&[hfa]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    #[test]
+    fn return_single_field_struct_in_x0() {
+        // struct { i64 } = 8 bytes -> return in X0 (not HFA, <= 8 bytes)
+        let ty = Type::Struct(vec![Type::I64]);
+        let locs = AppleAArch64ABI::classify_returns(&[ty]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
     }
 }
