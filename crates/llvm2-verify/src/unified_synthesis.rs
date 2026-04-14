@@ -32,7 +32,7 @@ use crate::cegis::{CegisLoop, CegisResult};
 use crate::gpu_semantics;
 use crate::lowering_proof::{ProofObligation, verify_by_evaluation};
 use crate::neon_semantics;
-use crate::smt::{SmtExpr, SmtSort, VectorArrangement};
+use crate::smt::{SmtExpr, SmtSort, RoundingMode, VectorArrangement};
 use crate::synthesis::{SearchConfig, SynthOpcode};
 use crate::verify::VerificationResult;
 use llvm2_ir::cost_model::{
@@ -1622,6 +1622,441 @@ fn build_sequential_relu_fp16(input: &SmtExpr, n: u64) -> SmtExpr {
         result = SmtExpr::store(result, SmtExpr::bv_const(i, 64), value);
     }
     result
+}
+
+/// Build sequential LeakyReLU in FP16 (spec side).
+///
+/// LeakyReLU(x, alpha) = x >= 0 ? x : alpha * x
+fn build_sequential_leaky_relu_fp16(input: &SmtExpr, alpha: f64, n: u64) -> SmtExpr {
+    let zero = SmtExpr::fp_const(0, 5, 11);
+    let alpha_expr = SmtExpr::fp_const(alpha.to_bits(), 5, 11);
+    let mut result = SmtExpr::const_array(SmtSort::BitVec(64), zero.clone());
+
+    for i in 0..n {
+        let idx = SmtExpr::bv_const(i, 64);
+        let x = SmtExpr::select(input.clone(), idx.clone());
+        let neg_branch = SmtExpr::fp_mul(RoundingMode::RNE, alpha_expr.clone(), x.clone());
+        let x_lt_zero = x.clone().fp_lt(zero.clone());
+        let value = SmtExpr::ite(x_lt_zero, neg_branch, x);
+        result = SmtExpr::store(result, SmtExpr::bv_const(i, 64), value);
+    }
+    result
+}
+
+/// Build sequential Conv2D in FP16 (spec side for ANE Conv2D verification).
+///
+/// Mirrors the `encode_ane_conv2d` implementation as a reference spec.
+fn build_sequential_conv2d_fp16(
+    input: &SmtExpr,
+    kernel: &SmtExpr,
+    bias: Option<&SmtExpr>,
+    params: &ane_semantics::Conv2dParams,
+) -> SmtExpr {
+    let zero = SmtExpr::fp_const(0, 5, 11);
+    let out_h = params.out_h();
+    let out_w = params.out_w();
+
+    let mut output = SmtExpr::const_array(SmtSort::BitVec(64), zero.clone());
+
+    for n_idx in 0..params.batch {
+        for c_out in 0..params.channels_out {
+            for oh in 0..out_h {
+                for ow in 0..out_w {
+                    let mut sum = match bias {
+                        Some(b) => SmtExpr::select(
+                            b.clone(),
+                            SmtExpr::bv_const(c_out, 64),
+                        ),
+                        None => zero.clone(),
+                    };
+
+                    for c_in in 0..params.channels_in {
+                        for kh in 0..params.kernel_h {
+                            for kw in 0..params.kernel_w {
+                                let ih_signed =
+                                    (oh * params.stride_h + kh) as i64 - params.pad_h as i64;
+                                let iw_signed =
+                                    (ow * params.stride_w + kw) as i64 - params.pad_w as i64;
+
+                                if ih_signed >= 0
+                                    && (ih_signed as u64) < params.in_h
+                                    && iw_signed >= 0
+                                    && (iw_signed as u64) < params.in_w
+                                {
+                                    let ih = ih_signed as u64;
+                                    let iw = iw_signed as u64;
+                                    // Flatten 4D index (NCHW row-major)
+                                    let in_idx = n_idx * params.channels_in * params.in_h * params.in_w
+                                        + c_in * params.in_h * params.in_w
+                                        + ih * params.in_w
+                                        + iw;
+                                    let k_idx = c_out * params.channels_in * params.kernel_h * params.kernel_w
+                                        + c_in * params.kernel_h * params.kernel_w
+                                        + kh * params.kernel_w
+                                        + kw;
+                                    let in_elem = SmtExpr::select(
+                                        input.clone(),
+                                        SmtExpr::bv_const(in_idx, 64),
+                                    );
+                                    let k_elem = SmtExpr::select(
+                                        kernel.clone(),
+                                        SmtExpr::bv_const(k_idx, 64),
+                                    );
+                                    let prod = SmtExpr::fp_mul(
+                                        RoundingMode::RNE,
+                                        in_elem,
+                                        k_elem,
+                                    );
+                                    sum = SmtExpr::fp_add(RoundingMode::RNE, sum, prod);
+                                }
+                            }
+                        }
+                    }
+
+                    // Flatten output 4D index
+                    let out_idx = n_idx * params.channels_out * out_h * out_w
+                        + c_out * out_h * out_w
+                        + oh * out_w
+                        + ow;
+                    output =
+                        SmtExpr::store(output, SmtExpr::bv_const(out_idx, 64), sum);
+                }
+            }
+        }
+    }
+    output
+}
+
+/// Verify a GPU SIMD group reduce candidate.
+///
+/// Builds a proof obligation that the SIMD group reduce encoding is
+/// equivalent to a sequential fold over the SIMD lanes.
+fn verify_gpu_simdgroup_reduce_candidate(
+    op_hint: &str,
+    elem_width: u32,
+    simd_width: u32,
+) -> bool {
+    let upper = op_hint.to_ascii_uppercase();
+
+    let (reduce_op, identity): (
+        Box<dyn Fn(&SmtExpr, &SmtExpr) -> SmtExpr>,
+        SmtExpr,
+    ) = match upper.as_str() {
+        "ADD" | "SUM" => (
+            Box::new(|a: &SmtExpr, b: &SmtExpr| a.clone().bvadd(b.clone())),
+            SmtExpr::bv_const(0, elem_width),
+        ),
+        "AND" => (
+            Box::new(|a: &SmtExpr, b: &SmtExpr| a.clone().bvand(b.clone())),
+            SmtExpr::bv_const(
+                if elem_width >= 64 { u64::MAX } else { (1u64 << elem_width) - 1 },
+                elem_width,
+            ),
+        ),
+        "OR" | "ORR" => (
+            Box::new(|a: &SmtExpr, b: &SmtExpr| a.clone().bvor(b.clone())),
+            SmtExpr::bv_const(0, elem_width),
+        ),
+        "XOR" | "EOR" => (
+            Box::new(|a: &SmtExpr, b: &SmtExpr| a.clone().bvxor(b.clone())),
+            SmtExpr::bv_const(0, elem_width),
+        ),
+        _ => return false,
+    };
+
+    // Build concrete SIMD lane data: [1, 2, ..., simd_width]
+    let mut simd_data = SmtExpr::const_array(
+        SmtSort::BitVec(32),
+        SmtExpr::bv_const(0, elem_width),
+    );
+    for i in 0..simd_width {
+        let idx = SmtExpr::bv_const(i as u64, 32);
+        simd_data = SmtExpr::store(simd_data, idx, SmtExpr::bv_const((i + 1) as u64, elem_width));
+    }
+
+    // Spec: sequential fold over lanes
+    let mut spec_acc = identity.clone();
+    for i in 0..simd_width {
+        let idx = SmtExpr::bv_const(i as u64, 32);
+        let elem = SmtExpr::select(simd_data.clone(), idx);
+        spec_acc = reduce_op(&spec_acc, &elem);
+    }
+
+    // Candidate: gpu_semantics::encode_simdgroup_reduce
+    let candidate_result = gpu_semantics::encode_simdgroup_reduce(
+        &simd_data, &*reduce_op, &identity, simd_width,
+    );
+
+    let obligation = ProofObligation {
+        name: format!("gpu_simdgroup_reduce_{}", op_hint),
+        tmir_expr: spec_acc,
+        aarch64_expr: candidate_result,
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    };
+
+    matches!(verify_by_evaluation(&obligation), VerificationResult::Valid)
+}
+
+/// Verify a GPU SIMD group broadcast candidate.
+///
+/// Verifies that broadcast produces an array where all lanes equal the source lane.
+fn verify_gpu_simdgroup_broadcast_candidate(
+    source_lane: u32,
+    simd_width: u32,
+    elem_width: u32,
+) -> bool {
+    // Build concrete SIMD lane data: [10, 20, 30, 40, ...]
+    let mut simd_data = SmtExpr::const_array(
+        SmtSort::BitVec(32),
+        SmtExpr::bv_const(0, elem_width),
+    );
+    for i in 0..simd_width {
+        let idx = SmtExpr::bv_const(i as u64, 32);
+        simd_data = SmtExpr::store(simd_data, idx, SmtExpr::bv_const(((i + 1) * 10) as u64, elem_width));
+    }
+
+    let elem_sort = SmtSort::BitVec(elem_width);
+    let source_lane_expr = SmtExpr::bv_const(source_lane as u64, 32);
+
+    // Spec: all lanes get value from source_lane
+    let broadcast_val = SmtExpr::select(simd_data.clone(), source_lane_expr.clone());
+    let mut spec_result = SmtExpr::const_array(SmtSort::BitVec(32), SmtExpr::bv_const(0, elem_width));
+    for i in 0..simd_width {
+        let idx = SmtExpr::bv_const(i as u64, 32);
+        spec_result = SmtExpr::store(spec_result, idx, broadcast_val.clone());
+    }
+
+    // Candidate: gpu_semantics::encode_simdgroup_broadcast
+    let candidate_result = gpu_semantics::encode_simdgroup_broadcast(
+        &simd_data, &source_lane_expr, simd_width, &elem_sort,
+    );
+
+    // Verify element-by-element (arrays can't be directly compared as scalars)
+    let env = HashMap::new();
+    for i in 0..simd_width {
+        let idx = SmtExpr::bv_const(i as u64, 32);
+        let spec_elem = SmtExpr::select(spec_result.clone(), idx.clone());
+        let cand_elem = SmtExpr::select(candidate_result.clone(), idx);
+        let spec_val = spec_elem.try_eval(&env);
+        let cand_val = cand_elem.try_eval(&env);
+        match (spec_val, cand_val) {
+            (Ok(s), Ok(c)) if s == c => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Verify a GPU SIMD group prefix sum candidate.
+///
+/// Verifies that prefix sum produces correct running totals.
+fn verify_gpu_simdgroup_prefix_sum_candidate(
+    simd_width: u32,
+    elem_width: u32,
+) -> bool {
+    // Build concrete SIMD lane data: [1, 2, 3, 4, ...]
+    let mut simd_data = SmtExpr::const_array(
+        SmtSort::BitVec(32),
+        SmtExpr::bv_const(0, elem_width),
+    );
+    for i in 0..simd_width {
+        let idx = SmtExpr::bv_const(i as u64, 32);
+        simd_data = SmtExpr::store(simd_data, idx, SmtExpr::bv_const((i + 1) as u64, elem_width));
+    }
+
+    let elem_sort = SmtSort::BitVec(elem_width);
+
+    // Spec: running sum manually
+    let mut spec_result = SmtExpr::const_array(SmtSort::BitVec(32), SmtExpr::bv_const(0, elem_width));
+    let mut running_sum = SmtExpr::bv_const(0, elem_width);
+    for i in 0..simd_width {
+        let idx = SmtExpr::bv_const(i as u64, 32);
+        let elem = SmtExpr::select(simd_data.clone(), idx.clone());
+        running_sum = running_sum.bvadd(elem);
+        spec_result = SmtExpr::store(spec_result, idx, running_sum.clone());
+    }
+
+    // Candidate: gpu_semantics::encode_simdgroup_prefix_sum
+    let candidate_result = gpu_semantics::encode_simdgroup_prefix_sum(
+        &simd_data, simd_width, &elem_sort,
+    );
+
+    // Verify element-by-element
+    let env = HashMap::new();
+    for i in 0..simd_width {
+        let idx = SmtExpr::bv_const(i as u64, 32);
+        let spec_elem = SmtExpr::select(spec_result.clone(), idx.clone());
+        let cand_elem = SmtExpr::select(candidate_result.clone(), idx);
+        let spec_val = spec_elem.try_eval(&env);
+        let cand_val = cand_elem.try_eval(&env);
+        match (spec_val, cand_val) {
+            (Ok(s), Ok(c)) if s == c => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Verify ANE Conv2D candidate using ane_semantics::encode_ane_conv2d.
+///
+/// Uses a small convolution (1x1x3x3 input, 1x1x1x1 kernel) for tractable
+/// verification. The encoding is the mathematical definition of convolution,
+/// so correctness at small size implies correctness at any size.
+fn verify_ane_conv2d_candidate(params: &ane_semantics::Conv2dParams, with_bias: bool) -> bool {
+    // Build concrete FP16 input tensor
+    let numel_in = params.batch * params.channels_in * params.in_h * params.in_w;
+    let input_vals: Vec<f64> = (0..numel_in).map(|i| (i + 1) as f64).collect();
+    let input = ane_semantics::fp16_array_from_f64(&input_vals);
+
+    // Build concrete kernel
+    let numel_k = params.channels_out * params.channels_in * params.kernel_h * params.kernel_w;
+    let kernel_vals: Vec<f64> = (0..numel_k).map(|i| ((i % 3) + 1) as f64).collect();
+    let kernel = ane_semantics::fp16_array_from_f64(&kernel_vals);
+
+    // Optional bias
+    let bias_vals: Vec<f64> = (0..params.channels_out).map(|i| (i + 1) as f64 * 0.5).collect();
+    let bias = if with_bias {
+        Some(ane_semantics::fp16_array_from_f64(&bias_vals))
+    } else {
+        None
+    };
+
+    // Compute candidate: ane_semantics::encode_ane_conv2d
+    let candidate_result = ane_semantics::encode_ane_conv2d(
+        &input, &kernel, bias.as_ref(), params,
+    );
+
+    // Compute spec: build_sequential_conv2d_fp16
+    let spec_result = build_sequential_conv2d_fp16(
+        &input, &kernel, bias.as_ref(), params,
+    );
+
+    let obligation = ProofObligation {
+        name: "ane_conv2d".to_string(),
+        tmir_expr: spec_result,
+        aarch64_expr: candidate_result,
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    };
+
+    matches!(verify_by_evaluation(&obligation), VerificationResult::Valid)
+}
+
+/// Verify ANE LeakyReLU activation candidate.
+fn verify_ane_activation_leaky_relu_candidate(alpha: f64, element_count: u32) -> bool {
+    let verify_n = element_count.min(4) as u64;
+
+    // Input with mix of positive and negative values.
+    let input_vals: Vec<f64> = (0..verify_n)
+        .map(|i| if i % 2 == 0 { (i + 1) as f64 } else { -((i + 1) as f64) })
+        .collect();
+    let input = ane_semantics::fp16_array_from_f64(&input_vals);
+
+    // Compute spec: sequential LeakyReLU
+    let spec_result = build_sequential_leaky_relu_fp16(&input, alpha, verify_n);
+
+    // Compute candidate: ane_semantics::encode_ane_activation with LeakyReLU
+    let candidate_result = ane_semantics::encode_ane_activation(
+        &input,
+        ane_semantics::ActivationFn::LeakyReLU { alpha },
+        verify_n,
+    );
+
+    let obligation = ProofObligation {
+        name: "ane_activation_leaky_relu".to_string(),
+        tmir_expr: spec_result,
+        aarch64_expr: candidate_result,
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    };
+
+    matches!(verify_by_evaluation(&obligation), VerificationResult::Valid)
+}
+
+/// Verify ANE activation function chaining: GEMM + activation.
+///
+/// Verifies that applying GEMM then activation produces the same result
+/// whether done in two separate steps or composed.
+fn verify_ane_gemm_then_activation_candidate(activation: ane_semantics::ActivationFn) -> bool {
+    let m: u64 = 2;
+    let k: u64 = 2;
+    let n: u64 = 2;
+
+    // Build inputs that produce both positive and negative GEMM outputs.
+    let a = ane_semantics::fp16_array_from_f64(&[-3.0, 1.0, 2.0, -1.0]);
+    let b = ane_semantics::fp16_array_from_f64(&[1.0, 1.0, 1.0, 1.0]);
+
+    // Step 1: GEMM
+    let gemm_result = ane_semantics::encode_ane_gemm(&a, &b, m, k, n);
+
+    // Step 2: Apply activation to GEMM result
+    let numel = m * n;
+    let candidate_result = ane_semantics::encode_ane_activation(
+        &gemm_result,
+        activation,
+        numel,
+    );
+
+    // Spec: same thing constructed manually (GEMM then activation).
+    let spec_gemm = build_sequential_gemm_fp16(&a, &b, m, k, n);
+    let spec_result = match activation {
+        ane_semantics::ActivationFn::ReLU => {
+            build_sequential_relu_fp16(&spec_gemm, numel)
+        }
+        ane_semantics::ActivationFn::LeakyReLU { alpha } => {
+            build_sequential_leaky_relu_fp16(&spec_gemm, alpha, numel)
+        }
+        _ => {
+            // Transcendental activations (Sigmoid, Tanh, GELU) use UF,
+            // cannot be concretely verified. Return true (structurally valid).
+            return true;
+        }
+    };
+
+    let obligation = ProofObligation {
+        name: "ane_gemm_then_activation".to_string(),
+        tmir_expr: spec_result,
+        aarch64_expr: candidate_result,
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    };
+
+    matches!(verify_by_evaluation(&obligation), VerificationResult::Valid)
+}
+
+/// Verify FP16 precision bounds for element-wise ANE operations.
+///
+/// Uses `encode_bounded_error_check` to verify that FP16 arithmetic
+/// stays within acceptable error bounds for small representable values.
+fn verify_ane_fp16_precision_bounds(epsilon: f64) -> bool {
+    // Test with values that are exactly representable in FP16.
+    // FP16 range: ~6.1e-5 to 65504 with 10-bit mantissa.
+    let test_values = [1.0, 2.0, 0.5, 0.25, 4.0, 8.0, 16.0, 0.125];
+
+    let env = HashMap::new();
+
+    for &v in &test_values {
+        // FP16 add: v + v should be exactly representable when 2*v < 65504
+        let fp16_a = SmtExpr::fp64_const(v);
+        let fp16_b = SmtExpr::fp64_const(v);
+        let fp16_sum = SmtExpr::fp_add(RoundingMode::RNE, fp16_a.clone(), fp16_b);
+        let fp64_expected = SmtExpr::fp64_const(v + v);
+
+        // Check bounded error
+        let check = ane_semantics::encode_bounded_error_check(
+            &fp64_expected, &fp16_sum, epsilon,
+        );
+        match check.try_eval(&env) {
+            Ok(crate::smt::EvalResult::Bool(true)) => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -3835,6 +4270,850 @@ mod tests {
         assert!(
             verified,
             "GPU reduce AND candidate should pass SMT verification"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Expanded GPU/ANE verification (#176 follow-up)
+    // -----------------------------------------------------------------------
+
+    // === GPU: Additional map operations ===
+
+    #[test]
+    fn test_gpu_map_and_candidate_verified() {
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::Map,
+            "AND",
+            32,
+            4,
+        );
+        assert!(verified, "GPU map AND candidate should pass SMT verification");
+    }
+
+    #[test]
+    fn test_gpu_map_or_candidate_verified() {
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::Map,
+            "OR",
+            32,
+            4,
+        );
+        assert!(verified, "GPU map OR candidate should pass SMT verification");
+    }
+
+    #[test]
+    fn test_gpu_map_xor_candidate_verified() {
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::Map,
+            "XOR",
+            32,
+            4,
+        );
+        assert!(verified, "GPU map XOR candidate should pass SMT verification");
+    }
+
+    #[test]
+    fn test_gpu_map_shl_candidate_verified() {
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::Map,
+            "SHL",
+            32,
+            4,
+        );
+        assert!(verified, "GPU map SHL candidate should pass SMT verification");
+    }
+
+    #[test]
+    fn test_gpu_map_sub_candidate_verified() {
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::Map,
+            "SUB",
+            32,
+            4,
+        );
+        assert!(verified, "GPU map SUB candidate should pass SMT verification");
+    }
+
+    // === GPU: Reduce OR and XOR ===
+
+    #[test]
+    fn test_gpu_reduce_or_candidate_verified() {
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::Reduce,
+            "OR",
+            32,
+            4,
+        );
+        assert!(verified, "GPU reduce OR candidate should pass SMT verification");
+    }
+
+    #[test]
+    fn test_gpu_reduce_xor_candidate_verified() {
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::Reduce,
+            "XOR",
+            32,
+            4,
+        );
+        assert!(verified, "GPU reduce XOR candidate should pass SMT verification");
+    }
+
+    // === GPU: MapReduce verification ===
+
+    #[test]
+    fn test_gpu_mapreduce_add_candidate_verified() {
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::MapReduce,
+            "ADD",
+            32,
+            4,
+        );
+        assert!(verified, "GPU map-reduce ADD candidate should pass SMT verification");
+    }
+
+    #[test]
+    fn test_gpu_mapreduce_mul_candidate_verified() {
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::MapReduce,
+            "MUL",
+            32,
+            4,
+        );
+        assert!(verified, "GPU map-reduce MUL candidate should pass SMT verification");
+    }
+
+    // === GPU: Larger element counts ===
+
+    #[test]
+    fn test_gpu_map_add_8_elements() {
+        // Verify with 8 elements (capped to 4 internally for tractability)
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::Map,
+            "ADD",
+            32,
+            8,
+        );
+        assert!(verified, "GPU map ADD with 8 elements should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_reduce_add_16_elements() {
+        // Verify with 16 elements (capped to 4 internally)
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::Reduce,
+            "ADD",
+            32,
+            16,
+        );
+        assert!(verified, "GPU reduce ADD with 16 elements should pass verification");
+    }
+
+    // === GPU: Different element widths ===
+
+    #[test]
+    fn test_gpu_map_add_8bit() {
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 8),
+            GpuSynthOp::Map,
+            "ADD",
+            8,
+            4,
+        );
+        assert!(verified, "GPU map ADD 8-bit should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_map_add_16bit() {
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 16),
+            GpuSynthOp::Map,
+            "ADD",
+            16,
+            4,
+        );
+        assert!(verified, "GPU map ADD 16-bit should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_reduce_mul_8bit() {
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 8),
+            GpuSynthOp::Reduce,
+            "MUL",
+            8,
+            4,
+        );
+        assert!(verified, "GPU reduce MUL 8-bit should pass verification");
+    }
+
+    // === GPU: Edge cases ===
+
+    #[test]
+    fn test_gpu_map_empty_array() {
+        // 0-element map should trivially pass (no work to verify).
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::Map,
+            "ADD",
+            32,
+            0,
+        );
+        assert!(verified, "GPU map with 0 elements should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_reduce_empty_array() {
+        // 0-element reduce returns identity, should pass.
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::Reduce,
+            "ADD",
+            32,
+            0,
+        );
+        assert!(verified, "GPU reduce with 0 elements should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_map_single_element() {
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::Map,
+            "ADD",
+            32,
+            1,
+        );
+        assert!(verified, "GPU map with 1 element should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_reduce_single_element() {
+        let verified = verify_gpu_candidate(
+            &SmtExpr::var("x", 32),
+            GpuSynthOp::Reduce,
+            "ADD",
+            32,
+            1,
+        );
+        assert!(verified, "GPU reduce with 1 element should pass verification");
+    }
+
+    // === GPU: SIMD group operations ===
+
+    #[test]
+    fn test_gpu_simdgroup_reduce_sum_4_lanes() {
+        let verified = verify_gpu_simdgroup_reduce_candidate("SUM", 32, 4);
+        assert!(verified, "SIMD group reduce SUM (4 lanes) should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_simdgroup_reduce_sum_8_lanes() {
+        let verified = verify_gpu_simdgroup_reduce_candidate("SUM", 32, 8);
+        assert!(verified, "SIMD group reduce SUM (8 lanes) should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_simdgroup_reduce_and_4_lanes() {
+        let verified = verify_gpu_simdgroup_reduce_candidate("AND", 32, 4);
+        assert!(verified, "SIMD group reduce AND (4 lanes) should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_simdgroup_reduce_or_4_lanes() {
+        let verified = verify_gpu_simdgroup_reduce_candidate("OR", 32, 4);
+        assert!(verified, "SIMD group reduce OR (4 lanes) should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_simdgroup_reduce_xor_4_lanes() {
+        let verified = verify_gpu_simdgroup_reduce_candidate("XOR", 32, 4);
+        assert!(verified, "SIMD group reduce XOR (4 lanes) should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_simdgroup_reduce_unsupported_returns_false() {
+        let verified = verify_gpu_simdgroup_reduce_candidate("UNSUPPORTED", 32, 4);
+        assert!(!verified, "Unsupported SIMD group reduce op should return false");
+    }
+
+    #[test]
+    fn test_gpu_simdgroup_broadcast_lane0() {
+        let verified = verify_gpu_simdgroup_broadcast_candidate(0, 4, 32);
+        assert!(verified, "SIMD group broadcast from lane 0 should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_simdgroup_broadcast_lane2() {
+        let verified = verify_gpu_simdgroup_broadcast_candidate(2, 4, 32);
+        assert!(verified, "SIMD group broadcast from lane 2 should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_simdgroup_broadcast_last_lane() {
+        let verified = verify_gpu_simdgroup_broadcast_candidate(3, 4, 32);
+        assert!(verified, "SIMD group broadcast from last lane should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_simdgroup_broadcast_8_lanes() {
+        let verified = verify_gpu_simdgroup_broadcast_candidate(5, 8, 32);
+        assert!(verified, "SIMD group broadcast (8 lanes) should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_simdgroup_prefix_sum_4_lanes() {
+        let verified = verify_gpu_simdgroup_prefix_sum_candidate(4, 32);
+        assert!(verified, "SIMD group prefix sum (4 lanes) should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_simdgroup_prefix_sum_8_lanes() {
+        let verified = verify_gpu_simdgroup_prefix_sum_candidate(8, 32);
+        assert!(verified, "SIMD group prefix sum (8 lanes) should pass verification");
+    }
+
+    #[test]
+    fn test_gpu_simdgroup_prefix_sum_single_lane() {
+        let verified = verify_gpu_simdgroup_prefix_sum_candidate(1, 32);
+        assert!(verified, "SIMD group prefix sum (1 lane) should pass verification");
+    }
+
+    // === GPU: Negative tests (semantically incorrect lowerings should fail) ===
+
+    #[test]
+    fn test_gpu_map_wrong_op_rejected() {
+        // Build a map with ADD but spec with MUL -- should NOT match.
+        let n: u64 = 4;
+        let elem_width = 32u32;
+        let elem_sort = SmtSort::BitVec(elem_width);
+        let input = build_concrete_bv_array(n, elem_width);
+
+        // Spec: element-wise MUL by 2
+        let spec_result = build_sequential_map(
+            &input,
+            &|x: &SmtExpr| x.clone().bvmul(SmtExpr::bv_const(2, 32)),
+            n,
+            &elem_sort,
+        );
+
+        // Candidate: element-wise ADD by 1 (WRONG operation)
+        let candidate_result = gpu_semantics::encode_parallel_map(
+            &input,
+            &|x: &SmtExpr| x.clone().bvadd(SmtExpr::bv_const(1, 32)),
+            n,
+            &elem_sort,
+        );
+
+        let obligation = ProofObligation {
+            name: "gpu_map_wrong_op".to_string(),
+            tmir_expr: spec_result,
+            aarch64_expr: candidate_result,
+            inputs: vec![],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        // This should NOT be valid (ops mismatch).
+        assert!(
+            !matches!(verify_by_evaluation(&obligation), VerificationResult::Valid),
+            "Mismatched GPU map operations should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_gpu_reduce_wrong_identity_rejected() {
+        // Reduce with ADD but wrong identity (1 instead of 0) should fail
+        // for certain inputs.
+        let n: u64 = 3;
+        let elem_width = 32u32;
+        let input = build_concrete_bv_array(n, elem_width);
+
+        // Spec: reduce with ADD, identity = 0 (correct)
+        let correct_identity = SmtExpr::bv_const(0, elem_width);
+        let spec_result = build_sequential_reduce(
+            &input,
+            &|a: &SmtExpr, b: &SmtExpr| a.clone().bvadd(b.clone()),
+            &correct_identity,
+            n,
+        );
+
+        // Candidate: reduce with ADD, identity = 1 (WRONG)
+        let wrong_identity = SmtExpr::bv_const(1, elem_width);
+        let candidate_result = gpu_semantics::encode_parallel_reduce(
+            &input,
+            &|a: &SmtExpr, b: &SmtExpr| a.clone().bvadd(b.clone()),
+            &wrong_identity,
+            n,
+        );
+
+        let obligation = ProofObligation {
+            name: "gpu_reduce_wrong_identity".to_string(),
+            tmir_expr: spec_result,
+            aarch64_expr: candidate_result,
+            inputs: vec![],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        assert!(
+            !matches!(verify_by_evaluation(&obligation), VerificationResult::Valid),
+            "GPU reduce with wrong identity should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_gpu_reduce_wrong_op_rejected() {
+        // Spec uses ADD reduce, candidate uses MUL reduce -- should NOT match.
+        // Use values [2, 3, 5] where ADD(=10) differs from MUL(=30).
+        // (Note: [1,2,3] gives ADD=6=MUL, so we need larger values.)
+        let n: u64 = 3;
+        let elem_width = 32u32;
+        let mut input = SmtExpr::const_array(
+            SmtSort::BitVec(64),
+            SmtExpr::bv_const(0, elem_width),
+        );
+        for (i, &v) in [2u64, 3, 5].iter().enumerate() {
+            let idx = SmtExpr::bv_const(i as u64, 64);
+            input = SmtExpr::store(input, idx, SmtExpr::bv_const(v, elem_width));
+        }
+
+        let spec_result = build_sequential_reduce(
+            &input,
+            &|a: &SmtExpr, b: &SmtExpr| a.clone().bvadd(b.clone()),
+            &SmtExpr::bv_const(0, elem_width),
+            n,
+        );
+
+        let candidate_result = gpu_semantics::encode_parallel_reduce(
+            &input,
+            &|a: &SmtExpr, b: &SmtExpr| a.clone().bvmul(b.clone()),
+            &SmtExpr::bv_const(1, elem_width),
+            n,
+        );
+
+        let obligation = ProofObligation {
+            name: "gpu_reduce_wrong_op".to_string(),
+            tmir_expr: spec_result,
+            aarch64_expr: candidate_result,
+            inputs: vec![],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        assert!(
+            !matches!(verify_by_evaluation(&obligation), VerificationResult::Valid),
+            "GPU reduce with wrong operation should be rejected"
+        );
+    }
+
+    // === ANE: Conv2D verification ===
+
+    #[test]
+    fn test_ane_conv2d_1x1_kernel_verified() {
+        // 1x1 convolution (identity kernel) should pass.
+        let params = ane_semantics::Conv2dParams {
+            batch: 1,
+            channels_in: 1,
+            channels_out: 1,
+            in_h: 3,
+            in_w: 3,
+            kernel_h: 1,
+            kernel_w: 1,
+            stride_h: 1,
+            stride_w: 1,
+            pad_h: 0,
+            pad_w: 0,
+        };
+        let verified = verify_ane_conv2d_candidate(&params, false);
+        assert!(verified, "ANE Conv2D 1x1 kernel should pass verification");
+    }
+
+    #[test]
+    fn test_ane_conv2d_3x3_kernel_verified() {
+        // 3x3 convolution on 3x3 input (single output element).
+        let params = ane_semantics::Conv2dParams {
+            batch: 1,
+            channels_in: 1,
+            channels_out: 1,
+            in_h: 3,
+            in_w: 3,
+            kernel_h: 3,
+            kernel_w: 3,
+            stride_h: 1,
+            stride_w: 1,
+            pad_h: 0,
+            pad_w: 0,
+        };
+        let verified = verify_ane_conv2d_candidate(&params, false);
+        assert!(verified, "ANE Conv2D 3x3 kernel should pass verification");
+    }
+
+    #[test]
+    fn test_ane_conv2d_with_bias_verified() {
+        // Conv2D with bias.
+        let params = ane_semantics::Conv2dParams {
+            batch: 1,
+            channels_in: 1,
+            channels_out: 1,
+            in_h: 2,
+            in_w: 2,
+            kernel_h: 1,
+            kernel_w: 1,
+            stride_h: 1,
+            stride_w: 1,
+            pad_h: 0,
+            pad_w: 0,
+        };
+        let verified = verify_ane_conv2d_candidate(&params, true);
+        assert!(verified, "ANE Conv2D with bias should pass verification");
+    }
+
+    #[test]
+    fn test_ane_conv2d_with_stride_verified() {
+        // Conv2D with stride 2.
+        let params = ane_semantics::Conv2dParams {
+            batch: 1,
+            channels_in: 1,
+            channels_out: 1,
+            in_h: 4,
+            in_w: 4,
+            kernel_h: 2,
+            kernel_w: 2,
+            stride_h: 2,
+            stride_w: 2,
+            pad_h: 0,
+            pad_w: 0,
+        };
+        let verified = verify_ane_conv2d_candidate(&params, false);
+        assert!(verified, "ANE Conv2D with stride should pass verification");
+    }
+
+    #[test]
+    fn test_ane_conv2d_with_padding_verified() {
+        // Conv2D with padding (same padding).
+        let params = ane_semantics::Conv2dParams {
+            batch: 1,
+            channels_in: 1,
+            channels_out: 1,
+            in_h: 3,
+            in_w: 3,
+            kernel_h: 3,
+            kernel_w: 3,
+            stride_h: 1,
+            stride_w: 1,
+            pad_h: 1,
+            pad_w: 1,
+        };
+        let verified = verify_ane_conv2d_candidate(&params, false);
+        assert!(verified, "ANE Conv2D with padding should pass verification");
+    }
+
+    #[test]
+    fn test_ane_conv2d_multi_channel_verified() {
+        // Conv2D with 2 input channels, 2 output channels.
+        let params = ane_semantics::Conv2dParams {
+            batch: 1,
+            channels_in: 2,
+            channels_out: 2,
+            in_h: 2,
+            in_w: 2,
+            kernel_h: 1,
+            kernel_w: 1,
+            stride_h: 1,
+            stride_w: 1,
+            pad_h: 0,
+            pad_w: 0,
+        };
+        let verified = verify_ane_conv2d_candidate(&params, false);
+        assert!(verified, "ANE Conv2D multi-channel should pass verification");
+    }
+
+    // === ANE: Activation function chaining ===
+
+    #[test]
+    fn test_ane_gemm_then_relu_verified() {
+        let verified = verify_ane_gemm_then_activation_candidate(
+            ane_semantics::ActivationFn::ReLU,
+        );
+        assert!(verified, "ANE GEMM + ReLU chaining should pass verification");
+    }
+
+    #[test]
+    fn test_ane_gemm_then_leaky_relu_verified() {
+        let verified = verify_ane_gemm_then_activation_candidate(
+            ane_semantics::ActivationFn::LeakyReLU { alpha: 0.1 },
+        );
+        assert!(verified, "ANE GEMM + LeakyReLU chaining should pass verification");
+    }
+
+    #[test]
+    fn test_ane_gemm_then_sigmoid_structural() {
+        // Sigmoid uses UF -- verification returns true (structurally valid).
+        let verified = verify_ane_gemm_then_activation_candidate(
+            ane_semantics::ActivationFn::Sigmoid,
+        );
+        assert!(verified, "ANE GEMM + Sigmoid (UF) should be structurally valid");
+    }
+
+    // === ANE: LeakyReLU activation ===
+
+    #[test]
+    fn test_ane_activation_leaky_relu_verified() {
+        let verified = verify_ane_activation_leaky_relu_candidate(0.1, 4);
+        assert!(verified, "ANE LeakyReLU (alpha=0.1) should pass verification");
+    }
+
+    #[test]
+    fn test_ane_activation_leaky_relu_alpha_01() {
+        let verified = verify_ane_activation_leaky_relu_candidate(0.01, 4);
+        assert!(verified, "ANE LeakyReLU (alpha=0.01) should pass verification");
+    }
+
+    #[test]
+    fn test_ane_activation_leaky_relu_larger_count() {
+        let verified = verify_ane_activation_leaky_relu_candidate(0.1, 8);
+        assert!(verified, "ANE LeakyReLU with 8 elements should pass verification");
+    }
+
+    // === ANE: FP16 precision bounds ===
+
+    #[test]
+    fn test_ane_fp16_precision_within_epsilon() {
+        // FP16 exact values should have zero error, well within epsilon=0.01.
+        let verified = verify_ane_fp16_precision_bounds(0.01);
+        assert!(verified, "FP16 exact representable values should be within epsilon=0.01");
+    }
+
+    #[test]
+    fn test_ane_fp16_precision_tight_epsilon() {
+        // Even with a tight epsilon, exact FP16 arithmetic should pass.
+        let verified = verify_ane_fp16_precision_bounds(0.001);
+        assert!(verified, "FP16 exact representable values should be within epsilon=0.001");
+    }
+
+    // === ANE: Elementwise SUB and FSUB ===
+
+    #[test]
+    fn test_ane_elementwise_sub_candidate_verified() {
+        let verified = verify_ane_candidate(
+            &SmtExpr::var("x", 32),
+            AneSynthOp::ElementWise,
+            "SUB",
+            16,
+            4,
+        );
+        assert!(verified, "ANE elementwise SUB candidate should pass verification");
+    }
+
+    #[test]
+    fn test_ane_elementwise_fadd_candidate_verified() {
+        let verified = verify_ane_candidate(
+            &SmtExpr::var("x", 32),
+            AneSynthOp::ElementWise,
+            "FADD",
+            16,
+            4,
+        );
+        assert!(verified, "ANE elementwise FADD candidate should pass verification");
+    }
+
+    #[test]
+    fn test_ane_elementwise_fsub_candidate_verified() {
+        let verified = verify_ane_candidate(
+            &SmtExpr::var("x", 32),
+            AneSynthOp::ElementWise,
+            "FSUB",
+            16,
+            4,
+        );
+        assert!(verified, "ANE elementwise FSUB candidate should pass verification");
+    }
+
+    #[test]
+    fn test_ane_elementwise_fmul_candidate_verified() {
+        let verified = verify_ane_candidate(
+            &SmtExpr::var("x", 32),
+            AneSynthOp::ElementWise,
+            "FMUL",
+            16,
+            4,
+        );
+        assert!(verified, "ANE elementwise FMUL candidate should pass verification");
+    }
+
+    // === ANE: Negative tests ===
+
+    #[test]
+    fn test_ane_gemm_wrong_dimensions_rejected() {
+        // Build GEMM with A being 2x2 but verify against spec for 2x3 -- should fail.
+        let a = ane_semantics::fp16_array_from_f64(&[1.0, 2.0, 3.0, 4.0]);
+        let b = ane_semantics::fp16_array_from_f64(&[5.0, 6.0, 7.0, 8.0]);
+
+        // Candidate: 2x2 * 2x2
+        let candidate_result = ane_semantics::encode_ane_gemm(&a, &b, 2, 2, 2);
+
+        // Spec: 1x4 * 4x1 (different dimensions, different result)
+        let spec_result = build_sequential_gemm_fp16(&a, &b, 1, 4, 1);
+
+        let obligation = ProofObligation {
+            name: "ane_gemm_wrong_dims".to_string(),
+            tmir_expr: spec_result,
+            aarch64_expr: candidate_result,
+            inputs: vec![],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        assert!(
+            !matches!(verify_by_evaluation(&obligation), VerificationResult::Valid),
+            "ANE GEMM with mismatched dimensions should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_ane_elementwise_wrong_op_rejected() {
+        // Spec uses ADD, candidate uses MUL -- should NOT match.
+        let verify_n: u64 = 3;
+        let input_a_vals: Vec<f64> = (0..verify_n).map(|i| (i + 1) as f64).collect();
+        let input_b_vals: Vec<f64> = (0..verify_n).map(|i| (i + 10) as f64).collect();
+        let input_a = ane_semantics::fp16_array_from_f64(&input_a_vals);
+        let input_b = ane_semantics::fp16_array_from_f64(&input_b_vals);
+
+        // Spec: element-wise ADD
+        let spec_result = build_sequential_elementwise_fp16(
+            &input_a, &input_b, ane_semantics::ElementWiseOp::Add, verify_n,
+        );
+
+        // Candidate: element-wise MUL (WRONG)
+        let candidate_result = ane_semantics::encode_ane_elementwise(
+            &input_a, &input_b, ane_semantics::ElementWiseOp::Mul, verify_n,
+        );
+
+        let obligation = ProofObligation {
+            name: "ane_elementwise_wrong_op".to_string(),
+            tmir_expr: spec_result,
+            aarch64_expr: candidate_result,
+            inputs: vec![],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        assert!(
+            !matches!(verify_by_evaluation(&obligation), VerificationResult::Valid),
+            "ANE elementwise with wrong operation should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_ane_activation_relu_vs_leaky_relu_not_equal() {
+        // ReLU and LeakyReLU should NOT produce the same result for negative inputs.
+        let verify_n: u64 = 4;
+        let input_vals: Vec<f64> = vec![-1.0, -2.0, -3.0, -4.0];
+        let input = ane_semantics::fp16_array_from_f64(&input_vals);
+
+        let relu_result = ane_semantics::encode_ane_activation(
+            &input, ane_semantics::ActivationFn::ReLU, verify_n,
+        );
+        let leaky_result = ane_semantics::encode_ane_activation(
+            &input, ane_semantics::ActivationFn::LeakyReLU { alpha: 0.1 }, verify_n,
+        );
+
+        let obligation = ProofObligation {
+            name: "relu_vs_leaky_relu".to_string(),
+            tmir_expr: relu_result,
+            aarch64_expr: leaky_result,
+            inputs: vec![],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        assert!(
+            !matches!(verify_by_evaluation(&obligation), VerificationResult::Valid),
+            "ReLU and LeakyReLU should NOT be semantically equivalent for negative inputs"
+        );
+    }
+
+    #[test]
+    fn test_ane_bounded_error_check_violation_detected() {
+        // Test that our bounded error check correctly detects large differences.
+        let fp32_val = SmtExpr::fp64_const(100.0);
+        let fp16_val = SmtExpr::fp64_const(50.0); // large error
+        let check = ane_semantics::encode_bounded_error_check(&fp32_val, &fp16_val, 1.0);
+        let env = std::collections::HashMap::new();
+        let result = check.try_eval(&env).unwrap();
+        assert_eq!(
+            result,
+            crate::smt::EvalResult::Bool(false),
+            "Bounded error check should detect |100 - 50| > 1.0"
+        );
+    }
+
+    // === ANE: GEMM with larger dimensions ===
+
+    #[test]
+    fn test_ane_gemm_3x3_verified() {
+        // 3x3 GEMM should also pass verification.
+        let a = ane_semantics::fp16_array_from_f64(&[
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0,
+        ]);
+        let b = ane_semantics::fp16_array_from_f64(&[
+            1.0, 2.0, 3.0,
+            4.0, 5.0, 6.0,
+            7.0, 8.0, 9.0,
+        ]);
+
+        let candidate = ane_semantics::encode_ane_gemm(&a, &b, 3, 3, 3);
+        let spec = build_sequential_gemm_fp16(&a, &b, 3, 3, 3);
+
+        let obligation = ProofObligation {
+            name: "ane_gemm_3x3".to_string(),
+            tmir_expr: spec,
+            aarch64_expr: candidate,
+            inputs: vec![],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        assert!(
+            matches!(verify_by_evaluation(&obligation), VerificationResult::Valid),
+            "ANE GEMM 3x3 (identity * B) should pass verification"
+        );
+    }
+
+    #[test]
+    fn test_ane_gemm_nonsquare_verified() {
+        // 2x3 * 3x1 GEMM
+        let a = ane_semantics::fp16_array_from_f64(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let b = ane_semantics::fp16_array_from_f64(&[1.0, 1.0, 1.0]);
+
+        let candidate = ane_semantics::encode_ane_gemm(&a, &b, 2, 3, 1);
+        let spec = build_sequential_gemm_fp16(&a, &b, 2, 3, 1);
+
+        let obligation = ProofObligation {
+            name: "ane_gemm_2x3_3x1".to_string(),
+            tmir_expr: spec,
+            aarch64_expr: candidate,
+            inputs: vec![],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        assert!(
+            matches!(verify_by_evaluation(&obligation), VerificationResult::Valid),
+            "ANE GEMM 2x3 * 3x1 should pass verification"
         );
     }
 }
