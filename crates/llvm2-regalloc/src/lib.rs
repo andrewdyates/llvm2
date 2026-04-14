@@ -676,4 +676,196 @@ mod tests {
         let total = result.allocation.len() + result.spills.len();
         assert!(total > 0, "should have some allocation results");
     }
+
+    #[test]
+    fn test_pipeline_remat_disabled_spill_reuse_enabled() {
+        let mut func = make_straight_line(30);
+        let mut config = AllocConfig::default_aarch64();
+        config.enable_remat = false;
+
+        let result = allocate(&mut func, &config).expect("allocation failed");
+
+        assert!(
+            !result.spills.is_empty(),
+            "expected spills with 30 live GPR64 vregs and remat disabled"
+        );
+        assert!(result.allocation.len() <= 26);
+    }
+
+    #[test]
+    fn test_pipeline_all_optimizations_disabled() {
+        let mut func = make_straight_line(5);
+        let mut config = AllocConfig::default_aarch64();
+        config.enable_coalescing = false;
+        config.enable_remat = false;
+        config.enable_spill_slot_reuse = false;
+
+        let result = allocate(&mut func, &config).expect("allocation failed");
+
+        assert_eq!(result.allocation.len(), 5);
+        assert!(result.spills.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_greedy_diamond() {
+        let mut func = make_diamond();
+        let config = AllocConfig::greedy_aarch64();
+
+        let result = allocate(&mut func, &config).expect("allocation failed");
+
+        assert!(result.spills.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_greedy_loop() {
+        let mut func = make_loop();
+        let config = AllocConfig::greedy_aarch64();
+
+        let result = allocate(&mut func, &config).expect("allocation failed");
+
+        assert!(result.spills.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_greedy_coalescing_disabled() {
+        let mut func = make_straight_line(5);
+        let mut config = AllocConfig::greedy_aarch64();
+        config.enable_coalescing = false;
+
+        let result = allocate(&mut func, &config).expect("allocation failed");
+
+        assert_eq!(result.allocation.len(), 5);
+        assert!(result.spills.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_empty_function() {
+        let mut func = MachFunction {
+            name: "empty".into(),
+            insts: Vec::new(),
+            blocks: vec![MachBlock {
+                insts: Vec::new(),
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 0,
+            next_stack_slot: 0,
+            stack_slots: HashMap::new(),
+        };
+
+        let config = AllocConfig::default_aarch64();
+        let result = allocate(&mut func, &config).expect("allocation failed");
+
+        assert!(result.allocation.is_empty());
+        assert!(result.spills.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_single_vreg() {
+        let mut func = make_straight_line(1);
+        let config = AllocConfig::default_aarch64();
+
+        let result = allocate(&mut func, &config).expect("allocation failed");
+
+        assert_eq!(result.allocation.len(), 1);
+        assert!(result.spills.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_fpr64_registers() {
+        let mut func = MachFunction {
+            name: "fpr64".into(),
+            insts: vec![
+                MachInst {
+                    opcode: 1,
+                    defs: vec![MachOperand::VReg(VReg {
+                        id: 0,
+                        class: RegClass::Fpr64,
+                    })],
+                    uses: vec![MachOperand::FImm(1.0)],
+                    implicit_defs: Vec::new(),
+                    implicit_uses: Vec::new(),
+                    flags: InstFlags::default(),
+                },
+                MachInst {
+                    opcode: 1,
+                    defs: vec![MachOperand::VReg(VReg {
+                        id: 1,
+                        class: RegClass::Fpr64,
+                    })],
+                    uses: vec![MachOperand::FImm(2.0)],
+                    implicit_defs: Vec::new(),
+                    implicit_uses: Vec::new(),
+                    flags: InstFlags::default(),
+                },
+                MachInst {
+                    opcode: 2,
+                    defs: vec![],
+                    uses: vec![
+                        MachOperand::VReg(VReg {
+                            id: 0,
+                            class: RegClass::Fpr64,
+                        }),
+                        MachOperand::VReg(VReg {
+                            id: 1,
+                            class: RegClass::Fpr64,
+                        }),
+                    ],
+                    implicit_defs: Vec::new(),
+                    implicit_uses: Vec::new(),
+                    flags: InstFlags::default(),
+                },
+            ],
+            blocks: vec![MachBlock {
+                insts: vec![InstId(0), InstId(1), InstId(2)],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 2,
+            next_stack_slot: 0,
+            stack_slots: HashMap::new(),
+        };
+
+        let all_regs = aarch64_allocatable_regs();
+        let mut regs = HashMap::new();
+        regs.insert(
+            RegClass::Fpr64,
+            all_regs
+                .get(&RegClass::Fpr64)
+                .expect("missing Fpr64 regs")
+                .clone(),
+        );
+
+        let config = AllocConfig {
+            allocatable_regs: regs,
+            strategy: AllocStrategy::LinearScan,
+            enable_coalescing: true,
+            enable_remat: true,
+            enable_spill_slot_reuse: true,
+            hints: HashMap::new(),
+        };
+
+        let result = allocate(&mut func, &config).expect("allocation failed");
+
+        assert_eq!(result.allocation.len(), 2);
+        assert!(result.spills.is_empty());
+    }
+
+    #[test]
+    fn test_default_aarch64_uses_linear_scan() {
+        let config = AllocConfig::default_aarch64();
+        assert_eq!(config.strategy, AllocStrategy::LinearScan);
+    }
+
+    #[test]
+    fn test_greedy_aarch64_uses_greedy() {
+        let config = AllocConfig::greedy_aarch64();
+        assert_eq!(config.strategy, AllocStrategy::Greedy);
+    }
 }
