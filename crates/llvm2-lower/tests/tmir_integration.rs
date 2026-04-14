@@ -13,7 +13,7 @@
 
 use llvm2_lower::adapter::{translate_function, AdapterError, ProofContext};
 use llvm2_lower::function::Function;
-use llvm2_lower::isel::{AArch64Opcode, InstructionSelector, MachFunction};
+use llvm2_lower::isel::{AArch64Opcode, InstructionSelector, ISelFunction};
 use llvm2_lower::instructions::Block;
 use llvm2_lower::types::Type;
 
@@ -27,10 +27,10 @@ use tmir_types::{BlockId, FuncId, FuncTy, Ty, ValueId};
 
 /// Translate a tMIR function through the adapter, then run ISel on all blocks.
 ///
-/// Returns the completed MachFunction. Panics on adapter errors; the ISel
+/// Returns the completed ISelFunction. Panics on adapter errors; the ISel
 /// does not return errors (it panics on undefined values, which would indicate
 /// a bug in the adapter or the test program).
-fn compile_tmir_function(func: &TmirFunction) -> MachFunction {
+fn compile_tmir_function(func: &TmirFunction) -> ISelFunction {
     // Step 1: adapter — tMIR -> internal LIR
     let (lir_func, _proof_ctx) =
         translate_function(func, &[]).expect("adapter translation failed");
@@ -67,8 +67,8 @@ fn translate_only(func: &TmirFunction) -> Result<(Function, ProofContext), Adapt
     translate_function(func, &[])
 }
 
-/// Count occurrences of a specific opcode in a MachFunction.
-fn count_opcode(mfunc: &MachFunction, opcode: AArch64Opcode) -> usize {
+/// Count occurrences of a specific opcode in a ISelFunction.
+fn count_opcode(mfunc: &ISelFunction, opcode: AArch64Opcode) -> usize {
     mfunc
         .blocks
         .values()
@@ -77,13 +77,13 @@ fn count_opcode(mfunc: &MachFunction, opcode: AArch64Opcode) -> usize {
         .count()
 }
 
-/// Check that a MachFunction contains at least one instance of the given opcode.
-fn has_opcode(mfunc: &MachFunction, opcode: AArch64Opcode) -> bool {
+/// Check that a ISelFunction contains at least one instance of the given opcode.
+fn has_opcode(mfunc: &ISelFunction, opcode: AArch64Opcode) -> bool {
     count_opcode(mfunc, opcode) > 0
 }
 
 /// Get total instruction count across all blocks.
-fn total_insts(mfunc: &MachFunction) -> usize {
+fn total_insts(mfunc: &ISelFunction) -> usize {
     mfunc.blocks.values().map(|b| b.insts.len()).sum()
 }
 
@@ -791,7 +791,7 @@ fn test_all_single_block_programs_compile_without_panic() {
         let mfunc = compile_tmir_function(func);
         assert!(
             !mfunc.blocks.is_empty(),
-            "{}: produced empty MachFunction",
+            "{}: produced empty ISelFunction",
             name
         );
         assert!(

@@ -15,20 +15,22 @@
 //! | `BlockId`, `InstId`, `StackSlotId` | `llvm2_ir::types` |
 //! | `InstFlags` | `llvm2_ir::inst` (unified in issue #73) |
 //!
-//! ## Compound types (regalloc-specific, intentionally separate)
+//! ## Compound types (regalloc-specific, renamed in issue #73)
 //!
-//! The compound types (`MachInst`, `MachBlock`, `MachFunction`, `MachOperand`,
-//! `StackSlot`) are regalloc-specific versions that shadow the `llvm2-ir`
-//! types by name. They have structural differences required for register
-//! allocation:
+//! The compound types are regalloc-specific versions with structural differences
+//! required for register allocation. They have been renamed (issue #73) to avoid
+//! shadowing the canonical `llvm2-ir` types:
 //!
-//! | Type | Why separate |
-//! |------|--------------|
-//! | `MachInst` | Separates defs/uses for liveness; opcode is `u16` not enum |
-//! | `MachOperand` | Subset of variants (no MemOp/FrameIndex/Special) |
-//! | `MachBlock` | Adds `loop_depth` for spill weight computation |
-//! | `StackSlot` | No alignment assertion |
-//! | `MachFunction` | `HashMap` stack slots, `next_stack_slot` counter |
+//! | Canonical (llvm2-ir) | RegAlloc name | Why separate |
+//! |---------------------|---------------|--------------|
+//! | `MachInst` | `RegAllocInst` | Separates defs/uses for liveness; opcode is `u16` not enum |
+//! | `MachOperand` | `RegAllocOperand` | Subset of variants (no MemOp/FrameIndex/Special) |
+//! | `MachBlock` | `RegAllocBlock` | Adds `loop_depth` for spill weight computation |
+//! | `StackSlot` | `RegAllocStackSlot` | No alignment assertion |
+//! | `MachFunction` | `RegAllocFunction` | `HashMap` stack slots, `next_stack_slot` counter |
+//!
+//! Backward-compatible type aliases (`MachInst`, `MachBlock`, etc.) are provided
+//! but deprecated. New code should use the `RegAlloc*` names.
 //!
 //! These will be unified with the `llvm2-ir` versions in a future phase,
 //! likely by enriching `llvm2_ir::MachInst` with def/use classification.
@@ -62,11 +64,14 @@ pub use llvm2_ir::inst::InstFlags;
 
 /// Operand of a regalloc-level machine instruction.
 ///
-/// Subset of `llvm2_ir::MachOperand` — omits `MemOp`, `FrameIndex`, and
-/// `Special` variants which are not needed for register allocation.
-/// Will be unified with `llvm2_ir::MachOperand` in a future phase. (#73)
+/// Subset of the canonical `llvm2_ir::MachOperand` — omits `MemOp`,
+/// `FrameIndex`, and `Special` variants which are not needed for register
+/// allocation. Will be unified with `llvm2_ir::MachOperand` in a future phase.
+///
+/// Named `RegAllocOperand` (issue #73) to avoid confusion with
+/// `llvm2_ir::MachOperand`, the canonical operand type.
 #[derive(Debug, Clone, PartialEq)]
-pub enum MachOperand {
+pub enum RegAllocOperand {
     VReg(VReg),
     PReg(PReg),
     Imm(i64),
@@ -75,11 +80,14 @@ pub enum MachOperand {
     StackSlot(StackSlotId),
 }
 
-impl MachOperand {
+/// Backward-compatible alias (deprecated). Use `RegAllocOperand` directly.
+pub type MachOperand = RegAllocOperand;
+
+impl RegAllocOperand {
     /// Returns the VReg if this operand is a virtual register.
     pub fn as_vreg(&self) -> Option<VReg> {
         match self {
-            MachOperand::VReg(v) => Some(*v),
+            RegAllocOperand::VReg(v) => Some(*v),
             _ => None,
         }
     }
@@ -87,7 +95,7 @@ impl MachOperand {
     /// Returns the PReg if this operand is a physical register.
     pub fn as_preg(&self) -> Option<PReg> {
         match self {
-            MachOperand::PReg(p) => Some(*p),
+            RegAllocOperand::PReg(p) => Some(*p),
             _ => None,
         }
     }
@@ -95,20 +103,22 @@ impl MachOperand {
 
 /// A machine instruction for register allocation.
 ///
-/// Unlike `llvm2_ir::MachInst` which stores all operands in a single list,
-/// this struct separates defs (outputs) from uses (inputs) for efficient
-/// liveness analysis. The opcode is stored as u16 to be target-independent.
+/// Unlike the canonical `llvm2_ir::MachInst` which stores all operands in a
+/// single list, this struct separates defs (outputs) from uses (inputs) for
+/// efficient liveness analysis. The opcode is stored as u16 to be
+/// target-independent.
 ///
+/// Named `RegAllocInst` (issue #73) to avoid confusion with `llvm2_ir::MachInst`.
 /// A future unification pass will reconcile this with the llvm2-ir model,
 /// likely by adding def/use classification to `llvm2_ir::MachInst`.
 #[derive(Debug, Clone)]
-pub struct MachInst {
+pub struct RegAllocInst {
     /// Target-specific opcode.
     pub opcode: u16,
     /// Defined (output) operands.
-    pub defs: Vec<MachOperand>,
+    pub defs: Vec<RegAllocOperand>,
     /// Used (input) operands.
-    pub uses: Vec<MachOperand>,
+    pub uses: Vec<RegAllocOperand>,
     /// Physical registers implicitly defined (e.g., call clobbers).
     pub implicit_defs: Vec<PReg>,
     /// Physical registers implicitly used.
@@ -117,7 +127,10 @@ pub struct MachInst {
     pub flags: InstFlags,
 }
 
-impl MachInst {
+/// Backward-compatible alias (deprecated). Use `RegAllocInst` directly.
+pub type MachInst = RegAllocInst;
+
+impl RegAllocInst {
     /// Returns all VRegs defined by this instruction.
     pub fn vreg_defs(&self) -> impl Iterator<Item = VReg> + '_ {
         self.defs.iter().filter_map(|op| op.as_vreg())
@@ -132,9 +145,11 @@ impl MachInst {
 /// A regalloc-level machine basic block.
 ///
 /// Extends `llvm2_ir::MachBlock` with `loop_depth` for spill weight
-/// computation. Will be unified in a future phase. (#37)
+/// computation. Will be unified in a future phase.
+///
+/// Named `RegAllocBlock` (issue #73) to avoid confusion with `llvm2_ir::MachBlock`.
 #[derive(Debug, Clone)]
-pub struct MachBlock {
+pub struct RegAllocBlock {
     /// Instructions in this block, in order.
     pub insts: Vec<InstId>,
     /// Predecessor blocks.
@@ -145,30 +160,42 @@ pub struct MachBlock {
     pub loop_depth: u32,
 }
 
+/// Backward-compatible alias (deprecated). Use `RegAllocBlock` directly.
+pub type MachBlock = RegAllocBlock;
+
 /// A stack slot for spilled values.
 ///
 /// Same fields as `llvm2_ir::function::StackSlot` but without the
-/// `debug_assert` alignment check. Will be unified. (#37)
+/// `debug_assert` alignment check. Will be unified.
+///
+/// Named `RegAllocStackSlot` (issue #73) to avoid confusion with
+/// `llvm2_ir::function::StackSlot`.
 #[derive(Debug, Clone)]
-pub struct StackSlot {
+pub struct RegAllocStackSlot {
     pub size: u32,
     pub align: u32,
 }
 
+/// Backward-compatible alias (deprecated). Use `RegAllocStackSlot` directly.
+pub type StackSlot = RegAllocStackSlot;
+
 /// A regalloc-level machine function -- the unit of register allocation.
 ///
-/// Differs from `llvm2_ir::MachFunction` in several ways:
-/// - Uses regalloc-specific `MachInst` with separated defs/uses
-/// - Uses `HashMap<StackSlotId, StackSlot>` instead of `Vec<StackSlot>`
+/// Differs from the canonical `llvm2_ir::MachFunction` in several ways:
+/// - Uses regalloc-specific `RegAllocInst` with separated defs/uses
+/// - Uses `HashMap<StackSlotId, RegAllocStackSlot>` instead of `Vec<StackSlot>`
 /// - Includes `next_stack_slot` counter for spill allocation
-/// Will be unified in a future phase. (#37)
+///
+/// Named `RegAllocFunction` (issue #73) to avoid confusion with
+/// `llvm2_ir::MachFunction`, the canonical machine function type.
+/// Will be unified in a future phase.
 #[derive(Debug, Clone)]
-pub struct MachFunction {
+pub struct RegAllocFunction {
     pub name: String,
     /// All instructions, indexed by InstId.
-    pub insts: Vec<MachInst>,
+    pub insts: Vec<RegAllocInst>,
     /// All blocks, indexed by BlockId.
-    pub blocks: Vec<MachBlock>,
+    pub blocks: Vec<RegAllocBlock>,
     /// Block ordering (RPO or linear).
     pub block_order: Vec<BlockId>,
     /// Entry block.
@@ -178,15 +205,18 @@ pub struct MachFunction {
     /// Next available stack slot id.
     pub next_stack_slot: u32,
     /// Stack slots allocated (for spills and locals).
-    pub stack_slots: HashMap<StackSlotId, StackSlot>,
+    pub stack_slots: HashMap<StackSlotId, RegAllocStackSlot>,
 }
 
-impl MachFunction {
+/// Backward-compatible alias (deprecated). Use `RegAllocFunction` directly.
+pub type MachFunction = RegAllocFunction;
+
+impl RegAllocFunction {
     /// Allocate a new stack slot for a spill.
     pub fn alloc_stack_slot(&mut self, size: u32, align: u32) -> StackSlotId {
         let id = StackSlotId(self.next_stack_slot);
         self.next_stack_slot += 1;
-        self.stack_slots.insert(id, StackSlot { size, align });
+        self.stack_slots.insert(id, RegAllocStackSlot { size, align });
         id
     }
 

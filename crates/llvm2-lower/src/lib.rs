@@ -19,7 +19,7 @@ pub mod adapter;
 pub use types::Type;
 pub use function::Function;
 pub use abi::{AppleAArch64ABI, ArgLocation, PReg, gpr};
-pub use isel::{InstructionSelector, ISelError};
+pub use isel::{InstructionSelector, ISelError, ISelFunction, ISelInst, ISelBlock, ISelOperand};
 pub use adapter::{
     translate_module, translate_function, translate_type, extract_proofs,
     AdapterError, Proof, ProofContext,
