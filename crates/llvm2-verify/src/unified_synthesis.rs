@@ -32,7 +32,9 @@ use crate::cegis::{CegisLoop, CegisResult};
 use crate::gpu_semantics;
 use crate::lowering_proof::{ProofObligation, verify_by_evaluation};
 use crate::neon_semantics;
-use crate::smt::{SmtExpr, SmtSort, RoundingMode, VectorArrangement};
+use crate::smt::{SmtExpr, SmtSort, VectorArrangement};
+#[cfg(test)]
+use crate::smt::RoundingMode;
 use crate::synthesis::{SearchConfig, SynthOpcode};
 use crate::verify::VerificationResult;
 use llvm2_ir::cost_model::{
@@ -1627,6 +1629,7 @@ fn build_sequential_relu_fp16(input: &SmtExpr, n: u64) -> SmtExpr {
 /// Build sequential LeakyReLU in FP16 (spec side).
 ///
 /// LeakyReLU(x, alpha) = x >= 0 ? x : alpha * x
+#[cfg(test)]
 fn build_sequential_leaky_relu_fp16(input: &SmtExpr, alpha: f64, n: u64) -> SmtExpr {
     let zero = SmtExpr::fp_const(0, 5, 11);
     let alpha_expr = SmtExpr::fp_const(alpha.to_bits(), 5, 11);
@@ -1646,6 +1649,7 @@ fn build_sequential_leaky_relu_fp16(input: &SmtExpr, alpha: f64, n: u64) -> SmtE
 /// Build sequential Conv2D in FP16 (spec side for ANE Conv2D verification).
 ///
 /// Mirrors the `encode_ane_conv2d` implementation as a reference spec.
+#[cfg(test)]
 fn build_sequential_conv2d_fp16(
     input: &SmtExpr,
     kernel: &SmtExpr,
@@ -1731,6 +1735,7 @@ fn build_sequential_conv2d_fp16(
 ///
 /// Builds a proof obligation that the SIMD group reduce encoding is
 /// equivalent to a sequential fold over the SIMD lanes.
+#[cfg(test)]
 fn verify_gpu_simdgroup_reduce_candidate(
     op_hint: &str,
     elem_width: u32,
@@ -1802,6 +1807,7 @@ fn verify_gpu_simdgroup_reduce_candidate(
 /// Verify a GPU SIMD group broadcast candidate.
 ///
 /// Verifies that broadcast produces an array where all lanes equal the source lane.
+#[cfg(test)]
 fn verify_gpu_simdgroup_broadcast_candidate(
     source_lane: u32,
     simd_width: u32,
@@ -1852,6 +1858,7 @@ fn verify_gpu_simdgroup_broadcast_candidate(
 /// Verify a GPU SIMD group prefix sum candidate.
 ///
 /// Verifies that prefix sum produces correct running totals.
+#[cfg(test)]
 fn verify_gpu_simdgroup_prefix_sum_candidate(
     simd_width: u32,
     elem_width: u32,
@@ -1904,6 +1911,7 @@ fn verify_gpu_simdgroup_prefix_sum_candidate(
 /// Uses a small convolution (1x1x3x3 input, 1x1x1x1 kernel) for tractable
 /// verification. The encoding is the mathematical definition of convolution,
 /// so correctness at small size implies correctness at any size.
+#[cfg(test)]
 fn verify_ane_conv2d_candidate(params: &ane_semantics::Conv2dParams, with_bias: bool) -> bool {
     // Build concrete FP16 input tensor
     let numel_in = params.batch * params.channels_in * params.in_h * params.in_w;
@@ -1946,6 +1954,7 @@ fn verify_ane_conv2d_candidate(params: &ane_semantics::Conv2dParams, with_bias: 
 }
 
 /// Verify ANE LeakyReLU activation candidate.
+#[cfg(test)]
 fn verify_ane_activation_leaky_relu_candidate(alpha: f64, element_count: u32) -> bool {
     let verify_n = element_count.min(4) as u64;
 
@@ -1981,6 +1990,7 @@ fn verify_ane_activation_leaky_relu_candidate(alpha: f64, element_count: u32) ->
 ///
 /// Verifies that applying GEMM then activation produces the same result
 /// whether done in two separate steps or composed.
+#[cfg(test)]
 fn verify_ane_gemm_then_activation_candidate(activation: ane_semantics::ActivationFn) -> bool {
     let m: u64 = 2;
     let k: u64 = 2;
@@ -2033,6 +2043,7 @@ fn verify_ane_gemm_then_activation_candidate(activation: ane_semantics::Activati
 ///
 /// Uses `encode_bounded_error_check` to verify that FP16 arithmetic
 /// stays within acceptable error bounds for small representable values.
+#[cfg(test)]
 fn verify_ane_fp16_precision_bounds(epsilon: f64) -> bool {
     // Test with values that are exactly representable in FP16.
     // FP16 range: ~6.1e-5 to 65504 with 10-bit mantissa.
