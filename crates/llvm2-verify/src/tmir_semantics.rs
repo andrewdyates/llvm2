@@ -82,6 +82,74 @@ pub fn encode_tmir_neg(_ty: Type, operand: SmtExpr) -> SmtExpr {
     operand.bvneg()
 }
 
+/// Encode a tMIR floating-point binary operation as an SMT FP expression (fallible).
+///
+/// Returns `Err(SmtError::UnsupportedType)` if the opcode is not a supported
+/// floating-point binary opcode.
+///
+/// # Supported opcodes
+///
+/// - `Opcode::Fadd` -> `fp.add(RNE, a, b)`
+/// - `Opcode::Fsub` -> `fp.sub(RNE, a, b)`
+/// - `Opcode::Fmul` -> `fp.mul(RNE, a, b)`
+/// - `Opcode::Fdiv` -> `fp.div(RNE, a, b)`
+///
+/// All FP operations use RNE (round to nearest, ties to even) as the default
+/// rounding mode, matching AArch64's default FPCR.RMode setting.
+pub fn try_encode_tmir_fp_binop(
+    opcode: &Opcode,
+    _ty: Type,
+    lhs: SmtExpr,
+    rhs: SmtExpr,
+) -> Result<SmtExpr, SmtError> {
+    use crate::smt::RoundingMode;
+    match opcode {
+        Opcode::Fadd => Ok(SmtExpr::fp_add(RoundingMode::RNE, lhs, rhs)),
+        Opcode::Fsub => Ok(SmtExpr::fp_sub(RoundingMode::RNE, lhs, rhs)),
+        Opcode::Fmul => Ok(SmtExpr::fp_mul(RoundingMode::RNE, lhs, rhs)),
+        Opcode::Fdiv => Ok(SmtExpr::fp_div(RoundingMode::RNE, lhs, rhs)),
+        other => Err(SmtError::UnsupportedType(format!(
+            "encode_tmir_fp_binop: unsupported opcode {:?}",
+            other
+        ))),
+    }
+}
+
+/// Encode a tMIR floating-point binary operation as an SMT FP expression.
+///
+/// Convenience wrapper around [`try_encode_tmir_fp_binop`].
+///
+/// # Panics
+///
+/// Panics if `opcode` is not a floating-point binary opcode.
+pub fn encode_tmir_fp_binop(opcode: &Opcode, ty: Type, lhs: SmtExpr, rhs: SmtExpr) -> SmtExpr {
+    try_encode_tmir_fp_binop(opcode, ty, lhs, rhs)
+        .expect("encode_tmir_fp_binop: unsupported opcode; use try_encode_tmir_fp_binop() for fallible encoding")
+}
+
+/// Encode a tMIR floating-point negation as an SMT FP expression.
+///
+/// `Fneg(a)` is encoded as `fp.neg(a)`. This matches the AArch64 FNEG instruction.
+pub fn encode_tmir_fneg(_ty: Type, operand: SmtExpr) -> SmtExpr {
+    operand.fp_neg()
+}
+
+/// Create symbolic FP input variables for a binary FP operation.
+///
+/// Returns `(lhs, rhs)` as FP constant nodes. For FP proofs, we use
+/// `FPConst` nodes that the evaluator interprets via native f32/f64.
+/// The `eb` and `sb` parameters specify the FP format (e.g., 8/24 for f32, 11/53 for f64).
+pub fn symbolic_fp_binary_inputs(eb: u32, sb: u32) -> (SmtExpr, SmtExpr) {
+    let _total = eb + sb;
+    // Use Var nodes with the bit-width matching the FP format.
+    // The proof obligation's fp_inputs field declares these as FP-sorted.
+    // For evaluation, we populate them via the fp_env pathway.
+    (
+        SmtExpr::FPConst { bits: 0, eb, sb }, // placeholder; actual values set per test
+        SmtExpr::FPConst { bits: 0, eb, sb },
+    )
+}
+
 /// Encode a tMIR integer constant.
 pub fn encode_tmir_iconst(ty: Type, imm: i64) -> SmtExpr {
     let width = ty.bits();
@@ -241,5 +309,70 @@ mod tests {
         let (a, b) = symbolic_binary_inputs(Type::I32);
         let pre = precondition(&Opcode::Iadd, Type::I32, &a, &b);
         assert!(pre.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Floating-point semantic encoder tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encode_fadd_f32() {
+        let a = SmtExpr::fp32_const(1.5f32);
+        let b = SmtExpr::fp32_const(2.5f32);
+        let expr = encode_tmir_fp_binop(&Opcode::Fadd, Type::F32, a, b);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Float(4.0));
+    }
+
+    #[test]
+    fn test_encode_fsub_f64() {
+        let a = SmtExpr::fp64_const(10.0);
+        let b = SmtExpr::fp64_const(3.5);
+        let expr = encode_tmir_fp_binop(&Opcode::Fsub, Type::F64, a, b);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Float(6.5));
+    }
+
+    #[test]
+    fn test_encode_fmul_f64() {
+        let a = SmtExpr::fp64_const(3.0);
+        let b = SmtExpr::fp64_const(7.0);
+        let expr = encode_tmir_fp_binop(&Opcode::Fmul, Type::F64, a, b);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Float(21.0));
+    }
+
+    #[test]
+    fn test_encode_fdiv_f64() {
+        let a = SmtExpr::fp64_const(10.0);
+        let b = SmtExpr::fp64_const(4.0);
+        let expr = encode_tmir_fp_binop(&Opcode::Fdiv, Type::F64, a, b);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Float(2.5));
+    }
+
+    #[test]
+    fn test_encode_fneg_f64() {
+        let a = SmtExpr::fp64_const(42.0);
+        let expr = encode_tmir_fneg(Type::F64, a);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Float(-42.0));
+    }
+
+    #[test]
+    fn test_encode_fneg_f32() {
+        let a = SmtExpr::fp32_const(-3.14f32);
+        let expr = encode_tmir_fneg(Type::F32, a);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        // Negation of -3.14 should be +3.14 (as f64)
+        assert_eq!(result, EvalResult::Float(3.140000104904175)); // f32 -> f64 precision
+    }
+
+    #[test]
+    fn test_try_encode_fp_binop_unsupported() {
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let result = try_encode_tmir_fp_binop(&Opcode::Iadd, Type::F64, a, b);
+        assert!(result.is_err());
     }
 }

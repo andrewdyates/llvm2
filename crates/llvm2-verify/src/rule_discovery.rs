@@ -183,6 +183,7 @@ impl RuleProposal {
                     .or_else(|| Self::find_var_width_in_expr(rhs, target))
             }
             SmtExpr::FPAdd { lhs, rhs, .. }
+            | SmtExpr::FPSub { lhs, rhs, .. }
             | SmtExpr::FPMul { lhs, rhs, .. }
             | SmtExpr::FPDiv { lhs, rhs, .. } => {
                 Self::find_var_width_in_expr(lhs, target)
@@ -678,6 +679,7 @@ fn estimate_expr_cost(expr: &SmtExpr) -> i32 {
         | SmtExpr::FPEq { lhs, rhs }
         | SmtExpr::FPLt { lhs, rhs } => 1 + estimate_expr_cost(lhs) + estimate_expr_cost(rhs),
         SmtExpr::FPAdd { lhs, rhs, .. }
+        | SmtExpr::FPSub { lhs, rhs, .. }
         | SmtExpr::FPMul { lhs, rhs, .. }
         | SmtExpr::FPDiv { lhs, rhs, .. } => {
             3 + estimate_expr_cost(lhs) + estimate_expr_cost(rhs)

@@ -177,6 +177,7 @@ fn infer_logic_walk(expr: &SmtExpr, has_array: &mut bool, has_fp: &mut bool, has
             infer_logic_walk(value, has_array, has_fp, has_uf);
         }
         SmtExpr::FPAdd { lhs, rhs, .. }
+        | SmtExpr::FPSub { lhs, rhs, .. }
         | SmtExpr::FPMul { lhs, rhs, .. }
         | SmtExpr::FPDiv { lhs, rhs, .. }
         | SmtExpr::FPEq { lhs, rhs }
@@ -804,6 +805,7 @@ fn translate_expr_to_z4(
             Err("Array theory (QF_ABV) not yet supported in z4 native API; use CLI fallback with z3".to_string())
         }
         SmtExpr::FPAdd { .. }
+        | SmtExpr::FPSub { .. }
         | SmtExpr::FPMul { .. }
         | SmtExpr::FPDiv { .. }
         | SmtExpr::FPNeg { .. }
