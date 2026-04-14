@@ -1393,6 +1393,24 @@ impl SmtExpr {
     pub fn eval(&self, env: &HashMap<String, u64>) -> EvalResult {
         self.try_eval(env).expect("SmtExpr::eval failed; use try_eval() for fallible evaluation")
     }
+
+    /// Serialize this expression to an SMT-LIB2 expression string.
+    ///
+    /// This is a convenience method that delegates to the [`Display`] implementation,
+    /// which produces valid SMT-LIB2 syntax for each expression variant.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use llvm2_verify::SmtExpr;
+    /// let a = SmtExpr::var("a", 32);
+    /// let b = SmtExpr::var("b", 32);
+    /// let expr = a.bvadd(b);
+    /// assert_eq!(expr.to_smt2_expr(), "(bvadd a b)");
+    /// ```
+    pub fn to_smt2_expr(&self) -> String {
+        format!("{}", self)
+    }
 }
 
 // ---------------------------------------------------------------------------
