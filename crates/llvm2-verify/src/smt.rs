@@ -311,6 +311,9 @@ pub enum SmtExpr {
     /// `(fp.mul rm a b)` -- floating-point multiplication.
     FPMul { rm: RoundingMode, lhs: Box<SmtExpr>, rhs: Box<SmtExpr> },
 
+    /// `(fp.sub rm a b)` -- floating-point subtraction.
+    FPSub { rm: RoundingMode, lhs: Box<SmtExpr>, rhs: Box<SmtExpr> },
+
     /// `(fp.div rm a b)` -- floating-point division.
     FPDiv { rm: RoundingMode, lhs: Box<SmtExpr>, rhs: Box<SmtExpr> },
 
@@ -667,6 +670,11 @@ impl SmtExpr {
         SmtExpr::FPAdd { rm, lhs: Box::new(a), rhs: Box::new(b) }
     }
 
+    /// `(fp.sub rm a b)` -- floating-point subtraction.
+    pub fn fp_sub(rm: RoundingMode, a: Self, b: Self) -> Self {
+        SmtExpr::FPSub { rm, lhs: Box::new(a), rhs: Box::new(b) }
+    }
+
     /// `(fp.mul rm a b)` -- floating-point multiplication.
     pub fn fp_mul(rm: RoundingMode, a: Self, b: Self) -> Self {
         SmtExpr::FPMul { rm, lhs: Box::new(a), rhs: Box::new(b) }
@@ -753,6 +761,7 @@ impl SmtExpr {
             | SmtExpr::FPLt { .. } => Err(SmtError::BoolHasNoWidth),
             // FP / array / UF decl nodes have no BV width.
             SmtExpr::FPAdd { .. }
+            | SmtExpr::FPSub { .. }
             | SmtExpr::FPMul { .. }
             | SmtExpr::FPDiv { .. }
             | SmtExpr::FPNeg { .. }
@@ -794,6 +803,7 @@ impl SmtExpr {
             | SmtExpr::FPLt { .. } => SmtSort::Bool,
             // Floating-point expressions
             SmtExpr::FPAdd { lhs, .. }
+            | SmtExpr::FPSub { lhs, .. }
             | SmtExpr::FPMul { lhs, .. }
             | SmtExpr::FPDiv { lhs, .. } => lhs.sort(),
             SmtExpr::FPNeg { operand } => operand.sort(),
@@ -861,6 +871,7 @@ impl SmtExpr {
                 rhs.collect_vars(vars);
             }
             SmtExpr::FPAdd { lhs, rhs, .. }
+            | SmtExpr::FPSub { lhs, rhs, .. }
             | SmtExpr::FPMul { lhs, rhs, .. }
             | SmtExpr::FPDiv { lhs, rhs, .. } => {
                 lhs.collect_vars(vars);
@@ -1324,6 +1335,11 @@ impl SmtExpr {
                 let b = rhs.try_eval(env)?.as_f64();
                 Ok(EvalResult::Float(a + b))
             }
+            SmtExpr::FPSub { lhs, rhs, .. } => {
+                let a = lhs.try_eval(env)?.as_f64();
+                let b = rhs.try_eval(env)?.as_f64();
+                Ok(EvalResult::Float(a - b))
+            }
             SmtExpr::FPMul { lhs, rhs, .. } => {
                 let a = lhs.try_eval(env)?.as_f64();
                 let b = rhs.try_eval(env)?.as_f64();
@@ -1461,6 +1477,9 @@ impl fmt::Display for SmtExpr {
             }
             SmtExpr::FPAdd { rm, lhs, rhs } => {
                 write!(f, "(fp.add {} {} {})", rm, lhs, rhs)
+            }
+            SmtExpr::FPSub { rm, lhs, rhs } => {
+                write!(f, "(fp.sub {} {} {})", rm, lhs, rhs)
             }
             SmtExpr::FPMul { rm, lhs, rhs } => {
                 write!(f, "(fp.mul {} {} {})", rm, lhs, rhs)
