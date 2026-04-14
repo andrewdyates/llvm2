@@ -319,15 +319,18 @@ fn build_return_const_tmir() -> TmirFunction {
                         value: 42,
                     },
                     results: vec![ValueId(0)],
+                    proofs: vec![],
                 },
                 InstrNode {
                     instr: Instr::Return {
                         values: vec![ValueId(0)],
                     },
                     results: vec![],
+                    proofs: vec![],
                 },
             ],
         }],
+        proofs: vec![],
     }
 }
 
@@ -356,15 +359,18 @@ fn build_simple_add_tmir() -> TmirFunction {
                         rhs: ValueId(1),
                     },
                     results: vec![ValueId(2)],
+                    proofs: vec![],
                 },
                 InstrNode {
                     instr: Instr::Return {
                         values: vec![ValueId(2)],
                     },
                     results: vec![],
+                    proofs: vec![],
                 },
             ],
         }],
+        proofs: vec![],
     }
 }
 
@@ -400,6 +406,7 @@ fn build_max_val_tmir() -> TmirFunction {
                             rhs: ValueId(1), // b
                         },
                         results: vec![ValueId(2)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::CondBr {
@@ -410,6 +417,7 @@ fn build_max_val_tmir() -> TmirFunction {
                             else_args: vec![],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -422,6 +430,7 @@ fn build_max_val_tmir() -> TmirFunction {
                         values: vec![ValueId(0)],
                     },
                     results: vec![],
+                    proofs: vec![],
                 }],
             },
             // bb2: return b
@@ -433,9 +442,11 @@ fn build_max_val_tmir() -> TmirFunction {
                         values: vec![ValueId(1)],
                     },
                     results: vec![],
+                    proofs: vec![],
                 }],
             },
         ],
+        proofs: vec![],
     }
 }
 
@@ -464,15 +475,18 @@ fn build_simple_sub_tmir() -> TmirFunction {
                         rhs: ValueId(1),
                     },
                     results: vec![ValueId(2)],
+                    proofs: vec![],
                 },
                 InstrNode {
                     instr: Instr::Return {
                         values: vec![ValueId(2)],
                     },
                     results: vec![],
+                    proofs: vec![],
                 },
             ],
         }],
+        proofs: vec![],
     }
 }
 
@@ -506,6 +520,7 @@ fn build_count_down_tmir() -> TmirFunction {
                             value: 0,
                         },
                         results: vec![ValueId(1)], // sum_init = 0
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Br {
@@ -513,6 +528,7 @@ fn build_count_down_tmir() -> TmirFunction {
                             args: vec![ValueId(1), ValueId(0)], // sum=0, i=n
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -531,6 +547,7 @@ fn build_count_down_tmir() -> TmirFunction {
                             value: 0,
                         },
                         results: vec![ValueId(12)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Cmp {
@@ -540,6 +557,7 @@ fn build_count_down_tmir() -> TmirFunction {
                             rhs: ValueId(12), // 0
                         },
                         results: vec![ValueId(13)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::CondBr {
@@ -550,6 +568,7 @@ fn build_count_down_tmir() -> TmirFunction {
                             else_args: vec![],
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
@@ -562,6 +581,7 @@ fn build_count_down_tmir() -> TmirFunction {
                         values: vec![ValueId(20)],
                     },
                     results: vec![],
+                    proofs: vec![],
                 }],
             },
             // bb3 (loop body): sum += i, i -= 1, loop back
@@ -578,6 +598,7 @@ fn build_count_down_tmir() -> TmirFunction {
                             rhs: ValueId(11), // i
                         },
                         results: vec![ValueId(14)],
+                        proofs: vec![],
                     },
                     // new_i = i - 1
                     InstrNode {
@@ -586,6 +607,7 @@ fn build_count_down_tmir() -> TmirFunction {
                             value: 1,
                         },
                         results: vec![ValueId(15)],
+                        proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::BinOp {
@@ -595,6 +617,7 @@ fn build_count_down_tmir() -> TmirFunction {
                             rhs: ValueId(15), // 1
                         },
                         results: vec![ValueId(16)],
+                        proofs: vec![],
                     },
                     // loop back
                     InstrNode {
@@ -603,10 +626,12 @@ fn build_count_down_tmir() -> TmirFunction {
                             args: vec![ValueId(14), ValueId(16)], // new_sum, new_i
                         },
                         results: vec![],
+                        proofs: vec![],
                     },
                 ],
             },
         ],
+        proofs: vec![],
     }
 }
 

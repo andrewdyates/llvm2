@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use tmir_instrs::InstrNode;
-use tmir_types::{BlockId, FuncId, FuncTy, StructDef, Ty, ValueId};
+use tmir_types::{BlockId, FuncId, FuncTy, StructDef, TmirProof, Ty, ValueId};
 
 /// A basic block in a tMIR function.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -32,6 +32,10 @@ pub struct Function {
     pub entry: BlockId,
     /// Basic blocks in layout order.
     pub blocks: Vec<Block>,
+    /// Function-level proof annotations (e.g., Pure — no side effects).
+    /// These apply to the entire function, not individual instructions.
+    #[serde(default)]
+    pub proofs: Vec<TmirProof>,
 }
 
 impl Function {

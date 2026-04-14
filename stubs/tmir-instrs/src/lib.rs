@@ -10,7 +10,7 @@
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
-use tmir_types::{BlockId, FuncId, Ty, ValueId};
+use tmir_types::{BlockId, FuncId, TmirProof, Ty, ValueId};
 
 /// Binary arithmetic/logic operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -289,7 +289,7 @@ pub enum Instr {
     },
 }
 
-/// A tMIR instruction with its result value(s).
+/// A tMIR instruction with its result value(s) and proof annotations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstrNode {
     /// The instruction opcode and operands.
@@ -297,4 +297,29 @@ pub struct InstrNode {
     /// Result value(s) produced by this instruction. Empty for void ops
     /// (Store, Br, CondBr, Switch, Return, Nop, EndBorrow, Retain, Release, Dealloc).
     pub results: Vec<ValueId>,
+    /// Proof annotations attached to this instruction by the source-language
+    /// compiler (tRust, tSwift, tC). These have been formally verified by z4.
+    /// The LLVM2 adapter extracts these for downstream optimization passes.
+    #[serde(default)]
+    pub proofs: Vec<TmirProof>,
+}
+
+impl InstrNode {
+    /// Create a new instruction node without proof annotations.
+    pub fn new(instr: Instr, results: Vec<ValueId>) -> Self {
+        Self {
+            instr,
+            results,
+            proofs: Vec::new(),
+        }
+    }
+
+    /// Create a new instruction node with proof annotations.
+    pub fn with_proofs(instr: Instr, results: Vec<ValueId>, proofs: Vec<TmirProof>) -> Self {
+        Self {
+            instr,
+            results,
+            proofs,
+        }
+    }
 }
