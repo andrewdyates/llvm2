@@ -253,9 +253,19 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
     };
 
     // Helper: determine if the instruction operates on 64-bit registers.
+    // Uses preg_class() to correctly distinguish W-registers (Gpr32, sf=0)
+    // from X-registers (Gpr64, sf=1). The previous implementation used
+    // is_gpr() which only covers X-registers (encoding 0-31), causing
+    // W-registers (encoding 32-63) to fall through to the default (true),
+    // producing wrong sf bit for BicRR, Csinc, Csinv, Csneg, Movn (#173).
     let is_64bit = |idx: usize| -> bool {
         match inst.operands.get(idx) {
-            Some(MachOperand::PReg(p)) => p.is_gpr() && p.encoding() < 32,
+            Some(MachOperand::PReg(p)) => {
+                match llvm2_ir::regs::preg_class(*p) {
+                    llvm2_ir::regs::RegClass::Gpr32 => false,
+                    _ => true,
+                }
+            }
             _ => true,
         }
     };
@@ -2120,5 +2130,135 @@ mod tests {
         // Check the immediate is embedded
         let imm_field = (word >> 5) & 0xFFFF;
         assert_eq!(imm_field, 42, "MOVN imm16 should be 42");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug #173: is_64bit helper must correctly classify W-registers as 32-bit
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_64bit_w0_returns_false() {
+        // BicRR with W-registers should produce sf=0 (bit 31=0)
+        use llvm2_ir::regs::W0;
+        let inst = MachInst::new(
+            AArch64Opcode::BicRR,
+            vec![
+                MachOperand::PReg(W0),
+                MachOperand::PReg(W1),
+                MachOperand::PReg(W2),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_eq!((word >> 31) & 1, 0,
+            "BIC W0, W1, W2 should have sf=0 (32-bit), got sf=1");
+    }
+
+    #[test]
+    fn test_is_64bit_x0_returns_true() {
+        // BicRR with X-registers should produce sf=1 (bit 31=1)
+        let inst = MachInst::new(
+            AArch64Opcode::BicRR,
+            vec![
+                MachOperand::PReg(X0),
+                MachOperand::PReg(X1),
+                MachOperand::PReg(X2),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_eq!((word >> 31) & 1, 1,
+            "BIC X0, X1, X2 should have sf=1 (64-bit), got sf=0");
+    }
+
+    #[test]
+    fn test_is_64bit_w30_returns_false() {
+        // W30 (encoding=62) must be classified as 32-bit
+        use llvm2_ir::regs::W30;
+        let inst = MachInst::new(
+            AArch64Opcode::Movn,
+            vec![MachOperand::PReg(W30), MachOperand::Imm(0)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_eq!((word >> 31) & 1, 0,
+            "MOVN W30, #0 should have sf=0 (32-bit), got sf=1");
+    }
+
+    #[test]
+    fn test_is_64bit_x30_returns_true() {
+        // X30 (encoding=30) must be classified as 64-bit
+        use llvm2_ir::regs::X30;
+        let inst = MachInst::new(
+            AArch64Opcode::Movn,
+            vec![MachOperand::PReg(X30), MachOperand::Imm(0)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_eq!((word >> 31) & 1, 1,
+            "MOVN X30, #0 should have sf=1 (64-bit), got sf=0");
+    }
+
+    #[test]
+    fn test_csinc_w_registers_sf0() {
+        // CSINC W0, W1, W2, EQ — sf must be 0
+        let inst = MachInst::new(
+            AArch64Opcode::Csinc,
+            vec![
+                MachOperand::PReg(W0),
+                MachOperand::PReg(W1),
+                MachOperand::PReg(W2),
+                MachOperand::Imm(0), // EQ
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_eq!((word >> 31) & 1, 0,
+            "CSINC W0, W1, W2, EQ should have sf=0 (32-bit)");
+        // Also verify it's still a CSINC (op2=01)
+        assert_eq!((word >> 10) & 0b11, 0b01, "CSINC op2 should be 01");
+    }
+
+    #[test]
+    fn test_movn_w_register_sf0() {
+        // MOVN W0, #42 — sf must be 0
+        let inst = MachInst::new(
+            AArch64Opcode::Movn,
+            vec![MachOperand::PReg(W0), MachOperand::Imm(42)],
+        );
+        let word = encode_inst(&inst).unwrap();
+        assert_eq!((word >> 31) & 1, 0,
+            "MOVN W0, #42 should have sf=0 (32-bit)");
+        let imm_field = (word >> 5) & 0xFFFF;
+        assert_eq!(imm_field, 42, "MOVN W0 imm16 should be 42");
+    }
+
+    #[test]
+    fn test_ldr_ro_w_register_32bit_size() {
+        // LDR W0, [X1, X2] — size should be 10 (32-bit), not 11 (64-bit)
+        let inst = MachInst::new(
+            AArch64Opcode::LdrRO,
+            vec![
+                MachOperand::PReg(W0),
+                MachOperand::PReg(X1),
+                MachOperand::PReg(X2),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let size = (word >> 30) & 0b11;
+        assert_eq!(size, 0b10,
+            "LDR W0, [X1, X2] should have size=10 (32-bit), got {:02b}", size);
+    }
+
+    #[test]
+    fn test_str_ro_w_register_32bit_size() {
+        // STR W0, [X1, X2] — size should be 10 (32-bit), not 11 (64-bit)
+        let inst = MachInst::new(
+            AArch64Opcode::StrRO,
+            vec![
+                MachOperand::PReg(W0),
+                MachOperand::PReg(X1),
+                MachOperand::PReg(X2),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        let size = (word >> 30) & 0b11;
+        assert_eq!(size, 0b10,
+            "STR W0, [X1, X2] should have size=10 (32-bit), got {:02b}", size);
     }
 }
