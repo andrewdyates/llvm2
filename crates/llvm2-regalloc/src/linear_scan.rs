@@ -1095,4 +1095,168 @@ mod tests {
             class: RegClass::Gpr64,
         }));
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case tests (issue #404 — TL7 coverage expansion)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_all_registers_exhausted_cascading_spills() {
+        // With 2 registers and 5 overlapping intervals, 3 must spill.
+        // Verifies cascading spill behavior under extreme pressure.
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0), PReg::new(1)]);
+
+        let intervals: Vec<LiveInterval> = (0u32..5)
+            .map(|id| {
+                let mut i = LiveInterval::new(VReg { id, class: RegClass::Gpr64 });
+                i.add_range(0, 50);
+                i.spill_weight = (id + 1) as f64; // 1.0, 2.0, 3.0, 4.0, 5.0
+                i
+            })
+            .collect();
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+
+        assert_eq!(result.allocation.len(), 2, "only 2 registers available");
+        assert_eq!(scan.spilled_vregs().len(), 3, "3 intervals must spill");
+
+        // The lowest-weight intervals (v0, v1, v2) should be spilled.
+        let spilled_ids: Vec<u32> = scan.spilled_vregs().iter().map(|v| v.id).collect();
+        for id in [0, 1, 2] {
+            assert!(
+                spilled_ids.contains(&id),
+                "v{id} (weight {}) should be spilled",
+                id + 1
+            );
+        }
+        // Highest-weight intervals (v3, v4) should be allocated.
+        for id in [3, 4] {
+            assert!(
+                result.allocation.contains_key(&VReg { id, class: RegClass::Gpr64 }),
+                "v{id} should be allocated"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mixed_gpr_and_fpr_simultaneous_pressure() {
+        // GPR and FPR allocation are independent — filling one class
+        // should not affect the other.
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);
+        regs.insert(RegClass::Fpr64, vec![PReg::new(96)]);
+
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+                i.add_range(0, 20);
+                i.spill_weight = 1.0;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg { id: 1, class: RegClass::Fpr64 });
+                i.add_range(0, 20);
+                i.spill_weight = 1.0;
+                i
+            },
+            {
+                // Second GPR interval overlaps — must spill one.
+                let mut i = LiveInterval::new(VReg { id: 2, class: RegClass::Gpr64 });
+                i.add_range(0, 20);
+                i.spill_weight = 5.0;
+                i
+            },
+            {
+                // Second FPR interval overlaps — must spill one.
+                let mut i = LiveInterval::new(VReg { id: 3, class: RegClass::Fpr64 });
+                i.add_range(0, 20);
+                i.spill_weight = 5.0;
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+
+        // 2 allocated (one per class), 2 spilled (one per class).
+        assert_eq!(result.allocation.len(), 2);
+        assert_eq!(scan.spilled_vregs().len(), 2);
+
+        // The lower-weight interval in each class should be spilled.
+        let spilled_ids: Vec<u32> = scan.spilled_vregs().iter().map(|v| v.id).collect();
+        assert!(spilled_ids.contains(&0), "v0 (GPR, weight 1.0) should be spilled");
+        assert!(spilled_ids.contains(&1), "v1 (FPR, weight 1.0) should be spilled");
+    }
+
+    #[test]
+    fn test_interleaved_short_and_long_no_spill_single_reg() {
+        // One register, intervals that exactly interleave without overlap.
+        // Tests that expire_old_intervals works correctly at boundaries.
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);
+
+        // [0,3), [3,6), [6,9), ... — each starts exactly where previous ends.
+        let intervals: Vec<LiveInterval> = (0u32..20)
+            .map(|id| {
+                let mut i = LiveInterval::new(VReg { id, class: RegClass::Gpr64 });
+                i.add_range(id * 3, id * 3 + 3);
+                i.spill_weight = 1.0;
+                i
+            })
+            .collect();
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+
+        assert_eq!(result.allocation.len(), 20);
+        assert!(scan.spilled_vregs().is_empty(), "no spills needed with non-overlapping intervals");
+    }
+
+    #[test]
+    fn test_spill_eviction_replaces_lowest_weight_active() {
+        // 3 registers, 4 overlapping intervals. The first 3 fill registers,
+        // the 4th (high weight) evicts the lowest-weight active interval.
+        let mut regs = HashMap::new();
+        regs.insert(
+            RegClass::Gpr64,
+            vec![PReg::new(0), PReg::new(1), PReg::new(2)],
+        );
+
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+                i.add_range(0, 30);
+                i.spill_weight = 3.0; // medium — will be evicted
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg { id: 1, class: RegClass::Gpr64 });
+                i.add_range(0, 30);
+                i.spill_weight = 10.0; // high
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg { id: 2, class: RegClass::Gpr64 });
+                i.add_range(0, 30);
+                i.spill_weight = 7.0; // medium-high
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg { id: 3, class: RegClass::Gpr64 });
+                i.add_range(0, 30);
+                i.spill_weight = 20.0; // highest — arrives last, evicts v0
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+
+        assert_eq!(result.allocation.len(), 3);
+        assert_eq!(scan.spilled_vregs().len(), 1);
+        // v0 has the lowest weight among active intervals, so it should be evicted.
+        assert_eq!(scan.spilled_vregs()[0].id, 0);
+    }
 }

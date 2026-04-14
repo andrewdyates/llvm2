@@ -810,4 +810,236 @@ mod tests {
             spill_infos.iter().map(|si| si.slot).collect();
         assert_eq!(slots.len(), 3, "each spilled vreg should have a unique slot");
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case tests (issue #404 — TL7 coverage expansion)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_spill_fpr16_and_fpr8_slot_sizes() {
+        // Fpr16 should allocate a 2-byte slot, Fpr8 a 1-byte slot.
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        // def v0 (Fpr16), def v1 (Fpr8)
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Fpr16 })],
+            uses: vec![MachOperand::FImm(0.0)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 1, class: RegClass::Fpr8 })],
+            uses: vec![MachOperand::FImm(0.0)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        // use v0, use v1
+        let i2 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 2,
+            defs: vec![],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Fpr16 }),
+                MachOperand::VReg(VReg { id: 1, class: RegClass::Fpr8 }),
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let mut func = MachFunction {
+            name: "fpr_small_spill".into(),
+            insts,
+            blocks: vec![MachBlock {
+                insts: vec![i0, i1, i2],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 2,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+
+        let v0 = VReg { id: 0, class: RegClass::Fpr16 };
+        let v1 = VReg { id: 1, class: RegClass::Fpr8 };
+        let spill_infos = insert_spill_code(&mut func, &[v0, v1], &HashMap::new());
+
+        assert_eq!(spill_infos.len(), 2);
+        let slot0 = &func.stack_slots[&spill_infos[0].slot];
+        let slot1 = &func.stack_slots[&spill_infos[1].slot];
+        assert_eq!(slot0.size, 2, "Fpr16 should use 2-byte slot");
+        assert_eq!(slot0.align, 2, "Fpr16 should use 2-byte alignment");
+        assert_eq!(slot1.size, 1, "Fpr8 should use 1-byte slot");
+        assert_eq!(slot1.align, 1, "Fpr8 should use 1-byte alignment");
+    }
+
+    #[test]
+    fn test_spill_three_blocks_def_in_first_use_in_last() {
+        // v0 defined in block 0, used in block 2 (block 1 is intermediate).
+        // Spill should insert store in block 0 after def, load in block 2 before use.
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        // Block 0: def v0
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(42)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(1))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 1: intermediate (nop, branch to block 2)
+        let i2 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0x00,
+            defs: vec![],
+            uses: vec![],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i3 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(2))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 2: use v0
+        let i4 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 2,
+            defs: vec![],
+            uses: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let mut func = MachFunction {
+            name: "three_block_spill".into(),
+            insts,
+            blocks: vec![
+                MachBlock {
+                    insts: vec![i0, i1],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(1)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i2, i3],
+                    preds: vec![BlockId(0)],
+                    succs: vec![BlockId(2)],
+                    loop_depth: 0,
+                },
+                MachBlock {
+                    insts: vec![i4],
+                    preds: vec![BlockId(1)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+            ],
+            block_order: vec![BlockId(0), BlockId(1), BlockId(2)],
+            entry_block: BlockId(0),
+            next_vreg: 1,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+
+        let v0 = VReg { id: 0, class: RegClass::Gpr64 };
+        insert_spill_code(&mut func, &[v0], &HashMap::new());
+
+        // Block 0 should have a store after the def.
+        let block0_has_store = func.blocks[0].insts.iter()
+            .any(|&id| func.insts[id.0 as usize].opcode == PSEUDO_SPILL_STORE);
+        assert!(block0_has_store, "block 0 should have spill store");
+
+        // Block 1 should NOT have any spill instructions (no def/use of v0).
+        let block1_spill_count = func.blocks[1].insts.iter()
+            .filter(|&&id| {
+                let op = func.insts[id.0 as usize].opcode;
+                op == PSEUDO_SPILL_STORE || op == PSEUDO_SPILL_LOAD
+            })
+            .count();
+        assert_eq!(block1_spill_count, 0, "block 1 should have no spill instructions");
+
+        // Block 2 should have a load before the use.
+        let block2_has_load = func.blocks[2].insts.iter()
+            .any(|&id| func.insts[id.0 as usize].opcode == PSEUDO_SPILL_LOAD);
+        assert!(block2_has_load, "block 2 should have spill load");
+    }
+
+    #[test]
+    fn test_spill_system_reg_class_slot_size() {
+        // System register class should get a 4-byte slot.
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::System })],
+            uses: vec![MachOperand::Imm(0)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 2,
+            defs: vec![],
+            uses: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::System })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let mut func = MachFunction {
+            name: "system_spill".into(),
+            insts,
+            blocks: vec![MachBlock {
+                insts: vec![i0, i1],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 1,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+
+        let v0 = VReg { id: 0, class: RegClass::System };
+        let spill_infos = insert_spill_code(&mut func, &[v0], &HashMap::new());
+
+        assert_eq!(spill_infos.len(), 1);
+        let slot = &func.stack_slots[&spill_infos[0].slot];
+        assert_eq!(slot.size, 4, "System should use 4-byte slot");
+    }
 }

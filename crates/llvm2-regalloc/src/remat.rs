@@ -662,4 +662,106 @@ mod tests {
         assert_eq!(spill_infos.len(), 1, "v1's spill info should remain");
         assert_eq!(spill_infos[0].vreg.id, 1);
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case tests (issue #404 — TL7 coverage expansion)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_remat_cheap_cost_candidate() {
+        // Test rematerialization with a Cheap candidate (one VReg + imm).
+        let mut func = make_func(vec![
+            // inst 0: ADD v0, v1, #10 (Cheap remat — one vreg + imm)
+            MachInst {
+                opcode: 2,
+                defs: vec![MachOperand::VReg(vreg(0))],
+                uses: vec![MachOperand::VReg(vreg(1)), MachOperand::Imm(10)],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+            // inst 1: SPILL_LOAD v0 from stack
+            MachInst {
+                opcode: PSEUDO_SPILL_LOAD,
+                defs: vec![MachOperand::VReg(vreg(0))],
+                uses: vec![MachOperand::StackSlot(StackSlotId(0))],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::READS_MEMORY,
+            },
+            // inst 2: use v0
+            MachInst {
+                opcode: 3,
+                defs: vec![],
+                uses: vec![MachOperand::VReg(vreg(0))],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+        ]);
+
+        let candidates = vec![RematCandidate {
+            vreg: vreg(0),
+            defining_inst_id: InstId(0),
+            cost: RematCost::Cheap,
+        }];
+
+        let mut spill_infos = vec![SpillInfo {
+            vreg: vreg(0),
+            slot: StackSlotId(0),
+        }];
+
+        let count = apply_rematerialization(&mut func, &candidates, &mut spill_infos);
+        assert_eq!(count, 1, "cheap candidate should be rematerialized");
+        assert!(spill_infos.is_empty(), "spill info should be removed");
+
+        // The replacement instruction should be a clone of the defining ADD.
+        let replaced_id = func.blocks[0].insts[1];
+        let replaced_inst = &func.insts[replaced_id.0 as usize];
+        assert_eq!(replaced_inst.opcode, 2, "should be cloned ADD instruction");
+        assert_eq!(replaced_inst.uses.len(), 2);
+    }
+
+    #[test]
+    fn test_find_remat_no_defining_instruction() {
+        // A spilled vreg with no definition in the function should not be a candidate.
+        let func = make_func(vec![
+            // Only uses v5, never defines it.
+            MachInst {
+                opcode: 3,
+                defs: vec![],
+                uses: vec![MachOperand::VReg(VReg { id: 5, class: RegClass::Gpr64 })],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::default(),
+            },
+        ]);
+
+        let candidates = find_remat_candidates(&func, &[VReg { id: 5, class: RegClass::Gpr64 }]);
+        assert!(candidates.is_empty(), "vreg with no def should not be a remat candidate");
+    }
+
+    #[test]
+    fn test_apply_remat_empty_candidates() {
+        // No candidates — nothing should happen.
+        let mut func = make_func(vec![
+            MachInst {
+                opcode: PSEUDO_SPILL_LOAD,
+                defs: vec![MachOperand::VReg(vreg(0))],
+                uses: vec![MachOperand::StackSlot(StackSlotId(0))],
+                implicit_defs: Vec::new(),
+                implicit_uses: Vec::new(),
+                flags: InstFlags::READS_MEMORY,
+            },
+        ]);
+
+        let mut spill_infos = vec![SpillInfo {
+            vreg: vreg(0),
+            slot: StackSlotId(0),
+        }];
+
+        let count = apply_rematerialization(&mut func, &[], &mut spill_infos);
+        assert_eq!(count, 0, "no candidates means no rematerialization");
+        assert_eq!(spill_infos.len(), 1, "spill info should be preserved");
+    }
 }
