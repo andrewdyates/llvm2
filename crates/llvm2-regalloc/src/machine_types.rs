@@ -5,6 +5,8 @@
 
 //! Machine-level type definitions used by the register allocator.
 //!
+//! See [`llvm2_ir::type_hierarchy`] for the full type hierarchy documentation.
+//!
 //! ## Unified types (re-exported from `llvm2-ir`)
 //!
 //! These types are shared with `llvm2-ir` via re-export (no adapter needed):
@@ -21,20 +23,20 @@
 //! required for register allocation. They have been renamed (issue #73) to avoid
 //! shadowing the canonical `llvm2-ir` types:
 //!
-//! | Canonical (llvm2-ir) | RegAlloc name | Why separate |
-//! |---------------------|---------------|--------------|
-//! | `MachInst` | `RegAllocInst` | Separates defs/uses for liveness; opcode is `u16` not enum |
-//! | `MachOperand` | `RegAllocOperand` | Subset of variants (no MemOp/FrameIndex/Special) |
-//! | `MachBlock` | `RegAllocBlock` | Adds `loop_depth` for spill weight computation |
-//! | `StackSlot` | `RegAllocStackSlot` | No alignment assertion |
-//! | `MachFunction` | `RegAllocFunction` | `HashMap` stack slots, `next_stack_slot` counter |
+//! | Canonical (llvm2-ir) | RegAlloc name | Why separate | Conversion |
+//! |---------------------|---------------|--------------|------------|
+//! | `MachInst` | `RegAllocInst` | Separates defs/uses for liveness; opcode is `u16` not enum | `classify_def_use()` in pipeline |
+//! | `MachOperand` | `RegAllocOperand` | Subset of variants (no MemOp/FrameIndex/Special) | `TryFrom<&MachOperand>` |
+//! | `MachBlock` | `RegAllocBlock` | Structurally identical (loop_depth added to IR, issue #73) | `From<&MachBlock>` |
+//! | `StackSlot` | `RegAllocStackSlot` | No alignment assertion | `From<&StackSlot>` |
+//! | `MachFunction` | `RegAllocFunction` | `HashMap` stack slots, `next_stack_slot` counter | `ir_to_regalloc()` in pipeline |
 //!
 //! Backward-compatible type aliases (`MachInst`, `MachBlock`, etc.) are provided
 //! but deprecated. New code should use the `RegAlloc*` names.
 //!
-//! These will be unified with the `llvm2-ir` versions in a future phase,
-//! likely by enriching `llvm2_ir::MachInst` with def/use classification.
-//! See issue #73 for tracking.
+//! The remaining unification target is `MachInst` / `RegAllocInst`: enriching
+//! `llvm2_ir::MachInst` with def/use classification would eliminate the need
+//! for `RegAllocInst`. See issue #73 for tracking.
 //!
 //! Reference: `~/llvm-project-ref/llvm/include/llvm/CodeGen/MachineInstr.h`
 
@@ -144,8 +146,9 @@ impl RegAllocInst {
 
 /// A regalloc-level machine basic block.
 ///
-/// Extends `llvm2_ir::MachBlock` with `loop_depth` for spill weight
-/// computation. Will be unified in a future phase.
+/// Structurally identical to `llvm2_ir::MachBlock` after the `loop_depth`
+/// field was added to the canonical type (issue #73). The `From<&MachBlock>`
+/// impl provides lossless conversion.
 ///
 /// Named `RegAllocBlock` (issue #73) to avoid confusion with `llvm2_ir::MachBlock`.
 #[derive(Debug, Clone)]
@@ -166,7 +169,8 @@ pub type MachBlock = RegAllocBlock;
 /// A stack slot for spilled values.
 ///
 /// Same fields as `llvm2_ir::function::StackSlot` but without the
-/// `debug_assert` alignment check. Will be unified.
+/// `debug_assert` alignment check. Convertible via `From<&StackSlot>`
+/// (issue #73).
 ///
 /// Named `RegAllocStackSlot` (issue #73) to avoid confusion with
 /// `llvm2_ir::function::StackSlot`.
@@ -210,6 +214,96 @@ pub struct RegAllocFunction {
 
 /// Backward-compatible alias (deprecated). Use `RegAllocFunction` directly.
 pub type MachFunction = RegAllocFunction;
+
+// ---------------------------------------------------------------------------
+// From / TryFrom impls — canonical llvm2-ir types -> regalloc types (issue #73)
+// ---------------------------------------------------------------------------
+//
+// These conversions formalize the adapter code that was previously scattered
+// in `llvm2-codegen/pipeline.rs`. The pipeline adapter (`ir_to_regalloc`)
+// now delegates to these impls for individual type conversions.
+
+/// Error type for operand conversions that encounter IR-only variants.
+#[derive(Debug, Clone)]
+pub struct OperandConversionError {
+    pub message: String,
+}
+
+impl std::fmt::Display for OperandConversionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "operand conversion error: {}", self.message)
+    }
+}
+
+impl std::error::Error for OperandConversionError {}
+
+/// Convert a canonical `llvm2_ir::MachOperand` to a `RegAllocOperand`.
+///
+/// Succeeds for the subset of operand variants that regalloc handles
+/// (VReg, PReg, Imm, FImm, Block, StackSlot). Fails for IR-only variants
+/// (FrameIndex, MemOp, Special) that must be lowered before register
+/// allocation. Symbol operands are mapped to Imm(0) since regalloc
+/// does not track relocation metadata.
+impl TryFrom<&llvm2_ir::MachOperand> for RegAllocOperand {
+    type Error = OperandConversionError;
+
+    fn try_from(op: &llvm2_ir::MachOperand) -> Result<Self, Self::Error> {
+        use llvm2_ir::MachOperand as IrOp;
+        match op {
+            IrOp::VReg(v) => Ok(RegAllocOperand::VReg(*v)),
+            IrOp::PReg(p) => Ok(RegAllocOperand::PReg(*p)),
+            IrOp::Imm(i) => Ok(RegAllocOperand::Imm(*i)),
+            IrOp::FImm(f) => Ok(RegAllocOperand::FImm(*f)),
+            IrOp::Block(b) => Ok(RegAllocOperand::Block(*b)),
+            IrOp::StackSlot(s) => Ok(RegAllocOperand::StackSlot(*s)),
+            IrOp::Symbol(_) => Ok(RegAllocOperand::Imm(0)),
+            IrOp::FrameIndex(fi) => Err(OperandConversionError {
+                message: format!(
+                    "FrameIndex({:?}) must be eliminated before register allocation",
+                    fi
+                ),
+            }),
+            IrOp::MemOp { base, offset } => Err(OperandConversionError {
+                message: format!(
+                    "MemOp(base={:?}, offset={}) must be lowered before register allocation",
+                    base, offset
+                ),
+            }),
+            IrOp::Special(s) => Err(OperandConversionError {
+                message: format!(
+                    "Special({:?}) must be lowered to PReg before register allocation",
+                    s
+                ),
+            }),
+        }
+    }
+}
+
+/// Convert a canonical `llvm2_ir::MachBlock` to a `RegAllocBlock`.
+///
+/// Copies insts, preds, succs, and loop_depth directly. The loop_depth
+/// field was added to `llvm2_ir::MachBlock` in issue #73 to enable this
+/// lossless conversion.
+impl From<&llvm2_ir::function::MachBlock> for RegAllocBlock {
+    fn from(block: &llvm2_ir::function::MachBlock) -> Self {
+        RegAllocBlock {
+            insts: block.insts.clone(),
+            preds: block.preds.clone(),
+            succs: block.succs.clone(),
+            loop_depth: block.loop_depth,
+        }
+    }
+}
+
+/// Convert a canonical `llvm2_ir::function::StackSlot` to a `RegAllocStackSlot`.
+impl From<&llvm2_ir::function::StackSlot> for RegAllocStackSlot {
+    fn from(slot: &llvm2_ir::function::StackSlot) -> Self {
+        RegAllocStackSlot {
+            size: slot.size,
+            align: slot.align,
+        }
+    }
+}
 
 impl RegAllocFunction {
     /// Allocate a new stack slot for a spill.
@@ -412,5 +506,115 @@ mod tests {
             func.stack_slots.get(&slot_id).map(|slot| (slot.size, slot.align)),
             Some((16, 8))
         );
+    }
+
+    // ---- From / TryFrom conversion tests (issue #73) ----
+
+    #[test]
+    fn try_from_ir_operand_vreg() {
+        let vreg = VReg::new(5, RegClass::Gpr64);
+        let ir_op = llvm2_ir::MachOperand::VReg(vreg);
+        let ra_op = RegAllocOperand::try_from(&ir_op).unwrap();
+        assert_eq!(ra_op, RegAllocOperand::VReg(vreg));
+    }
+
+    #[test]
+    fn try_from_ir_operand_preg() {
+        let preg = PReg::new(10);
+        let ir_op = llvm2_ir::MachOperand::PReg(preg);
+        let ra_op = RegAllocOperand::try_from(&ir_op).unwrap();
+        assert_eq!(ra_op, RegAllocOperand::PReg(preg));
+    }
+
+    #[test]
+    fn try_from_ir_operand_imm() {
+        let ir_op = llvm2_ir::MachOperand::Imm(42);
+        let ra_op = RegAllocOperand::try_from(&ir_op).unwrap();
+        assert_eq!(ra_op, RegAllocOperand::Imm(42));
+    }
+
+    #[test]
+    fn try_from_ir_operand_fimm() {
+        let ir_op = llvm2_ir::MachOperand::FImm(3.14);
+        let ra_op = RegAllocOperand::try_from(&ir_op).unwrap();
+        assert_eq!(ra_op, RegAllocOperand::FImm(3.14));
+    }
+
+    #[test]
+    fn try_from_ir_operand_block() {
+        let ir_op = llvm2_ir::MachOperand::Block(BlockId(7));
+        let ra_op = RegAllocOperand::try_from(&ir_op).unwrap();
+        assert_eq!(ra_op, RegAllocOperand::Block(BlockId(7)));
+    }
+
+    #[test]
+    fn try_from_ir_operand_stack_slot() {
+        let ir_op = llvm2_ir::MachOperand::StackSlot(StackSlotId(3));
+        let ra_op = RegAllocOperand::try_from(&ir_op).unwrap();
+        assert_eq!(ra_op, RegAllocOperand::StackSlot(StackSlotId(3)));
+    }
+
+    #[test]
+    fn try_from_ir_operand_symbol_maps_to_imm_zero() {
+        let ir_op = llvm2_ir::MachOperand::Symbol("_printf".to_string());
+        let ra_op = RegAllocOperand::try_from(&ir_op).unwrap();
+        assert_eq!(ra_op, RegAllocOperand::Imm(0));
+    }
+
+    #[test]
+    fn try_from_ir_operand_frame_index_fails() {
+        let ir_op = llvm2_ir::MachOperand::FrameIndex(llvm2_ir::types::FrameIdx(-8));
+        let result = RegAllocOperand::try_from(&ir_op);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("FrameIndex"));
+    }
+
+    #[test]
+    fn try_from_ir_operand_memop_fails() {
+        let ir_op = llvm2_ir::MachOperand::MemOp { base: PReg::new(0), offset: 16 };
+        let result = RegAllocOperand::try_from(&ir_op);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("MemOp"));
+    }
+
+    #[test]
+    fn try_from_ir_operand_special_fails() {
+        let ir_op = llvm2_ir::MachOperand::Special(llvm2_ir::regs::SpecialReg::SP);
+        let result = RegAllocOperand::try_from(&ir_op);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("Special"));
+    }
+
+    #[test]
+    fn from_ir_block_copies_all_fields() {
+        let ir_block = llvm2_ir::function::MachBlock {
+            insts: vec![InstId(0), InstId(1), InstId(2)],
+            preds: vec![BlockId(5)],
+            succs: vec![BlockId(6), BlockId(7)],
+            loop_depth: 3,
+        };
+        let ra_block = RegAllocBlock::from(&ir_block);
+        assert_eq!(ra_block.insts, vec![InstId(0), InstId(1), InstId(2)]);
+        assert_eq!(ra_block.preds, vec![BlockId(5)]);
+        assert_eq!(ra_block.succs, vec![BlockId(6), BlockId(7)]);
+        assert_eq!(ra_block.loop_depth, 3);
+    }
+
+    #[test]
+    fn from_ir_block_empty() {
+        let ir_block = llvm2_ir::function::MachBlock::new();
+        let ra_block = RegAllocBlock::from(&ir_block);
+        assert!(ra_block.insts.is_empty());
+        assert!(ra_block.preds.is_empty());
+        assert!(ra_block.succs.is_empty());
+        assert_eq!(ra_block.loop_depth, 0);
+    }
+
+    #[test]
+    fn from_ir_stack_slot() {
+        let ir_slot = llvm2_ir::function::StackSlot::new(16, 8);
+        let ra_slot = RegAllocStackSlot::from(&ir_slot);
+        assert_eq!(ra_slot.size, 16);
+        assert_eq!(ra_slot.align, 8);
     }
 }

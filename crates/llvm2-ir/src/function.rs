@@ -19,6 +19,10 @@ pub struct MachBlock {
     pub preds: Vec<BlockId>,
     /// Successor blocks.
     pub succs: Vec<BlockId>,
+    /// Loop nesting depth (0 = not in a loop). Used by regalloc for spill
+    /// weight computation and by optimization passes (LICM) for hoisting
+    /// decisions. Populated by loop analysis; defaults to 0.
+    pub loop_depth: u32,
 }
 
 impl MachBlock {
@@ -28,6 +32,7 @@ impl MachBlock {
             insts: Vec::new(),
             preds: Vec::new(),
             succs: Vec::new(),
+            loop_depth: 0,
         }
     }
 

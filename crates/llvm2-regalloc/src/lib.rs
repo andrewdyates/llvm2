@@ -100,6 +100,8 @@ pub use machine_types::{
     RegAllocBlock, RegAllocFunction, RegAllocInst, RegAllocOperand, RegAllocStackSlot,
     // Backward-compatible aliases (deprecated — use RegAlloc* names):
     InstFlags, MachBlock, MachFunction, MachInst, MachOperand, StackSlot,
+    // Conversion error type (issue #73):
+    OperandConversionError,
 };
 // Re-export canonical types from llvm2-ir via machine_types.
 pub use machine_types::{BlockId, InstId, PReg, RegClass, StackSlotId, VReg};
