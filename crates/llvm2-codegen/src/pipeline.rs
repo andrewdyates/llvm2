@@ -119,6 +119,8 @@ pub enum PipelineError {
     },
     #[error("CoreML MIL emission failed: {0}")]
     CoreMLEmit(#[from] CoreMLEmitError),
+    #[error("Metal kernel emission failed: {0}")]
+    MetalEmit(#[from] crate::metal_emitter::MetalEmitError),
 }
 
 // ---------------------------------------------------------------------------
@@ -881,6 +883,28 @@ impl Pipeline {
     ) -> Result<DispatchPlan, PipelineError> {
         let plan = generate_dispatch_plan(graph, recommendations);
         self.verify_dispatch_plan(graph, plan, recommendations)
+    }
+
+    /// Generate Metal kernel code for GPU-targeted dispatch operations.
+    ///
+    /// This is the primary integration point for Metal kernel generation in
+    /// the compilation pipeline. It takes a verified dispatch plan and compute
+    /// graph, and produces all MSL kernel sources plus host-side dispatch code.
+    ///
+    /// Typical usage:
+    /// ```ignore
+    /// let plan = pipeline.generate_and_verify_dispatch(&graph, &recs)?;
+    /// let metal = pipeline.emit_metal_kernels(&plan, &graph)?;
+    /// // metal.kernels contains MSL sources to compile with `xcrun metal`
+    /// // metal.dispatch_code contains Objective-C host dispatch code
+    /// ```
+    pub fn emit_metal_kernels(
+        &self,
+        plan: &DispatchPlan,
+        graph: &ComputeGraph,
+    ) -> Result<crate::metal_emitter::MetalOutput, PipelineError> {
+        crate::metal_emitter::emit_metal_kernels(plan, graph)
+            .map_err(PipelineError::from)
     }
 }
 

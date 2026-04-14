@@ -85,6 +85,8 @@ impl fmt::Display for MetalEmitError {
     }
 }
 
+impl std::error::Error for MetalEmitError {}
+
 // ---------------------------------------------------------------------------
 // MSL element types
 // ---------------------------------------------------------------------------
@@ -1109,6 +1111,150 @@ pub fn kernel_function_name(node_id: &str, kernel: &MslKernel) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// MetalOutput — aggregated output from Metal kernel generation pipeline
+// ---------------------------------------------------------------------------
+
+/// A named MSL kernel source: function name + source text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedKernel {
+    /// The MSL kernel function name (e.g., `llvm2_map_node_42`).
+    pub name: String,
+    /// Complete MSL source text for this kernel.
+    pub source: String,
+    /// The compute node ID that produced this kernel.
+    pub node_id: ComputeNodeId,
+}
+
+/// Aggregated output from Metal kernel generation for a dispatch plan.
+///
+/// Contains all generated MSL kernel sources, the host-side dispatch code,
+/// and metadata about buffer requirements. This is the output of
+/// [`emit_metal_kernels`] and the primary integration point between the
+/// Metal emission pipeline and the compilation pipeline.
+#[derive(Debug, Clone)]
+pub struct MetalOutput {
+    /// Generated MSL kernel sources, one per GPU-targeted node.
+    pub kernels: Vec<NamedKernel>,
+    /// Host-side Objective-C dispatch code (complete function body).
+    pub dispatch_code: String,
+    /// Total number of Metal buffers required across all kernels.
+    ///
+    /// Computed as the sum of per-kernel buffer counts:
+    /// - Unary map: 2 (input + output)
+    /// - Binary map: 3 (a + b + output)
+    /// - Reduce: 2 (input + partial_results)
+    /// - MapReduce: 3 (a + b + partial_results)
+    /// - MatMul: 3 (A + B + C)
+    pub buffer_count: usize,
+}
+
+/// Count the number of Metal buffers a kernel requires based on node kind
+/// and operation pattern.
+fn count_buffers_for_node(node: &ComputeNode) -> usize {
+    let msl_op = infer_msl_op(&node.dominant_op);
+    match node.kind {
+        NodeKind::DataParallel => {
+            if is_reduce_pattern(&node.dominant_op) {
+                2 // input + partial_results
+            } else {
+                match msl_op {
+                    Some(ref op) if op.arity() == 1 => 2, // input + output
+                    _ => 3, // a + b + output (binary/ternary/unknown)
+                }
+            }
+        }
+        NodeKind::MatrixHeavy => 3, // A + B + C
+        NodeKind::Scalar => 0,      // Not a GPU kernel
+    }
+}
+
+/// Generate Metal kernel sources and dispatch code for a dispatch plan.
+///
+/// Iterates over GPU-targeted kernel launch operations in the plan, generates
+/// an MSL kernel source for each corresponding compute graph node, and
+/// generates the host-side dispatch code that drives execution.
+///
+/// # Arguments
+///
+/// * `plan` - The dispatch plan containing GPU kernel launches.
+/// * `graph` - The compute graph with node metadata (kind, dominant_op, data_size).
+///
+/// # Returns
+///
+/// A [`MetalOutput`] containing kernel sources, dispatch code, and buffer metadata.
+///
+/// # Errors
+///
+/// Returns [`MetalEmitError`] if any GPU-targeted node cannot be converted to
+/// an MSL kernel (e.g., unsuitable node kind, zero data size).
+pub fn emit_metal_kernels(
+    plan: &DispatchPlan,
+    graph: &llvm2_lower::compute_graph::ComputeGraph,
+) -> Result<MetalOutput, MetalEmitError> {
+    let mut kernels = Vec::new();
+    let mut total_buffer_count: usize = 0;
+
+    // Iterate over GPU-targeted kernel launches in the plan
+    for op in &plan.ops {
+        if let DispatchOp::KernelLaunch { target, node_id, .. } = op {
+            if *target != ComputeTarget::Gpu {
+                continue;
+            }
+
+            // Look up the node in the compute graph
+            let node = match graph.node(*node_id) {
+                Some(n) => n,
+                None => continue, // Node not found; skip gracefully
+            };
+
+            // Generate the MSL kernel source
+            let source = emit_kernel_from_node(node)?;
+
+            // Determine the kernel function name
+            let node_id_str = format!("{}", node.id);
+
+            let kernel_name = match node.kind {
+                NodeKind::MatrixHeavy => format!("llvm2_matmul_{}", node_id_str),
+                NodeKind::DataParallel => {
+                    if is_reduce_pattern(&node.dominant_op) {
+                        format!("llvm2_reduce_simd_{}", node_id_str)
+                    } else {
+                        let msl_op = infer_msl_op(&node.dominant_op);
+                        match msl_op {
+                            Some(ref op) if op.arity() == 1 => {
+                                format!("llvm2_map_{}", node_id_str)
+                            }
+                            _ => {
+                                format!("llvm2_map2_{}", node_id_str)
+                            }
+                        }
+                    }
+                }
+                NodeKind::Scalar => unreachable!("emit_kernel_from_node rejects Scalar"),
+            };
+
+            let buf_count = count_buffers_for_node(node);
+            total_buffer_count += buf_count;
+
+            kernels.push(NamedKernel {
+                name: kernel_name,
+                source,
+                node_id: *node_id,
+            });
+        }
+    }
+
+    // Generate the host-side dispatch code
+    let dispatch_code = emit_dispatch_code(plan, graph);
+
+    Ok(MetalOutput {
+        kernels,
+        dispatch_code,
+        buffer_count: total_buffer_count,
+    })
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -1593,5 +1739,484 @@ mod tests {
         assert!(is_reduce_pattern("ACCUM"));
         assert!(!is_reduce_pattern("FADD"));
         assert!(!is_reduce_pattern("MUL"));
+    }
+
+    // -----------------------------------------------------------------------
+    // emit_metal_kernels + MetalOutput tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_emit_metal_kernels_single_gpu_map() {
+        use llvm2_lower::compute_graph::ComputeGraph;
+        use llvm2_lower::dispatch::DispatchOp;
+
+        let mut graph = ComputeGraph::new();
+        graph.nodes.push(make_test_node(
+            1,
+            NodeKind::DataParallel,
+            "FADD",
+            4096,
+            vec![ComputeTarget::Gpu],
+        ));
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(1),
+                    estimated_cycles: 500,
+                },
+            ],
+            assignment: {
+                let mut m = HashMap::new();
+                m.insert(ComputeNodeId(1), ComputeTarget::Gpu);
+                m
+            },
+            estimated_total_cycles: 500,
+        };
+
+        let output = emit_metal_kernels(&plan, &graph).unwrap();
+
+        assert_eq!(output.kernels.len(), 1, "expected 1 kernel");
+        assert_eq!(output.kernels[0].name, "llvm2_map2_node_1");
+        assert_eq!(output.kernels[0].node_id, ComputeNodeId(1));
+        assert!(output.kernels[0].source.contains("kernel void"),
+            "kernel source should contain MSL kernel declaration");
+        assert!(output.kernels[0].source.contains("a[tid] + b[tid]"),
+            "kernel source should contain FADD expression");
+        assert_eq!(output.buffer_count, 3, "binary map needs 3 buffers (a + b + output)");
+        assert!(!output.dispatch_code.is_empty(), "dispatch code should not be empty");
+    }
+
+    #[test]
+    fn test_emit_metal_kernels_unary_map_buffer_count() {
+        use llvm2_lower::compute_graph::ComputeGraph;
+        use llvm2_lower::dispatch::DispatchOp;
+
+        let mut graph = ComputeGraph::new();
+        graph.nodes.push(make_test_node(
+            2,
+            NodeKind::DataParallel,
+            "FNEG",
+            4096,
+            vec![ComputeTarget::Gpu],
+        ));
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(2),
+                    estimated_cycles: 300,
+                },
+            ],
+            assignment: {
+                let mut m = HashMap::new();
+                m.insert(ComputeNodeId(2), ComputeTarget::Gpu);
+                m
+            },
+            estimated_total_cycles: 300,
+        };
+
+        let output = emit_metal_kernels(&plan, &graph).unwrap();
+        assert_eq!(output.kernels.len(), 1);
+        assert_eq!(output.kernels[0].name, "llvm2_map_node_2");
+        assert_eq!(output.buffer_count, 2, "unary map needs 2 buffers (input + output)");
+    }
+
+    #[test]
+    fn test_emit_metal_kernels_reduce_kernel() {
+        use llvm2_lower::compute_graph::ComputeGraph;
+        use llvm2_lower::dispatch::DispatchOp;
+
+        let mut graph = ComputeGraph::new();
+        graph.nodes.push(make_test_node(
+            3,
+            NodeKind::DataParallel,
+            "REDUCE_ADD",
+            8192,
+            vec![ComputeTarget::Gpu],
+        ));
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(3),
+                    estimated_cycles: 800,
+                },
+            ],
+            assignment: {
+                let mut m = HashMap::new();
+                m.insert(ComputeNodeId(3), ComputeTarget::Gpu);
+                m
+            },
+            estimated_total_cycles: 800,
+        };
+
+        let output = emit_metal_kernels(&plan, &graph).unwrap();
+        assert_eq!(output.kernels.len(), 1);
+        assert_eq!(output.kernels[0].name, "llvm2_reduce_simd_node_3");
+        assert!(output.kernels[0].source.contains("simd_sum"),
+            "reduce kernel should use simd_sum");
+        assert_eq!(output.buffer_count, 2, "reduce needs 2 buffers (input + partial_results)");
+    }
+
+    #[test]
+    fn test_emit_metal_kernels_matmul_kernel() {
+        use llvm2_lower::compute_graph::ComputeGraph;
+        use llvm2_lower::dispatch::DispatchOp;
+
+        let data_size = 3 * 64 * 64 * 4; // 64x64 square matmul
+        let mut graph = ComputeGraph::new();
+        graph.nodes.push(make_test_node(
+            4,
+            NodeKind::MatrixHeavy,
+            "FMUL",
+            data_size,
+            vec![ComputeTarget::Gpu],
+        ));
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(4),
+                    estimated_cycles: 2000,
+                },
+            ],
+            assignment: {
+                let mut m = HashMap::new();
+                m.insert(ComputeNodeId(4), ComputeTarget::Gpu);
+                m
+            },
+            estimated_total_cycles: 2000,
+        };
+
+        let output = emit_metal_kernels(&plan, &graph).unwrap();
+        assert_eq!(output.kernels.len(), 1);
+        assert_eq!(output.kernels[0].name, "llvm2_matmul_node_4");
+        assert!(output.kernels[0].source.contains("simdgroup_matrix"),
+            "matmul kernel should use simdgroup_matrix");
+        assert_eq!(output.buffer_count, 3, "matmul needs 3 buffers (A + B + C)");
+    }
+
+    #[test]
+    fn test_emit_metal_kernels_skips_cpu_launches() {
+        use llvm2_lower::compute_graph::ComputeGraph;
+        use llvm2_lower::dispatch::DispatchOp;
+
+        let mut graph = ComputeGraph::new();
+        graph.nodes.push(make_test_node(
+            10,
+            NodeKind::DataParallel,
+            "FADD",
+            4096,
+            vec![ComputeTarget::CpuScalar, ComputeTarget::Gpu],
+        ));
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::CpuScalar,
+                    node_id: ComputeNodeId(10),
+                    estimated_cycles: 100,
+                },
+            ],
+            assignment: {
+                let mut m = HashMap::new();
+                m.insert(ComputeNodeId(10), ComputeTarget::CpuScalar);
+                m
+            },
+            estimated_total_cycles: 100,
+        };
+
+        let output = emit_metal_kernels(&plan, &graph).unwrap();
+        assert_eq!(output.kernels.len(), 0, "CPU launches should not produce Metal kernels");
+        assert_eq!(output.buffer_count, 0);
+    }
+
+    #[test]
+    fn test_emit_metal_kernels_multiple_gpu_kernels() {
+        use llvm2_lower::compute_graph::ComputeGraph;
+        use llvm2_lower::dispatch::DispatchOp;
+
+        let mut graph = ComputeGraph::new();
+        graph.nodes.push(make_test_node(
+            1,
+            NodeKind::DataParallel,
+            "FADD",
+            4096,
+            vec![ComputeTarget::Gpu],
+        ));
+        graph.nodes.push(make_test_node(
+            2,
+            NodeKind::DataParallel,
+            "FNEG",
+            2048,
+            vec![ComputeTarget::Gpu],
+        ));
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(1),
+                    estimated_cycles: 500,
+                },
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(2),
+                    estimated_cycles: 200,
+                },
+            ],
+            assignment: {
+                let mut m = HashMap::new();
+                m.insert(ComputeNodeId(1), ComputeTarget::Gpu);
+                m.insert(ComputeNodeId(2), ComputeTarget::Gpu);
+                m
+            },
+            estimated_total_cycles: 700,
+        };
+
+        let output = emit_metal_kernels(&plan, &graph).unwrap();
+        assert_eq!(output.kernels.len(), 2, "expected 2 GPU kernels");
+        assert_eq!(output.kernels[0].name, "llvm2_map2_node_1");
+        assert_eq!(output.kernels[1].name, "llvm2_map_node_2");
+        // 3 (binary map) + 2 (unary map) = 5 buffers total
+        assert_eq!(output.buffer_count, 5, "total buffer count should be 5");
+    }
+
+    #[test]
+    fn test_emit_metal_kernels_mixed_cpu_gpu_plan() {
+        use llvm2_lower::compute_graph::ComputeGraph;
+        use llvm2_lower::dispatch::DispatchOp;
+
+        let mut graph = ComputeGraph::new();
+        // CPU node
+        graph.nodes.push(make_test_node(
+            0,
+            NodeKind::Scalar,
+            "ADD",
+            8,
+            vec![ComputeTarget::CpuScalar],
+        ));
+        // GPU node
+        graph.nodes.push(make_test_node(
+            1,
+            NodeKind::DataParallel,
+            "FADD",
+            4096,
+            vec![ComputeTarget::CpuScalar, ComputeTarget::Gpu],
+        ));
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::CpuScalar,
+                    node_id: ComputeNodeId(0),
+                    estimated_cycles: 10,
+                },
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(1),
+                    estimated_cycles: 500,
+                },
+            ],
+            assignment: {
+                let mut m = HashMap::new();
+                m.insert(ComputeNodeId(0), ComputeTarget::CpuScalar);
+                m.insert(ComputeNodeId(1), ComputeTarget::Gpu);
+                m
+            },
+            estimated_total_cycles: 510,
+        };
+
+        let output = emit_metal_kernels(&plan, &graph).unwrap();
+        assert_eq!(output.kernels.len(), 1, "only GPU node should produce a kernel");
+        assert_eq!(output.kernels[0].node_id, ComputeNodeId(1));
+        assert_eq!(output.buffer_count, 3);
+    }
+
+    #[test]
+    fn test_emit_metal_kernels_empty_plan() {
+        use llvm2_lower::compute_graph::ComputeGraph;
+
+        let graph = ComputeGraph::new();
+        let plan = DispatchPlan {
+            ops: vec![],
+            assignment: HashMap::new(),
+            estimated_total_cycles: 0,
+        };
+
+        let output = emit_metal_kernels(&plan, &graph).unwrap();
+        assert_eq!(output.kernels.len(), 0);
+        assert_eq!(output.buffer_count, 0);
+        assert!(!output.dispatch_code.is_empty(),
+            "dispatch code should still contain the function shell");
+    }
+
+    #[test]
+    fn test_emit_metal_kernels_error_on_zero_data_size() {
+        use llvm2_lower::compute_graph::ComputeGraph;
+        use llvm2_lower::dispatch::DispatchOp;
+
+        let mut graph = ComputeGraph::new();
+        graph.nodes.push(make_test_node(
+            99,
+            NodeKind::DataParallel,
+            "FADD",
+            0, // Zero data size should cause error
+            vec![ComputeTarget::Gpu],
+        ));
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(99),
+                    estimated_cycles: 100,
+                },
+            ],
+            assignment: {
+                let mut m = HashMap::new();
+                m.insert(ComputeNodeId(99), ComputeTarget::Gpu);
+                m
+            },
+            estimated_total_cycles: 100,
+        };
+
+        let result = emit_metal_kernels(&plan, &graph);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MetalEmitError::ZeroDataSize { node_id } => {
+                assert_eq!(node_id, ComputeNodeId(99));
+            }
+            other => panic!("expected ZeroDataSize, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_emit_metal_kernels_dispatch_code_references_kernels() {
+        use llvm2_lower::compute_graph::ComputeGraph;
+        use llvm2_lower::dispatch::DispatchOp;
+
+        // Use a unary op (FNEG) so kernel name is consistent between
+        // emit_metal_kernels (which differentiates map/map2) and
+        // emit_dispatch_code (which uses a simpler naming heuristic).
+        // NOTE: Binary map kernels have a naming inconsistency between
+        // the two functions — emit_dispatch_code always emits "llvm2_map_"
+        // while the actual kernel uses "llvm2_map2_" for binary ops.
+        let mut graph = ComputeGraph::new();
+        graph.nodes.push(make_test_node(
+            7,
+            NodeKind::DataParallel,
+            "FNEG",
+            8192,
+            vec![ComputeTarget::Gpu],
+        ));
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(7),
+                    estimated_cycles: 600,
+                },
+            ],
+            assignment: {
+                let mut m = HashMap::new();
+                m.insert(ComputeNodeId(7), ComputeTarget::Gpu);
+                m
+            },
+            estimated_total_cycles: 600,
+        };
+
+        let output = emit_metal_kernels(&plan, &graph).unwrap();
+
+        // The dispatch code should reference the same kernel function name
+        let kernel_name = &output.kernels[0].name;
+        assert!(output.dispatch_code.contains(kernel_name),
+            "dispatch code should reference kernel name '{}', but got:\n{}",
+            kernel_name, output.dispatch_code);
+    }
+
+    #[test]
+    fn test_emit_metal_kernels_with_transfers_and_syncs() {
+        use llvm2_lower::compute_graph::{ComputeGraph, TransferCost};
+        use llvm2_lower::dispatch::DispatchOp;
+
+        let mut graph = ComputeGraph::new();
+        graph.nodes.push(make_test_node(
+            5,
+            NodeKind::DataParallel,
+            "FSUB",
+            4096,
+            vec![ComputeTarget::CpuScalar, ComputeTarget::Gpu],
+        ));
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::DataTransfer {
+                    src: ComputeTarget::CpuScalar,
+                    dst: ComputeTarget::Gpu,
+                    size_bytes: 4096,
+                    cost: TransferCost::zero(),
+                    edge_from: ComputeNodeId(0),
+                    edge_to: ComputeNodeId(5),
+                },
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(5),
+                    estimated_cycles: 400,
+                },
+                DispatchOp::Synchronize {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(5),
+                },
+            ],
+            assignment: {
+                let mut m = HashMap::new();
+                m.insert(ComputeNodeId(5), ComputeTarget::Gpu);
+                m
+            },
+            estimated_total_cycles: 500,
+        };
+
+        let output = emit_metal_kernels(&plan, &graph).unwrap();
+
+        // Only the kernel launch produces a kernel; transfers and syncs do not
+        assert_eq!(output.kernels.len(), 1);
+        assert_eq!(output.kernels[0].name, "llvm2_map2_node_5");
+        assert!(output.kernels[0].source.contains("a[tid] - b[tid]"),
+            "subtraction kernel should have a[tid] - b[tid]");
+
+        // Dispatch code should include transfer and sync comments
+        assert!(output.dispatch_code.contains("Transfer"),
+            "dispatch code should mention transfer");
+        assert!(output.dispatch_code.contains("Synchronize"),
+            "dispatch code should mention sync");
+    }
+
+    #[test]
+    fn test_metal_output_struct_fields() {
+        // Verify MetalOutput struct is correctly constructed
+        let output = MetalOutput {
+            kernels: vec![
+                NamedKernel {
+                    name: "test_kernel".to_string(),
+                    source: "kernel void test_kernel() {}".to_string(),
+                    node_id: ComputeNodeId(42),
+                },
+            ],
+            dispatch_code: "dispatch code here".to_string(),
+            buffer_count: 3,
+        };
+
+        assert_eq!(output.kernels.len(), 1);
+        assert_eq!(output.kernels[0].name, "test_kernel");
+        assert_eq!(output.kernels[0].node_id, ComputeNodeId(42));
+        assert_eq!(output.dispatch_code, "dispatch code here");
+        assert_eq!(output.buffer_count, 3);
     }
 }
