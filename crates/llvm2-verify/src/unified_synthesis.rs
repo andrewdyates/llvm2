@@ -204,7 +204,8 @@ pub struct UnifiedSearchConfig {
     /// Whether to include NEON candidates in the search.
     pub include_neon: bool,
     /// NEON vector arrangements to search. Default: S2 (2x32-bit, testable
-    /// with the 64-bit evaluator).
+    /// with the 64-bit evaluator), S4 (4x32-bit, 128-bit), D2 (2x64-bit,
+    /// 128-bit). S4 and D2 cover the full 128-bit NEON register file.
     pub neon_arrangements: Vec<VectorArrangement>,
     /// Interesting shift amounts for NEON SHL/USHR (must be < lane_bits).
     pub neon_shift_amounts: Vec<u32>,
@@ -215,8 +216,14 @@ impl Default for UnifiedSearchConfig {
         Self {
             scalar: SearchConfig::default(),
             include_neon: true,
-            // S2 (2x32-bit in 64-bit) is testable with the u64 evaluator
-            neon_arrangements: vec![VectorArrangement::S2],
+            // S2 (2x32-bit in 64-bit) is testable with the u64 evaluator.
+            // S4 (4x32-bit, 128-bit) and D2 (2x64-bit, 128-bit) cover the
+            // full 128-bit NEON register file for SIMD synthesis (#166).
+            neon_arrangements: vec![
+                VectorArrangement::S2,
+                VectorArrangement::S4,
+                VectorArrangement::D2,
+            ],
             neon_shift_amounts: vec![1, 2, 4],
         }
     }
@@ -593,7 +600,7 @@ impl UnifiedCegisLoop {
         }
     }
 
-    /// Create with default configuration (scalar + NEON S2).
+    /// Create with default configuration (scalar + NEON S2/S4/D2).
     pub fn with_defaults() -> Self {
         Self::new(10, 5000, UnifiedSearchConfig::default())
     }
@@ -918,6 +925,75 @@ mod tests {
             .filter(|c| matches!(c.target, SynthTarget::Neon(_)))
             .count();
         assert_eq!(neon_count, 0, "Should have no NEON candidates when disabled");
+    }
+
+    // -----------------------------------------------------------------------
+    // Default config includes 128-bit NEON arrangements (#166)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_default_config_includes_128bit_neon() {
+        let config = UnifiedSearchConfig::default();
+        assert!(
+            config.neon_arrangements.contains(&VectorArrangement::S4),
+            "Default config should include S4 (4x32-bit, 128-bit NEON)"
+        );
+        assert!(
+            config.neon_arrangements.contains(&VectorArrangement::D2),
+            "Default config should include D2 (2x64-bit, 128-bit NEON)"
+        );
+        // S2 should still be present
+        assert!(
+            config.neon_arrangements.contains(&VectorArrangement::S2),
+            "Default config should still include S2 (2x32-bit, 64-bit)"
+        );
+    }
+
+    #[test]
+    fn test_all_candidates_include_128bit_neon_targets() {
+        let config = UnifiedSearchConfig::default();
+        let all = UnifiedSearchSpace::all_candidates("x", 8, &config);
+
+        let s4_count = all
+            .iter()
+            .filter(|c| matches!(c.target, SynthTarget::Neon(VectorArrangement::S4)))
+            .count();
+        let d2_count = all
+            .iter()
+            .filter(|c| matches!(c.target, SynthTarget::Neon(VectorArrangement::D2)))
+            .count();
+
+        assert!(s4_count > 0, "Should have S4 (128-bit) NEON candidates, got 0");
+        assert!(d2_count > 0, "Should have D2 (128-bit) NEON candidates, got 0");
+    }
+
+    #[test]
+    fn test_neon_candidates_s4_nonempty() {
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::S4, &config);
+        assert!(
+            !candidates.is_empty(),
+            "NEON S4 (128-bit) search should produce candidates"
+        );
+        // Should have identity + various ops
+        assert!(
+            candidates.len() > 5,
+            "Expected multiple S4 candidates, got {}",
+            candidates.len()
+        );
+    }
+
+    #[test]
+    fn test_neon_candidates_d2_skips_mul() {
+        // D2 (2x64-bit) does not support MUL on AArch64 NEON
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::D2, &config);
+        assert!(
+            !candidates.iter().any(|c| c.name.contains("NEON_MUL")),
+            "D2 candidates should NOT include NEON_MUL (unsupported on AArch64)"
+        );
     }
 
     // -----------------------------------------------------------------------

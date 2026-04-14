@@ -812,7 +812,7 @@ mod tests {
     use llvm2_ir::function::{MachFunction, Signature, Type};
     use llvm2_ir::inst::{AArch64Opcode, MachInst};
     use llvm2_ir::operand::MachOperand;
-    use llvm2_ir::regs::{X0, X1, X2, X19};
+    use llvm2_ir::regs::{X0, X1, X2, X19, W0, W1, W2};
     use llvm2_ir::types::BlockId;
 
     /// Helper: create a minimal function with instructions in the entry block.
@@ -2016,7 +2016,7 @@ mod tests {
 
     #[test]
     fn test_encode_csinv() {
-        // CSINV X0, X1, X2, NE (cond=1)
+        // CSINV X0, X1, X2, NE (cond=1) — 64-bit form
         let inst = MachInst::new(
             AArch64Opcode::Csinv,
             vec![
@@ -2031,11 +2031,38 @@ mod tests {
         assert_eq!((word >> 10) & 0b11, 0b00, "CSINV op2 should be 00");
         // Check bit 30 = 1 (CSINV uses op=1)
         assert_eq!((word >> 30) & 1, 1, "CSINV should have bit 30 = 1");
+        // S-field (bit 29) must be 0 — CSINV is non-flag-setting (#165)
+        assert_eq!((word >> 29) & 1, 0, "CSINV S-field (bit 29) must be 0");
+        // sf (bit 31) = 1 for 64-bit
+        assert_eq!((word >> 31) & 1, 1, "64-bit CSINV should have sf=1");
+    }
+
+    #[test]
+    fn test_encode_csinv_32bit() {
+        // CSINV W0, W1, W2, NE (cond=1) — 32-bit form (#165)
+        let inst = MachInst::new(
+            AArch64Opcode::Csinv,
+            vec![
+                MachOperand::PReg(W0),
+                MachOperand::PReg(W1),
+                MachOperand::PReg(W2),
+                MachOperand::Imm(1), // NE condition
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        // Check op2 field = 00 (CSINV)
+        assert_eq!((word >> 10) & 0b11, 0b00, "32-bit CSINV op2 should be 00");
+        // Check bit 30 = 1 (CSINV uses op=1)
+        assert_eq!((word >> 30) & 1, 1, "32-bit CSINV should have bit 30 = 1");
+        // S-field (bit 29) must be 0 — CSINV is non-flag-setting (#165)
+        assert_eq!((word >> 29) & 1, 0, "32-bit CSINV S-field (bit 29) must be 0");
+        // sf (bit 31) = 0 for 32-bit
+        assert_eq!((word >> 31) & 1, 0, "32-bit CSINV should have sf=0");
     }
 
     #[test]
     fn test_encode_csneg() {
-        // CSNEG X0, X1, X2, EQ (cond=0)
+        // CSNEG X0, X1, X2, EQ (cond=0) — 64-bit form
         let inst = MachInst::new(
             AArch64Opcode::Csneg,
             vec![
@@ -2050,6 +2077,33 @@ mod tests {
         assert_eq!((word >> 10) & 0b11, 0b01, "CSNEG op2 should be 01");
         // Check bit 30 = 1 (CSNEG uses op=1)
         assert_eq!((word >> 30) & 1, 1, "CSNEG should have bit 30 = 1");
+        // S-field (bit 29) must be 0 — CSNEG is non-flag-setting (#165)
+        assert_eq!((word >> 29) & 1, 0, "CSNEG S-field (bit 29) must be 0");
+        // sf (bit 31) = 1 for 64-bit
+        assert_eq!((word >> 31) & 1, 1, "64-bit CSNEG should have sf=1");
+    }
+
+    #[test]
+    fn test_encode_csneg_32bit() {
+        // CSNEG W0, W1, W2, EQ (cond=0) — 32-bit form (#165)
+        let inst = MachInst::new(
+            AArch64Opcode::Csneg,
+            vec![
+                MachOperand::PReg(W0),
+                MachOperand::PReg(W1),
+                MachOperand::PReg(W2),
+                MachOperand::Imm(0),
+            ],
+        );
+        let word = encode_inst(&inst).unwrap();
+        // Check op2 field = 01 (CSNEG)
+        assert_eq!((word >> 10) & 0b11, 0b01, "32-bit CSNEG op2 should be 01");
+        // Check bit 30 = 1 (CSNEG uses op=1)
+        assert_eq!((word >> 30) & 1, 1, "32-bit CSNEG should have bit 30 = 1");
+        // S-field (bit 29) must be 0 — CSNEG is non-flag-setting (#165)
+        assert_eq!((word >> 29) & 1, 0, "32-bit CSNEG S-field (bit 29) must be 0");
+        // sf (bit 31) = 0 for 32-bit
+        assert_eq!((word >> 31) & 1, 0, "32-bit CSNEG should have sf=0");
     }
 
     #[test]
