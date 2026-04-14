@@ -34,6 +34,57 @@
 
 use std::fmt;
 
+use llvm2_lower::compute_graph::{ComputeNode, ComputeNodeId, NodeKind};
+use llvm2_lower::dispatch::{DispatchOp, DispatchPlan};
+use llvm2_lower::target_analysis::ComputeTarget;
+
+// ---------------------------------------------------------------------------
+// Metal emit errors
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur during Metal kernel generation from ComputeGraph nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetalEmitError {
+    /// Node kind is not suitable for GPU execution (e.g., scalar).
+    UnsuitableNodeKind {
+        node_id: ComputeNodeId,
+        kind: NodeKind,
+    },
+    /// GPU is not a legal target for this node.
+    GpuNotLegal {
+        node_id: ComputeNodeId,
+    },
+    /// Node has zero data size, cannot compute element count.
+    ZeroDataSize {
+        node_id: ComputeNodeId,
+    },
+    /// MatMul node dimensions could not be inferred (data size not
+    /// a valid square or rectangular matrix).
+    MatMulDimensionError {
+        node_id: ComputeNodeId,
+        data_size_bytes: u64,
+    },
+}
+
+impl fmt::Display for MetalEmitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MetalEmitError::UnsuitableNodeKind { node_id, kind } => {
+                write!(f, "node {} has kind {} which is not suitable for Metal GPU execution", node_id, kind)
+            }
+            MetalEmitError::GpuNotLegal { node_id } => {
+                write!(f, "GPU is not a legal compute target for node {}", node_id)
+            }
+            MetalEmitError::ZeroDataSize { node_id } => {
+                write!(f, "node {} has zero data_size_bytes, cannot infer element count", node_id)
+            }
+            MetalEmitError::MatMulDimensionError { node_id, data_size_bytes } => {
+                write!(f, "cannot infer MatMul dimensions for node {} with data_size_bytes={}", node_id, data_size_bytes)
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MSL element types
 // ---------------------------------------------------------------------------
@@ -664,6 +715,375 @@ impl MetalKernelEmitter {
 }
 
 // ---------------------------------------------------------------------------
+// ComputeGraph -> MSL kernel generation
+// ---------------------------------------------------------------------------
+
+/// Default threadgroup size for 1D kernels.
+const DEFAULT_THREADGROUP_SIZE: u32 = 256;
+
+/// Default tile size for MatMul kernels (8x8 simdgroup_matrix tiles).
+const DEFAULT_MATMUL_TILE: u32 = 8;
+
+/// Infer MSL element type from a ComputeNode's dominant operation name.
+///
+/// Floating-point ops (FADD, FSUB, FMUL, FDIV, FNEG, FMA) map to Float.
+/// Integer ops (ADD, SUB, MUL, SDIV, UDIV) map to Int.
+/// Unsigned ops (UADD, USUB, UMUL) map to Uint.
+/// Default is Float (safest for GPU workloads).
+pub fn infer_element_type(dominant_op: &str) -> MslElementType {
+    let op = dominant_op.to_uppercase();
+    if op.starts_with('F') || op == "FMA" || op.contains("FLOAT") {
+        MslElementType::Float
+    } else if op.starts_with('U') || op.contains("UINT") || op.contains("UNSIGNED") {
+        MslElementType::Uint
+    } else if op.starts_with("REDUCE") {
+        // Reduce ops: check suffix for type hint
+        if op.contains("FLOAT") || op.contains("FP") {
+            MslElementType::Float
+        } else {
+            MslElementType::Float // default reduce to float
+        }
+    } else if op == "ADD" || op == "SUB" || op == "MUL" || op == "SDIV"
+        || op == "NEG" || op == "ABS" || op.contains("INT")
+    {
+        MslElementType::Int
+    } else {
+        MslElementType::Float
+    }
+}
+
+/// Infer the MslOp for the map body from a dominant operation name.
+///
+/// Returns `None` for reduce-like operations that should use `ParallelReduce`.
+fn infer_msl_op(dominant_op: &str) -> Option<MslOp> {
+    let op = dominant_op.to_uppercase();
+    match op.as_str() {
+        "ADD" | "FADD" => Some(MslOp::Add),
+        "SUB" | "FSUB" => Some(MslOp::Sub),
+        "MUL" | "FMUL" => Some(MslOp::Mul),
+        "SDIV" | "UDIV" | "FDIV" | "DIV" => Some(MslOp::Div),
+        "NEG" | "FNEG" => Some(MslOp::Neg),
+        "ABS" | "FABS" => Some(MslOp::Abs),
+        "SQRT" | "FSQRT" => Some(MslOp::Sqrt),
+        "FMA" | "FFMA" => Some(MslOp::Fma),
+        "MIN" | "FMIN" => Some(MslOp::Min),
+        "MAX" | "FMAX" => Some(MslOp::Max),
+        _ => None,
+    }
+}
+
+/// Infer the MslReduceOp from a dominant operation name for reduce patterns.
+fn infer_reduce_op(dominant_op: &str) -> MslReduceOp {
+    let op = dominant_op.to_uppercase();
+    if op.contains("MUL") || op.contains("PROD") {
+        MslReduceOp::Mul
+    } else if op.contains("MIN") {
+        MslReduceOp::Min
+    } else if op.contains("MAX") {
+        MslReduceOp::Max
+    } else if op.contains("AND") {
+        MslReduceOp::BitwiseAnd
+    } else if op.contains("OR") {
+        MslReduceOp::BitwiseOr
+    } else if op.contains("XOR") {
+        MslReduceOp::BitwiseXor
+    } else {
+        // Default: additive reduction (sum)
+        MslReduceOp::Add
+    }
+}
+
+/// Returns true if the dominant_op looks like a reduction pattern.
+fn is_reduce_pattern(dominant_op: &str) -> bool {
+    let op = dominant_op.to_uppercase();
+    op.starts_with("REDUCE") || op.starts_with("SUM") || op.starts_with("PROD")
+        || op == "DOT" || op.starts_with("ACCUM")
+}
+
+/// Emit a complete MSL kernel source string for a ComputeGraph node.
+///
+/// This is the main entry point for converting ComputeGraph GPU nodes into
+/// Metal shader source code. It inspects the node's `kind`, `dominant_op`,
+/// and `data_size_bytes` to select the right kernel template and generate
+/// the MSL source.
+///
+/// # Errors
+///
+/// - `UnsuitableNodeKind` if the node is `Scalar` (should run on CPU).
+/// - `GpuNotLegal` if GPU is not in the node's `legal_targets`.
+/// - `ZeroDataSize` if `data_size_bytes` is 0.
+/// - `MatMulDimensionError` if MatMul dimensions cannot be inferred.
+pub fn emit_kernel_from_node(node: &ComputeNode) -> Result<String, MetalEmitError> {
+    // Validate: node must be suitable for GPU
+    if node.kind == NodeKind::Scalar {
+        return Err(MetalEmitError::UnsuitableNodeKind {
+            node_id: node.id,
+            kind: node.kind,
+        });
+    }
+
+    if !node.legal_targets.contains(&ComputeTarget::Gpu) {
+        return Err(MetalEmitError::GpuNotLegal { node_id: node.id });
+    }
+
+    if node.data_size_bytes == 0 {
+        return Err(MetalEmitError::ZeroDataSize { node_id: node.id });
+    }
+
+    let node_id_str = format!("{}", node.id);
+    let elem_type = infer_element_type(&node.dominant_op);
+    let emitter = MetalKernelEmitter::new(&node_id_str, elem_type);
+
+    // Compute element count from data size (4 bytes for float/int/uint, 2 for half)
+    let elem_bytes = match elem_type {
+        MslElementType::Half => 2u64,
+        MslElementType::Float | MslElementType::Int | MslElementType::Uint => 4u64,
+    };
+    let element_count = node.data_size_bytes / elem_bytes;
+
+    match node.kind {
+        NodeKind::DataParallel => {
+            if is_reduce_pattern(&node.dominant_op) {
+                // Emit a parallel reduce kernel
+                let reduce_op = infer_reduce_op(&node.dominant_op);
+                let kernel = MslKernel::parallel_reduce(
+                    reduce_op,
+                    true, // use SIMD acceleration by default
+                    element_count,
+                    DEFAULT_THREADGROUP_SIZE,
+                );
+                Ok(emitter.emit(&kernel))
+            } else {
+                // Emit a parallel map kernel
+                let msl_op = infer_msl_op(&node.dominant_op);
+                let (body_expr, input_count) = match msl_op {
+                    Some(ref op) if op.arity() == 1 => {
+                        (op.emit("input[tid]", "", ""), 1u32)
+                    }
+                    Some(ref op) if op.arity() == 2 => {
+                        (op.emit("a[tid]", "b[tid]", ""), 2u32)
+                    }
+                    Some(ref op) => {
+                        // Ternary ops: use 2 inputs + constant
+                        (op.emit("a[tid]", "b[tid]", "0"), 2u32)
+                    }
+                    None => {
+                        // Fallback: identity map
+                        ("input[tid]".to_string(), 1u32)
+                    }
+                };
+
+                let kernel = MslKernel::ParallelMap {
+                    body_expr,
+                    input_count,
+                    element_count,
+                    threadgroup_size: DEFAULT_THREADGROUP_SIZE,
+                };
+
+                Ok(emitter.emit(&kernel))
+            }
+        }
+
+        NodeKind::MatrixHeavy => {
+            // Infer square matrix dimensions from data size.
+            // For C = A*B where A is MxK and B is KxN, total data is:
+            //   (M*K + K*N + M*N) * elem_bytes
+            // For simplicity, assume square: M=K=N=dim, so 3*dim^2*elem_bytes = data_size
+            let total_elements = node.data_size_bytes / elem_bytes;
+            // 3*dim^2 = total_elements  =>  dim = sqrt(total_elements / 3)
+            let dim_sq = total_elements / 3;
+            let dim = (dim_sq as f64).sqrt() as u64;
+
+            if dim == 0 {
+                return Err(MetalEmitError::MatMulDimensionError {
+                    node_id: node.id,
+                    data_size_bytes: node.data_size_bytes,
+                });
+            }
+
+            let kernel = MslKernel::matmul(dim, dim, dim);
+            Ok(emitter.emit(&kernel))
+        }
+
+        NodeKind::Scalar => {
+            // Already handled above, but match arm is required
+            unreachable!()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host-side Metal dispatch code generation
+// ---------------------------------------------------------------------------
+
+/// Emit host-side Objective-C Metal dispatch code for a DispatchPlan.
+///
+/// Generates a complete dispatch function that:
+/// - Creates Metal buffers for data transfers
+/// - Creates compute pipeline states for each kernel
+/// - Encodes and dispatches compute commands
+/// - Inserts synchronization barriers
+///
+/// The generated code assumes `_device` (id<MTLDevice>), `_queue`
+/// (id<MTLCommandQueue>), and `_library` (id<MTLLibrary>) are in scope
+/// as instance variables.
+pub fn emit_dispatch_code(
+    plan: &DispatchPlan,
+    graph: &llvm2_lower::compute_graph::ComputeGraph,
+) -> String {
+    let mut out = String::new();
+
+    out.push_str("// Generated by LLVM2 — Metal dispatch code\n");
+    out.push_str(&format!(
+        "// Dispatch plan: {} ops ({} launches, {} transfers)\n\n",
+        plan.len(),
+        plan.count_launches(),
+        plan.count_transfers(),
+    ));
+
+    out.push_str("- (void)executeDispatchPlan {\n");
+    out.push_str("    id<MTLCommandBuffer> cmdBuf = [_queue commandBuffer];\n\n");
+
+    for (i, op) in plan.ops.iter().enumerate() {
+        match op {
+            DispatchOp::DataTransfer { src, dst, size_bytes, edge_from, edge_to, .. } => {
+                out.push_str(&format!(
+                    "    // Op {}: Transfer {} bytes ({:?} -> {:?})\n",
+                    i, size_bytes, src, dst,
+                ));
+                // On Apple UMA, shared memory means no explicit copy for CPU<->GPU.
+                if (*src == ComputeTarget::CpuScalar || *src == ComputeTarget::CpuSimd)
+                    && *dst == ComputeTarget::Gpu
+                {
+                    out.push_str("    // UMA: no explicit copy needed (shared memory)\n");
+                } else if *src == ComputeTarget::Gpu
+                    && (*dst == ComputeTarget::CpuScalar || *dst == ComputeTarget::CpuSimd)
+                {
+                    out.push_str("    // UMA: coherent after command buffer completion\n");
+                } else {
+                    out.push_str(&format!(
+                        "    id<MTLBuffer> xfer_{i} = [_device newBufferWithLength:{size} options:MTLResourceStorageModeShared];\n",
+                        i = i, size = size_bytes,
+                    ));
+                }
+                let _ = (edge_from, edge_to); // suppress unused warnings in doc
+                out.push('\n');
+            }
+
+            DispatchOp::KernelLaunch { target, node_id, estimated_cycles } => {
+                let node_id_str = format!("{}", node_id);
+                let kernel_name = if let Some(node) = graph.node(*node_id) {
+                    match node.kind {
+                        NodeKind::MatrixHeavy => format!("llvm2_matmul_{}", node_id_str),
+                        NodeKind::DataParallel => {
+                            if is_reduce_pattern(&node.dominant_op) {
+                                format!("llvm2_reduce_simd_{}", node_id_str)
+                            } else {
+                                format!("llvm2_map_{}", node_id_str)
+                            }
+                        }
+                        NodeKind::Scalar => format!("llvm2_scalar_{}", node_id_str),
+                    }
+                } else {
+                    format!("llvm2_kernel_{}", node_id_str)
+                };
+
+                out.push_str(&format!(
+                    "    // Op {}: Launch {:?} kernel '{}' (est. {} cycles)\n",
+                    i, target, kernel_name, estimated_cycles,
+                ));
+
+                if *target == ComputeTarget::Gpu {
+                    out.push_str(&format!(
+                        "    id<MTLFunction> fn_{i} = [_library newFunctionWithName:@\"{name}\"];\n",
+                        i = i, name = kernel_name,
+                    ));
+                    out.push_str(&format!(
+                        "    id<MTLComputePipelineState> pso_{i} = [_device newComputePipelineStateWithFunction:fn_{i} error:nil];\n",
+                        i = i,
+                    ));
+                    out.push_str(&format!(
+                        "    id<MTLComputeCommandEncoder> enc_{i} = [cmdBuf computeCommandEncoder];\n",
+                        i = i,
+                    ));
+                    out.push_str(&format!(
+                        "    [enc_{i} setComputePipelineState:pso_{i}];\n",
+                        i = i,
+                    ));
+
+                    // Dispatch dimensions from node metadata
+                    if let Some(node) = graph.node(*node_id) {
+                        let elem_type = infer_element_type(&node.dominant_op);
+                        let elem_bytes: u64 = match elem_type {
+                            MslElementType::Half => 2,
+                            _ => 4,
+                        };
+                        let element_count = node.data_size_bytes / elem_bytes.max(1);
+
+                        if node.kind == NodeKind::MatrixHeavy {
+                            let dim_sq = (element_count / 3).max(1);
+                            let dim = (dim_sq as f64).sqrt() as u64;
+                            let params = MetalDispatchParams::for_2d(dim, dim, DEFAULT_MATMUL_TILE);
+                            out.push_str(&format!(
+                                "    [enc_{i} dispatchThreads:MTLSizeMake({w}, {h}, 1) threadsPerThreadgroup:MTLSizeMake({tw}, {th}, 1)];\n",
+                                i = i,
+                                w = params.grid_size.width,
+                                h = params.grid_size.height,
+                                tw = params.threadgroup_size.width,
+                                th = params.threadgroup_size.height,
+                            ));
+                        } else {
+                            let params = MetalDispatchParams::for_1d(element_count, DEFAULT_THREADGROUP_SIZE);
+                            out.push_str(&format!(
+                                "    [enc_{i} dispatchThreads:MTLSizeMake({w}, 1, 1) threadsPerThreadgroup:MTLSizeMake({tw}, 1, 1)];\n",
+                                i = i,
+                                w = params.grid_size.width,
+                                tw = params.threadgroup_size.width,
+                            ));
+                        }
+                    }
+
+                    out.push_str(&format!("    [enc_{i} endEncoding];\n", i = i));
+                } else {
+                    out.push_str(&format!(
+                        "    // CPU execution for {} (not a Metal kernel)\n",
+                        node_id,
+                    ));
+                }
+                out.push('\n');
+            }
+
+            DispatchOp::Synchronize { target, .. } => {
+                out.push_str(&format!(
+                    "    // Op {}: Synchronize {:?}\n",
+                    i, target,
+                ));
+                if *target == ComputeTarget::Gpu {
+                    out.push_str("    [cmdBuf commit];\n");
+                    out.push_str("    [cmdBuf waitUntilCompleted];\n");
+                    out.push_str("    cmdBuf = [_queue commandBuffer];\n");
+                }
+                out.push('\n');
+            }
+
+            DispatchOp::CpuFallback { node_id, reason } => {
+                out.push_str(&format!(
+                    "    // Op {}: CPU fallback for {} ({})\n",
+                    i, node_id, reason,
+                ));
+                out.push('\n');
+            }
+        }
+    }
+
+    out.push_str("    [cmdBuf commit];\n");
+    out.push_str("    [cmdBuf waitUntilCompleted];\n");
+    out.push_str("}\n");
+
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Kernel function name generation
 // ---------------------------------------------------------------------------
 
@@ -696,6 +1116,7 @@ pub fn kernel_function_name(node_id: &str, kernel: &MslKernel) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_msl_element_type_display() {
@@ -798,5 +1219,379 @@ mod tests {
 
         let mm = MslKernel::matmul(8, 8, 8);
         assert_eq!(kernel_function_name("n3", &mm), "llvm2_matmul_n3");
+    }
+
+    // -----------------------------------------------------------------------
+    // ComputeGraph -> MSL kernel generation tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: construct a minimal ComputeNode for testing.
+    fn make_test_node(
+        id: u32,
+        kind: NodeKind,
+        dominant_op: &str,
+        data_size_bytes: u64,
+        legal_targets: Vec<ComputeTarget>,
+    ) -> ComputeNode {
+        ComputeNode {
+            id: ComputeNodeId(id),
+            instructions: vec![],
+            costs: HashMap::new(),
+            legal_targets,
+            kind,
+            data_size_bytes,
+            produced_values: vec![],
+            consumed_values: vec![],
+            dominant_op: dominant_op.to_string(),
+            target_legality: None,
+        }
+    }
+
+    #[test]
+    fn test_infer_element_type_float_ops() {
+        assert_eq!(infer_element_type("FADD"), MslElementType::Float);
+        assert_eq!(infer_element_type("FMUL"), MslElementType::Float);
+        assert_eq!(infer_element_type("FSUB"), MslElementType::Float);
+        assert_eq!(infer_element_type("FDIV"), MslElementType::Float);
+        assert_eq!(infer_element_type("FNEG"), MslElementType::Float);
+        assert_eq!(infer_element_type("FMA"), MslElementType::Float);
+    }
+
+    #[test]
+    fn test_infer_element_type_int_ops() {
+        assert_eq!(infer_element_type("ADD"), MslElementType::Int);
+        assert_eq!(infer_element_type("SUB"), MslElementType::Int);
+        assert_eq!(infer_element_type("MUL"), MslElementType::Int);
+        assert_eq!(infer_element_type("NEG"), MslElementType::Int);
+    }
+
+    #[test]
+    fn test_infer_element_type_uint_ops() {
+        assert_eq!(infer_element_type("UADD"), MslElementType::Uint);
+        assert_eq!(infer_element_type("UMUL"), MslElementType::Uint);
+    }
+
+    #[test]
+    fn test_emit_kernel_from_node_data_parallel_fadd() {
+        let node = make_test_node(
+            10,
+            NodeKind::DataParallel,
+            "FADD",
+            4096, // 1024 float elements
+            vec![ComputeTarget::CpuScalar, ComputeTarget::Gpu],
+        );
+
+        let source = emit_kernel_from_node(&node).unwrap();
+        // Should generate a binary map kernel: a[tid] + b[tid]
+        assert!(source.contains("kernel void llvm2_map2_node_10("),
+            "Expected binary map kernel, got:\n{}", source);
+        assert!(source.contains("a[tid] + b[tid]"),
+            "Expected add expression, got:\n{}", source);
+        assert!(source.contains("const device float*"),
+            "Expected float type, got:\n{}", source);
+        assert!(source.contains("if (tid >= 1024u)"),
+            "Expected bounds check for 1024 elements, got:\n{}", source);
+    }
+
+    #[test]
+    fn test_emit_kernel_from_node_data_parallel_neg() {
+        let node = make_test_node(
+            11,
+            NodeKind::DataParallel,
+            "NEG",
+            4000, // 1000 int elements
+            vec![ComputeTarget::CpuScalar, ComputeTarget::Gpu],
+        );
+
+        let source = emit_kernel_from_node(&node).unwrap();
+        // NEG is unary -> single input map kernel
+        assert!(source.contains("kernel void llvm2_map_node_11("),
+            "Expected unary map kernel, got:\n{}", source);
+        assert!(source.contains("-input[tid]"),
+            "Expected negation expression, got:\n{}", source);
+        assert!(source.contains("const device int*"),
+            "Expected int type for NEG, got:\n{}", source);
+    }
+
+    #[test]
+    fn test_emit_kernel_from_node_data_parallel_reduce_add() {
+        let node = make_test_node(
+            12,
+            NodeKind::DataParallel,
+            "REDUCE_ADD",
+            8192, // 2048 float elements
+            vec![ComputeTarget::CpuScalar, ComputeTarget::Gpu],
+        );
+
+        let source = emit_kernel_from_node(&node).unwrap();
+        // Should generate a SIMD reduce kernel
+        assert!(source.contains("llvm2_reduce_simd_node_12"),
+            "Expected SIMD reduce kernel, got:\n{}", source);
+        assert!(source.contains("simd_sum"),
+            "Expected simd_sum intrinsic for additive reduce, got:\n{}", source);
+        assert!(source.contains("threadgroup float*"),
+            "Expected float shared memory, got:\n{}", source);
+    }
+
+    #[test]
+    fn test_emit_kernel_from_node_data_parallel_reduce_max() {
+        let node = make_test_node(
+            13,
+            NodeKind::DataParallel,
+            "REDUCE_MAX",
+            4096,
+            vec![ComputeTarget::Gpu],
+        );
+
+        let source = emit_kernel_from_node(&node).unwrap();
+        assert!(source.contains("simd_max"),
+            "Expected simd_max intrinsic, got:\n{}", source);
+        assert!(source.contains("-INFINITY"),
+            "Expected -INFINITY identity for max reduce of float, got:\n{}", source);
+    }
+
+    #[test]
+    fn test_emit_kernel_from_node_matmul() {
+        // 3 * 64^2 * 4 = 49152 bytes for a 64x64 matmul (A + B + C)
+        let data_size = 3 * 64 * 64 * 4;
+        let node = make_test_node(
+            20,
+            NodeKind::MatrixHeavy,
+            "FMUL",
+            data_size,
+            vec![ComputeTarget::Gpu],
+        );
+
+        let source = emit_kernel_from_node(&node).unwrap();
+        assert!(source.contains("kernel void llvm2_matmul_node_20("),
+            "Expected matmul kernel, got:\n{}", source);
+        assert!(source.contains("simdgroup_matrix<float, 8, 8>"),
+            "Expected simdgroup_matrix usage, got:\n{}", source);
+        assert!(source.contains("simdgroup_multiply_accumulate"),
+            "Expected simdgroup_multiply_accumulate, got:\n{}", source);
+        assert!(source.contains("const uint M = 64u;"),
+            "Expected M=64, got:\n{}", source);
+    }
+
+    #[test]
+    fn test_emit_kernel_from_node_scalar_rejected() {
+        let node = make_test_node(
+            30,
+            NodeKind::Scalar,
+            "ADD",
+            1000,
+            vec![ComputeTarget::CpuScalar, ComputeTarget::Gpu],
+        );
+
+        let result = emit_kernel_from_node(&node);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MetalEmitError::UnsuitableNodeKind { node_id, kind } => {
+                assert_eq!(node_id.0, 30);
+                assert_eq!(kind, NodeKind::Scalar);
+            }
+            other => panic!("Expected UnsuitableNodeKind, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_emit_kernel_from_node_gpu_not_legal() {
+        let node = make_test_node(
+            31,
+            NodeKind::DataParallel,
+            "ADD",
+            1000,
+            vec![ComputeTarget::CpuScalar, ComputeTarget::CpuSimd],
+        );
+
+        let result = emit_kernel_from_node(&node);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MetalEmitError::GpuNotLegal { node_id } => {
+                assert_eq!(node_id.0, 31);
+            }
+            other => panic!("Expected GpuNotLegal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_emit_kernel_from_node_zero_data_size() {
+        let node = make_test_node(
+            32,
+            NodeKind::DataParallel,
+            "FADD",
+            0,
+            vec![ComputeTarget::Gpu],
+        );
+
+        let result = emit_kernel_from_node(&node);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MetalEmitError::ZeroDataSize { node_id } => {
+                assert_eq!(node_id.0, 32);
+            }
+            other => panic!("Expected ZeroDataSize, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_emit_kernel_from_node_sqrt_unary() {
+        let node = make_test_node(
+            14,
+            NodeKind::DataParallel,
+            "FSQRT",
+            2048, // 512 float elements
+            vec![ComputeTarget::Gpu],
+        );
+
+        let source = emit_kernel_from_node(&node).unwrap();
+        assert!(source.contains("kernel void llvm2_map_node_14("),
+            "Expected unary map kernel for sqrt, got:\n{}", source);
+        assert!(source.contains("sqrt(input[tid])"),
+            "Expected sqrt(input[tid]) expression, got:\n{}", source);
+    }
+
+    #[test]
+    fn test_emit_kernel_from_node_div_binary() {
+        let node = make_test_node(
+            15,
+            NodeKind::DataParallel,
+            "FDIV",
+            4096,
+            vec![ComputeTarget::Gpu],
+        );
+
+        let source = emit_kernel_from_node(&node).unwrap();
+        assert!(source.contains("a[tid] / b[tid]"),
+            "Expected division expression, got:\n{}", source);
+    }
+
+    #[test]
+    fn test_emit_kernel_from_node_unknown_op_fallback() {
+        let node = make_test_node(
+            16,
+            NodeKind::DataParallel,
+            "CUSTOM_OP",
+            4096,
+            vec![ComputeTarget::Gpu],
+        );
+
+        let source = emit_kernel_from_node(&node).unwrap();
+        // Unknown ops fall back to identity map
+        assert!(source.contains("input[tid]"),
+            "Expected identity fallback, got:\n{}", source);
+    }
+
+    #[test]
+    fn test_emit_dispatch_code_basic() {
+        use llvm2_lower::compute_graph::ComputeGraph;
+        use llvm2_lower::dispatch::DispatchOp;
+
+        let mut graph = ComputeGraph::new();
+        graph.nodes.push(make_test_node(
+            1,
+            NodeKind::DataParallel,
+            "FADD",
+            4096,
+            vec![ComputeTarget::Gpu],
+        ));
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(1),
+                    estimated_cycles: 500,
+                },
+            ],
+            assignment: {
+                let mut m = HashMap::new();
+                m.insert(ComputeNodeId(1), ComputeTarget::Gpu);
+                m
+            },
+            estimated_total_cycles: 500,
+        };
+
+        let code = emit_dispatch_code(&plan, &graph);
+        assert!(code.contains("executeDispatchPlan"),
+            "Expected function name in dispatch code, got:\n{}", code);
+        assert!(code.contains("llvm2_map_node_1"),
+            "Expected kernel name in dispatch code, got:\n{}", code);
+        assert!(code.contains("newComputePipelineState"),
+            "Expected PSO creation in dispatch code, got:\n{}", code);
+        assert!(code.contains("dispatchThreads"),
+            "Expected dispatch call, got:\n{}", code);
+        assert!(code.contains("[cmdBuf commit]"),
+            "Expected commit, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_emit_dispatch_code_with_transfer_and_sync() {
+        use llvm2_lower::compute_graph::{ComputeGraph, TransferCost};
+        use llvm2_lower::dispatch::DispatchOp;
+
+        let mut graph = ComputeGraph::new();
+        graph.nodes.push(make_test_node(
+            5,
+            NodeKind::DataParallel,
+            "FADD",
+            8192,
+            vec![ComputeTarget::Gpu],
+        ));
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::DataTransfer {
+                    src: ComputeTarget::CpuScalar,
+                    dst: ComputeTarget::Gpu,
+                    size_bytes: 8192,
+                    cost: TransferCost::zero(),
+                    edge_from: ComputeNodeId(0),
+                    edge_to: ComputeNodeId(5),
+                },
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(5),
+                    estimated_cycles: 1000,
+                },
+                DispatchOp::Synchronize {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(5),
+                },
+            ],
+            assignment: {
+                let mut m = HashMap::new();
+                m.insert(ComputeNodeId(5), ComputeTarget::Gpu);
+                m
+            },
+            estimated_total_cycles: 1200,
+        };
+
+        let code = emit_dispatch_code(&plan, &graph);
+        // Check transfer comment (UMA no-copy)
+        assert!(code.contains("UMA: no explicit copy needed"),
+            "Expected UMA comment for CPU->GPU transfer, got:\n{}", code);
+        // Check sync
+        assert!(code.contains("[cmdBuf commit]"),
+            "Expected commit for sync, got:\n{}", code);
+        assert!(code.contains("[cmdBuf waitUntilCompleted]"),
+            "Expected waitUntilCompleted for sync, got:\n{}", code);
+        // Plan stats
+        assert!(code.contains("1 launches"),
+            "Expected 1 launch in stats, got:\n{}", code);
+        assert!(code.contains("1 transfers"),
+            "Expected 1 transfer in stats, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_is_reduce_pattern() {
+        assert!(is_reduce_pattern("REDUCE_ADD"));
+        assert!(is_reduce_pattern("REDUCE_MAX"));
+        assert!(is_reduce_pattern("SUM"));
+        assert!(is_reduce_pattern("PROD"));
+        assert!(is_reduce_pattern("DOT"));
+        assert!(is_reduce_pattern("ACCUM"));
+        assert!(!is_reduce_pattern("FADD"));
+        assert!(!is_reduce_pattern("MUL"));
     }
 }
