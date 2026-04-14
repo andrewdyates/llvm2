@@ -12,7 +12,7 @@
 //! ## Architecture
 //!
 //! ```text
-//! MachFunction (input, SSA with phis)
+//! RegAllocFunction (input, SSA with phis)
 //!      |
 //!      v
 //! +-------------------+
@@ -64,16 +64,16 @@
 //! +--------+----------+
 //!          |
 //!          v
-//! MachFunction (output, VRegs replaced with PRegs)
+//! RegAllocFunction (output, VRegs replaced with PRegs)
 //! ```
 //!
 //! ## Usage
 //!
 //! ```rust,no_run
 //! use llvm2_regalloc::{allocate, AllocConfig};
-//! use llvm2_regalloc::machine_types::MachFunction;
+//! use llvm2_regalloc::machine_types::RegAllocFunction;
 //!
-//! # fn example(mut func: MachFunction) {
+//! # fn example(mut func: RegAllocFunction) {
 //! let config = AllocConfig::default_aarch64();
 //! let result = allocate(&mut func, &config).expect("allocation failed");
 //! # }
@@ -96,6 +96,9 @@ pub use liveness::{compute_live_intervals, LiveInterval, LiveRange, LivenessResu
 pub use linear_scan::{aarch64_allocatable_regs, AllocError, AllocationResult, LinearScan, SpillInfo};
 pub use greedy::{GreedyAllocator, Stage as GreedyStage};
 pub use machine_types::{
+    // Canonical names (issue #73):
+    RegAllocBlock, RegAllocFunction, RegAllocInst, RegAllocOperand, RegAllocStackSlot,
+    // Backward-compatible aliases (deprecated — use RegAlloc* names):
     InstFlags, MachBlock, MachFunction, MachInst, MachOperand, StackSlot,
 };
 // Re-export canonical types from llvm2-ir via machine_types.
@@ -181,7 +184,7 @@ impl AllocConfig {
 ///
 /// Returns the allocation result with VReg-to-PReg mappings and spill info.
 pub fn allocate(
-    func: &mut MachFunction,
+    func: &mut RegAllocFunction,
     config: &AllocConfig,
 ) -> Result<AllocationResult, AllocError> {
     // Phase 1: Critical edge splitting (required before phi elimination).

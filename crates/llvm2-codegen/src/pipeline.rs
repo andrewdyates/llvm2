@@ -15,20 +15,20 @@
 //!
 //! ```text
 //! Phase 1: ISel (llvm2-lower)
-//!   llvm2_lower::Function -> llvm2_lower::isel::MachFunction
+//!   llvm2_lower::Function -> llvm2_lower::isel::ISelFunction
 //!   (VRegs, canonical llvm2_ir::AArch64Opcode — unified in issue #73)
 //!
 //! Phase 2: Adapt ISel -> IR (structural only — opcodes are already unified)
-//!   llvm2_lower::isel::MachFunction -> llvm2_ir::MachFunction
+//!   llvm2_lower::isel::ISelFunction -> llvm2_ir::MachFunction
 //!
 //! Phase 3: Optimization (llvm2-opt)
 //!   llvm2_ir::MachFunction -> llvm2_ir::MachFunction (optimized)
 //!
 //! Phase 4: Adapt IR -> RegAlloc
-//!   llvm2_ir::MachFunction -> llvm2_regalloc::MachFunction
+//!   llvm2_ir::MachFunction -> llvm2_regalloc::RegAllocFunction
 //!
 //! Phase 5: Register Allocation (llvm2-regalloc)
-//!   llvm2_regalloc::MachFunction -> AllocationResult (VReg -> PReg map)
+//!   llvm2_regalloc::RegAllocFunction -> AllocationResult (VReg -> PReg map)
 //!
 //! Phase 6: Apply allocation to IR
 //!   llvm2_ir::MachFunction + AllocationResult -> llvm2_ir::MachFunction (PRegs only)
@@ -52,17 +52,21 @@
 //! - Primitive types: `VReg`, `PReg`, `RegClass`, `BlockId`, `InstId`,
 //!   `StackSlotId` — all re-exported from `llvm2_ir` by regalloc.
 //!
-//! **Remaining structural adapters (separate types with good reason):**
-//! - `MachOperand`: ISel has `CondCode`/`Symbol`/`StackSlot(u32)` variants;
-//!   regalloc omits `MemOp`/`FrameIndex`/`Special`. Unification requires
+//! **Remaining structural adapters (separate types, renamed in issue #73):**
+//! - `ISelOperand` / `RegAllocOperand`: ISel has `CondCode`/`Symbol`/`StackSlot(u32)`
+//!   variants; regalloc omits `MemOp`/`FrameIndex`/`Special`. Unification requires
 //!   a superset enum with phase-dependent validation.
-//! - `MachInst`: regalloc separates defs/uses for liveness analysis;
+//! - `ISelInst` / `RegAllocInst`: regalloc separates defs/uses for liveness analysis;
 //!   ISel has no flags/implicit-defs/proofs. Unification requires adding
 //!   def/use classification to `llvm2_ir::MachInst`.
-//! - `MachBlock`: regalloc adds `loop_depth`; ISel uses inline `Vec<MachInst>`.
-//! - `MachFunction`: ISel uses `HashMap<Block, MachBlock>` (construction-friendly);
-//!   regalloc uses `HashMap<StackSlotId, StackSlot>` + `next_stack_slot`.
+//! - `ISelBlock` / `RegAllocBlock`: regalloc adds `loop_depth`; ISel uses inline
+//!   `Vec<ISelInst>`.
+//! - `ISelFunction` / `RegAllocFunction`: ISel uses `HashMap<Block, ISelBlock>`
+//!   (construction-friendly); regalloc uses `HashMap<StackSlotId, RegAllocStackSlot>`
+//!   + `next_stack_slot`.
 //!
+//! The canonical types are in `llvm2_ir`: `MachFunction`, `MachInst`, `MachBlock`,
+//! `MachOperand`. ISel and regalloc types have been renamed to avoid confusion.
 //! See issue #73 for the remaining unification plan.
 
 use std::collections::HashMap;
@@ -156,7 +160,7 @@ impl CompilationUnit {
 }
 
 // ---------------------------------------------------------------------------
-// Adapter: llvm2_lower::isel::MachFunction -> llvm2_ir::MachFunction
+// Adapter: llvm2_lower::isel::ISelFunction -> llvm2_ir::MachFunction
 // ---------------------------------------------------------------------------
 
 // NOTE: `map_isel_opcode()` has been ELIMINATED as of issue #73.
@@ -166,9 +170,9 @@ impl CompilationUnit {
 // opcode enum, so no mapping is needed. The `isel_to_ir` adapter below
 // uses `isel_inst.opcode` directly as an `IrOpcode`.
 
-/// Convert an ISel MachOperand to an IR MachOperand.
-fn convert_isel_operand(op: &llvm2_lower::isel::MachOperand) -> IrOperand {
-    use llvm2_lower::isel::MachOperand as IsOp;
+/// Convert an ISel ISelOperand to an IR MachOperand.
+fn convert_isel_operand(op: &llvm2_lower::isel::ISelOperand) -> IrOperand {
+    use llvm2_lower::isel::ISelOperand as IsOp;
     match op {
         IsOp::VReg(v) => IrOperand::VReg(*v),
         IsOp::PReg(p) => IrOperand::PReg(*p),
@@ -207,13 +211,13 @@ fn convert_isel_operand(op: &llvm2_lower::isel::MachOperand) -> IrOperand {
     }
 }
 
-/// Convert ISel's MachFunction to the shared IR MachFunction.
+/// Convert ISel's `ISelFunction` to the canonical `llvm2_ir::MachFunction`.
 ///
 /// This is the Phase 1->2 adapter. The ISel uses HashMap-based blocks and
-/// its own opcode enum. The IR uses Vec-based arena storage and a unified
-/// opcode enum.
+/// ISel-specific types. The IR uses Vec-based arena storage and the
+/// canonical types.
 pub fn isel_to_ir(
-    isel_func: &llvm2_lower::isel::MachFunction,
+    isel_func: &llvm2_lower::isel::ISelFunction,
     param_types: &[llvm2_ir::function::Type],
     return_types: &[llvm2_ir::function::Type],
 ) -> IrMachFunction {
@@ -283,18 +287,18 @@ pub fn isel_to_ir(
 }
 
 // ---------------------------------------------------------------------------
-// Adapter: llvm2_ir::MachFunction -> llvm2_regalloc::MachFunction
+// Adapter: llvm2_ir::MachFunction -> llvm2_regalloc::RegAllocFunction
 // ---------------------------------------------------------------------------
 
-/// Convert an IR MachFunction to the regalloc MachFunction format.
+/// Convert the canonical `llvm2_ir::MachFunction` to `RegAllocFunction` format.
 ///
-/// The regalloc MachFunction separates defs from uses for liveness analysis.
+/// The `RegAllocFunction` separates defs from uses for liveness analysis.
 /// We use a simple heuristic: first operand is def, rest are uses
 /// (for most instructions). Special cases: branches have no defs, etc.
-pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> Result<llvm2_regalloc::MachFunction, PipelineError> {
+pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> Result<llvm2_regalloc::RegAllocFunction, PipelineError> {
     use llvm2_regalloc::machine_types as ra;
 
-    let mut ra_func = ra::MachFunction {
+    let mut ra_func = ra::RegAllocFunction {
         name: ir_func.name.clone(),
         insts: Vec::new(),
         blocks: Vec::new(),
@@ -309,7 +313,7 @@ pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> Result<llvm2_regalloc::MachFu
     for (i, slot) in ir_func.stack_slots.iter().enumerate() {
         ra_func.stack_slots.insert(
             llvm2_ir::types::StackSlotId(i as u32),
-            ra::StackSlot {
+            ra::RegAllocStackSlot {
                 size: slot.size,
                 align: slot.align,
             },
@@ -324,7 +328,7 @@ pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> Result<llvm2_regalloc::MachFu
         let implicit_defs: Vec<PReg> = ir_inst.implicit_defs.to_vec();
         let implicit_uses: Vec<PReg> = ir_inst.implicit_uses.to_vec();
 
-        ra_func.insts.push(ra::MachInst {
+        ra_func.insts.push(ra::RegAllocInst {
             opcode: ir_inst.opcode as u16,
             defs,
             uses,
@@ -336,7 +340,7 @@ pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> Result<llvm2_regalloc::MachFu
 
     // Convert blocks.
     for ir_block in &ir_func.blocks {
-        ra_func.blocks.push(ra::MachBlock {
+        ra_func.blocks.push(ra::RegAllocBlock {
             insts: ir_block.insts.clone(),
             preds: ir_block.preds.clone(),
             succs: ir_block.succs.clone(),
@@ -356,8 +360,8 @@ pub fn ir_to_regalloc(ir_func: &IrMachFunction) -> Result<llvm2_regalloc::MachFu
 /// - For loads: operand[0] is def, rest are uses
 fn classify_def_use(
     inst: &IrMachInst,
-) -> Result<(Vec<llvm2_regalloc::MachOperand>, Vec<llvm2_regalloc::MachOperand>), PipelineError> {
-    use llvm2_regalloc::machine_types::MachOperand as RaOp;
+) -> Result<(Vec<llvm2_regalloc::RegAllocOperand>, Vec<llvm2_regalloc::RegAllocOperand>), PipelineError> {
+    use llvm2_regalloc::machine_types::RegAllocOperand as RaOp;
 
     let convert_op = |op: &IrOperand| -> Result<RaOp, PipelineError> {
         match op {
@@ -721,7 +725,7 @@ impl Pipeline {
     fn run_isel(
         &self,
         input: &llvm2_lower::Function,
-    ) -> Result<llvm2_lower::isel::MachFunction, PipelineError> {
+    ) -> Result<llvm2_lower::isel::ISelFunction, PipelineError> {
         use llvm2_lower::isel::InstructionSelector;
 
         let sig = llvm2_lower::function::Signature {

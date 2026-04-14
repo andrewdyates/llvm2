@@ -9,9 +9,14 @@
 //! AArch64 instruction selection: tMIR SSA IR -> AArch64 MachIR with virtual registers.
 //!
 //! Phase 1 (this module): Walk tMIR blocks in reverse postorder, match each
-//! instruction bottom-up, emit AArch64 MachInst with VRegs. This covers
+//! instruction bottom-up, emit AArch64 ISelInst with VRegs. This covers
 //! arithmetic, comparisons, branches, calls, returns, loads, stores, and
 //! constants.
+//!
+//! The ISel types (`ISelFunction`, `ISelInst`, `ISelBlock`, `ISelOperand`) are
+//! ISel-specific intermediates, distinct from the canonical `llvm2_ir::MachFunction`
+//! / `MachInst` / `MachBlock` / `MachOperand` types. The pipeline adapter
+//! (`isel_to_ir` in `llvm2-codegen/pipeline.rs`) converts between them.
 //!
 //! Phase 2 (llvm2-opt late combines): Address-mode formation, cmp+branch
 //! fusing, csel/cset formation. Those depend on one-use analysis not available
@@ -96,8 +101,12 @@ pub use llvm2_ir::AArch64Opcode;
 /// Separate from `llvm2_ir::MachOperand`: includes ISel-specific variants
 /// (CondCode, Symbol) not present in the canonical IR, and uses `Block`
 /// (LIR block ID) instead of `BlockId` (MachIR block ID).
+///
+/// Named `ISelOperand` (issue #73) to avoid confusion with the canonical
+/// `llvm2_ir::MachOperand`. The pipeline adapter (`isel_to_ir`) converts
+/// these to `llvm2_ir::MachOperand`.
 #[derive(Debug, Clone, PartialEq)]
-pub enum MachOperand {
+pub enum ISelOperand {
     /// Virtual register.
     VReg(VReg),
     /// Physical register (for ABI constraints, e.g. X0 for return).
@@ -115,6 +124,9 @@ pub enum MachOperand {
     /// Stack slot index (resolved during frame lowering).
     StackSlot(u32),
 }
+
+/// Backward-compatible alias (deprecated). Use `ISelOperand` directly.
+pub type MachOperand = ISelOperand;
 
 /// AArch64 condition codes (NZCV-based) for ISel output.
 ///
@@ -204,19 +216,25 @@ impl AArch64CC {
 
 /// A single ISel-output machine instruction (pre-regalloc).
 ///
-/// Simpler than `llvm2_ir::MachInst`: no flags, no implicit defs/uses, no
-/// proof annotations. Those are added during the ISel-to-MachIR translation.
+/// Simpler than the canonical `llvm2_ir::MachInst`: no flags, no implicit
+/// defs/uses, no proof annotations. Those are added during the ISel-to-IR
+/// translation in the pipeline adapter.
+///
+/// Named `ISelInst` (issue #73) to avoid confusion with `llvm2_ir::MachInst`.
 #[derive(Debug, Clone)]
-pub struct MachInst {
+pub struct ISelInst {
     pub opcode: AArch64Opcode,
-    pub operands: Vec<MachOperand>,
+    pub operands: Vec<ISelOperand>,
 }
 
-impl MachInst {
-    pub fn new(opcode: AArch64Opcode, operands: Vec<MachOperand>) -> Self {
+impl ISelInst {
+    pub fn new(opcode: AArch64Opcode, operands: Vec<ISelOperand>) -> Self {
         Self { opcode, operands }
     }
 }
+
+/// Backward-compatible alias (deprecated). Use `ISelInst` directly.
+pub type MachInst = ISelInst;
 
 // ---------------------------------------------------------------------------
 // ISel-level machine basic block
@@ -224,35 +242,45 @@ impl MachInst {
 
 /// An ISel-output basic block of machine instructions.
 ///
-/// Uses `Vec<MachInst>` inline (not arena-indexed), and `successors` (not
-/// `succs`/`preds`). This is the ISel output format; the canonical
-/// `llvm2_ir::MachBlock` uses arena-indexed `Vec<InstId>` and explicit
-/// predecessor tracking.
+/// Uses `Vec<ISelInst>` inline (not arena-indexed), and `successors` (not
+/// `succs`/`preds`). The canonical `llvm2_ir::MachBlock` uses arena-indexed
+/// `Vec<InstId>` and explicit predecessor tracking.
+///
+/// Named `ISelBlock` (issue #73) to avoid confusion with `llvm2_ir::MachBlock`.
 #[derive(Debug, Clone, Default)]
-pub struct MachBlock {
-    pub insts: Vec<MachInst>,
+pub struct ISelBlock {
+    pub insts: Vec<ISelInst>,
     pub successors: Vec<Block>,
 }
+
+/// Backward-compatible alias (deprecated). Use `ISelBlock` directly.
+pub type MachBlock = ISelBlock;
 
 // ---------------------------------------------------------------------------
 // ISel-level machine function
 // ---------------------------------------------------------------------------
 
-/// An ISel-output function containing MachInsts with VRegs.
+/// An ISel-output function containing ISelInsts with VRegs.
 ///
-/// Uses `HashMap<Block, MachBlock>` for blocks (convenient for ISel
-/// construction), while `llvm2_ir::MachFunction` uses `Vec<MachBlock>`
-/// indexed by `BlockId` (cache-friendly for optimization passes).
+/// Uses `HashMap<Block, ISelBlock>` for blocks (convenient for ISel
+/// construction), while the canonical `llvm2_ir::MachFunction` uses
+/// `Vec<MachBlock>` indexed by `BlockId` (cache-friendly for later passes).
+///
+/// Named `ISelFunction` (issue #73) to avoid confusion with `llvm2_ir::MachFunction`,
+/// which is the canonical machine function type for the pipeline.
 #[derive(Debug, Clone)]
-pub struct MachFunction {
+pub struct ISelFunction {
     pub name: String,
     pub sig: Signature,
-    pub blocks: HashMap<Block, MachBlock>,
+    pub blocks: HashMap<Block, ISelBlock>,
     pub block_order: Vec<Block>,
     pub next_vreg: u32,
 }
 
-impl MachFunction {
+/// Backward-compatible alias (deprecated). Use `ISelFunction` directly.
+pub type MachFunction = ISelFunction;
+
+impl ISelFunction {
     pub fn new(name: String, sig: Signature) -> Self {
         Self {
             name,
@@ -264,14 +292,14 @@ impl MachFunction {
     }
 
     /// Emit a machine instruction into the given block.
-    pub fn push_inst(&mut self, block: Block, inst: MachInst) {
+    pub fn push_inst(&mut self, block: Block, inst: ISelInst) {
         self.blocks.entry(block).or_default().insts.push(inst);
     }
 
     /// Add a block to the function (if not already present).
     pub fn ensure_block(&mut self, block: Block) {
         if !self.blocks.contains_key(&block) {
-            self.blocks.insert(block, MachBlock::default());
+            self.blocks.insert(block, ISelBlock::default());
             self.block_order.push(block);
         }
     }
@@ -284,12 +312,12 @@ impl MachFunction {
 /// AArch64 instruction selector.
 ///
 /// Walks tMIR blocks in order, selects each instruction into one or more
-/// AArch64 MachInsts, tracking value -> VReg mappings. After selection,
-/// `finalize()` returns the completed MachFunction.
+/// AArch64 ISelInsts, tracking value -> VReg mappings. After selection,
+/// `finalize()` returns the completed ISelFunction.
 pub struct InstructionSelector {
-    func: MachFunction,
+    func: ISelFunction,
     /// tMIR Value -> machine operand mapping.
-    value_map: HashMap<Value, MachOperand>,
+    value_map: HashMap<Value, ISelOperand>,
     /// Type of each value, tracked for selecting correct instruction width.
     value_types: HashMap<Value, Type>,
 }
@@ -298,7 +326,7 @@ impl InstructionSelector {
     /// Create a new instruction selector for the given function.
     pub fn new(name: String, sig: Signature) -> Self {
         Self {
-            func: MachFunction::new(name, sig),
+            func: ISelFunction::new(name, sig),
             value_map: HashMap::new(),
             value_types: HashMap::new(),
         }
@@ -332,13 +360,13 @@ impl InstructionSelector {
     }
 
     /// Record a mapping from tMIR Value to machine operand.
-    fn define_value(&mut self, val: Value, operand: MachOperand, ty: Type) {
+    fn define_value(&mut self, val: Value, operand: ISelOperand, ty: Type) {
         self.value_map.insert(val, operand);
         self.value_types.insert(val, ty);
     }
 
     /// Look up the machine operand for a tMIR Value.
-    fn use_value(&self, val: &Value) -> Result<MachOperand, ISelError> {
+    fn use_value(&self, val: &Value) -> Result<ISelOperand, ISelError> {
         self.value_map
             .get(val)
             .cloned()
@@ -371,7 +399,7 @@ impl InstructionSelector {
         Ok(())
     }
 
-    /// Select a single tMIR instruction, emitting MachInsts into the block.
+    /// Select a single tMIR instruction, emitting ISelInsts into the block.
     fn select_instruction(&mut self, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         match &inst.opcode {
             // Constants
@@ -527,7 +555,7 @@ impl InstructionSelector {
             };
             self.func.push_inst(
                 block,
-                MachInst::new(opc, vec![MachOperand::VReg(dst), MachOperand::Imm(imm)]),
+                ISelInst::new(opc, vec![ISelOperand::VReg(dst), ISelOperand::Imm(imm)]),
             );
         } else if imm < 0 && imm >= -0x10000 {
             // MOVN for small negative values
@@ -540,9 +568,9 @@ impl InstructionSelector {
             let encoded = (!imm) as u64 & 0xFFFF;
             self.func.push_inst(
                 block,
-                MachInst::new(
+                ISelInst::new(
                     opc,
-                    vec![MachOperand::VReg(dst), MachOperand::Imm(encoded as i64)],
+                    vec![ISelOperand::VReg(dst), ISelOperand::Imm(encoded as i64)],
                 ),
             );
         } else {
@@ -556,9 +584,9 @@ impl InstructionSelector {
             let low16 = (imm as u64) & 0xFFFF;
             self.func.push_inst(
                 block,
-                MachInst::new(
+                ISelInst::new(
                     opc_z,
-                    vec![MachOperand::VReg(dst), MachOperand::Imm(low16 as i64)],
+                    vec![ISelOperand::VReg(dst), ISelOperand::Imm(low16 as i64)],
                 ),
             );
 
@@ -569,12 +597,12 @@ impl InstructionSelector {
                 if chunk != 0 {
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::Movk,
                             vec![
-                                MachOperand::VReg(dst),
-                                MachOperand::Imm(chunk as i64),
-                                MachOperand::Imm(shift as i64 * 16), // shift amount
+                                ISelOperand::VReg(dst),
+                                ISelOperand::Imm(chunk as i64),
+                                ISelOperand::Imm(shift as i64 * 16), // shift amount
                             ],
                         ),
                     );
@@ -582,7 +610,7 @@ impl InstructionSelector {
             }
         }
 
-        self.define_value(*result, MachOperand::VReg(dst), ty);
+        self.define_value(*result, ISelOperand::VReg(dst), ty);
         Ok(())
     }
 
@@ -604,10 +632,10 @@ impl InstructionSelector {
         // values outside the 8-bit FP immediate range via constant pool.
         self.func.push_inst(
             block,
-            MachInst::new(opc, vec![MachOperand::VReg(dst), MachOperand::FImm(imm)]),
+            ISelInst::new(opc, vec![ISelOperand::VReg(dst), ISelOperand::FImm(imm)]),
         );
 
-        self.define_value(*result, MachOperand::VReg(dst), ty);
+        self.define_value(*result, ISelOperand::VReg(dst), ty);
         Ok(())
     }
 
@@ -636,7 +664,7 @@ impl InstructionSelector {
         // parameters, which is essential for correct register allocation
         // across loop back-edges.
         let dst = if let Some(existing) = self.value_map.get(&result_val) {
-            if let MachOperand::VReg(v) = existing {
+            if let ISelOperand::VReg(v) = existing {
                 *v
             } else {
                 let class = reg_class_for_type(&ty);
@@ -655,10 +683,10 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
+            ISelInst::new(opc, vec![ISelOperand::VReg(dst), src]),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), ty);
         Ok(())
     }
 
@@ -701,10 +729,10 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(opc, vec![MachOperand::VReg(dst), lhs, rhs]),
+            ISelInst::new(opc, vec![ISelOperand::VReg(dst), lhs, rhs]),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), ty);
         Ok(())
     }
 
@@ -741,7 +769,7 @@ impl InstructionSelector {
         };
         self.func.push_inst(
             block,
-            MachInst::new(div_opc, vec![MachOperand::VReg(tmp), lhs.clone(), rhs.clone()]),
+            ISelInst::new(div_opc, vec![ISelOperand::VReg(tmp), lhs.clone(), rhs.clone()]),
         );
 
         // Step 2: result = a - tmp * b  (MSUB Rd, Rn, Rm, Ra)
@@ -754,18 +782,18 @@ impl InstructionSelector {
         };
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 msub_opc,
                 vec![
-                    MachOperand::VReg(dst),
-                    MachOperand::VReg(tmp),
+                    ISelOperand::VReg(dst),
+                    ISelOperand::VReg(tmp),
                     rhs,
                     lhs,
                 ],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), ty);
         Ok(())
     }
 
@@ -801,10 +829,10 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
+            ISelInst::new(opc, vec![ISelOperand::VReg(dst), src]),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), ty);
         Ok(())
     }
 
@@ -831,10 +859,10 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
+            ISelInst::new(opc, vec![ISelOperand::VReg(dst), src]),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), ty);
         Ok(())
     }
 
@@ -869,7 +897,7 @@ impl InstructionSelector {
         };
         self.func.push_inst(
             block,
-            MachInst::new(cmp_opc, vec![lhs, rhs]),
+            ISelInst::new(cmp_opc, vec![lhs, rhs]),
         );
 
         // CSET: materialize condition code into a register.
@@ -882,13 +910,13 @@ impl InstructionSelector {
         let dst = self.new_vreg(RegClass::Gpr64);
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::CSet,
-                vec![MachOperand::VReg(dst), MachOperand::CondCode(cc)],
+                vec![ISelOperand::VReg(dst), ISelOperand::CondCode(cc)],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), Type::B1);
+        self.define_value(result_val, ISelOperand::VReg(dst), Type::B1);
         Ok(())
     }
 
@@ -900,7 +928,7 @@ impl InstructionSelector {
     fn select_jump(&mut self, dest: Block, block: Block) -> Result<(), ISelError> {
         self.func.push_inst(
             block,
-            MachInst::new(AArch64Opcode::B, vec![MachOperand::Block(dest)]),
+            ISelInst::new(AArch64Opcode::B, vec![ISelOperand::Block(dest)]),
         );
         self.func
             .blocks
@@ -932,20 +960,20 @@ impl InstructionSelector {
         // Use 64-bit CMP to match the Gpr64 class of the CSET result.
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::CmpRI,
-                vec![cond_op, MachOperand::Imm(0)],
+                vec![cond_op, ISelOperand::Imm(0)],
             ),
         );
 
         // B.NE then_block (condition was nonzero = true)
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::BCond,
                 vec![
-                    MachOperand::CondCode(AArch64CC::NE),
-                    MachOperand::Block(then_dest),
+                    ISelOperand::CondCode(AArch64CC::NE),
+                    ISelOperand::Block(then_dest),
                 ],
             ),
         );
@@ -953,7 +981,7 @@ impl InstructionSelector {
         // B else_block (unconditional fallthrough)
         self.func.push_inst(
             block,
-            MachInst::new(AArch64Opcode::B, vec![MachOperand::Block(else_dest)]),
+            ISelInst::new(AArch64Opcode::B, vec![ISelOperand::Block(else_dest)]),
         );
 
         let mblock = self.func.blocks.entry(block).or_default();
@@ -987,9 +1015,9 @@ impl InstructionSelector {
                     // COPY pseudo: move value to physical register
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             opc,
-                            vec![MachOperand::PReg(*preg), src],
+                            vec![ISelOperand::PReg(*preg), src],
                         ),
                     );
                 }
@@ -1008,7 +1036,7 @@ impl InstructionSelector {
         // Emit RET (branches to LR)
         self.func.push_inst(
             block,
-            MachInst::new(AArch64Opcode::Ret, vec![MachOperand::PReg(gpr::LR)]),
+            ISelInst::new(AArch64Opcode::Ret, vec![ISelOperand::PReg(gpr::LR)]),
         );
         Ok(())
     }
@@ -1054,7 +1082,7 @@ impl InstructionSelector {
                     };
                     self.func.push_inst(
                         block,
-                        MachInst::new(opc, vec![MachOperand::PReg(*preg), src]),
+                        ISelInst::new(opc, vec![ISelOperand::PReg(*preg), src]),
                     );
                 }
                 ArgLocation::Stack { offset, size: _ } => {
@@ -1066,9 +1094,9 @@ impl InstructionSelector {
                     };
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             opc,
-                            vec![src, MachOperand::PReg(SP), MachOperand::Imm(*offset)],
+                            vec![src, ISelOperand::PReg(SP), ISelOperand::Imm(*offset)],
                         ),
                     );
                 }
@@ -1076,9 +1104,9 @@ impl InstructionSelector {
                     // Non-aggregate indirect (I128): pass pointer in register
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::MovR,
-                            vec![MachOperand::PReg(*ptr_reg), src],
+                            vec![ISelOperand::PReg(*ptr_reg), src],
                         ),
                     );
                 }
@@ -1088,9 +1116,9 @@ impl InstructionSelector {
         // Emit BL (direct call) with the callee symbol for relocation.
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::Bl,
-                vec![MachOperand::Symbol(callee_name.to_string())],
+                vec![ISelOperand::Symbol(callee_name.to_string())],
             ),
         );
 
@@ -1109,9 +1137,9 @@ impl InstructionSelector {
                     };
                     self.func.push_inst(
                         block,
-                        MachInst::new(opc, vec![MachOperand::VReg(dst), MachOperand::PReg(*preg)]),
+                        ISelInst::new(opc, vec![ISelOperand::VReg(dst), ISelOperand::PReg(*preg)]),
                     );
-                    self.define_value(*val, MachOperand::VReg(dst), ty);
+                    self.define_value(*val, ISelOperand::VReg(dst), ty);
                 }
                 ArgLocation::Indirect { ptr_reg } => {
                     // Aggregate returned via sret pointer (X8).
@@ -1122,12 +1150,12 @@ impl InstructionSelector {
                     let dst = self.new_vreg(RegClass::Gpr64);
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::MovR,
-                            vec![MachOperand::VReg(dst), MachOperand::PReg(*ptr_reg)],
+                            vec![ISelOperand::VReg(dst), ISelOperand::PReg(*ptr_reg)],
                         ),
                     );
-                    self.define_value(*val, MachOperand::VReg(dst), ty);
+                    self.define_value(*val, ISelOperand::VReg(dst), ty);
                 }
                 ArgLocation::Stack { .. } => {
                     return Err(ISelError::UnsupportedReturnLocation);
@@ -1195,7 +1223,7 @@ impl InstructionSelector {
                     };
                     self.func.push_inst(
                         block,
-                        MachInst::new(opc, vec![MachOperand::PReg(*preg), src]),
+                        ISelInst::new(opc, vec![ISelOperand::PReg(*preg), src]),
                     );
                 }
                 ArgLocation::Stack { offset, size: _ } => {
@@ -1212,9 +1240,9 @@ impl InstructionSelector {
                     };
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             opc,
-                            vec![src, MachOperand::PReg(SP), MachOperand::Imm(*offset)],
+                            vec![src, ISelOperand::PReg(SP), ISelOperand::Imm(*offset)],
                         ),
                     );
                 }
@@ -1222,9 +1250,9 @@ impl InstructionSelector {
                     // Non-aggregate indirect (I128): pass pointer in register
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::MovR,
-                            vec![MachOperand::PReg(*ptr_reg), src],
+                            vec![ISelOperand::PReg(*ptr_reg), src],
                         ),
                     );
                 }
@@ -1234,9 +1262,9 @@ impl InstructionSelector {
         // Emit BL (direct call) with the callee symbol for relocation.
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::Bl,
-                vec![MachOperand::Symbol(callee_name.to_string())],
+                vec![ISelOperand::Symbol(callee_name.to_string())],
             ),
         );
 
@@ -1255,21 +1283,21 @@ impl InstructionSelector {
                     };
                     self.func.push_inst(
                         block,
-                        MachInst::new(opc, vec![MachOperand::VReg(dst), MachOperand::PReg(*preg)]),
+                        ISelInst::new(opc, vec![ISelOperand::VReg(dst), ISelOperand::PReg(*preg)]),
                     );
-                    self.define_value(*val, MachOperand::VReg(dst), ty);
+                    self.define_value(*val, ISelOperand::VReg(dst), ty);
                 }
                 ArgLocation::Indirect { ptr_reg } => {
                     let ty = result_types[i].clone();
                     let dst = self.new_vreg(RegClass::Gpr64);
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::MovR,
-                            vec![MachOperand::VReg(dst), MachOperand::PReg(*ptr_reg)],
+                            vec![ISelOperand::VReg(dst), ISelOperand::PReg(*ptr_reg)],
                         ),
                     );
-                    self.define_value(*val, MachOperand::VReg(dst), ty);
+                    self.define_value(*val, ISelOperand::VReg(dst), ty);
                 }
                 ArgLocation::Stack { .. } => {
                     return Err(ISelError::UnsupportedReturnLocation);
@@ -1352,7 +1380,7 @@ impl InstructionSelector {
                     };
                     self.func.push_inst(
                         block,
-                        MachInst::new(opc, vec![MachOperand::PReg(*preg), src]),
+                        ISelInst::new(opc, vec![ISelOperand::PReg(*preg), src]),
                     );
                 }
                 ArgLocation::Stack { offset, size: _ } => {
@@ -1363,18 +1391,18 @@ impl InstructionSelector {
                     };
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             opc,
-                            vec![src, MachOperand::PReg(SP), MachOperand::Imm(*offset)],
+                            vec![src, ISelOperand::PReg(SP), ISelOperand::Imm(*offset)],
                         ),
                     );
                 }
                 ArgLocation::Indirect { ptr_reg } => {
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::MovR,
-                            vec![MachOperand::PReg(*ptr_reg), src],
+                            vec![ISelOperand::PReg(*ptr_reg), src],
                         ),
                     );
                 }
@@ -1387,18 +1415,18 @@ impl InstructionSelector {
         let fn_ptr = self.use_value(fn_ptr_val)?;
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::MovR,
-                vec![MachOperand::PReg(gpr::X16), fn_ptr],
+                vec![ISelOperand::PReg(gpr::X16), fn_ptr],
             ),
         );
 
         // Emit BLR X16 (indirect call via register)
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::Blr,
-                vec![MachOperand::PReg(gpr::X16)],
+                vec![ISelOperand::PReg(gpr::X16)],
             ),
         );
 
@@ -1417,21 +1445,21 @@ impl InstructionSelector {
                     };
                     self.func.push_inst(
                         block,
-                        MachInst::new(opc, vec![MachOperand::VReg(dst), MachOperand::PReg(*preg)]),
+                        ISelInst::new(opc, vec![ISelOperand::VReg(dst), ISelOperand::PReg(*preg)]),
                     );
-                    self.define_value(*val, MachOperand::VReg(dst), ty);
+                    self.define_value(*val, ISelOperand::VReg(dst), ty);
                 }
                 ArgLocation::Indirect { ptr_reg } => {
                     let ty = result_types[i].clone();
                     let dst = self.new_vreg(RegClass::Gpr64);
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::MovR,
-                            vec![MachOperand::VReg(dst), MachOperand::PReg(*ptr_reg)],
+                            vec![ISelOperand::VReg(dst), ISelOperand::PReg(*ptr_reg)],
                         ),
                     );
-                    self.define_value(*val, MachOperand::VReg(dst), ty);
+                    self.define_value(*val, ISelOperand::VReg(dst), ty);
                 }
                 ArgLocation::Stack { .. } => {
                     return Err(ISelError::UnsupportedReturnLocation);
@@ -1506,9 +1534,9 @@ impl InstructionSelector {
                 };
                 self.func.push_inst(
                     block,
-                    MachInst::new(
+                    ISelInst::new(
                         cmp_opc,
-                        vec![selector.clone(), MachOperand::Imm(*case_val)],
+                        vec![selector.clone(), ISelOperand::Imm(*case_val)],
                     ),
                 );
             } else {
@@ -1525,11 +1553,11 @@ impl InstructionSelector {
                 // TODO: Full 64-bit materialization for very large constants.
                 self.func.push_inst(
                     block,
-                    MachInst::new(
+                    ISelInst::new(
                         mov_opc,
                         vec![
-                            MachOperand::VReg(case_vreg),
-                            MachOperand::Imm(*case_val),
+                            ISelOperand::VReg(case_vreg),
+                            ISelOperand::Imm(*case_val),
                         ],
                     ),
                 );
@@ -1541,9 +1569,9 @@ impl InstructionSelector {
                 };
                 self.func.push_inst(
                     block,
-                    MachInst::new(
+                    ISelInst::new(
                         cmp_opc,
-                        vec![selector.clone(), MachOperand::VReg(case_vreg)],
+                        vec![selector.clone(), ISelOperand::VReg(case_vreg)],
                     ),
                 );
             }
@@ -1551,11 +1579,11 @@ impl InstructionSelector {
             // B.EQ target_block
             self.func.push_inst(
                 block,
-                MachInst::new(
+                ISelInst::new(
                     AArch64Opcode::BCond,
                     vec![
-                        MachOperand::CondCode(AArch64CC::EQ),
-                        MachOperand::Block(*target),
+                        ISelOperand::CondCode(AArch64CC::EQ),
+                        ISelOperand::Block(*target),
                     ],
                 ),
             );
@@ -1572,7 +1600,7 @@ impl InstructionSelector {
         // Fall through to default block
         self.func.push_inst(
             block,
-            MachInst::new(AArch64Opcode::B, vec![MachOperand::Block(default)]),
+            ISelInst::new(AArch64Opcode::B, vec![ISelOperand::Block(default)]),
         );
         self.func
             .blocks
@@ -1616,13 +1644,13 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 opc,
-                vec![MachOperand::VReg(dst), addr, MachOperand::Imm(0)],
+                vec![ISelOperand::VReg(dst), addr, ISelOperand::Imm(0)],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), ty);
         Ok(())
     }
 
@@ -1649,7 +1677,7 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(opc, vec![src, addr, MachOperand::Imm(0)]),
+            ISelInst::new(opc, vec![src, addr, ISelOperand::Imm(0)]),
         );
         Ok(())
     }
@@ -1699,28 +1727,28 @@ impl InstructionSelector {
             // Field is at base address, just move the pointer
             self.func.push_inst(
                 block,
-                MachInst::new(
+                ISelInst::new(
                     AArch64Opcode::MovR,
-                    vec![MachOperand::VReg(dst), base],
+                    vec![ISelOperand::VReg(dst), base],
                 ),
             );
         } else {
             // ADD Xd, base, #offset
             self.func.push_inst(
                 block,
-                MachInst::new(
+                ISelInst::new(
                     AArch64Opcode::AddRI,
                     vec![
-                        MachOperand::VReg(dst),
+                        ISelOperand::VReg(dst),
                         base,
-                        MachOperand::Imm(offset as i64),
+                        ISelOperand::Imm(offset as i64),
                     ],
                 ),
             );
         }
 
         // Result is a pointer (I64 on AArch64)
-        self.define_value(result_val, MachOperand::VReg(dst), Type::I64);
+        self.define_value(result_val, ISelOperand::VReg(dst), Type::I64);
         Ok(())
     }
 
@@ -1734,7 +1762,7 @@ impl InstructionSelector {
     /// This is called from `select_return` when it detects an aggregate type.
     fn select_aggregate_return(
         &mut self,
-        src: MachOperand,
+        src: ISelOperand,
         agg_ty: &Type,
         block: Block,
     ) -> Result<(), ISelError> {
@@ -1746,9 +1774,9 @@ impl InstructionSelector {
             // Emit: LDR X0, [src]
             self.func.push_inst(
                 block,
-                MachInst::new(
+                ISelInst::new(
                     AArch64Opcode::LdrRI,
-                    vec![MachOperand::PReg(gpr::X0), src, MachOperand::Imm(0)],
+                    vec![ISelOperand::PReg(gpr::X0), src, ISelOperand::Imm(0)],
                 ),
             );
         } else if size <= 16 {
@@ -1756,21 +1784,21 @@ impl InstructionSelector {
             // First 8 bytes -> X0
             self.func.push_inst(
                 block,
-                MachInst::new(
+                ISelInst::new(
                     AArch64Opcode::LdrRI,
                     vec![
-                        MachOperand::PReg(gpr::X0),
+                        ISelOperand::PReg(gpr::X0),
                         src.clone(),
-                        MachOperand::Imm(0),
+                        ISelOperand::Imm(0),
                     ],
                 ),
             );
             // Next bytes -> X1
             self.func.push_inst(
                 block,
-                MachInst::new(
+                ISelInst::new(
                     AArch64Opcode::LdrRI,
-                    vec![MachOperand::PReg(gpr::X1), src, MachOperand::Imm(8)],
+                    vec![ISelOperand::PReg(gpr::X1), src, ISelOperand::Imm(8)],
                 ),
             );
         } else {
@@ -1784,24 +1812,24 @@ impl InstructionSelector {
                 let tmp = self.new_vreg(RegClass::Gpr64);
                 self.func.push_inst(
                     block,
-                    MachInst::new(
+                    ISelInst::new(
                         AArch64Opcode::LdrRI,
                         vec![
-                            MachOperand::VReg(tmp),
+                            ISelOperand::VReg(tmp),
                             src.clone(),
-                            MachOperand::Imm(offset as i64),
+                            ISelOperand::Imm(offset as i64),
                         ],
                     ),
                 );
                 // Store 8 bytes to sret destination
                 self.func.push_inst(
                     block,
-                    MachInst::new(
+                    ISelInst::new(
                         AArch64Opcode::StrRI,
                         vec![
-                            MachOperand::VReg(tmp),
-                            MachOperand::PReg(gpr::X8),
-                            MachOperand::Imm(offset as i64),
+                            ISelOperand::VReg(tmp),
+                            ISelOperand::PReg(gpr::X8),
+                            ISelOperand::Imm(offset as i64),
                         ],
                     ),
                 );
@@ -1812,23 +1840,23 @@ impl InstructionSelector {
                 let tmp = self.new_vreg(RegClass::Gpr32);
                 self.func.push_inst(
                     block,
-                    MachInst::new(
+                    ISelInst::new(
                         AArch64Opcode::LdrRI,
                         vec![
-                            MachOperand::VReg(tmp),
+                            ISelOperand::VReg(tmp),
                             src.clone(),
-                            MachOperand::Imm(offset as i64),
+                            ISelOperand::Imm(offset as i64),
                         ],
                     ),
                 );
                 self.func.push_inst(
                     block,
-                    MachInst::new(
+                    ISelInst::new(
                         AArch64Opcode::StrRI,
                         vec![
-                            MachOperand::VReg(tmp),
-                            MachOperand::PReg(gpr::X8),
-                            MachOperand::Imm(offset as i64),
+                            ISelOperand::VReg(tmp),
+                            ISelOperand::PReg(gpr::X8),
+                            ISelOperand::Imm(offset as i64),
                         ],
                     ),
                 );
@@ -1839,23 +1867,23 @@ impl InstructionSelector {
                 let tmp = self.new_vreg(RegClass::Gpr32);
                 self.func.push_inst(
                     block,
-                    MachInst::new(
+                    ISelInst::new(
                         AArch64Opcode::LdrhRI,
                         vec![
-                            MachOperand::VReg(tmp),
+                            ISelOperand::VReg(tmp),
                             src.clone(),
-                            MachOperand::Imm(offset as i64),
+                            ISelOperand::Imm(offset as i64),
                         ],
                     ),
                 );
                 self.func.push_inst(
                     block,
-                    MachInst::new(
+                    ISelInst::new(
                         AArch64Opcode::StrhRI,
                         vec![
-                            MachOperand::VReg(tmp),
-                            MachOperand::PReg(gpr::X8),
-                            MachOperand::Imm(offset as i64),
+                            ISelOperand::VReg(tmp),
+                            ISelOperand::PReg(gpr::X8),
+                            ISelOperand::Imm(offset as i64),
                         ],
                     ),
                 );
@@ -1866,23 +1894,23 @@ impl InstructionSelector {
                 let tmp = self.new_vreg(RegClass::Gpr32);
                 self.func.push_inst(
                     block,
-                    MachInst::new(
+                    ISelInst::new(
                         AArch64Opcode::LdrbRI,
                         vec![
-                            MachOperand::VReg(tmp),
+                            ISelOperand::VReg(tmp),
                             src.clone(),
-                            MachOperand::Imm(offset as i64),
+                            ISelOperand::Imm(offset as i64),
                         ],
                     ),
                 );
                 self.func.push_inst(
                     block,
-                    MachInst::new(
+                    ISelInst::new(
                         AArch64Opcode::StrbRI,
                         vec![
-                            MachOperand::VReg(tmp),
-                            MachOperand::PReg(gpr::X8),
-                            MachOperand::Imm(offset as i64),
+                            ISelOperand::VReg(tmp),
+                            ISelOperand::PReg(gpr::X8),
+                            ISelOperand::Imm(offset as i64),
                         ],
                     ),
                 );
@@ -1903,7 +1931,7 @@ impl InstructionSelector {
     /// `preg` is the physical register assigned by the ABI classifier.
     fn select_aggregate_arg(
         &mut self,
-        src: MachOperand,
+        src: ISelOperand,
         agg_ty: &Type,
         loc: &ArgLocation,
         block: Block,
@@ -1915,9 +1943,9 @@ impl InstructionSelector {
                 // Small aggregate (<=8 bytes): load as single value into register
                 self.func.push_inst(
                     block,
-                    MachInst::new(
+                    ISelInst::new(
                         AArch64Opcode::LdrRI,
-                        vec![MachOperand::PReg(*preg), src, MachOperand::Imm(0)],
+                        vec![ISelOperand::PReg(*preg), src, ISelOperand::Imm(0)],
                     ),
                 );
             }
@@ -1928,12 +1956,12 @@ impl InstructionSelector {
                     // meaning the first register of the pair. Load first 8 bytes.
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::LdrRI,
                             vec![
-                                MachOperand::PReg(*ptr_reg),
+                                ISelOperand::PReg(*ptr_reg),
                                 src.clone(),
-                                MachOperand::Imm(0),
+                                ISelOperand::Imm(0),
                             ],
                         ),
                     );
@@ -1942,12 +1970,12 @@ impl InstructionSelector {
                     let next_reg = PReg::new(ptr_reg.hw_enc() as u16 + 1);
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::LdrRI,
                             vec![
-                                MachOperand::PReg(next_reg),
+                                ISelOperand::PReg(next_reg),
                                 src,
-                                MachOperand::Imm(8),
+                                ISelOperand::Imm(8),
                             ],
                         ),
                     );
@@ -1957,9 +1985,9 @@ impl InstructionSelector {
                     // just pass the pointer in the designated register.
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::MovR,
-                            vec![MachOperand::PReg(*ptr_reg), src],
+                            vec![ISelOperand::PReg(*ptr_reg), src],
                         ),
                     );
                 }
@@ -1971,23 +1999,23 @@ impl InstructionSelector {
                     let tmp = self.new_vreg(RegClass::Gpr64);
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::LdrRI,
                             vec![
-                                MachOperand::VReg(tmp),
+                                ISelOperand::VReg(tmp),
                                 src.clone(),
-                                MachOperand::Imm(byte_offset as i64),
+                                ISelOperand::Imm(byte_offset as i64),
                             ],
                         ),
                     );
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::StrRI,
                             vec![
-                                MachOperand::VReg(tmp),
-                                MachOperand::PReg(SP),
-                                MachOperand::Imm(*offset + byte_offset as i64),
+                                ISelOperand::VReg(tmp),
+                                ISelOperand::PReg(SP),
+                                ISelOperand::Imm(*offset + byte_offset as i64),
                             ],
                         ),
                     );
@@ -1997,23 +2025,23 @@ impl InstructionSelector {
                     let tmp = self.new_vreg(RegClass::Gpr32);
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::LdrRI,
                             vec![
-                                MachOperand::VReg(tmp),
+                                ISelOperand::VReg(tmp),
                                 src.clone(),
-                                MachOperand::Imm(byte_offset as i64),
+                                ISelOperand::Imm(byte_offset as i64),
                             ],
                         ),
                     );
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::StrRI,
                             vec![
-                                MachOperand::VReg(tmp),
-                                MachOperand::PReg(SP),
-                                MachOperand::Imm(*offset + byte_offset as i64),
+                                ISelOperand::VReg(tmp),
+                                ISelOperand::PReg(SP),
+                                ISelOperand::Imm(*offset + byte_offset as i64),
                             ],
                         ),
                     );
@@ -2024,23 +2052,23 @@ impl InstructionSelector {
                     let tmp = self.new_vreg(RegClass::Gpr32);
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::LdrhRI,
                             vec![
-                                MachOperand::VReg(tmp),
+                                ISelOperand::VReg(tmp),
                                 src.clone(),
-                                MachOperand::Imm(byte_offset as i64),
+                                ISelOperand::Imm(byte_offset as i64),
                             ],
                         ),
                     );
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::StrhRI,
                             vec![
-                                MachOperand::VReg(tmp),
-                                MachOperand::PReg(SP),
-                                MachOperand::Imm(*offset + byte_offset as i64),
+                                ISelOperand::VReg(tmp),
+                                ISelOperand::PReg(SP),
+                                ISelOperand::Imm(*offset + byte_offset as i64),
                             ],
                         ),
                     );
@@ -2051,23 +2079,23 @@ impl InstructionSelector {
                     let tmp = self.new_vreg(RegClass::Gpr32);
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::LdrbRI,
                             vec![
-                                MachOperand::VReg(tmp),
+                                ISelOperand::VReg(tmp),
                                 src.clone(),
-                                MachOperand::Imm(byte_offset as i64),
+                                ISelOperand::Imm(byte_offset as i64),
                             ],
                         ),
                     );
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::StrbRI,
                             vec![
-                                MachOperand::VReg(tmp),
-                                MachOperand::PReg(SP),
-                                MachOperand::Imm(*offset + byte_offset as i64),
+                                ISelOperand::VReg(tmp),
+                                ISelOperand::PReg(SP),
+                                ISelOperand::Imm(*offset + byte_offset as i64),
                             ],
                         ),
                     );
@@ -2104,9 +2132,9 @@ impl InstructionSelector {
                     // COPY from physical to virtual register
                     self.func.push_inst(
                         entry_block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::Copy,
-                            vec![MachOperand::VReg(vreg), MachOperand::PReg(*preg)],
+                            vec![ISelOperand::VReg(vreg), ISelOperand::PReg(*preg)],
                         ),
                     );
                 }
@@ -2120,12 +2148,12 @@ impl InstructionSelector {
                     // SP is register 31 in the encoding
                     self.func.push_inst(
                         entry_block,
-                        MachInst::new(
+                        ISelInst::new(
                             opc,
                             vec![
-                                MachOperand::VReg(vreg),
-                                MachOperand::PReg(SP),
-                                MachOperand::Imm(*offset),
+                                ISelOperand::VReg(vreg),
+                                ISelOperand::PReg(SP),
+                                ISelOperand::Imm(*offset),
                             ],
                         ),
                     );
@@ -2135,15 +2163,15 @@ impl InstructionSelector {
                     // For scaffold: just copy the pointer register
                     self.func.push_inst(
                         entry_block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::Copy,
-                            vec![MachOperand::VReg(vreg), MachOperand::PReg(*ptr_reg)],
+                            vec![ISelOperand::VReg(vreg), ISelOperand::PReg(*ptr_reg)],
                         ),
                     );
                 }
             }
 
-            self.define_value(val, MachOperand::VReg(vreg), ty.clone());
+            self.define_value(val, ISelOperand::VReg(vreg), ty.clone());
         }
         Ok(())
     }
@@ -2173,7 +2201,7 @@ impl InstructionSelector {
         let amt = self.use_value(&amt_val)?;
 
         // Check if shift amount is an immediate
-        let is_imm = matches!(amt, MachOperand::Imm(_));
+        let is_imm = matches!(amt, ISelOperand::Imm(_));
 
         if is_imm {
             // Immediate shift form
@@ -2187,7 +2215,7 @@ impl InstructionSelector {
             };
             self.func.push_inst(
                 block,
-                MachInst::new(opc, vec![MachOperand::VReg(dst), src, amt]),
+                ISelInst::new(opc, vec![ISelOperand::VReg(dst), src, amt]),
             );
         } else {
             // Register shift form
@@ -2201,11 +2229,11 @@ impl InstructionSelector {
             };
             self.func.push_inst(
                 block,
-                MachInst::new(opc, vec![MachOperand::VReg(dst), src, amt]),
+                ISelInst::new(opc, vec![ISelOperand::VReg(dst), src, amt]),
             );
         }
 
-        self.define_value(result_val, MachOperand::VReg(dst), ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), ty);
         Ok(())
     }
 
@@ -2245,10 +2273,10 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(opc, vec![MachOperand::VReg(dst), lhs, rhs]),
+            ISelInst::new(opc, vec![ISelOperand::VReg(dst), lhs, rhs]),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), ty);
         Ok(())
     }
 
@@ -2293,12 +2321,12 @@ impl InstructionSelector {
                     // Same-width or unsupported: just copy
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::Copy,
-                            vec![MachOperand::VReg(dst), src],
+                            vec![ISelOperand::VReg(dst), src],
                         ),
                     );
-                    self.define_value(result_val, MachOperand::VReg(dst), to_ty_owned);
+                    self.define_value(result_val, ISelOperand::VReg(dst), to_ty_owned);
                     return Ok(());
                 }
             }
@@ -2313,23 +2341,23 @@ impl InstructionSelector {
                     // But we need an explicit instruction for tracking.
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::MovR,
-                            vec![MachOperand::VReg(dst), src],
+                            vec![ISelOperand::VReg(dst), src],
                         ),
                     );
-                    self.define_value(result_val, MachOperand::VReg(dst), to_ty_owned);
+                    self.define_value(result_val, ISelOperand::VReg(dst), to_ty_owned);
                     return Ok(());
                 }
                 _ => {
                     self.func.push_inst(
                         block,
-                        MachInst::new(
+                        ISelInst::new(
                             AArch64Opcode::Copy,
-                            vec![MachOperand::VReg(dst), src],
+                            vec![ISelOperand::VReg(dst), src],
                         ),
                     );
-                    self.define_value(result_val, MachOperand::VReg(dst), to_ty_owned);
+                    self.define_value(result_val, ISelOperand::VReg(dst), to_ty_owned);
                     return Ok(());
                 }
             }
@@ -2337,9 +2365,9 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
+            ISelInst::new(opc, vec![ISelOperand::VReg(dst), src]),
         );
-        self.define_value(result_val, MachOperand::VReg(dst), to_ty_owned);
+        self.define_value(result_val, ISelOperand::VReg(dst), to_ty_owned);
         Ok(())
     }
 
@@ -2386,18 +2414,18 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 opc,
                 vec![
-                    MachOperand::VReg(dst),
+                    ISelOperand::VReg(dst),
                     src,
-                    MachOperand::Imm(immr),
-                    MachOperand::Imm(imms),
+                    ISelOperand::Imm(immr),
+                    ISelOperand::Imm(imms),
                 ],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), ty);
         Ok(())
     }
 
@@ -2432,9 +2460,9 @@ impl InstructionSelector {
         // Copy dst to result (BFM operates on Wd as both read and write)
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::Copy,
-                vec![MachOperand::VReg(result), dst_op],
+                vec![ISelOperand::VReg(result), dst_op],
             ),
         );
 
@@ -2453,18 +2481,18 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 opc,
                 vec![
-                    MachOperand::VReg(result),
+                    ISelOperand::VReg(result),
                     src_op,
-                    MachOperand::Imm(immr),
-                    MachOperand::Imm(imms),
+                    ISelOperand::Imm(immr),
+                    ISelOperand::Imm(imms),
                 ],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(result), ty);
+        self.define_value(result_val, ISelOperand::VReg(result), ty);
         Ok(())
     }
 
@@ -2498,9 +2526,9 @@ impl InstructionSelector {
         // First, test the condition value (CMP cond, #0)
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::CmpRI,
-                vec![cond_op, MachOperand::Imm(0)],
+                vec![cond_op, ISelOperand::Imm(0)],
             ),
         );
 
@@ -2514,18 +2542,18 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 opc,
                 vec![
-                    MachOperand::VReg(dst),
+                    ISelOperand::VReg(dst),
                     true_op,
                     false_op,
-                    MachOperand::CondCode(cc),
+                    ISelOperand::CondCode(cc),
                 ],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), ty);
         Ok(())
     }
 
@@ -2563,10 +2591,10 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(opc, vec![MachOperand::VReg(dst), lhs, rhs]),
+            ISelInst::new(opc, vec![ISelOperand::VReg(dst), lhs, rhs]),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), ty);
         Ok(())
     }
 
@@ -2593,7 +2621,7 @@ impl InstructionSelector {
         };
         self.func.push_inst(
             block,
-            MachInst::new(cmp_opc, vec![lhs, rhs]),
+            ISelInst::new(cmp_opc, vec![lhs, rhs]),
         );
 
         // CSET to materialize result
@@ -2601,13 +2629,13 @@ impl InstructionSelector {
         let dst = self.new_vreg(RegClass::Gpr32);
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::CSet,
-                vec![MachOperand::VReg(dst), MachOperand::CondCode(cc)],
+                vec![ISelOperand::VReg(dst), ISelOperand::CondCode(cc)],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), Type::B1);
+        self.define_value(result_val, ISelOperand::VReg(dst), Type::B1);
         Ok(())
     }
 
@@ -2640,17 +2668,17 @@ impl InstructionSelector {
         let src_hint = if matches!(src_ty, Type::F32) { 32i64 } else { 64 };
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 opc,
                 vec![
-                    MachOperand::VReg(dst),
+                    ISelOperand::VReg(dst),
                     src,
-                    MachOperand::Imm(src_hint),
+                    ISelOperand::Imm(src_hint),
                 ],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), dst_ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), dst_ty);
         Ok(())
     }
 
@@ -2688,10 +2716,10 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
+            ISelInst::new(opc, vec![ISelOperand::VReg(dst), src]),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), dst_ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), dst_ty);
         Ok(())
     }
 
@@ -2724,17 +2752,17 @@ impl InstructionSelector {
         let src_hint = if matches!(src_ty, Type::F32) { 32i64 } else { 64 };
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 opc,
                 vec![
-                    MachOperand::VReg(dst),
+                    ISelOperand::VReg(dst),
                     src,
-                    MachOperand::Imm(src_hint),
+                    ISelOperand::Imm(src_hint),
                 ],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), dst_ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), dst_ty);
         Ok(())
     }
 
@@ -2767,10 +2795,10 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
+            ISelInst::new(opc, vec![ISelOperand::VReg(dst), src]),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), dst_ty);
+        self.define_value(result_val, ISelOperand::VReg(dst), dst_ty);
         Ok(())
     }
 
@@ -2792,13 +2820,13 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::FcvtSD,
-                vec![MachOperand::VReg(dst), src],
+                vec![ISelOperand::VReg(dst), src],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), Type::F64);
+        self.define_value(result_val, ISelOperand::VReg(dst), Type::F64);
         Ok(())
     }
 
@@ -2816,13 +2844,13 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::FcvtDS,
-                vec![MachOperand::VReg(dst), src],
+                vec![ISelOperand::VReg(dst), src],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), Type::F32);
+        self.define_value(result_val, ISelOperand::VReg(dst), Type::F32);
         Ok(())
     }
 
@@ -2860,10 +2888,10 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
+            ISelInst::new(opc, vec![ISelOperand::VReg(dst), src]),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), to_ty.clone());
+        self.define_value(result_val, ISelOperand::VReg(dst), to_ty.clone());
         Ok(())
     }
 
@@ -2922,10 +2950,10 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(opc, vec![MachOperand::VReg(dst), src]),
+            ISelInst::new(opc, vec![ISelOperand::VReg(dst), src]),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), to_ty.clone());
+        self.define_value(result_val, ISelOperand::VReg(dst), to_ty.clone());
         Ok(())
     }
 
@@ -2952,26 +2980,26 @@ impl InstructionSelector {
         // ADRP Xd, symbol@PAGE
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::Adrp,
-                vec![MachOperand::VReg(dst), MachOperand::Symbol(name.to_string())],
+                vec![ISelOperand::VReg(dst), ISelOperand::Symbol(name.to_string())],
             ),
         );
 
         // ADD Xd, Xd, symbol@PAGEOFF
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::AddPCRel,
                 vec![
-                    MachOperand::VReg(dst),
-                    MachOperand::VReg(dst),
-                    MachOperand::Symbol(name.to_string()),
+                    ISelOperand::VReg(dst),
+                    ISelOperand::VReg(dst),
+                    ISelOperand::Symbol(name.to_string()),
                 ],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), Type::I64);
+        self.define_value(result_val, ISelOperand::VReg(dst), Type::I64);
         Ok(())
     }
 
@@ -2999,26 +3027,26 @@ impl InstructionSelector {
         // ADRP Xd, symbol@GOTPAGE
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::Adrp,
-                vec![MachOperand::VReg(dst), MachOperand::Symbol(name.to_string())],
+                vec![ISelOperand::VReg(dst), ISelOperand::Symbol(name.to_string())],
             ),
         );
 
         // LDR Xd, [Xd, symbol@GOTPAGEOFF]
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::LdrGot,
                 vec![
-                    MachOperand::VReg(dst),
-                    MachOperand::VReg(dst),
-                    MachOperand::Symbol(name.to_string()),
+                    ISelOperand::VReg(dst),
+                    ISelOperand::VReg(dst),
+                    ISelOperand::Symbol(name.to_string()),
                 ],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), Type::I64);
+        self.define_value(result_val, ISelOperand::VReg(dst), Type::I64);
         Ok(())
     }
 
@@ -3045,26 +3073,26 @@ impl InstructionSelector {
         // ADRP Xd, symbol@TLVPPAGE
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::Adrp,
-                vec![MachOperand::VReg(dst), MachOperand::Symbol(name.to_string())],
+                vec![ISelOperand::VReg(dst), ISelOperand::Symbol(name.to_string())],
             ),
         );
 
         // LDR Xd, [Xd, symbol@TLVPPAGEOFF]
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::LdrTlvp,
                 vec![
-                    MachOperand::VReg(dst),
-                    MachOperand::VReg(dst),
-                    MachOperand::Symbol(name.to_string()),
+                    ISelOperand::VReg(dst),
+                    ISelOperand::VReg(dst),
+                    ISelOperand::Symbol(name.to_string()),
                 ],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), Type::I64);
+        self.define_value(result_val, ISelOperand::VReg(dst), Type::I64);
         Ok(())
     }
 
@@ -3080,17 +3108,17 @@ impl InstructionSelector {
 
         self.func.push_inst(
             block,
-            MachInst::new(
+            ISelInst::new(
                 AArch64Opcode::AddPCRel,
                 vec![
-                    MachOperand::VReg(dst),
-                    MachOperand::PReg(SP), // SP
-                    MachOperand::StackSlot(slot),
+                    ISelOperand::VReg(dst),
+                    ISelOperand::PReg(SP), // SP
+                    ISelOperand::StackSlot(slot),
                 ],
             ),
         );
 
-        self.define_value(result_val, MachOperand::VReg(dst), Type::I64);
+        self.define_value(result_val, ISelOperand::VReg(dst), Type::I64);
         Ok(())
     }
 
@@ -3118,12 +3146,12 @@ impl InstructionSelector {
             }
             let class = reg_class_for_type(ty);
             let vreg = self.new_vreg(class);
-            self.define_value(*val, MachOperand::VReg(vreg), ty.clone());
+            self.define_value(*val, ISelOperand::VReg(vreg), ty.clone());
         }
     }
 
-    /// Consume the selector and return the completed MachFunction.
-    pub fn finalize(self) -> MachFunction {
+    /// Consume the selector and return the completed ISelFunction.
+    pub fn finalize(self) -> ISelFunction {
         self.func
     }
 }
@@ -3259,8 +3287,8 @@ mod tests {
         assert_eq!(mblock.insts.len(), 2);
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Copy);
         assert_eq!(mblock.insts[1].opcode, AArch64Opcode::Copy);
-        assert_eq!(mblock.insts[0].operands[1], MachOperand::PReg(PReg::new(0))); // X0
-        assert_eq!(mblock.insts[1].operands[1], MachOperand::PReg(PReg::new(1))); // X1
+        assert_eq!(mblock.insts[0].operands[1], ISelOperand::PReg(PReg::new(0))); // X0
+        assert_eq!(mblock.insts[1].operands[1], ISelOperand::PReg(PReg::new(1))); // X1
     }
 
     #[test]
@@ -3343,7 +3371,7 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts.len(), 4);
-        assert_eq!(mblock.insts[2].operands[0], MachOperand::PReg(PReg::new(0))); // X0
+        assert_eq!(mblock.insts[2].operands[0], ISelOperand::PReg(PReg::new(0))); // X0
         assert_eq!(mblock.insts[3].opcode, AArch64Opcode::Ret);
     }
 
@@ -3795,8 +3823,8 @@ mod tests {
         let inst = &mfunc.blocks[&entry].insts[1];
         assert_eq!(inst.opcode, AArch64Opcode::Ubfm);
         // immr = 4, imms = 11
-        assert_eq!(inst.operands[2], MachOperand::Imm(4));
-        assert_eq!(inst.operands[3], MachOperand::Imm(11));
+        assert_eq!(inst.operands[2], ISelOperand::Imm(4));
+        assert_eq!(inst.operands[3], ISelOperand::Imm(11));
     }
 
     #[test]
@@ -3822,8 +3850,8 @@ mod tests {
         let mfunc = isel.finalize();
         let inst = &mfunc.blocks[&entry].insts[1];
         assert_eq!(inst.opcode, AArch64Opcode::Sbfm);
-        assert_eq!(inst.operands[2], MachOperand::Imm(0));
-        assert_eq!(inst.operands[3], MachOperand::Imm(15));
+        assert_eq!(inst.operands[2], ISelOperand::Imm(0));
+        assert_eq!(inst.operands[3], ISelOperand::Imm(15));
     }
 
     #[test]
@@ -3847,8 +3875,8 @@ mod tests {
         assert_eq!(mblock.insts[2].opcode, AArch64Opcode::Copy);
         assert_eq!(mblock.insts[3].opcode, AArch64Opcode::Bfm);
         // immr = (32 - 4) % 32 = 28, imms = 7
-        assert_eq!(mblock.insts[3].operands[2], MachOperand::Imm(28));
-        assert_eq!(mblock.insts[3].operands[3], MachOperand::Imm(7));
+        assert_eq!(mblock.insts[3].operands[2], ISelOperand::Imm(28));
+        assert_eq!(mblock.insts[3].operands[3], ISelOperand::Imm(7));
     }
 
     // =======================================================================
@@ -3884,7 +3912,7 @@ mod tests {
         assert_eq!(mblock.insts[4].opcode, AArch64Opcode::Csel);
         assert_eq!(
             mblock.insts[4].operands[3],
-            MachOperand::CondCode(AArch64CC::NE)
+            ISelOperand::CondCode(AArch64CC::NE)
         );
     }
 
@@ -3913,7 +3941,7 @@ mod tests {
         assert_eq!(mblock.insts[4].opcode, AArch64Opcode::Csel);
         assert_eq!(
             mblock.insts[4].operands[3],
-            MachOperand::CondCode(AArch64CC::GT)
+            ISelOperand::CondCode(AArch64CC::GT)
         );
     }
 
@@ -3941,7 +3969,7 @@ mod tests {
         let mblock = &mfunc.blocks[&entry];
         // MOVZ (low 16 bits) + 3 MOVK (remaining non-zero chunks)
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Movz);
-        assert_eq!(mblock.insts[0].operands[1], MachOperand::Imm(0x0004));
+        assert_eq!(mblock.insts[0].operands[1], ISelOperand::Imm(0x0004));
 
         // Should have MOVK for bits [16:31], [32:47], [48:63]
         let movk_count = mblock.insts.iter().filter(|i| i.opcode == AArch64Opcode::Movk).count();
@@ -3967,10 +3995,10 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Movz);
-        assert_eq!(mblock.insts[0].operands[1], MachOperand::Imm(0x0002));
+        assert_eq!(mblock.insts[0].operands[1], ISelOperand::Imm(0x0002));
         assert_eq!(mblock.insts[1].opcode, AArch64Opcode::Movk);
-        assert_eq!(mblock.insts[1].operands[1], MachOperand::Imm(0x0001));
-        assert_eq!(mblock.insts[1].operands[2], MachOperand::Imm(16)); // shift=16
+        assert_eq!(mblock.insts[1].operands[1], ISelOperand::Imm(0x0001));
+        assert_eq!(mblock.insts[1].operands[2], ISelOperand::Imm(16)); // shift=16
     }
 
     // =======================================================================
@@ -4055,7 +4083,7 @@ mod tests {
         assert_eq!(mblock.insts[3].opcode, AArch64Opcode::CSet);
         assert_eq!(
             mblock.insts[3].operands[1],
-            MachOperand::CondCode(AArch64CC::MI)
+            ISelOperand::CondCode(AArch64CC::MI)
         );
     }
 
@@ -4149,9 +4177,9 @@ mod tests {
         // ADRP + ADD
         assert_eq!(mblock.insts.len(), 2);
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Adrp);
-        assert_eq!(mblock.insts[0].operands[1], MachOperand::Symbol("my_global".to_string()));
+        assert_eq!(mblock.insts[0].operands[1], ISelOperand::Symbol("my_global".to_string()));
         assert_eq!(mblock.insts[1].opcode, AArch64Opcode::AddPCRel);
-        assert_eq!(mblock.insts[1].operands[2], MachOperand::Symbol("my_global".to_string()));
+        assert_eq!(mblock.insts[1].operands[2], ISelOperand::Symbol("my_global".to_string()));
     }
 
     #[test]
@@ -4171,9 +4199,9 @@ mod tests {
         // ADRP + LDR (GOT-indirect, not ADD)
         assert_eq!(mblock.insts.len(), 2);
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Adrp);
-        assert_eq!(mblock.insts[0].operands[1], MachOperand::Symbol("printf".to_string()));
+        assert_eq!(mblock.insts[0].operands[1], ISelOperand::Symbol("printf".to_string()));
         assert_eq!(mblock.insts[1].opcode, AArch64Opcode::LdrGot);
-        assert_eq!(mblock.insts[1].operands[2], MachOperand::Symbol("printf".to_string()));
+        assert_eq!(mblock.insts[1].operands[2], ISelOperand::Symbol("printf".to_string()));
     }
 
     #[test]
@@ -4193,9 +4221,9 @@ mod tests {
         // ADRP + LDR (TLV-indirect)
         assert_eq!(mblock.insts.len(), 2);
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::Adrp);
-        assert_eq!(mblock.insts[0].operands[1], MachOperand::Symbol("thread_local_var".to_string()));
+        assert_eq!(mblock.insts[0].operands[1], ISelOperand::Symbol("thread_local_var".to_string()));
         assert_eq!(mblock.insts[1].opcode, AArch64Opcode::LdrTlvp);
-        assert_eq!(mblock.insts[1].operands[2], MachOperand::Symbol("thread_local_var".to_string()));
+        assert_eq!(mblock.insts[1].operands[2], ISelOperand::Symbol("thread_local_var".to_string()));
     }
 
     #[test]
@@ -4215,8 +4243,8 @@ mod tests {
         assert_eq!(mblock.insts.len(), 1);
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::AddPCRel);
         // Should reference SP (PReg(31)) and StackSlot(3)
-        assert_eq!(mblock.insts[0].operands[1], MachOperand::PReg(SP));
-        assert_eq!(mblock.insts[0].operands[2], MachOperand::StackSlot(3));
+        assert_eq!(mblock.insts[0].operands[1], ISelOperand::PReg(SP));
+        assert_eq!(mblock.insts[0].operands[2], ISelOperand::StackSlot(3));
     }
 
     // =======================================================================
@@ -4367,7 +4395,7 @@ mod tests {
 
         // Define an arg value (simulating a function parameter).
         let vreg = isel.new_vreg(RegClass::Gpr32);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I32);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), Type::I32);
 
         // Select a Call instruction.
         isel.select_instruction(
@@ -4389,7 +4417,7 @@ mod tests {
         let bl = bl_inst.unwrap();
         assert_eq!(
             bl.operands[0],
-            MachOperand::Symbol("my_callee".to_string()),
+            ISelOperand::Symbol("my_callee".to_string()),
             "BL should have Symbol operand with callee name"
         );
     }
@@ -4405,7 +4433,7 @@ mod tests {
 
         // Define a boolean condition value.
         let vreg = isel.new_vreg(RegClass::Gpr32);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::B1);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), Type::B1);
 
         let then_block = Block(1);
         let else_block = Block(2);
@@ -4438,12 +4466,12 @@ mod tests {
         let bcc = bcc_inst.unwrap();
         assert_eq!(
             bcc.operands[0],
-            MachOperand::CondCode(AArch64CC::NE),
+            ISelOperand::CondCode(AArch64CC::NE),
             "B.cond should have NE condition code (branch if nonzero)"
         );
         assert_eq!(
             bcc.operands[1],
-            MachOperand::Block(then_block),
+            ISelOperand::Block(then_block),
             "B.cond should target the then block"
         );
     }
@@ -5119,7 +5147,7 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let vreg = isel.new_vreg(RegClass::Gpr32);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I32);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), Type::I32);
 
         isel.select_instruction(
             &Instruction {
@@ -5145,7 +5173,7 @@ mod tests {
 
         // Define a pointer value
         let vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), Type::I64);
 
         let struct_ty = Type::Struct(vec![Type::I32, Type::I32]);
         isel.select_instruction(
@@ -5169,7 +5197,7 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), Type::I64);
 
         let struct_ty = Type::Struct(vec![Type::I32, Type::I32]);
         isel.select_instruction(
@@ -5186,7 +5214,7 @@ mod tests {
         // Field 1 at offset 4 -> ADDXri
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::AddRI);
         // Offset should be 4
-        assert_eq!(mblock.insts[0].operands[2], MachOperand::Imm(4));
+        assert_eq!(mblock.insts[0].operands[2], ISelOperand::Imm(4));
     }
 
     #[test]
@@ -5195,7 +5223,7 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), Type::I64);
 
         let struct_ty = Type::Struct(vec![Type::I8, Type::I32]);
         isel.select_instruction(
@@ -5210,7 +5238,7 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::AddRI);
-        assert_eq!(mblock.insts[0].operands[2], MachOperand::Imm(4));
+        assert_eq!(mblock.insts[0].operands[2], ISelOperand::Imm(4));
     }
 
     #[test]
@@ -5218,7 +5246,7 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), Type::I64);
 
         let struct_ty = Type::Struct(vec![Type::I32]);
         let result = isel.select_instruction(
@@ -5237,7 +5265,7 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), Type::I64);
 
         // Using I32 as the struct_ty should fail
         let result = isel.select_instruction(
@@ -5267,7 +5295,7 @@ mod tests {
 
         // Define a pointer to the struct as a vreg
         let vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), struct_ty);
 
         isel.select_instruction(
             &Instruction {
@@ -5287,7 +5315,7 @@ mod tests {
         // Find the LDR X0 instruction
         let ldr_inst = insts.iter().find(|i| {
             i.opcode == AArch64Opcode::LdrRI
-                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+                && i.operands.first() == Some(&ISelOperand::PReg(gpr::X0))
         });
         assert!(ldr_inst.is_some(), "Expected LDR X0 for small struct return");
         // Must end with RET
@@ -5309,7 +5337,7 @@ mod tests {
         isel.func.ensure_block(entry);
 
         let vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), struct_ty);
 
         isel.select_instruction(
             &Instruction {
@@ -5327,13 +5355,13 @@ mod tests {
         // Should have LDR X0 at offset 0, LDR X1 at offset 8, then RET
         let ldr_x0 = insts.iter().find(|i| {
             i.opcode == AArch64Opcode::LdrRI
-                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+                && i.operands.first() == Some(&ISelOperand::PReg(gpr::X0))
         });
         assert!(ldr_x0.is_some(), "Expected LDR X0 for medium struct return");
 
         let ldr_x1 = insts.iter().find(|i| {
             i.opcode == AArch64Opcode::LdrRI
-                && i.operands.first() == Some(&MachOperand::PReg(gpr::X1))
+                && i.operands.first() == Some(&ISelOperand::PReg(gpr::X1))
         });
         assert!(ldr_x1.is_some(), "Expected LDR X1 for medium struct return");
         assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::Ret);
@@ -5354,7 +5382,7 @@ mod tests {
         isel.func.ensure_block(entry);
 
         let vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), struct_ty);
 
         isel.select_instruction(
             &Instruction {
@@ -5372,7 +5400,7 @@ mod tests {
         // Should have 3 LDR+STR pairs (24 bytes / 8 = 3 chunks) then RET
         let str_to_x8: Vec<_> = insts.iter().filter(|i| {
             i.opcode == AArch64Opcode::StrRI
-                && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
+                && i.operands.get(1) == Some(&ISelOperand::PReg(gpr::X8))
         }).collect();
         assert_eq!(str_to_x8.len(), 3, "Expected 3 stores to X8 for 24-byte struct");
         assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::Ret);
@@ -5387,7 +5415,7 @@ mod tests {
         let struct_ty = Type::Struct(vec![Type::I32, Type::I32]);
         // Define a pointer to the struct
         let vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), struct_ty);
 
         // Define a result value
         let result_types = vec![Type::I32];
@@ -5409,7 +5437,7 @@ mod tests {
         // The aggregate arg should be loaded into X0 (small struct -> Reg(X0))
         let ldr_x0 = mblock.insts.iter().find(|i| {
             i.opcode == AArch64Opcode::LdrRI
-                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+                && i.operands.first() == Some(&ISelOperand::PReg(gpr::X0))
         });
         assert!(ldr_x0.is_some(), "Expected LDR X0 for small aggregate arg");
     }
@@ -5422,7 +5450,7 @@ mod tests {
 
         let struct_ty = Type::Struct(vec![Type::I64, Type::I64, Type::I64]);
         let vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), struct_ty);
 
         let result_types = vec![Type::I32];
         isel.select_call(
@@ -5439,7 +5467,7 @@ mod tests {
         // Large aggregate -> Indirect{X0}, so should emit MovR to X0
         let mov_x0 = mblock.insts.iter().find(|i| {
             i.opcode == AArch64Opcode::MovR
-                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+                && i.operands.first() == Some(&ISelOperand::PReg(gpr::X0))
         });
         assert!(mov_x0.is_some(), "Expected MOV X0 for large aggregate indirect pass");
     }
@@ -5470,7 +5498,7 @@ mod tests {
         // Result should be defined (the MovR from X8)
         let mov_from_x8 = mblock.insts.iter().find(|i| {
             i.opcode == AArch64Opcode::MovR
-                && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
+                && i.operands.get(1) == Some(&ISelOperand::PReg(gpr::X8))
         });
         assert!(mov_from_x8.is_some(), "Expected MOV from X8 for sret result");
     }
@@ -5481,7 +5509,7 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), Type::I64);
 
         let struct_ty = Type::Struct(vec![Type::I8, Type::I32, Type::I64]);
         // Verify expected offsets from the type system
@@ -5502,7 +5530,7 @@ mod tests {
         let mfunc = isel.finalize();
         let mblock = &mfunc.blocks[&entry];
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::AddRI);
-        assert_eq!(mblock.insts[0].operands[2], MachOperand::Imm(8));
+        assert_eq!(mblock.insts[0].operands[2], ISelOperand::Imm(8));
     }
 
     // =======================================================================
@@ -5513,7 +5541,7 @@ mod tests {
     fn select_load_i8_emits_ldrb() {
         let (mut isel, entry) = make_empty_isel();
         let addr_vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(addr_vreg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(addr_vreg), Type::I64);
 
         isel.select_instruction(
             &Instruction {
@@ -5534,7 +5562,7 @@ mod tests {
     fn select_load_i16_emits_ldrh() {
         let (mut isel, entry) = make_empty_isel();
         let addr_vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(addr_vreg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(addr_vreg), Type::I64);
 
         isel.select_instruction(
             &Instruction {
@@ -5555,9 +5583,9 @@ mod tests {
     fn select_store_i8_emits_strb() {
         let (mut isel, entry) = make_empty_isel();
         let val_vreg = isel.new_vreg(RegClass::Gpr32);
-        isel.define_value(Value(0), MachOperand::VReg(val_vreg), Type::I8);
+        isel.define_value(Value(0), ISelOperand::VReg(val_vreg), Type::I8);
         let addr_vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(1), MachOperand::VReg(addr_vreg), Type::I64);
+        isel.define_value(Value(1), ISelOperand::VReg(addr_vreg), Type::I64);
 
         isel.select_instruction(
             &Instruction {
@@ -5578,9 +5606,9 @@ mod tests {
     fn select_store_i16_emits_strh() {
         let (mut isel, entry) = make_empty_isel();
         let val_vreg = isel.new_vreg(RegClass::Gpr32);
-        isel.define_value(Value(0), MachOperand::VReg(val_vreg), Type::I16);
+        isel.define_value(Value(0), ISelOperand::VReg(val_vreg), Type::I16);
         let addr_vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(1), MachOperand::VReg(addr_vreg), Type::I64);
+        isel.define_value(Value(1), ISelOperand::VReg(addr_vreg), Type::I64);
 
         isel.select_instruction(
             &Instruction {
@@ -5601,9 +5629,9 @@ mod tests {
     fn select_load_i8_add_store_i8_roundtrip() {
         let (mut isel, entry) = make_empty_isel();
         let addr_vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(addr_vreg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(addr_vreg), Type::I64);
         let addr_vreg2 = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(1), MachOperand::VReg(addr_vreg2), Type::I64);
+        isel.define_value(Value(1), ISelOperand::VReg(addr_vreg2), Type::I64);
 
         isel.select_instruction(
             &Instruction {
@@ -5669,7 +5697,7 @@ mod tests {
         isel.func.ensure_block(entry);
 
         let vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), struct_ty);
 
         isel.select_instruction(
             &Instruction {
@@ -5687,7 +5715,7 @@ mod tests {
         // Count stores to X8
         let str_to_x8: Vec<_> = insts.iter().filter(|i| {
             (i.opcode == AArch64Opcode::StrRI || i.opcode == AArch64Opcode::StrbRI)
-                && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
+                && i.operands.get(1) == Some(&ISelOperand::PReg(gpr::X8))
         }).collect();
         // 2x StrRI (8-byte each) + 1x StrbRI (1-byte tail) = 3 stores
         assert_eq!(str_to_x8.len(), 3, "Expected 3 stores for 17-byte struct sret: 2x8 + 1x1");
@@ -5696,7 +5724,7 @@ mod tests {
         let tail_store = str_to_x8.last().unwrap();
         assert_eq!(tail_store.opcode, AArch64Opcode::StrbRI,
             "Trailing byte should use STRB");
-        assert_eq!(tail_store.operands.get(2), Some(&MachOperand::Imm(16)),
+        assert_eq!(tail_store.operands.get(2), Some(&ISelOperand::Imm(16)),
             "Trailing byte store should be at offset 16");
 
         assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::Ret);
@@ -5721,7 +5749,7 @@ mod tests {
         isel.func.ensure_block(entry);
 
         let vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), struct_ty);
 
         isel.select_instruction(
             &Instruction {
@@ -5741,14 +5769,14 @@ mod tests {
         let str_to_x8: Vec<_> = insts.iter().filter(|i| {
             (i.opcode == AArch64Opcode::StrRI
                 || i.opcode == AArch64Opcode::StrhRI)
-                && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
+                && i.operands.get(1) == Some(&ISelOperand::PReg(gpr::X8))
         }).collect();
         assert_eq!(str_to_x8.len(), 3, "Expected 3 stores for 18-byte struct: 2x8 + 1x2");
 
         let tail_store = str_to_x8.last().unwrap();
         assert_eq!(tail_store.opcode, AArch64Opcode::StrhRI,
             "Trailing halfword should use STRH");
-        assert_eq!(tail_store.operands.get(2), Some(&MachOperand::Imm(16)),
+        assert_eq!(tail_store.operands.get(2), Some(&ISelOperand::Imm(16)),
             "Trailing halfword store should be at offset 16");
 
         assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::Ret);
@@ -5770,7 +5798,7 @@ mod tests {
         isel.func.ensure_block(entry);
 
         let vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(vreg), struct_ty);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), struct_ty);
 
         isel.select_instruction(
             &Instruction {
@@ -5790,7 +5818,7 @@ mod tests {
             matches!(i.opcode,
                 AArch64Opcode::StrRI
                 | AArch64Opcode::StrhRI | AArch64Opcode::StrbRI)
-                && i.operands.get(1) == Some(&MachOperand::PReg(gpr::X8))
+                && i.operands.get(1) == Some(&ISelOperand::PReg(gpr::X8))
         }).collect();
         // 2x StrRI + 1x StrRI + 1x StrhRI + 1x StrbRI = 5 stores
         assert_eq!(str_to_x8.len(), 5,
@@ -5804,11 +5832,11 @@ mod tests {
         assert_eq!(str_to_x8[4].opcode, AArch64Opcode::StrbRI);
 
         // Verify offsets
-        assert_eq!(str_to_x8[0].operands.get(2), Some(&MachOperand::Imm(0)));
-        assert_eq!(str_to_x8[1].operands.get(2), Some(&MachOperand::Imm(8)));
-        assert_eq!(str_to_x8[2].operands.get(2), Some(&MachOperand::Imm(16)));
-        assert_eq!(str_to_x8[3].operands.get(2), Some(&MachOperand::Imm(20)));
-        assert_eq!(str_to_x8[4].operands.get(2), Some(&MachOperand::Imm(22)));
+        assert_eq!(str_to_x8[0].operands.get(2), Some(&ISelOperand::Imm(0)));
+        assert_eq!(str_to_x8[1].operands.get(2), Some(&ISelOperand::Imm(8)));
+        assert_eq!(str_to_x8[2].operands.get(2), Some(&ISelOperand::Imm(16)));
+        assert_eq!(str_to_x8[3].operands.get(2), Some(&ISelOperand::Imm(20)));
+        assert_eq!(str_to_x8[4].operands.get(2), Some(&ISelOperand::Imm(22)));
 
         assert_eq!(insts.last().unwrap().opcode, AArch64Opcode::Ret);
     }
@@ -5826,11 +5854,11 @@ mod tests {
 
         // Define arg values
         let v0_reg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(v0_reg), Type::I64); // fmt
+        isel.define_value(Value(0), ISelOperand::VReg(v0_reg), Type::I64); // fmt
         let v1_reg = isel.new_vreg(RegClass::Gpr32);
-        isel.define_value(Value(1), MachOperand::VReg(v1_reg), Type::I32); // 42
+        isel.define_value(Value(1), ISelOperand::VReg(v1_reg), Type::I32); // 42
         let v2_reg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(2), MachOperand::VReg(v2_reg), Type::I64); // 100
+        isel.define_value(Value(2), ISelOperand::VReg(v2_reg), Type::I64); // 100
 
         let result_types = vec![Type::I32]; // printf returns int
         isel.select_variadic_call(
@@ -5850,27 +5878,27 @@ mod tests {
         // First: MOV to X0 for fixed arg
         let mov_x0 = insts.iter().find(|i| {
             i.opcode == AArch64Opcode::MovR
-                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+                && i.operands.first() == Some(&ISelOperand::PReg(gpr::X0))
         });
         assert!(mov_x0.is_some(), "Fixed arg should go to X0");
 
         // Variadic args should be STR to stack
         let str_sp: Vec<_> = insts.iter().filter(|i| {
             matches!(i.opcode, AArch64Opcode::StrRI | AArch64Opcode::StrRI)
-                && i.operands.get(1) == Some(&MachOperand::PReg(SP))
+                && i.operands.get(1) == Some(&ISelOperand::PReg(SP))
         }).collect();
         assert_eq!(str_sp.len(), 2, "Two variadic args should be stored to stack");
 
         // Verify offsets: first at 0, second at 8
-        assert_eq!(str_sp[0].operands.get(2), Some(&MachOperand::Imm(0)));
-        assert_eq!(str_sp[1].operands.get(2), Some(&MachOperand::Imm(8)));
+        assert_eq!(str_sp[0].operands.get(2), Some(&ISelOperand::Imm(0)));
+        assert_eq!(str_sp[1].operands.get(2), Some(&ISelOperand::Imm(8)));
 
         // BL should be present
         let bl_inst = insts.iter().find(|i| i.opcode == AArch64Opcode::Bl);
         assert!(bl_inst.is_some(), "Expected BL instruction");
         assert_eq!(
             bl_inst.unwrap().operands[0],
-            MachOperand::Symbol("printf".to_string()),
+            ISelOperand::Symbol("printf".to_string()),
         );
     }
 
@@ -5881,9 +5909,9 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let v0_reg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(v0_reg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(v0_reg), Type::I64);
         let v1_reg = isel.new_vreg(RegClass::Fpr64);
-        isel.define_value(Value(1), MachOperand::VReg(v1_reg), Type::F64);
+        isel.define_value(Value(1), ISelOperand::VReg(v1_reg), Type::F64);
 
         let result_types = vec![Type::I32];
         isel.select_variadic_call(
@@ -5902,18 +5930,18 @@ mod tests {
         // The variadic F64 should be stored to stack using StrRI (not MOV to V0)
         let str_d_sp = insts.iter().find(|i| {
             i.opcode == AArch64Opcode::StrRI
-                && i.operands.get(1) == Some(&MachOperand::PReg(SP))
+                && i.operands.get(1) == Some(&ISelOperand::PReg(SP))
         });
         assert!(str_d_sp.is_some(), "Variadic f64 should use StrRI to stack");
         assert_eq!(
             str_d_sp.unwrap().operands.get(2),
-            Some(&MachOperand::Imm(0)),
+            Some(&ISelOperand::Imm(0)),
             "Variadic f64 at stack offset 0"
         );
 
         // V0 should NOT be used (no MOV to V0 for variadic float)
         let mov_v0 = insts.iter().find(|i| {
-            i.operands.first() == Some(&MachOperand::PReg(gpr::V0))
+            i.operands.first() == Some(&ISelOperand::PReg(gpr::V0))
         });
         assert!(mov_v0.is_none(), "Variadic float should NOT go in V0 (Apple ABI)");
     }
@@ -5924,9 +5952,9 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let v0_reg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(v0_reg), Type::I64); // fmt
+        isel.define_value(Value(0), ISelOperand::VReg(v0_reg), Type::I64); // fmt
         let v1_reg = isel.new_vreg(RegClass::Gpr32);
-        isel.define_value(Value(1), MachOperand::VReg(v1_reg), Type::I32); // vararg
+        isel.define_value(Value(1), ISelOperand::VReg(v1_reg), Type::I32); // vararg
 
         isel.select_instruction(
             &Instruction {
@@ -5948,12 +5976,12 @@ mod tests {
         assert!(bl_inst.is_some());
         assert_eq!(
             bl_inst.unwrap().operands[0],
-            MachOperand::Symbol("NSLog".to_string()),
+            ISelOperand::Symbol("NSLog".to_string()),
         );
 
         let str_sp = mblock.insts.iter().find(|i| {
             matches!(i.opcode, AArch64Opcode::StrRI)
-                && i.operands.get(1) == Some(&MachOperand::PReg(SP))
+                && i.operands.get(1) == Some(&ISelOperand::PReg(SP))
         });
         assert!(str_sp.is_some(), "Variadic i32 arg should be on stack");
     }
@@ -5965,7 +5993,7 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let v0_reg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(v0_reg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(v0_reg), Type::I64);
 
         let result_types = vec![Type::I32];
         isel.select_variadic_call(
@@ -5983,13 +6011,13 @@ mod tests {
         // Fixed arg in X0, BL, result from X0
         let mov_x0 = mblock.insts.iter().find(|i| {
             i.opcode == AArch64Opcode::MovR
-                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+                && i.operands.first() == Some(&ISelOperand::PReg(gpr::X0))
         });
         assert!(mov_x0.is_some(), "Fixed arg should go to X0");
 
         // No stack stores (no varargs)
         let str_sp = mblock.insts.iter().any(|i| {
-            i.operands.get(1) == Some(&MachOperand::PReg(SP))
+            i.operands.get(1) == Some(&ISelOperand::PReg(SP))
                 && matches!(i.opcode, AArch64Opcode::StrRI | AArch64Opcode::StrRI
                     | AArch64Opcode::StrRI | AArch64Opcode::StrRI)
         });
@@ -6008,11 +6036,11 @@ mod tests {
 
         // Define the function pointer value
         let fp_vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(fp_vreg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(fp_vreg), Type::I64);
 
         // Define an argument value
         let arg_vreg = isel.new_vreg(RegClass::Gpr32);
-        isel.define_value(Value(1), MachOperand::VReg(arg_vreg), Type::I32);
+        isel.define_value(Value(1), ISelOperand::VReg(arg_vreg), Type::I32);
 
         // Select CallIndirect: args[0]=fn_ptr, args[1]=arg, results=[retval]
         isel.select_instruction(
@@ -6034,21 +6062,21 @@ mod tests {
         let blr = blr_inst.unwrap();
         assert_eq!(
             blr.operands[0],
-            MachOperand::PReg(gpr::X16),
+            ISelOperand::PReg(gpr::X16),
             "BLR should target X16 (IP0 scratch register)"
         );
 
         // Verify arg was moved to X0
         let mov_x0 = mblock.insts.iter().find(|i| {
             i.opcode == AArch64Opcode::MovR
-                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+                && i.operands.first() == Some(&ISelOperand::PReg(gpr::X0))
         });
         assert!(mov_x0.is_some(), "Arg should be moved to X0");
 
         // Verify fn_ptr was moved to X16
         let mov_x16 = mblock.insts.iter().find(|i| {
             i.opcode == AArch64Opcode::MovR
-                && i.operands.first() == Some(&MachOperand::PReg(gpr::X16))
+                && i.operands.first() == Some(&ISelOperand::PReg(gpr::X16))
         });
         assert!(mov_x16.is_some(), "Function pointer should be moved to X16");
     }
@@ -6059,7 +6087,7 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let fp_vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(fp_vreg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(fp_vreg), Type::I64);
 
         isel.select_instruction(
             &Instruction {
@@ -6086,14 +6114,14 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let fp_vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(fp_vreg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(fp_vreg), Type::I64);
 
         let a_vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(1), MachOperand::VReg(a_vreg), Type::I64);
+        isel.define_value(Value(1), ISelOperand::VReg(a_vreg), Type::I64);
         let b_vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(2), MachOperand::VReg(b_vreg), Type::I64);
+        isel.define_value(Value(2), ISelOperand::VReg(b_vreg), Type::I64);
         let c_vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(3), MachOperand::VReg(c_vreg), Type::I64);
+        isel.define_value(Value(3), ISelOperand::VReg(c_vreg), Type::I64);
 
         isel.select_instruction(
             &Instruction {
@@ -6110,15 +6138,15 @@ mod tests {
         // Verify args go to X0, X1, X2
         let mov_x0 = mblock.insts.iter().any(|i| {
             i.opcode == AArch64Opcode::MovR
-                && i.operands.first() == Some(&MachOperand::PReg(gpr::X0))
+                && i.operands.first() == Some(&ISelOperand::PReg(gpr::X0))
         });
         let mov_x1 = mblock.insts.iter().any(|i| {
             i.opcode == AArch64Opcode::MovR
-                && i.operands.first() == Some(&MachOperand::PReg(gpr::X1))
+                && i.operands.first() == Some(&ISelOperand::PReg(gpr::X1))
         });
         let mov_x2 = mblock.insts.iter().any(|i| {
             i.opcode == AArch64Opcode::MovR
-                && i.operands.first() == Some(&MachOperand::PReg(gpr::X2))
+                && i.operands.first() == Some(&ISelOperand::PReg(gpr::X2))
         });
         assert!(mov_x0, "First arg should go to X0");
         assert!(mov_x1, "Second arg should go to X1");
@@ -6139,7 +6167,7 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let sel_vreg = isel.new_vreg(RegClass::Gpr32);
-        isel.define_value(Value(0), MachOperand::VReg(sel_vreg), Type::I32);
+        isel.define_value(Value(0), ISelOperand::VReg(sel_vreg), Type::I32);
 
         let block1 = Block(1);
         let block2 = Block(2);
@@ -6180,7 +6208,7 @@ mod tests {
         for bcc in mblock.insts.iter().filter(|i| i.opcode == AArch64Opcode::BCond) {
             assert_eq!(
                 bcc.operands[0],
-                MachOperand::CondCode(AArch64CC::EQ),
+                ISelOperand::CondCode(AArch64CC::EQ),
                 "Switch cases use B.EQ"
             );
         }
@@ -6188,7 +6216,7 @@ mod tests {
         // The last instruction should be unconditional B to default
         let last = mblock.insts.last().unwrap();
         assert_eq!(last.opcode, AArch64Opcode::B, "Last inst should be B (default fallthrough)");
-        assert_eq!(last.operands[0], MachOperand::Block(block3), "Default should be block3");
+        assert_eq!(last.operands[0], ISelOperand::Block(block3), "Default should be block3");
 
         // Verify successors
         let succs = &mfunc.blocks[&entry].successors;
@@ -6203,7 +6231,7 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let sel_vreg = isel.new_vreg(RegClass::Gpr64);
-        isel.define_value(Value(0), MachOperand::VReg(sel_vreg), Type::I64);
+        isel.define_value(Value(0), ISelOperand::VReg(sel_vreg), Type::I64);
 
         let block1 = Block(1);
         let block2 = Block(2);
@@ -6240,7 +6268,7 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let sel_vreg = isel.new_vreg(RegClass::Gpr32);
-        isel.define_value(Value(0), MachOperand::VReg(sel_vreg), Type::I32);
+        isel.define_value(Value(0), ISelOperand::VReg(sel_vreg), Type::I32);
 
         let block1 = Block(1);
         let block_default = Block(2);
@@ -6270,7 +6298,7 @@ mod tests {
 
         let last = mblock.insts.last().unwrap();
         assert_eq!(last.opcode, AArch64Opcode::B);
-        assert_eq!(last.operands[0], MachOperand::Block(block_default));
+        assert_eq!(last.operands[0], ISelOperand::Block(block_default));
     }
 
     #[test]
@@ -6279,7 +6307,7 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
 
         let sel_vreg = isel.new_vreg(RegClass::Gpr32);
-        isel.define_value(Value(0), MachOperand::VReg(sel_vreg), Type::I32);
+        isel.define_value(Value(0), ISelOperand::VReg(sel_vreg), Type::I32);
 
         let block_default = Block(1);
         isel.func.ensure_block(block_default);
@@ -6302,6 +6330,6 @@ mod tests {
         // Just one B to default
         assert_eq!(mblock.insts.len(), 1, "Empty switch = just B to default");
         assert_eq!(mblock.insts[0].opcode, AArch64Opcode::B);
-        assert_eq!(mblock.insts[0].operands[0], MachOperand::Block(block_default));
+        assert_eq!(mblock.insts[0].operands[0], ISelOperand::Block(block_default));
     }
 }
