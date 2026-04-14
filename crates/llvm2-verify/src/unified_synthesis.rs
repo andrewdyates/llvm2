@@ -117,10 +117,20 @@ pub enum NeonSynthOpcode {
     Orr,
     /// NEON bitwise EOR (full-width).
     Eor,
+    /// NEON bitwise BIC (bit clear = AND NOT, full-width).
+    Bic,
     /// NEON SHL (per-lane shift left by immediate).
     Shl,
     /// NEON USHR (per-lane unsigned shift right by immediate).
     Ushr,
+    /// NEON SSHR (per-lane signed/arithmetic shift right by immediate).
+    Sshr,
+    /// NEON MLA (multiply-accumulate: Vd + Vn * Vm, per-lane, no 2D).
+    /// This is a fused two-instruction sequence: MUL then ADD.
+    Mla,
+    /// NEON MLS (multiply-subtract: Vd - Vn * Vm, per-lane, no 2D).
+    /// This is a fused two-instruction sequence: MUL then SUB.
+    Mls,
 }
 
 impl NeonSynthOpcode {
@@ -134,8 +144,12 @@ impl NeonSynthOpcode {
             NeonSynthOpcode::And,
             NeonSynthOpcode::Orr,
             NeonSynthOpcode::Eor,
+            NeonSynthOpcode::Bic,
             NeonSynthOpcode::Shl,
             NeonSynthOpcode::Ushr,
+            NeonSynthOpcode::Sshr,
+            NeonSynthOpcode::Mla,
+            NeonSynthOpcode::Mls,
         ]
     }
 
@@ -146,15 +160,39 @@ impl NeonSynthOpcode {
 
     /// Whether this opcode takes an immediate shift amount.
     pub fn is_shift(self) -> bool {
-        matches!(self, NeonSynthOpcode::Shl | NeonSynthOpcode::Ushr)
+        matches!(
+            self,
+            NeonSynthOpcode::Shl | NeonSynthOpcode::Ushr | NeonSynthOpcode::Sshr
+        )
     }
 
     /// Whether this opcode is bitwise (no lane decomposition needed).
     pub fn is_bitwise(self) -> bool {
         matches!(
             self,
-            NeonSynthOpcode::And | NeonSynthOpcode::Orr | NeonSynthOpcode::Eor
+            NeonSynthOpcode::And
+                | NeonSynthOpcode::Orr
+                | NeonSynthOpcode::Eor
+                | NeonSynthOpcode::Bic
         )
+    }
+
+    /// Whether this opcode is a fused multi-instruction operation (ternary).
+    pub fn is_fused(self) -> bool {
+        matches!(self, NeonSynthOpcode::Mla | NeonSynthOpcode::Mls)
+    }
+
+    /// Whether this opcode is compatible with the given arrangement.
+    ///
+    /// Most NEON integer ops support all arrangements. Exceptions:
+    /// - MUL, MLA, MLS: no D2 (64-bit lane MUL not supported on AArch64 NEON)
+    pub fn is_compatible(self, arrangement: VectorArrangement) -> bool {
+        match self {
+            NeonSynthOpcode::Mul | NeonSynthOpcode::Mla | NeonSynthOpcode::Mls => {
+                arrangement != VectorArrangement::D2
+            }
+            _ => true,
+        }
     }
 
     /// Human-readable name.
@@ -167,8 +205,12 @@ impl NeonSynthOpcode {
             NeonSynthOpcode::And => "NEON_AND",
             NeonSynthOpcode::Orr => "NEON_ORR",
             NeonSynthOpcode::Eor => "NEON_EOR",
+            NeonSynthOpcode::Bic => "NEON_BIC",
             NeonSynthOpcode::Shl => "NEON_SHL",
             NeonSynthOpcode::Ushr => "NEON_USHR",
+            NeonSynthOpcode::Sshr => "NEON_SSHR",
+            NeonSynthOpcode::Mla => "NEON_MLA",
+            NeonSynthOpcode::Mls => "NEON_MLS",
         }
     }
 
@@ -185,10 +227,16 @@ impl NeonSynthOpcode {
             | NeonSynthOpcode::And
             | NeonSynthOpcode::Orr
             | NeonSynthOpcode::Eor
+            | NeonSynthOpcode::Bic
             | NeonSynthOpcode::Shl
-            | NeonSynthOpcode::Ushr => 1,
+            | NeonSynthOpcode::Ushr
+            | NeonSynthOpcode::Sshr => 1,
             NeonSynthOpcode::Neg => 1,
             NeonSynthOpcode::Mul => 3,
+            // Fused ops: cost equals sum of component instructions.
+            // MLA = MUL + ADD = 3 + 1 = 4, but on hardware MLA is typically
+            // 4 cycles (same latency as MUL, ADD is "free" in the fused pipe).
+            NeonSynthOpcode::Mla | NeonSynthOpcode::Mls => 4,
         }
     }
 }
@@ -306,9 +354,13 @@ impl UnifiedSearchSpace {
 
     /// Generate NEON candidates for a given source expression.
     ///
-    /// The source and candidate are both 64-bit vector registers containing
-    /// lanes of the specified arrangement. For binary ops, the second operand
-    /// is the same vector (self-operation) or a vector of the same variable.
+    /// The source and candidate are both vector registers containing
+    /// lanes of the specified arrangement. Generates:
+    /// - Identity (cost 0)
+    /// - All single-instruction NEON ops (self-operation: vn OP vn)
+    /// - Shift-by-immediate variants for SHL/USHR/SSHR
+    /// - Multi-instruction fusion candidates (MLA, MLS: vn + vn*vn, vn - vn*vn)
+    /// - Arrangement-filtered: skips opcodes incompatible with the arrangement
     pub fn neon_candidates(
         source_name: &str,
         arrangement: VectorArrangement,
@@ -327,8 +379,8 @@ impl UnifiedSearchSpace {
         ));
 
         for &opcode in NeonSynthOpcode::all() {
-            // Skip MUL for D2 (not supported by AArch64 NEON)
-            if opcode == NeonSynthOpcode::Mul && arrangement == VectorArrangement::D2 {
+            // Arrangement compatibility filter
+            if !opcode.is_compatible(arrangement) {
                 continue;
             }
 
@@ -346,8 +398,10 @@ impl UnifiedSearchSpace {
                     if shift_amt >= arrangement.lane_bits() {
                         continue;
                     }
-                    // For USHR, shift must be >= 1
-                    if opcode == NeonSynthOpcode::Ushr && shift_amt < 1 {
+                    // For USHR/SSHR, shift must be >= 1
+                    if matches!(opcode, NeonSynthOpcode::Ushr | NeonSynthOpcode::Sshr)
+                        && shift_amt < 1
+                    {
                         continue;
                     }
                     let expr = encode_neon_shift(opcode, arrangement, &vn, shift_amt);
@@ -365,6 +419,25 @@ impl UnifiedSearchSpace {
                         cost,
                     ));
                 }
+            } else if opcode.is_fused() {
+                // Fused multi-instruction candidates: MLA(vn, vn, vn), MLS(vn, vn, vn)
+                // MLA: vd = vn + vn * vn (accumulator = first operand)
+                // MLS: vd = vn - vn * vn (accumulator = first operand)
+                let expr = encode_neon_fused(opcode, arrangement, &vn, &vn, &vn);
+                let cost = opcode.cost();
+                candidates.push(TargetCandidate::new(
+                    format!(
+                        "{}.{:?} {}, {}, {}",
+                        opcode.name(),
+                        arrangement,
+                        source_name,
+                        source_name,
+                        source_name,
+                    ),
+                    expr,
+                    SynthTarget::Neon(arrangement),
+                    cost,
+                ));
             } else if opcode.is_bitwise() {
                 // Bitwise ops: vn OP vn (self-operation)
                 let expr = encode_neon_bitwise(opcode, &vn, &vn);
@@ -401,6 +474,24 @@ impl UnifiedSearchSpace {
         }
 
         candidates
+    }
+
+    /// Filter a candidate list to only those compatible with the given arrangement.
+    ///
+    /// This is useful when externally-constructed candidates need to be pruned
+    /// to a specific arrangement's constraints (e.g., no MUL/MLA/MLS on D2).
+    pub fn filter_by_arrangement(
+        candidates: &[TargetCandidate],
+        arrangement: VectorArrangement,
+    ) -> Vec<TargetCandidate> {
+        candidates
+            .iter()
+            .filter(|c| match c.target {
+                SynthTarget::Neon(arr) => arr == arrangement,
+                _ => true,
+            })
+            .cloned()
+            .collect()
     }
 
     /// Generate candidates across all configured targets.
@@ -499,6 +590,7 @@ fn encode_neon_bitwise(
         NeonSynthOpcode::And => neon_semantics::encode_neon_and(vn, vm),
         NeonSynthOpcode::Orr => neon_semantics::encode_neon_orr(vn, vm),
         NeonSynthOpcode::Eor => neon_semantics::encode_neon_eor(vn, vm),
+        NeonSynthOpcode::Bic => neon_semantics::encode_neon_bic(vn, vm),
         _ => panic!("Not a NEON bitwise opcode: {:?}", opcode),
     }
 }
@@ -513,7 +605,31 @@ fn encode_neon_shift(
     match opcode {
         NeonSynthOpcode::Shl => neon_semantics::encode_neon_shl(arrangement, vn, imm),
         NeonSynthOpcode::Ushr => neon_semantics::encode_neon_ushr(arrangement, vn, imm),
+        NeonSynthOpcode::Sshr => neon_semantics::encode_neon_sshr(arrangement, vn, imm),
         _ => panic!("Not a NEON shift opcode: {:?}", opcode),
+    }
+}
+
+/// Encode a NEON fused multi-instruction operation.
+///
+/// MLA: `vd = vacc + vn * vm` (multiply-accumulate, per-lane)
+/// MLS: `vd = vacc - vn * vm` (multiply-subtract, per-lane)
+///
+/// These are encoded as the composition of MUL + ADD/SUB. On hardware,
+/// AArch64 NEON has dedicated MLA/MLS instructions that fuse these
+/// into a single operation.
+fn encode_neon_fused(
+    opcode: NeonSynthOpcode,
+    arrangement: VectorArrangement,
+    vacc: &SmtExpr,
+    vn: &SmtExpr,
+    vm: &SmtExpr,
+) -> SmtExpr {
+    let product = neon_semantics::encode_neon_mul(arrangement, vn, vm);
+    match opcode {
+        NeonSynthOpcode::Mla => neon_semantics::encode_neon_add(arrangement, vacc, &product),
+        NeonSynthOpcode::Mls => neon_semantics::encode_neon_sub(arrangement, vacc, &product),
+        _ => panic!("Not a NEON fused opcode: {:?}", opcode),
     }
 }
 
@@ -1355,18 +1471,24 @@ mod tests {
 
         assert!(NeonSynthOpcode::Shl.is_shift());
         assert!(NeonSynthOpcode::Ushr.is_shift());
+        assert!(NeonSynthOpcode::Sshr.is_shift());
         assert!(!NeonSynthOpcode::Add.is_shift());
 
         assert!(NeonSynthOpcode::And.is_bitwise());
         assert!(NeonSynthOpcode::Orr.is_bitwise());
         assert!(NeonSynthOpcode::Eor.is_bitwise());
+        assert!(NeonSynthOpcode::Bic.is_bitwise());
         assert!(!NeonSynthOpcode::Add.is_bitwise());
+
+        assert!(NeonSynthOpcode::Mla.is_fused());
+        assert!(NeonSynthOpcode::Mls.is_fused());
+        assert!(!NeonSynthOpcode::Add.is_fused());
     }
 
     #[test]
     fn test_neon_opcode_all() {
         let all = NeonSynthOpcode::all();
-        assert_eq!(all.len(), 9);
+        assert_eq!(all.len(), 13);
     }
 
     // -----------------------------------------------------------------------
@@ -2265,6 +2387,393 @@ mod tests {
         assert!(
             candidates.is_empty(),
             "DIV should not generate ANE candidates (unsupported)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Comprehensive NEON candidate enumeration tests (#160)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_neon_candidates_add_produces_correct_candidates() {
+        // NEON candidate list for S2 should contain ADD self-op.
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::S2, &config);
+        let add_candidates: Vec<_> = candidates
+            .iter()
+            .filter(|c| c.name.contains("NEON_ADD"))
+            .collect();
+        assert!(
+            !add_candidates.is_empty(),
+            "Should produce NEON_ADD candidate for S2"
+        );
+        // ADD self-op should have cost 1
+        for c in &add_candidates {
+            assert_eq!(c.cost, 1, "NEON ADD should cost 1, got {}", c.cost);
+        }
+    }
+
+    #[test]
+    fn test_neon_candidates_mul_add_produces_mla_candidate() {
+        // MLA (multiply-accumulate) should appear as a fused candidate.
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::S2, &config);
+        let mla_candidates: Vec<_> = candidates
+            .iter()
+            .filter(|c| c.name.contains("NEON_MLA"))
+            .collect();
+        assert!(
+            !mla_candidates.is_empty(),
+            "Should produce NEON_MLA (fused MUL+ADD) candidate"
+        );
+        // MLA cost should be 4 (MUL=3 + ADD=1 fused)
+        assert_eq!(
+            mla_candidates[0].cost, 4,
+            "NEON_MLA cost should be 4"
+        );
+    }
+
+    #[test]
+    fn test_neon_candidates_mls_candidate_present() {
+        // MLS (multiply-subtract) should appear for S4 arrangement.
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::S4, &config);
+        let mls_candidates: Vec<_> = candidates
+            .iter()
+            .filter(|c| c.name.contains("NEON_MLS"))
+            .collect();
+        assert!(
+            !mls_candidates.is_empty(),
+            "Should produce NEON_MLS (fused MUL-SUB) candidate for S4"
+        );
+    }
+
+    #[test]
+    fn test_neon_candidates_arrangement_filtering_d2_no_mul_mla_mls() {
+        // D2 does not support MUL, MLA, or MLS.
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::D2, &config);
+        assert!(
+            !candidates.iter().any(|c| c.name.contains("NEON_MUL")),
+            "D2 should NOT have NEON_MUL"
+        );
+        assert!(
+            !candidates.iter().any(|c| c.name.contains("NEON_MLA")),
+            "D2 should NOT have NEON_MLA"
+        );
+        assert!(
+            !candidates.iter().any(|c| c.name.contains("NEON_MLS")),
+            "D2 should NOT have NEON_MLS"
+        );
+    }
+
+    #[test]
+    fn test_neon_candidates_bic_present() {
+        // BIC (bit clear) should be in the candidate list.
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::S2, &config);
+        assert!(
+            candidates.iter().any(|c| c.name.contains("NEON_BIC")),
+            "Should include NEON_BIC candidate"
+        );
+    }
+
+    #[test]
+    fn test_neon_candidates_sshr_present() {
+        // SSHR (signed shift right) should be in the candidate list.
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::S2, &config);
+        let sshr_candidates: Vec<_> = candidates
+            .iter()
+            .filter(|c| c.name.contains("NEON_SSHR"))
+            .collect();
+        assert!(
+            !sshr_candidates.is_empty(),
+            "Should include NEON_SSHR candidates"
+        );
+        // Should have one per valid shift amount
+        assert!(
+            sshr_candidates.len() >= 2,
+            "Should have multiple SSHR shift amounts, got {}",
+            sshr_candidates.len()
+        );
+    }
+
+    #[test]
+    fn test_neon_opcode_is_compatible() {
+        // All opcodes compatible with S2
+        for &op in NeonSynthOpcode::all() {
+            assert!(
+                op.is_compatible(VectorArrangement::S2),
+                "{:?} should be compatible with S2",
+                op
+            );
+        }
+
+        // MUL, MLA, MLS NOT compatible with D2
+        assert!(
+            !NeonSynthOpcode::Mul.is_compatible(VectorArrangement::D2),
+            "MUL should NOT be compatible with D2"
+        );
+        assert!(
+            !NeonSynthOpcode::Mla.is_compatible(VectorArrangement::D2),
+            "MLA should NOT be compatible with D2"
+        );
+        assert!(
+            !NeonSynthOpcode::Mls.is_compatible(VectorArrangement::D2),
+            "MLS should NOT be compatible with D2"
+        );
+
+        // ADD, SUB, NEG compatible with D2
+        assert!(NeonSynthOpcode::Add.is_compatible(VectorArrangement::D2));
+        assert!(NeonSynthOpcode::Sub.is_compatible(VectorArrangement::D2));
+        assert!(NeonSynthOpcode::Neg.is_compatible(VectorArrangement::D2));
+    }
+
+    #[test]
+    fn test_neon_filter_by_arrangement() {
+        // Build candidates for S2 and D2, then filter for D2 only
+        let config = UnifiedSearchConfig::default();
+        let s2_candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::S2, &config);
+        let d2_candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::D2, &config);
+
+        // Combine and filter
+        let mut combined = s2_candidates;
+        combined.extend(d2_candidates);
+
+        let filtered = UnifiedSearchSpace::filter_by_arrangement(
+            &combined,
+            VectorArrangement::D2,
+        );
+
+        // All filtered candidates should target D2
+        for c in &filtered {
+            assert_eq!(
+                c.target,
+                SynthTarget::Neon(VectorArrangement::D2),
+                "Filtered candidate '{}' should target D2",
+                c.name
+            );
+        }
+        // And there should be some
+        assert!(
+            !filtered.is_empty(),
+            "Filter should keep D2 candidates"
+        );
+    }
+
+    #[test]
+    fn test_neon_candidates_s2_has_all_expected_opcodes() {
+        // S2 should have candidates for all 13 opcodes (excluding fused
+        // which also need MUL compatibility, but S2 supports MUL).
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::S2, &config);
+
+        let expected_prefixes = [
+            "NEON_ADD", "NEON_SUB", "NEON_MUL", "NEON_NEG",
+            "NEON_AND", "NEON_ORR", "NEON_EOR", "NEON_BIC",
+            "NEON_SHL", "NEON_USHR", "NEON_SSHR",
+            "NEON_MLA", "NEON_MLS",
+        ];
+        for prefix in &expected_prefixes {
+            assert!(
+                candidates.iter().any(|c| c.name.contains(prefix)),
+                "S2 candidates should include {} but found none",
+                prefix
+            );
+        }
+    }
+
+    #[test]
+    fn test_neon_mla_encoding_correctness() {
+        // MLA(vacc, vn, vm) = vacc + vn * vm, per-lane.
+        use std::collections::HashMap;
+        use crate::smt::EvalResult;
+
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::S2, &config);
+
+        let mla = candidates
+            .iter()
+            .find(|c| c.name.contains("NEON_MLA"))
+            .expect("Should have NEON_MLA candidate");
+
+        // For self-op: MLA(v, v, v) = v + v*v per lane
+        // v = [3, 5] as S2 => result = [3 + 3*3, 5 + 5*5] = [12, 30]
+        let mut env = HashMap::new();
+        let v_val = (5u64 << 32) | 3u64;
+        env.insert("v".to_string(), v_val);
+        let result = mla.expr.eval(&env);
+        let expected = (30u64 << 32) | 12u64;
+        assert_eq!(
+            result,
+            EvalResult::Bv(expected),
+            "MLA(v,v,v) with v=[3,5] should give [12,30]"
+        );
+    }
+
+    #[test]
+    fn test_neon_mls_encoding_correctness() {
+        // MLS(vacc, vn, vm) = vacc - vn * vm, per-lane.
+        use std::collections::HashMap;
+        use crate::smt::EvalResult;
+
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::S2, &config);
+
+        let mls = candidates
+            .iter()
+            .find(|c| c.name.contains("NEON_MLS"))
+            .expect("Should have NEON_MLS candidate");
+
+        // For self-op: MLS(v, v, v) = v - v*v per lane
+        // v = [10, 2] as S2 => result = [10 - 10*10, 2 - 2*2]
+        // = [10 - 100, 2 - 4] = [-90 mod 2^32, -2 mod 2^32]
+        // = [0xFFFFFFA6, 0xFFFFFFFE]
+        let mut env = HashMap::new();
+        let v_val = (2u64 << 32) | 10u64;
+        env.insert("v".to_string(), v_val);
+        let result = mls.expr.eval(&env);
+        let expected = (0xFFFFFFFEu64 << 32) | 0xFFFFFFA6u64;
+        assert_eq!(
+            result,
+            EvalResult::Bv(expected),
+            "MLS(v,v,v) with v=[10,2] should give wrapping result"
+        );
+    }
+
+    #[test]
+    fn test_neon_bic_encoding_correctness() {
+        // BIC(vn, vm) = vn AND NOT(vm)
+        use std::collections::HashMap;
+        use crate::smt::EvalResult;
+
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::S2, &config);
+
+        let bic = candidates
+            .iter()
+            .find(|c| c.name.contains("NEON_BIC"))
+            .expect("Should have NEON_BIC candidate");
+
+        // Self-op: BIC(v, v) = v AND NOT(v) = 0 for any input
+        let mut env = HashMap::new();
+        env.insert("v".to_string(), 0xDEADBEEF_CAFEBABEu64);
+        let result = bic.expr.eval(&env);
+        assert_eq!(
+            result,
+            EvalResult::Bv(0),
+            "BIC(v, v) should always be 0"
+        );
+    }
+
+    #[test]
+    fn test_neon_sshr_encoding_correctness() {
+        // SSHR.S2 v, #1: signed shift right by 1
+        use std::collections::HashMap;
+        use crate::smt::EvalResult;
+
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::S2, &config);
+
+        let sshr1 = candidates
+            .iter()
+            .find(|c| c.name.contains("NEON_SSHR") && c.name.contains("#1"))
+            .expect("Should have NEON_SSHR #1 candidate");
+
+        // v = [0x80000000, 4] => SSHR #1 => [0xC0000000, 2]
+        // 0x80000000 is -2^31 in signed, >>s 1 = -2^30 = 0xC0000000
+        let mut env = HashMap::new();
+        let v_val = (4u64 << 32) | 0x80000000u64;
+        env.insert("v".to_string(), v_val);
+        let result = sshr1.expr.eval(&env);
+        let expected = (2u64 << 32) | 0xC0000000u64;
+        assert_eq!(
+            result,
+            EvalResult::Bv(expected),
+            "SSHR.S2 v, #1 should produce signed shift result"
+        );
+    }
+
+    #[test]
+    fn test_neon_candidates_d2_still_has_basic_ops() {
+        // D2 should still have ADD, SUB, NEG, bitwise, shifts.
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::D2, &config);
+
+        let present_prefixes = [
+            "NEON_ADD", "NEON_SUB", "NEON_NEG",
+            "NEON_AND", "NEON_ORR", "NEON_EOR", "NEON_BIC",
+            "NEON_SHL", "NEON_USHR", "NEON_SSHR",
+        ];
+        for prefix in &present_prefixes {
+            assert!(
+                candidates.iter().any(|c| c.name.contains(prefix)),
+                "D2 candidates should include {} (arrangement-compatible)",
+                prefix
+            );
+        }
+    }
+
+    #[test]
+    fn test_neon_candidate_count_comprehensive() {
+        // Verify the total candidate count for S2 arrangement with default config.
+        // Expected:
+        //   1 identity
+        //   + 1 NEG (unary)
+        //   + 3 ADD, SUB, MUL (binary self-ops)
+        //   + 4 AND, ORR, EOR, BIC (bitwise self-ops)
+        //   + 3 shift amounts * 3 shift ops (SHL, USHR, SSHR) = 9
+        //   + 2 MLA, MLS (fused self-ops)
+        //   = 1 + 1 + 3 + 4 + 9 + 2 = 20
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::S2, &config);
+
+        assert_eq!(
+            candidates.len(),
+            20,
+            "S2 with default config should have 20 candidates, got {}. Names: {:?}",
+            candidates.len(),
+            candidates.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_neon_candidate_count_d2_excludes_mul_variants() {
+        // D2 should have fewer candidates (no MUL, MLA, MLS).
+        // Expected:
+        //   1 identity
+        //   + 1 NEG
+        //   + 2 ADD, SUB (binary self-ops, no MUL)
+        //   + 4 AND, ORR, EOR, BIC
+        //   + 3 shift amounts * 3 shift ops = 9
+        //   + 0 MLA, MLS (excluded)
+        //   = 1 + 1 + 2 + 4 + 9 + 0 = 17
+        let config = UnifiedSearchConfig::default();
+        let candidates =
+            UnifiedSearchSpace::neon_candidates("v", VectorArrangement::D2, &config);
+
+        assert_eq!(
+            candidates.len(),
+            17,
+            "D2 with default config should have 17 candidates (no MUL/MLA/MLS), got {}. Names: {:?}",
+            candidates.len(),
+            candidates.iter().map(|c| &c.name).collect::<Vec<_>>()
         );
     }
 }
