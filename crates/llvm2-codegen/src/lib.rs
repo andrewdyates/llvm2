@@ -13,6 +13,7 @@
 
 pub mod aarch64;
 pub mod compiler;
+pub mod coreml_emitter;
 pub mod dwarf_cfi;
 pub mod dwarf_info;
 pub mod error;
@@ -20,6 +21,7 @@ pub mod frame;
 pub mod layout;
 pub mod lower;
 pub mod macho;
+pub mod metal_emitter;
 pub mod pipeline;
 pub mod relax;
 pub mod target;
