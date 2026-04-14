@@ -301,6 +301,139 @@ pub fn proof_sub_zero_identity_w32() -> ProofObligation {
     }
 }
 
+/// Proof: `MUL Wd, Wn, #1` is equivalent to `MOV Wd, Wn` (32-bit).
+///
+/// Theorem: forall xn : BV32 . xn * 1 == xn
+///
+/// Multiplicative identity at 32-bit width.
+pub fn proof_mul_one_identity_w32() -> ProofObligation {
+    let width = 32;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: MUL Wd, Wn, #1 ≡ MOV Wd, Wn (32-bit)".to_string(),
+        tmir_expr: encode_mul_ri(xn.clone(), 1, width),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: `LSL Wd, Wn, #0` is equivalent to `MOV Wd, Wn` (32-bit).
+///
+/// Theorem: forall xn : BV32 . xn << 0 == xn
+///
+/// Left shift by zero is identity at 32-bit width.
+pub fn proof_lsl_zero_identity_w32() -> ProofObligation {
+    let width = 32;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: LSL Wd, Wn, #0 ≡ MOV Wd, Wn (32-bit)".to_string(),
+        tmir_expr: encode_lsl_ri(xn.clone(), 0, width),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: `LSR Wd, Wn, #0` is equivalent to `MOV Wd, Wn` (32-bit).
+///
+/// Theorem: forall xn : BV32 . xn >>_l 0 == xn
+///
+/// Logical right shift by zero is identity at 32-bit width.
+pub fn proof_lsr_zero_identity_w32() -> ProofObligation {
+    let width = 32;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: LSR Wd, Wn, #0 ≡ MOV Wd, Wn (32-bit)".to_string(),
+        tmir_expr: encode_lsr_ri(xn.clone(), 0, width),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: `ASR Wd, Wn, #0` is equivalent to `MOV Wd, Wn` (32-bit).
+///
+/// Theorem: forall xn : BV32 . xn >>_a 0 == xn
+///
+/// Arithmetic right shift by zero is identity at 32-bit width.
+pub fn proof_asr_zero_identity_w32() -> ProofObligation {
+    let width = 32;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: ASR Wd, Wn, #0 ≡ MOV Wd, Wn (32-bit)".to_string(),
+        tmir_expr: encode_asr_ri(xn.clone(), 0, width),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: `ORR Wd, Wn, Wn` is equivalent to `MOV Wd, Wn` (32-bit).
+///
+/// Theorem: forall xn : BV32 . xn | xn == xn
+///
+/// Bitwise OR is idempotent at 32-bit width.
+pub fn proof_orr_self_identity_w32() -> ProofObligation {
+    let width = 32;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: ORR Wd, Wn, Wn ≡ MOV Wd, Wn (32-bit)".to_string(),
+        tmir_expr: encode_orr_rr(xn.clone(), xn.clone()),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: `AND Wd, Wn, Wn` is equivalent to `MOV Wd, Wn` (32-bit).
+///
+/// Theorem: forall xn : BV32 . xn & xn == xn
+///
+/// Bitwise AND is idempotent at 32-bit width.
+pub fn proof_and_self_identity_w32() -> ProofObligation {
+    let width = 32;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: AND Wd, Wn, Wn ≡ MOV Wd, Wn (32-bit)".to_string(),
+        tmir_expr: encode_and_rr(xn.clone(), xn.clone()),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: `EOR Wd, Wn, #0` is equivalent to `MOV Wd, Wn` (32-bit).
+///
+/// Theorem: forall xn : BV32 . xn ^ 0 == xn
+///
+/// XOR with zero is identity at 32-bit width.
+pub fn proof_eor_zero_identity_w32() -> ProofObligation {
+    let width = 32;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: EOR Wd, Wn, #0 ≡ MOV Wd, Wn (32-bit)".to_string(),
+        tmir_expr: encode_eor_ri(xn.clone(), 0, width),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 8-bit exhaustive variants (all 256 input combinations)
 // ---------------------------------------------------------------------------
@@ -495,11 +628,25 @@ pub fn all_peephole_proofs() -> Vec<ProofObligation> {
     ]
 }
 
-/// Return all peephole proofs including 32-bit variants (11 total).
+/// Return all 9 peephole identity proofs at 32-bit width (W-register).
+pub fn all_peephole_proofs_i32() -> Vec<ProofObligation> {
+    vec![
+        proof_add_zero_identity_w32(),
+        proof_sub_zero_identity_w32(),
+        proof_mul_one_identity_w32(),
+        proof_lsl_zero_identity_w32(),
+        proof_lsr_zero_identity_w32(),
+        proof_asr_zero_identity_w32(),
+        proof_orr_self_identity_w32(),
+        proof_and_self_identity_w32(),
+        proof_eor_zero_identity_w32(),
+    ]
+}
+
+/// Return all peephole proofs including 32-bit variants (18 total: 9x64 + 9x32).
 pub fn all_peephole_proofs_with_32bit() -> Vec<ProofObligation> {
     let mut proofs = all_peephole_proofs();
-    proofs.push(proof_add_zero_identity_w32());
-    proofs.push(proof_sub_zero_identity_w32());
+    proofs.extend(all_peephole_proofs_i32());
     proofs
 }
 
@@ -523,7 +670,7 @@ pub fn all_peephole_proofs_i8() -> Vec<ProofObligation> {
 
 /// Return all peephole proofs across all widths (64-bit, 32-bit, and 8-bit).
 ///
-/// Total: 9 (64-bit) + 2 (32-bit) + 9 (8-bit) = 20 proofs.
+/// Total: 9 (64-bit) + 9 (32-bit) + 9 (8-bit) = 27 proofs.
 pub fn all_peephole_proofs_all_widths() -> Vec<ProofObligation> {
     let mut proofs = all_peephole_proofs_with_32bit();
     proofs.extend(all_peephole_proofs_i8());
@@ -620,6 +767,41 @@ mod tests {
         assert_valid(&proof_sub_zero_identity_w32());
     }
 
+    #[test]
+    fn test_proof_mul_one_identity_w32() {
+        assert_valid(&proof_mul_one_identity_w32());
+    }
+
+    #[test]
+    fn test_proof_lsl_zero_identity_w32() {
+        assert_valid(&proof_lsl_zero_identity_w32());
+    }
+
+    #[test]
+    fn test_proof_lsr_zero_identity_w32() {
+        assert_valid(&proof_lsr_zero_identity_w32());
+    }
+
+    #[test]
+    fn test_proof_asr_zero_identity_w32() {
+        assert_valid(&proof_asr_zero_identity_w32());
+    }
+
+    #[test]
+    fn test_proof_orr_self_identity_w32() {
+        assert_valid(&proof_orr_self_identity_w32());
+    }
+
+    #[test]
+    fn test_proof_and_self_identity_w32() {
+        assert_valid(&proof_and_self_identity_w32());
+    }
+
+    #[test]
+    fn test_proof_eor_zero_identity_w32() {
+        assert_valid(&proof_eor_zero_identity_w32());
+    }
+
     // -----------------------------------------------------------------------
     // 8-bit exhaustive variant tests
     // -----------------------------------------------------------------------
@@ -675,29 +857,46 @@ mod tests {
 
     #[test]
     fn test_all_peephole_proofs() {
-        for obligation in all_peephole_proofs() {
-            assert_valid(&obligation);
+        let proofs = all_peephole_proofs();
+        assert_eq!(proofs.len(), 9, "Expected 9 64-bit proofs");
+        for obligation in &proofs {
+            assert_valid(obligation);
+        }
+    }
+
+    #[test]
+    fn test_all_peephole_proofs_i32() {
+        let proofs = all_peephole_proofs_i32();
+        assert_eq!(proofs.len(), 9, "Expected 9 32-bit proofs");
+        for obligation in &proofs {
+            assert_valid(obligation);
         }
     }
 
     #[test]
     fn test_all_peephole_proofs_with_32bit() {
-        for obligation in all_peephole_proofs_with_32bit() {
-            assert_valid(&obligation);
+        let proofs = all_peephole_proofs_with_32bit();
+        assert_eq!(proofs.len(), 18, "Expected 18 proofs (9x64 + 9x32)");
+        for obligation in &proofs {
+            assert_valid(obligation);
         }
     }
 
     #[test]
     fn test_all_peephole_proofs_i8() {
-        for obligation in all_peephole_proofs_i8() {
-            assert_valid(&obligation);
+        let proofs = all_peephole_proofs_i8();
+        assert_eq!(proofs.len(), 9, "Expected 9 8-bit proofs");
+        for obligation in &proofs {
+            assert_valid(obligation);
         }
     }
 
     #[test]
     fn test_all_peephole_proofs_all_widths() {
-        for obligation in all_peephole_proofs_all_widths() {
-            assert_valid(&obligation);
+        let proofs = all_peephole_proofs_all_widths();
+        assert_eq!(proofs.len(), 27, "Expected 27 proofs (9x64 + 9x32 + 9x8)");
+        for obligation in &proofs {
+            assert_valid(obligation);
         }
     }
 

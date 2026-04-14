@@ -543,8 +543,8 @@ mod tests {
     fn test_peephole_proofs_count() {
         let db = ProofDatabase::new();
         let count = db.count_by_category(ProofCategory::Peephole);
-        // 9 core + 2 32-bit variants = 11
-        assert_eq!(count, 11, "expected 11 peephole proofs, got {}", count);
+        // 9 core (64-bit) + 9 (32-bit) variants = 18
+        assert_eq!(count, 18, "expected 18 peephole proofs, got {}", count);
     }
 
     #[test]
