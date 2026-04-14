@@ -147,6 +147,7 @@ pub fn proof_const_fold_add() -> ProofObligation {
         aarch64_expr: encode_add(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -162,6 +163,7 @@ pub fn proof_const_fold_add_8bit() -> ProofObligation {
         aarch64_expr: encode_add(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -182,6 +184,7 @@ pub fn proof_const_fold_sub() -> ProofObligation {
         aarch64_expr: encode_sub(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -197,6 +200,7 @@ pub fn proof_const_fold_sub_8bit() -> ProofObligation {
         aarch64_expr: encode_sub(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -217,6 +221,7 @@ pub fn proof_const_fold_mul() -> ProofObligation {
         aarch64_expr: encode_mul(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -232,6 +237,7 @@ pub fn proof_const_fold_mul_8bit() -> ProofObligation {
         aarch64_expr: encode_mul(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -252,6 +258,7 @@ pub fn proof_const_fold_and() -> ProofObligation {
         aarch64_expr: encode_and(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -267,6 +274,7 @@ pub fn proof_const_fold_and_8bit() -> ProofObligation {
         aarch64_expr: encode_and(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -286,6 +294,7 @@ pub fn proof_const_fold_or() -> ProofObligation {
         aarch64_expr: encode_or(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -301,6 +310,7 @@ pub fn proof_const_fold_or_8bit() -> ProofObligation {
         aarch64_expr: encode_or(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -320,6 +330,7 @@ pub fn proof_const_fold_xor() -> ProofObligation {
         aarch64_expr: encode_xor(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -335,6 +346,7 @@ pub fn proof_const_fold_xor_8bit() -> ProofObligation {
         aarch64_expr: encode_xor(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -363,6 +375,7 @@ pub fn proof_const_fold_shl() -> ProofObligation {
         aarch64_expr: encode_shl(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![precond],
+        fp_inputs: vec![],
     }
 }
 
@@ -380,6 +393,7 @@ pub fn proof_const_fold_shl_8bit() -> ProofObligation {
         aarch64_expr: encode_shl(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![precond],
+        fp_inputs: vec![],
     }
 }
 
@@ -407,6 +421,7 @@ pub fn proof_const_fold_sdiv() -> ProofObligation {
         aarch64_expr: encode_sdiv(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![precond],
+        fp_inputs: vec![],
     }
 }
 
@@ -424,6 +439,7 @@ pub fn proof_const_fold_sdiv_8bit() -> ProofObligation {
         aarch64_expr: encode_sdiv(c1, c2),
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![precond],
+        fp_inputs: vec![],
     }
 }
 
@@ -447,6 +463,7 @@ pub fn proof_const_fold_neg() -> ProofObligation {
         aarch64_expr: encode_neg(c),
         inputs: vec![("c".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -461,6 +478,7 @@ pub fn proof_const_fold_neg_8bit() -> ProofObligation {
         aarch64_expr: encode_neg(c),
         inputs: vec![("c".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -480,6 +498,7 @@ pub fn proof_const_fold_not() -> ProofObligation {
         aarch64_expr: encode_not(c, width),
         inputs: vec![("c".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -494,6 +513,7 @@ pub fn proof_const_fold_not_8bit() -> ProofObligation {
         aarch64_expr: encode_not(c, width),
         inputs: vec![("c".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -518,6 +538,7 @@ pub fn proof_identity_add_zero() -> ProofObligation {
         aarch64_expr: encode_identity(x),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -532,6 +553,7 @@ pub fn proof_identity_add_zero_8bit() -> ProofObligation {
         aarch64_expr: encode_identity(x),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -551,6 +573,7 @@ pub fn proof_identity_mul_one() -> ProofObligation {
         aarch64_expr: encode_identity(x),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -565,6 +588,7 @@ pub fn proof_identity_mul_one_8bit() -> ProofObligation {
         aarch64_expr: encode_identity(x),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -584,6 +608,7 @@ pub fn proof_identity_mul_zero() -> ProofObligation {
         aarch64_expr: encode_movi(0, width),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -598,6 +623,7 @@ pub fn proof_identity_mul_zero_8bit() -> ProofObligation {
         aarch64_expr: encode_movi(0, width),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -617,6 +643,7 @@ pub fn proof_identity_and_zero() -> ProofObligation {
         aarch64_expr: encode_movi(0, width),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -631,6 +658,7 @@ pub fn proof_identity_and_zero_8bit() -> ProofObligation {
         aarch64_expr: encode_movi(0, width),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -650,6 +678,7 @@ pub fn proof_identity_or_zero() -> ProofObligation {
         aarch64_expr: encode_identity(x),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -664,6 +693,7 @@ pub fn proof_identity_or_zero_8bit() -> ProofObligation {
         aarch64_expr: encode_identity(x),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -683,6 +713,7 @@ pub fn proof_identity_xor_zero() -> ProofObligation {
         aarch64_expr: encode_identity(x),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -697,6 +728,7 @@ pub fn proof_identity_xor_zero_8bit() -> ProofObligation {
         aarch64_expr: encode_identity(x),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -717,6 +749,7 @@ pub fn proof_identity_sub_self() -> ProofObligation {
         aarch64_expr: encode_movi(0, width),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -731,6 +764,7 @@ pub fn proof_identity_sub_self_8bit() -> ProofObligation {
         aarch64_expr: encode_movi(0, width),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -1063,6 +1097,7 @@ mod tests {
             aarch64_expr: encode_sub(c1, c2),
             inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1084,6 +1119,7 @@ mod tests {
             aarch64_expr: encode_identity(x),
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1105,6 +1141,7 @@ mod tests {
             aarch64_expr: encode_identity(x),
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1126,6 +1163,7 @@ mod tests {
             aarch64_expr: encode_identity(x),
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1147,6 +1185,7 @@ mod tests {
             aarch64_expr: encode_identity(x),
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);

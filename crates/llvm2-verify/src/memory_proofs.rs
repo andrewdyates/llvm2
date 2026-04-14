@@ -360,6 +360,7 @@ fn proof_load_equiv(
         aarch64_expr: aarch64_result,
         inputs,
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -426,6 +427,7 @@ fn proof_store_load_roundtrip(name: &str, size_bytes: u32) -> ProofObligation {
             ("mem_default".to_string(), 8),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -493,6 +495,7 @@ fn proof_non_interference(name: &str, size_bytes: u32, gap: u64) -> ProofObligat
             ("mem_default".to_string(), 8),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -544,6 +547,7 @@ fn proof_store_equiv(name: &str, size_bytes: u32, scaled_imm: u64) -> ProofOblig
             ("mem_default".to_string(), 8),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -620,6 +624,7 @@ pub fn proof_endianness_i32() -> ProofObligation {
             ("value".to_string(), 32),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -646,6 +651,7 @@ pub fn proof_endianness_msb_i32() -> ProofObligation {
             ("value".to_string(), 32),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -670,6 +676,7 @@ pub fn proof_endianness_i64() -> ProofObligation {
             ("value".to_string(), 64),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -1169,6 +1176,7 @@ mod tests {
                 ("value".to_string(), 32),
             ],
             preconditions: vec![],
+            fp_inputs: vec![],
         };
 
         let result = verify_memory_proof(&obligation);
@@ -1203,6 +1211,7 @@ mod tests {
                 ("value".to_string(), 32),
             ],
             preconditions: vec![],
+            fp_inputs: vec![],
         };
 
         let result = verify_memory_proof(&obligation);
@@ -1236,6 +1245,7 @@ mod tests {
                 ("value".to_string(), 32),
             ],
             preconditions: vec![],
+            fp_inputs: vec![],
         };
 
         let result = verify_memory_proof(&obligation);
@@ -1253,7 +1263,7 @@ mod tests {
     fn test_smt2_output_roundtrip() {
         let obligation = proof_roundtrip_i32();
         let smt2 = obligation.to_smt2();
-        assert!(smt2.contains("(set-logic QF_BV)"));
+        assert!(smt2.contains("(set-logic QF_ABV)"));
         assert!(smt2.contains("(declare-const base (_ BitVec 64))"));
         assert!(smt2.contains("(declare-const value (_ BitVec 32))"));
         assert!(smt2.contains("(check-sat)"));

@@ -326,6 +326,7 @@ impl CegisLoop {
                 aarch64_expr: target_smt.clone(),
                 inputs: vars.to_vec(),
                 preconditions: vec![],
+            fp_inputs: vec![],
             };
 
             let result = verify_with_z4(&obligation, &self.solver_config);

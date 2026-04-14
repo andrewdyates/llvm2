@@ -135,6 +135,7 @@ pub fn proof_cse_add() -> ProofObligation {
         aarch64_expr: encode_add(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -150,6 +151,7 @@ pub fn proof_cse_add_8bit() -> ProofObligation {
         aarch64_expr: encode_add(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -167,6 +169,7 @@ pub fn proof_cse_sub() -> ProofObligation {
         aarch64_expr: encode_sub(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -182,6 +185,7 @@ pub fn proof_cse_sub_8bit() -> ProofObligation {
         aarch64_expr: encode_sub(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -199,6 +203,7 @@ pub fn proof_cse_mul() -> ProofObligation {
         aarch64_expr: encode_mul(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -214,6 +219,7 @@ pub fn proof_cse_mul_8bit() -> ProofObligation {
         aarch64_expr: encode_mul(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -231,6 +237,7 @@ pub fn proof_cse_and() -> ProofObligation {
         aarch64_expr: encode_and(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -246,6 +253,7 @@ pub fn proof_cse_and_8bit() -> ProofObligation {
         aarch64_expr: encode_and(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -263,6 +271,7 @@ pub fn proof_cse_or() -> ProofObligation {
         aarch64_expr: encode_or(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -278,6 +287,7 @@ pub fn proof_cse_or_8bit() -> ProofObligation {
         aarch64_expr: encode_or(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -295,6 +305,7 @@ pub fn proof_cse_xor() -> ProofObligation {
         aarch64_expr: encode_xor(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -310,6 +321,7 @@ pub fn proof_cse_xor_8bit() -> ProofObligation {
         aarch64_expr: encode_xor(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -331,6 +343,7 @@ pub fn proof_cse_commutative_add() -> ProofObligation {
         aarch64_expr: encode_add(b, a),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -346,6 +359,7 @@ pub fn proof_cse_commutative_add_8bit() -> ProofObligation {
         aarch64_expr: encode_add(b, a),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -363,6 +377,7 @@ pub fn proof_cse_commutative_mul() -> ProofObligation {
         aarch64_expr: encode_mul(b, a),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -380,6 +395,7 @@ pub fn proof_cse_commutative_and() -> ProofObligation {
         aarch64_expr: encode_and(b, a),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -397,6 +413,7 @@ pub fn proof_cse_commutative_or() -> ProofObligation {
         aarch64_expr: encode_or(b, a),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -414,6 +431,7 @@ pub fn proof_cse_commutative_xor() -> ProofObligation {
         aarch64_expr: encode_xor(b, a),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -455,6 +473,7 @@ pub fn proof_licm_pure_add() -> ProofObligation {
         aarch64_expr: encode_add(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -470,6 +489,7 @@ pub fn proof_licm_pure_add_8bit() -> ProofObligation {
         aarch64_expr: encode_add(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -487,6 +507,7 @@ pub fn proof_licm_pure_mul() -> ProofObligation {
         aarch64_expr: encode_mul(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -502,6 +523,7 @@ pub fn proof_licm_pure_mul_8bit() -> ProofObligation {
         aarch64_expr: encode_mul(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -519,6 +541,7 @@ pub fn proof_licm_pure_and() -> ProofObligation {
         aarch64_expr: encode_and(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -536,6 +559,7 @@ pub fn proof_licm_pure_or() -> ProofObligation {
         aarch64_expr: encode_or(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -553,6 +577,7 @@ pub fn proof_licm_pure_xor() -> ProofObligation {
         aarch64_expr: encode_xor(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -570,6 +595,7 @@ pub fn proof_licm_pure_sub() -> ProofObligation {
         aarch64_expr: encode_sub(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -599,6 +625,7 @@ pub fn proof_pure_determinism_add() -> ProofObligation {
         aarch64_expr: encode_add(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -616,6 +643,7 @@ pub fn proof_pure_determinism_mul() -> ProofObligation {
         aarch64_expr: encode_mul(a, b),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -1084,6 +1112,7 @@ mod tests {
             aarch64_expr: encode_sub(a, b),
             inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1110,6 +1139,7 @@ mod tests {
             aarch64_expr: encode_add(a, b.bvadd(SmtExpr::bv_const(1, width))),
             inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1134,6 +1164,7 @@ mod tests {
             aarch64_expr: encode_sub(b, a),
             inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1162,6 +1193,7 @@ mod tests {
             aarch64_expr: encode_add(a, loop_var.bvadd(SmtExpr::bv_const(1, width))),
             inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1184,6 +1216,7 @@ mod tests {
             aarch64_expr: encode_mul(a, loop_var.bvadd(SmtExpr::bv_const(1, width))),
             inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);

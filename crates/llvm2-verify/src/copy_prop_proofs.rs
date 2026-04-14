@@ -65,6 +65,7 @@ pub fn proof_copy_identity() -> ProofObligation {
         aarch64_expr: x,      // value after propagation: x directly
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -79,6 +80,7 @@ pub fn proof_copy_identity_8bit() -> ProofObligation {
         aarch64_expr: x,
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -109,6 +111,7 @@ pub fn proof_copy_in_add() -> ProofObligation {
         aarch64_expr: after,
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -127,6 +130,7 @@ pub fn proof_copy_in_add_8bit() -> ProofObligation {
         aarch64_expr: after,
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -147,6 +151,7 @@ pub fn proof_copy_in_sub() -> ProofObligation {
         aarch64_expr: after,
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -165,6 +170,7 @@ pub fn proof_copy_in_sub_8bit() -> ProofObligation {
         aarch64_expr: after,
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -185,6 +191,7 @@ pub fn proof_copy_in_mul() -> ProofObligation {
         aarch64_expr: after,
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -205,6 +212,7 @@ pub fn proof_copy_in_and() -> ProofObligation {
         aarch64_expr: after,
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -225,6 +233,7 @@ pub fn proof_copy_in_or() -> ProofObligation {
         aarch64_expr: after,
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -245,6 +254,7 @@ pub fn proof_copy_in_xor() -> ProofObligation {
         aarch64_expr: after,
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -270,6 +280,7 @@ pub fn proof_copy_chain_two() -> ProofObligation {
         aarch64_expr: x,
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -284,6 +295,7 @@ pub fn proof_copy_chain_two_8bit() -> ProofObligation {
         aarch64_expr: x,
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -303,6 +315,7 @@ pub fn proof_copy_chain_three() -> ProofObligation {
         aarch64_expr: x,
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -328,6 +341,7 @@ pub fn proof_copy_chain_in_expr() -> ProofObligation {
         aarch64_expr: after,
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -346,6 +360,7 @@ pub fn proof_copy_chain_in_expr_8bit() -> ProofObligation {
         aarch64_expr: after,
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -537,6 +552,7 @@ mod tests {
             aarch64_expr: wrong,
             inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -570,6 +586,7 @@ mod tests {
             aarch64_expr: wrong_propagation,
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);

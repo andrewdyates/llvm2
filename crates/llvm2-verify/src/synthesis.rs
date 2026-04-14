@@ -564,6 +564,7 @@ impl SynthesisEngine {
             aarch64_expr: replacement_expr,
             inputs: vec![("x".to_string(), self.width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);

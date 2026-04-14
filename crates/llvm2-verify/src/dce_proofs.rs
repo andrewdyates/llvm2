@@ -74,6 +74,7 @@ pub fn proof_dce_dead_add_preserves_live() -> ProofObligation {
             ("y".to_string(), width), // live value (preserved)
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -93,6 +94,7 @@ pub fn proof_dce_dead_add_preserves_live_8bit() -> ProofObligation {
             ("y".to_string(), width),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -115,6 +117,7 @@ pub fn proof_dce_dead_mul_preserves_live() -> ProofObligation {
             ("y".to_string(), width),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -137,6 +140,7 @@ pub fn proof_dce_dead_and_preserves_live() -> ProofObligation {
             ("y".to_string(), width),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -159,6 +163,7 @@ pub fn proof_dce_dead_shift_preserves_live() -> ProofObligation {
             ("y".to_string(), width),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -198,6 +203,7 @@ pub fn proof_dce_live_add_preserved() -> ProofObligation {
             ("b".to_string(), width),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -219,6 +225,7 @@ pub fn proof_dce_live_add_preserved_8bit() -> ProofObligation {
             ("b".to_string(), width),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -242,6 +249,7 @@ pub fn proof_dce_live_mul_preserved() -> ProofObligation {
             ("b".to_string(), width),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -263,6 +271,7 @@ pub fn proof_dce_live_mul_preserved_8bit() -> ProofObligation {
             ("b".to_string(), width),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -286,6 +295,7 @@ pub fn proof_dce_live_sub_preserved() -> ProofObligation {
             ("b".to_string(), width),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -309,6 +319,7 @@ pub fn proof_dce_live_xor_preserved() -> ProofObligation {
             ("b".to_string(), width),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -482,6 +493,7 @@ mod tests {
                 ("b".to_string(), width),
             ],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);

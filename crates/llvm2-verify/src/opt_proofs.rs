@@ -90,6 +90,7 @@ pub fn proof_const_fold_add() -> ProofObligation {
         aarch64_expr: encode_add_rr(k1, k2),
         inputs: vec![("k1".to_string(), width), ("k2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -105,6 +106,7 @@ pub fn proof_const_fold_add_8bit() -> ProofObligation {
         aarch64_expr: encode_add_rr(k1, k2),
         inputs: vec![("k1".to_string(), width), ("k2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -125,6 +127,7 @@ pub fn proof_const_fold_sub() -> ProofObligation {
         aarch64_expr: encode_sub_rr(k1, k2),
         inputs: vec![("k1".to_string(), width), ("k2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -140,6 +143,7 @@ pub fn proof_const_fold_sub_8bit() -> ProofObligation {
         aarch64_expr: encode_sub_rr(k1, k2),
         inputs: vec![("k1".to_string(), width), ("k2".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -164,6 +168,7 @@ pub fn proof_and_absorb() -> ProofObligation {
         aarch64_expr: encode_movi(0, width),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -178,6 +183,7 @@ pub fn proof_and_absorb_8bit() -> ProofObligation {
         aarch64_expr: encode_movi(0, width),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -200,6 +206,7 @@ pub fn proof_or_absorb() -> ProofObligation {
         aarch64_expr: encode_movi(all_ones, width),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -215,6 +222,7 @@ pub fn proof_or_absorb_8bit() -> ProofObligation {
         aarch64_expr: encode_movi(all_ones, width),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -260,6 +268,7 @@ pub fn proof_dce_safety() -> ProofObligation {
             ("y".to_string(), width), // live value (preserved)
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -279,6 +288,7 @@ pub fn proof_dce_safety_8bit() -> ProofObligation {
             ("y".to_string(), width),
         ],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -312,6 +322,7 @@ pub fn proof_copy_prop_identity() -> ProofObligation {
         aarch64_expr: encode_identity(x),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -326,6 +337,7 @@ pub fn proof_copy_prop_identity_8bit() -> ProofObligation {
         aarch64_expr: encode_identity(x),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -344,6 +356,7 @@ pub fn proof_and_absorb_w32() -> ProofObligation {
         aarch64_expr: encode_movi(0, width),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -359,6 +372,7 @@ pub fn proof_or_absorb_w32() -> ProofObligation {
         aarch64_expr: encode_movi(all_ones, width),
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -533,6 +547,7 @@ mod tests {
             aarch64_expr: encode_movi(0, width),
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -554,6 +569,7 @@ mod tests {
             aarch64_expr: encode_movi(0xFF, width),
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -576,6 +592,7 @@ mod tests {
             aarch64_expr: encode_sub_rr(k1, k2),
             inputs: vec![("k1".to_string(), width), ("k2".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -597,6 +614,7 @@ mod tests {
             aarch64_expr: x.bvadd(SmtExpr::bv_const(1, width)),
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);

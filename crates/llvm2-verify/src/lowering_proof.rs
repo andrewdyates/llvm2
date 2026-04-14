@@ -50,6 +50,11 @@ pub struct ProofObligation {
     pub inputs: Vec<(String, u32)>,
     /// Optional preconditions that must hold (e.g., divisor != 0).
     pub preconditions: Vec<SmtExpr>,
+    /// Symbolic floating-point input variables: (name, exponent_bits, significand_bits).
+    ///
+    /// These are declared as `(_ FloatingPoint eb sb)` in SMT-LIB2.
+    /// Empty for purely bitvector proof obligations.
+    pub fp_inputs: Vec<(String, u32, u32)>,
 }
 
 impl ProofObligation {
@@ -75,10 +80,16 @@ impl ProofObligation {
 
     /// Serialize the proof obligation to SMT-LIB2 format (for z4 CLI).
     pub fn to_smt2(&self) -> String {
-        let mut lines = Vec::new();
-        lines.push("(set-logic QF_BV)".to_string());
+        use crate::z4_bridge::infer_logic;
 
-        // Declare symbolic inputs
+        let mut lines = Vec::new();
+
+        // Infer logic from the formula content.
+        let formula = self.negated_equivalence();
+        let logic = infer_logic(&formula);
+        lines.push(format!("(set-logic {})", logic));
+
+        // Declare symbolic bitvector inputs
         for (name, width) in &self.inputs {
             lines.push(format!(
                 "(declare-const {} (_ BitVec {}))",
@@ -86,8 +97,15 @@ impl ProofObligation {
             ));
         }
 
+        // Declare symbolic floating-point inputs
+        for (name, eb, sb) in &self.fp_inputs {
+            lines.push(format!(
+                "(declare-const {} (_ FloatingPoint {} {}))",
+                name, eb, sb
+            ));
+        }
+
         // Assert the negated equivalence
-        let formula = self.negated_equivalence();
         lines.push(format!("(assert {})", formula));
         lines.push("(check-sat)".to_string());
 
@@ -341,6 +359,7 @@ pub fn proof_iadd_i32() -> ProofObligation {
         aarch64_expr: encode_add_rr(OperandSize::S32, a, b),
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -361,6 +380,7 @@ pub fn proof_iadd_i64() -> ProofObligation {
         aarch64_expr: encode_add_rr(OperandSize::S64, a, b),
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -381,6 +401,7 @@ pub fn proof_isub_i32() -> ProofObligation {
         aarch64_expr: encode_sub_rr(OperandSize::S32, a, b),
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -401,6 +422,7 @@ pub fn proof_imul_i32() -> ProofObligation {
         aarch64_expr: encode_mul_rr(OperandSize::S32, a, b),
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -422,6 +444,7 @@ pub fn proof_neg_i32() -> ProofObligation {
         aarch64_expr: encode_neg(OperandSize::S32, a),
         inputs: vec![("a".to_string(), 32)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -468,6 +491,7 @@ pub fn proof_nzcv_n_flag_i32() -> ProofObligation {
         aarch64_expr: n_bv,
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -495,6 +519,7 @@ pub fn proof_nzcv_z_flag_i32() -> ProofObligation {
         aarch64_expr: z_bv,
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -521,6 +546,7 @@ pub fn proof_nzcv_c_flag_i32() -> ProofObligation {
         aarch64_expr: c_bv,
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -553,6 +579,7 @@ pub fn proof_nzcv_v_flag_i32() -> ProofObligation {
         aarch64_expr: v_bv,
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -594,6 +621,7 @@ fn proof_icmp_generic(
         aarch64_expr: encode_cmp_cset(a, b, width, aarch64cc),
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -754,6 +782,7 @@ fn proof_condbr_generic(
         aarch64_expr: aarch64_branch_taken,
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -886,6 +915,7 @@ mod tests {
             aarch64_expr: a.bvsub(b),                  // sub (wrong!)
             inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
             preconditions: vec![],
+            fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1059,6 +1089,7 @@ mod tests {
             aarch64_expr: encode_cmp_cset(a, b, 8, AArch64CC::LT),
             inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
             preconditions: vec![],
+            fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1080,6 +1111,7 @@ mod tests {
             aarch64_expr: a.bvadd(b),
             inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
             preconditions: vec![],
+            fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);

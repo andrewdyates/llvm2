@@ -307,11 +307,19 @@ pub fn generate_smt2_query_with_arrays(
         lines.push("(set-option :produce-models true)".to_string());
     }
 
-    // Declare symbolic inputs (bitvector-sorted)
+    // Declare symbolic bitvector inputs
     for (name, width) in &obligation.inputs {
         lines.push(format!(
             "(declare-const {} (_ BitVec {}))",
             name, width
+        ));
+    }
+
+    // Declare symbolic floating-point inputs
+    for (name, eb, sb) in &obligation.fp_inputs {
+        lines.push(format!(
+            "(declare-const {} (_ FloatingPoint {} {}))",
+            name, eb, sb
         ));
     }
 
@@ -330,16 +338,17 @@ pub fn generate_smt2_query_with_arrays(
     lines.push("(check-sat)".to_string());
 
     // If SAT, get the model for counterexample extraction.
-    // Only request values for bitvector inputs (array model extraction
-    // requires a different approach -- not yet supported).
-    if config.produce_models && !obligation.inputs.is_empty() {
-        let var_list: String = obligation
+    let has_any_inputs = !obligation.inputs.is_empty() || !obligation.fp_inputs.is_empty();
+    if config.produce_models && has_any_inputs {
+        let mut var_names: Vec<&str> = obligation
             .inputs
             .iter()
             .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        lines.push(format!("(get-value ({}))", var_list));
+            .collect();
+        for (name, _, _) in &obligation.fp_inputs {
+            var_names.push(name.as_str());
+        }
+        lines.push(format!("(get-value ({}))", var_names.join(" ")));
     }
 
     lines.push("(exit)".to_string());
@@ -936,6 +945,7 @@ mod tests {
             aarch64_expr: a.bvadd(b),
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![],
+            fp_inputs: vec![],
         };
 
         let config = Z4Config::default();
@@ -961,6 +971,7 @@ mod tests {
             aarch64_expr: a,
             inputs: vec![("x".to_string(), 64)],
             preconditions: vec![],
+            fp_inputs: vec![],
         };
 
         let config = Z4Config {
@@ -1122,6 +1133,7 @@ mod tests {
             aarch64_expr: a.bvadd(b),
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![],
+            fp_inputs: vec![],
         };
 
         let config = Z4Config::default();
@@ -1146,6 +1158,7 @@ mod tests {
             aarch64_expr: a.bvsub(b),
             inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
             preconditions: vec![],
+            fp_inputs: vec![],
         };
 
         let config = Z4Config::default();
@@ -1227,6 +1240,9 @@ mod tests {
     #[test]
     fn test_rounding_mode_smt2() {
         assert_eq!(rounding_mode_to_smt2(&RoundingMode::RNE), "RNE");
+        assert_eq!(rounding_mode_to_smt2(&RoundingMode::RNA), "RNA");
+        assert_eq!(rounding_mode_to_smt2(&RoundingMode::RTP), "RTP");
+        assert_eq!(rounding_mode_to_smt2(&RoundingMode::RTN), "RTN");
         assert_eq!(rounding_mode_to_smt2(&RoundingMode::RTZ), "RTZ");
     }
 
@@ -1337,6 +1353,7 @@ mod tests {
                 ("d".to_string(), 8),
             ],
             preconditions: vec![],
+            fp_inputs: vec![],
         };
 
         let config = Z4Config::default();
@@ -1366,6 +1383,7 @@ mod tests {
             aarch64_expr: addr,
             inputs: vec![("a".to_string(), 64)],
             preconditions: vec![],
+            fp_inputs: vec![],
         };
 
         let config = Z4Config::default();
@@ -1411,5 +1429,206 @@ mod tests {
         let config = Z4Config::default();
         let result = verify_with_cli(&obligation, &config);
         assert_eq!(result, Z4Result::Verified, "Store-load roundtrip I8 should be verified");
+    }
+
+    // -----------------------------------------------------------------------
+    // Floating-point SMT-LIB2 serialization tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fp_add_smt2_serialization() {
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let expr = SmtExpr::fp_add(RoundingMode::RNE, a, b);
+        let s = format!("{}", expr);
+        assert!(s.starts_with("(fp.add RNE"));
+        assert!(s.contains("(fp #b"));
+    }
+
+    #[test]
+    fn test_fp_mul_smt2_serialization() {
+        let a = SmtExpr::fp64_const(3.0);
+        let b = SmtExpr::fp64_const(7.0);
+        let expr = SmtExpr::fp_mul(RoundingMode::RTZ, a, b);
+        let s = format!("{}", expr);
+        assert!(s.starts_with("(fp.mul RTZ"));
+    }
+
+    #[test]
+    fn test_fp_div_smt2_serialization() {
+        let a = SmtExpr::fp64_const(10.0);
+        let b = SmtExpr::fp64_const(4.0);
+        let expr = SmtExpr::fp_div(RoundingMode::RNA, a, b);
+        let s = format!("{}", expr);
+        assert!(s.starts_with("(fp.div RNA"));
+    }
+
+    #[test]
+    fn test_fp_neg_smt2_serialization() {
+        let a = SmtExpr::fp64_const(42.0);
+        let expr = a.fp_neg();
+        let s = format!("{}", expr);
+        assert!(s.starts_with("(fp.neg"));
+    }
+
+    #[test]
+    fn test_fp_eq_smt2_serialization() {
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(1.0);
+        let expr = a.fp_eq(b);
+        let s = format!("{}", expr);
+        assert!(s.starts_with("(fp.eq"));
+    }
+
+    #[test]
+    fn test_fp_lt_smt2_serialization() {
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let expr = a.fp_lt(b);
+        let s = format!("{}", expr);
+        assert!(s.starts_with("(fp.lt"));
+    }
+
+    #[test]
+    fn test_fp_const_smt2_serialization() {
+        let expr = SmtExpr::fp64_const(1.0_f64);
+        let s = format!("{}", expr);
+        assert!(s.starts_with("(fp #b"));
+        assert!(s.contains("#b0"));
+        assert!(s.contains("#b01111111111"));
+    }
+
+    #[test]
+    fn test_fp_const_fp32_smt2_serialization() {
+        let expr = SmtExpr::fp32_const(1.5_f32);
+        let s = format!("{}", expr);
+        assert!(s.starts_with("(fp #b0"));
+        assert!(s.contains("#b01111111"));
+    }
+
+    #[test]
+    fn test_fp_const_negative_smt2() {
+        let expr = SmtExpr::fp64_const(-1.0_f64);
+        let s = format!("{}", expr);
+        assert!(s.starts_with("(fp #b1"));
+    }
+
+    #[test]
+    fn test_generate_smt2_query_with_fp_inputs() {
+        let a_const = SmtExpr::fp64_const(1.0);
+        let b_const = SmtExpr::fp64_const(2.0);
+
+        let obligation = ProofObligation {
+            name: "test_fp_add".to_string(),
+            tmir_expr: SmtExpr::fp_add(RoundingMode::RNE, a_const.clone(), b_const.clone()),
+            aarch64_expr: SmtExpr::fp_add(RoundingMode::RNE, a_const, b_const),
+            inputs: vec![],
+            preconditions: vec![],
+            fp_inputs: vec![
+                ("a".to_string(), 11, 53),
+                ("b".to_string(), 11, 53),
+            ],
+        };
+
+        let config = Z4Config::default();
+        let smt2 = generate_smt2_query(&obligation, &config);
+
+        assert!(smt2.contains("QF_BVFP") || smt2.contains("QF_FP"),
+            "Expected FP logic, got: {}", smt2);
+        assert!(smt2.contains("(declare-const a (_ FloatingPoint 11 53))"),
+            "Missing FP64 declaration for a: {}", smt2);
+        assert!(smt2.contains("(declare-const b (_ FloatingPoint 11 53))"),
+            "Missing FP64 declaration for b: {}", smt2);
+        assert!(smt2.contains("(get-value (a b))"),
+            "Missing get-value for FP vars: {}", smt2);
+    }
+
+    #[test]
+    fn test_generate_smt2_query_mixed_bv_fp() {
+        let _bv_a = SmtExpr::var("x", 32);
+        let fp_a = SmtExpr::fp32_const(1.0_f32);
+        let fp_b = SmtExpr::fp32_const(2.0_f32);
+
+        let obligation = ProofObligation {
+            name: "test_mixed".to_string(),
+            tmir_expr: SmtExpr::fp_add(RoundingMode::RNE, fp_a.clone(), fp_b.clone()),
+            aarch64_expr: SmtExpr::fp_add(RoundingMode::RNE, fp_a, fp_b),
+            inputs: vec![("x".to_string(), 32)],
+            preconditions: vec![],
+            fp_inputs: vec![
+                ("fa".to_string(), 8, 24),
+            ],
+        };
+
+        let config = Z4Config::default();
+        let smt2 = generate_smt2_query(&obligation, &config);
+
+        assert!(smt2.contains("(declare-const x (_ BitVec 32))"));
+        assert!(smt2.contains("(declare-const fa (_ FloatingPoint 8 24))"));
+        assert!(smt2.contains("(get-value (x fa))"));
+    }
+
+    #[test]
+    fn test_fp_sort_display_in_declare() {
+        let fp32 = SmtSort::fp32();
+        assert_eq!(format!("{}", fp32), "(_ FloatingPoint 8 24)");
+        let fp64 = SmtSort::fp64();
+        assert_eq!(format!("{}", fp64), "(_ FloatingPoint 11 53)");
+        let fp16 = SmtSort::fp16();
+        assert_eq!(format!("{}", fp16), "(_ FloatingPoint 5 11)");
+    }
+
+    #[test]
+    fn test_infer_logic_fp_add() {
+        let expr = SmtExpr::fp_add(
+            RoundingMode::RNE,
+            SmtExpr::fp32_const(1.0_f32),
+            SmtExpr::fp32_const(2.0_f32),
+        );
+        assert_eq!(infer_logic(&expr), "QF_BVFP");
+    }
+
+    #[test]
+    fn test_infer_logic_fp_neg() {
+        let expr = SmtExpr::fp64_const(1.0).fp_neg();
+        assert_eq!(infer_logic(&expr), "QF_BVFP");
+    }
+
+    #[test]
+    fn test_infer_logic_fp_eq() {
+        let expr = SmtExpr::fp64_const(1.0).fp_eq(SmtExpr::fp64_const(2.0));
+        assert_eq!(infer_logic(&expr), "QF_BVFP");
+    }
+
+    #[test]
+    fn test_infer_logic_fp_lt() {
+        let expr = SmtExpr::fp64_const(1.0).fp_lt(SmtExpr::fp64_const(2.0));
+        assert_eq!(infer_logic(&expr), "QF_BVFP");
+    }
+
+    #[test]
+    fn test_infer_logic_fp_const_only() {
+        let expr = SmtExpr::fp64_const(3.14);
+        assert_eq!(infer_logic(&expr), "QF_BVFP");
+    }
+
+    #[test]
+    fn test_infer_logic_fp_mul() {
+        let expr = SmtExpr::fp_mul(
+            RoundingMode::RTZ,
+            SmtExpr::fp64_const(2.0),
+            SmtExpr::fp64_const(3.0),
+        );
+        assert_eq!(infer_logic(&expr), "QF_BVFP");
+    }
+
+    #[test]
+    fn test_infer_logic_fp_div() {
+        let expr = SmtExpr::fp_div(
+            RoundingMode::RNE,
+            SmtExpr::fp64_const(10.0),
+            SmtExpr::fp64_const(3.0),
+        );
+        assert_eq!(infer_logic(&expr), "QF_BVFP");
     }
 }

@@ -87,6 +87,7 @@ pub fn proof_uncond_branch_fold_preserves_value() -> ProofObligation {
         aarch64_expr: y,
         inputs: vec![("y".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -101,6 +102,7 @@ pub fn proof_uncond_branch_fold_preserves_value_8bit() -> ProofObligation {
         aarch64_expr: y,
         inputs: vec![("y".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -125,6 +127,7 @@ pub fn proof_uncond_branch_fold_preserves_computation() -> ProofObligation {
         aarch64_expr: after,
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -143,6 +146,7 @@ pub fn proof_uncond_branch_fold_preserves_computation_8bit() -> ProofObligation 
         aarch64_expr: after,
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -180,6 +184,7 @@ pub fn proof_const_branch_cbz_zero() -> ProofObligation {
         aarch64_expr: always_taken,
         inputs: vec![], // no free variables — all constants
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -210,6 +215,7 @@ pub fn proof_const_branch_cbz_nonzero() -> ProofObligation {
         aarch64_expr: never_taken,
         inputs: vec![],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -238,6 +244,7 @@ pub fn proof_const_branch_cbnz_nonzero() -> ProofObligation {
         aarch64_expr: always_taken,
         inputs: vec![],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -266,6 +273,7 @@ pub fn proof_const_branch_cbnz_zero() -> ProofObligation {
         aarch64_expr: never_taken,
         inputs: vec![],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -300,6 +308,7 @@ pub fn proof_cbz_deterministic() -> ProofObligation {
         aarch64_expr: branch_taken_after,
         inputs: vec![("v".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -319,6 +328,7 @@ pub fn proof_cbz_deterministic_8bit() -> ProofObligation {
         aarch64_expr: after,
         inputs: vec![("v".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -353,6 +363,7 @@ pub fn proof_dup_branch_same_target() -> ProofObligation {
         aarch64_expr: after,
         inputs: vec![("v".to_string(), width), ("target".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -372,6 +383,7 @@ pub fn proof_dup_branch_same_target_8bit() -> ProofObligation {
         aarch64_expr: after,
         inputs: vec![("v".to_string(), width), ("target".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -399,6 +411,7 @@ pub fn proof_empty_block_redirect() -> ProofObligation {
         aarch64_expr: target,
         inputs: vec![("target".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -413,6 +426,7 @@ pub fn proof_empty_block_redirect_8bit() -> ProofObligation {
         aarch64_expr: target,
         inputs: vec![("target".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -435,6 +449,7 @@ pub fn proof_branch_thread_preserves_target() -> ProofObligation {
         aarch64_expr: target,
         inputs: vec![("target".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -454,6 +469,7 @@ pub fn proof_unreachable_block_removal() -> ProofObligation {
         aarch64_expr: y,
         inputs: vec![("y".to_string(), width)],
         preconditions: vec![],
+        fp_inputs: vec![],
     }
 }
 
@@ -663,6 +679,7 @@ mod tests {
             aarch64_expr: wrong,
             inputs: vec![],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -700,6 +717,7 @@ mod tests {
                 ("x".to_string(), width),
             ],
             preconditions: vec![],
+        fp_inputs: vec![],
         };
 
         let result = verify_by_evaluation(&obligation);
