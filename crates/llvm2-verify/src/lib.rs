@@ -66,6 +66,7 @@ pub mod cegis;
 pub mod rule_discovery;
 pub mod neon_semantics;
 pub mod unified_synthesis;
+pub mod neon_lowering_proofs;
 
 pub use verify::{VerificationResult, VerificationReport, ProofResult, Verifier};
 pub use lowering_proof::{ProofObligation, verify_by_evaluation};
