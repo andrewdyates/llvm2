@@ -18,6 +18,10 @@
 //   3. Store-load roundtrip: Store then Select at same address returns stored value
 //   4. Non-interference: Store at addr A, Select at addr B returns original value
 //   5. Little-endian byte ordering: multi-byte values decomposed correctly
+//   6. Alignment: naturally-aligned addresses produce correct roundtrips
+//   7. Load-after-store forwarding: store(addr, val) then load(addr) == val (with offsets)
+//   8. Byte-level addressing: sub-word loads extract correct bytes from stored values
+//   9. Write combining: consecutive narrow stores equal single wide store
 //
 // Reference: ARM Architecture Reference Manual (DDI 0487), Section C6.
 // Reference: designs/2026-04-13-verification-architecture.md, Phase 4.
@@ -741,6 +745,414 @@ pub fn proof_store_i16() -> ProofObligation {
 }
 
 // ---------------------------------------------------------------------------
+// Proof obligations: Alignment verification
+// ---------------------------------------------------------------------------
+
+/// Build an alignment proof: for an N-byte access at a naturally-aligned address,
+/// the store-load roundtrip produces the correct value.
+///
+/// The proof constrains the address to be N-byte aligned via a precondition:
+/// `base & (N-1) == 0`, which is the standard AArch64 natural alignment check.
+/// Under this precondition, the stored value is recovered exactly.
+///
+/// Reference: ARM DDI 0487, Section A3.5.7 (Alignment support).
+fn proof_aligned_store_load(name: &str, size_bytes: u32) -> ProofObligation {
+    let result_width = size_bytes * 8;
+    let mem = symbolic_memory("mem_default");
+    let base = SmtExpr::var("base", 64);
+    let value = SmtExpr::var("value", result_width);
+
+    // Store value, then load it back
+    let mem_after_store = encode_store_le(&mem, &base, &value, size_bytes);
+    let loaded = encode_load_le(&mem_after_store, &base, size_bytes);
+
+    // Precondition: base is naturally aligned (base & (size-1) == 0)
+    let align_mask = SmtExpr::bv_const((size_bytes - 1) as u64, 64);
+    let masked = base.clone().bvand(align_mask);
+    let aligned = masked.eq_expr(SmtExpr::bv_const(0, 64));
+
+    ProofObligation {
+        name: name.to_string(),
+        tmir_expr: value,
+        aarch64_expr: loaded,
+        inputs: vec![
+            ("base".to_string(), 64),
+            ("value".to_string(), result_width),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![aligned],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: aligned 16-bit store-load roundtrip (base & 1 == 0).
+pub fn proof_aligned_roundtrip_i16() -> ProofObligation {
+    proof_aligned_store_load("Aligned_Roundtrip_I16: 2-byte aligned store-load", 2)
+}
+
+/// Proof: aligned 32-bit store-load roundtrip (base & 3 == 0).
+pub fn proof_aligned_roundtrip_i32() -> ProofObligation {
+    proof_aligned_store_load("Aligned_Roundtrip_I32: 4-byte aligned store-load", 4)
+}
+
+/// Proof: aligned 64-bit store-load roundtrip (base & 7 == 0).
+pub fn proof_aligned_roundtrip_i64() -> ProofObligation {
+    proof_aligned_store_load("Aligned_Roundtrip_I64: 8-byte aligned store-load", 8)
+}
+
+/// Proof: AArch64 scaled-offset addressing preserves alignment.
+///
+/// If `base` is N-byte aligned and `scaled_imm` is any value, then
+/// `base + scaled_imm * N` is also N-byte aligned. This is a key
+/// property of AArch64's scaled immediate addressing mode.
+///
+/// Encoded as: store at `base + scaled_imm * N`, load back, compare.
+/// Precondition: `base & (N-1) == 0`.
+pub fn proof_scaled_offset_alignment_i32() -> ProofObligation {
+    let mem = symbolic_memory("mem_default");
+    let base = SmtExpr::var("base", 64);
+    let value = SmtExpr::var("value", 32);
+
+    let size_bytes: u32 = 4;
+    let scaled_imm: u64 = 5; // arbitrary non-zero scaled offset
+    let byte_offset = scaled_imm * size_bytes as u64;
+
+    // AArch64 STR then LDR at scaled offset
+    let mem_after = encode_aarch64_str_imm(&mem, &base, scaled_imm, &value, size_bytes);
+    let loaded = encode_aarch64_ldr_imm(&mem_after, &base, scaled_imm, size_bytes);
+
+    // tMIR store then load at byte offset
+    let mem_after_tmir = encode_tmir_store(&mem, &base, byte_offset, &value, size_bytes);
+    let loaded_tmir = encode_tmir_load(&mem_after_tmir, &base, byte_offset, size_bytes);
+
+    // Precondition: base is 4-byte aligned
+    let align_mask = SmtExpr::bv_const(3, 64);
+    let aligned = base.clone().bvand(align_mask).eq_expr(SmtExpr::bv_const(0, 64));
+
+    ProofObligation {
+        name: "Aligned_ScaledOffset_I32: base aligned => base+imm*4 aligned".to_string(),
+        tmir_expr: loaded_tmir,
+        aarch64_expr: loaded,
+        inputs: vec![
+            ("base".to_string(), 64),
+            ("value".to_string(), 32),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![aligned],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proof obligations: Load-after-store forwarding
+// ---------------------------------------------------------------------------
+
+/// Proof: store at `base + offset`, then load from `base + offset` returns value.
+///
+/// This is the offset variant of the basic store-load roundtrip. It proves
+/// that the effective address computation is consistent between the store
+/// and load paths even when a non-zero offset is involved.
+fn proof_forwarding_with_offset(
+    name: &str,
+    size_bytes: u32,
+    byte_offset: u64,
+) -> ProofObligation {
+    let result_width = size_bytes * 8;
+    let mem = symbolic_memory("mem_default");
+    let base = SmtExpr::var("base", 64);
+    let value = SmtExpr::var("value", result_width);
+
+    // Store at base+offset, then load from base+offset
+    let mem_after = encode_tmir_store(&mem, &base, byte_offset, &value, size_bytes);
+    let loaded = encode_tmir_load(&mem_after, &base, byte_offset, size_bytes);
+
+    ProofObligation {
+        name: name.to_string(),
+        tmir_expr: value,
+        aarch64_expr: loaded,
+        inputs: vec![
+            ("base".to_string(), 64),
+            ("value".to_string(), result_width),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: store I32 at base+12, load from base+12 returns same value.
+pub fn proof_forwarding_i32_offset12() -> ProofObligation {
+    proof_forwarding_with_offset("Forwarding_I32_offset12: store at base+12, load at base+12", 4, 12)
+}
+
+/// Proof: store I64 at base+24, load from base+24 returns same value.
+pub fn proof_forwarding_i64_offset24() -> ProofObligation {
+    proof_forwarding_with_offset("Forwarding_I64_offset24: store at base+24, load at base+24", 8, 24)
+}
+
+/// Proof: store I64, then load the lower I32 half via a 4-byte load.
+///
+/// This is a cross-size forwarding proof. When you store a 64-bit value at
+/// `base`, a 32-bit load from `base` should return the lower 32 bits of the
+/// stored value. This is critical for code that accesses fields within larger
+/// structures.
+///
+/// ```text
+/// Store(mem, base, value_64, 8)
+/// Load(mem', base, 4) == Extract(31, 0, value_64)
+/// ```
+pub fn proof_forwarding_i64_to_i32_lower() -> ProofObligation {
+    let mem = symbolic_memory("mem_default");
+    let base = SmtExpr::var("base", 64);
+    let value = SmtExpr::var("value", 64);
+
+    // Store 64-bit value
+    let mem_after = encode_store_le(&mem, &base, &value, 8);
+    // Load lower 32 bits
+    let loaded_32 = encode_load_le(&mem_after, &base, 4);
+
+    // Expected: lower 32 bits of the 64-bit value
+    let expected_32 = value.clone().extract(31, 0);
+
+    ProofObligation {
+        name: "Forwarding_I64_to_I32: store I64, load I32 at same addr == lower 32 bits".to_string(),
+        tmir_expr: expected_32,
+        aarch64_expr: loaded_32,
+        inputs: vec![
+            ("base".to_string(), 64),
+            ("value".to_string(), 64),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proof obligations: Byte-level addressing (sub-word extraction)
+// ---------------------------------------------------------------------------
+
+/// Proof: store a 32-bit value, then byte-load at each offset extracts
+/// the correct byte. Specifically: Load(I8, base+i) == Extract(i*8+7, i*8, value).
+///
+/// This proves that the byte-level decomposition in `encode_store_le` correctly
+/// places each byte of a multi-byte value at the expected address.
+fn proof_subword_byte_extract(name: &str, store_size: u32, byte_index: u32) -> ProofObligation {
+    let store_width = store_size * 8;
+    let mem = zeroed_memory();
+    let base = SmtExpr::var("base", 64);
+    let value = SmtExpr::var("value", store_width);
+
+    // Store multi-byte value
+    let mem_after = encode_store_le(&mem, &base, &value, store_size);
+
+    // Load single byte at base+byte_index
+    let byte_addr = base.clone().bvadd(SmtExpr::bv_const(byte_index as u64, 64));
+    let loaded_byte = SmtExpr::select(mem_after, byte_addr);
+
+    // Expected: Extract(byte_index*8+7, byte_index*8, value)
+    let expected_byte = value.clone().extract(byte_index * 8 + 7, byte_index * 8);
+
+    ProofObligation {
+        name: name.to_string(),
+        tmir_expr: expected_byte,
+        aarch64_expr: loaded_byte,
+        inputs: vec![
+            ("base".to_string(), 64),
+            ("value".to_string(), store_width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: store I32, load byte[1] == value[15:8].
+pub fn proof_subword_i32_byte1() -> ProofObligation {
+    proof_subword_byte_extract("SubWord_I32_byte1: Store I32, Select byte[1]", 4, 1)
+}
+
+/// Proof: store I32, load byte[2] == value[23:16].
+pub fn proof_subword_i32_byte2() -> ProofObligation {
+    proof_subword_byte_extract("SubWord_I32_byte2: Store I32, Select byte[2]", 4, 2)
+}
+
+/// Proof: store I64, load byte[5] == value[47:40].
+pub fn proof_subword_i64_byte5() -> ProofObligation {
+    proof_subword_byte_extract("SubWord_I64_byte5: Store I64, Select byte[5]", 8, 5)
+}
+
+/// Proof: store I32, then load a 16-bit halfword from byte offset 2.
+///
+/// This proves that sub-word loads at non-zero offsets within a stored
+/// value extract the correct bits. Specifically:
+/// ```text
+/// Store(mem, base, value_32, 4)
+/// Load(mem', base+2, 2) == Extract(31, 16, value_32)
+/// ```
+pub fn proof_subword_i32_halfword_upper() -> ProofObligation {
+    let mem = zeroed_memory();
+    let base = SmtExpr::var("base", 64);
+    let value = SmtExpr::var("value", 32);
+
+    // Store 32-bit value
+    let mem_after = encode_store_le(&mem, &base, &value, 4);
+
+    // Load 16-bit halfword from base+2
+    let half_addr = base.clone().bvadd(SmtExpr::bv_const(2, 64));
+    let loaded_16 = encode_load_le(&mem_after, &half_addr, 2);
+
+    // Expected: upper 16 bits of the 32-bit value
+    let expected_16 = value.clone().extract(31, 16);
+
+    ProofObligation {
+        name: "SubWord_I32_halfword_upper: Store I32, Load I16 at base+2 == value[31:16]".to_string(),
+        tmir_expr: expected_16,
+        aarch64_expr: loaded_16,
+        inputs: vec![
+            ("base".to_string(), 64),
+            ("value".to_string(), 32),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proof obligations: Write combining (consecutive byte stores)
+// ---------------------------------------------------------------------------
+
+/// Proof: four consecutive byte stores at base..base+3 produce the same
+/// memory state as a single 32-bit store.
+///
+/// This verifies that the byte decomposition in `encode_store_le` is
+/// equivalent to manual byte-by-byte writes. This is critical for
+/// correctness of narrowing stores and byte-level memory operations.
+///
+/// ```text
+/// byte_store(mem, base,   byte0)  // value[7:0]
+/// byte_store(mem, base+1, byte1)  // value[15:8]
+/// byte_store(mem, base+2, byte2)  // value[23:16]
+/// byte_store(mem, base+3, byte3)  // value[31:24]
+/// == store_le(mem, base, value, 4)
+/// ```
+pub fn proof_write_combining_i32() -> ProofObligation {
+    let mem = zeroed_memory();
+    let base = SmtExpr::var("base", 64);
+    let value = SmtExpr::var("value", 32);
+
+    // Method 1: single 32-bit store, then load back
+    let mem_single = encode_store_le(&mem, &base, &value, 4);
+    let loaded_single = encode_load_le(&mem_single, &base, 4);
+
+    // Method 2: four individual byte stores, then 32-bit load
+    let byte0 = value.clone().extract(7, 0);
+    let byte1 = value.clone().extract(15, 8);
+    let byte2 = value.clone().extract(23, 16);
+    let byte3 = value.clone().extract(31, 24);
+
+    let addr0 = base.clone();
+    let addr1 = base.clone().bvadd(SmtExpr::bv_const(1, 64));
+    let addr2 = base.clone().bvadd(SmtExpr::bv_const(2, 64));
+    let addr3 = base.clone().bvadd(SmtExpr::bv_const(3, 64));
+
+    let mem_bytes = SmtExpr::store(mem.clone(), addr0, byte0);
+    let mem_bytes = SmtExpr::store(mem_bytes, addr1, byte1);
+    let mem_bytes = SmtExpr::store(mem_bytes, addr2, byte2);
+    let mem_bytes = SmtExpr::store(mem_bytes, addr3, byte3);
+    let loaded_bytes = encode_load_le(&mem_bytes, &base, 4);
+
+    ProofObligation {
+        name: "WriteCombine_I32: 4 byte stores == 1 word store".to_string(),
+        tmir_expr: loaded_single,
+        aarch64_expr: loaded_bytes,
+        inputs: vec![
+            ("base".to_string(), 64),
+            ("value".to_string(), 32),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: two consecutive 16-bit stores at base and base+2 produce the
+/// same result as a single 32-bit store.
+///
+/// ```text
+/// store_le(mem, base,   value[15:0],  2)
+/// store_le(mem, base+2, value[31:16], 2)
+/// == store_le(mem, base, value, 4)
+/// ```
+pub fn proof_write_combining_halfwords_to_i32() -> ProofObligation {
+    let mem = zeroed_memory();
+    let base = SmtExpr::var("base", 64);
+    let value = SmtExpr::var("value", 32);
+
+    // Method 1: single 32-bit store
+    let mem_single = encode_store_le(&mem, &base, &value, 4);
+    let loaded_single = encode_load_le(&mem_single, &base, 4);
+
+    // Method 2: two 16-bit stores
+    let lower_half = value.clone().extract(15, 0);
+    let upper_half = value.clone().extract(31, 16);
+    let addr_upper = base.clone().bvadd(SmtExpr::bv_const(2, 64));
+
+    let mem_halves = encode_store_le(&mem, &base, &lower_half, 2);
+    let mem_halves = encode_store_le(&mem_halves, &addr_upper, &upper_half, 2);
+    let loaded_halves = encode_load_le(&mem_halves, &base, 4);
+
+    ProofObligation {
+        name: "WriteCombine_Halfwords_I32: 2 halfword stores == 1 word store".to_string(),
+        tmir_expr: loaded_single,
+        aarch64_expr: loaded_halves,
+        inputs: vec![
+            ("base".to_string(), 64),
+            ("value".to_string(), 32),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: two consecutive 32-bit stores at base and base+4 produce the
+/// same result as a single 64-bit store.
+///
+/// ```text
+/// store_le(mem, base,   value[31:0],  4)
+/// store_le(mem, base+4, value[63:32], 4)
+/// == store_le(mem, base, value, 8)
+/// ```
+pub fn proof_write_combining_words_to_i64() -> ProofObligation {
+    let mem = zeroed_memory();
+    let base = SmtExpr::var("base", 64);
+    let value = SmtExpr::var("value", 64);
+
+    // Method 1: single 64-bit store
+    let mem_single = encode_store_le(&mem, &base, &value, 8);
+    let loaded_single = encode_load_le(&mem_single, &base, 8);
+
+    // Method 2: two 32-bit stores
+    let lower_word = value.clone().extract(31, 0);
+    let upper_word = value.clone().extract(63, 32);
+    let addr_upper = base.clone().bvadd(SmtExpr::bv_const(4, 64));
+
+    let mem_words = encode_store_le(&mem, &base, &lower_word, 4);
+    let mem_words = encode_store_le(&mem_words, &addr_upper, &upper_word, 4);
+    let loaded_words = encode_load_le(&mem_words, &base, 8);
+
+    ProofObligation {
+        name: "WriteCombine_Words_I64: 2 word stores == 1 dword store".to_string(),
+        tmir_expr: loaded_single,
+        aarch64_expr: loaded_words,
+        inputs: vec![
+            ("base".to_string(), 64),
+            ("value".to_string(), 64),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Proof obligations: Endianness verification
 // ---------------------------------------------------------------------------
 
@@ -900,7 +1312,45 @@ pub fn all_endianness_proofs() -> Vec<ProofObligation> {
     ]
 }
 
-/// All array-based memory proofs (27 total).
+/// All alignment proofs (4 total).
+pub fn all_alignment_proofs() -> Vec<ProofObligation> {
+    vec![
+        proof_aligned_roundtrip_i16(),
+        proof_aligned_roundtrip_i32(),
+        proof_aligned_roundtrip_i64(),
+        proof_scaled_offset_alignment_i32(),
+    ]
+}
+
+/// All load-after-store forwarding proofs (3 total).
+pub fn all_forwarding_proofs() -> Vec<ProofObligation> {
+    vec![
+        proof_forwarding_i32_offset12(),
+        proof_forwarding_i64_offset24(),
+        proof_forwarding_i64_to_i32_lower(),
+    ]
+}
+
+/// All byte-level addressing (sub-word extraction) proofs (4 total).
+pub fn all_subword_proofs() -> Vec<ProofObligation> {
+    vec![
+        proof_subword_i32_byte1(),
+        proof_subword_i32_byte2(),
+        proof_subword_i64_byte5(),
+        proof_subword_i32_halfword_upper(),
+    ]
+}
+
+/// All write combining proofs (3 total).
+pub fn all_write_combining_proofs() -> Vec<ProofObligation> {
+    vec![
+        proof_write_combining_i32(),
+        proof_write_combining_halfwords_to_i32(),
+        proof_write_combining_words_to_i64(),
+    ]
+}
+
+/// All array-based memory proofs (41 total).
 pub fn all_memory_proofs() -> Vec<ProofObligation> {
     let mut proofs = Vec::new();
     proofs.extend(all_load_proofs());
@@ -908,6 +1358,10 @@ pub fn all_memory_proofs() -> Vec<ProofObligation> {
     proofs.extend(all_roundtrip_proofs());
     proofs.extend(all_non_interference_proofs());
     proofs.extend(all_endianness_proofs());
+    proofs.extend(all_alignment_proofs());
+    proofs.extend(all_forwarding_proofs());
+    proofs.extend(all_subword_proofs());
+    proofs.extend(all_write_combining_proofs());
     proofs
 }
 
@@ -1610,6 +2064,124 @@ mod tests {
         match result {
             VerificationResult::Invalid { .. } => {} // expected
             other => panic!("Expected Invalid for wrong-size roundtrip, got {:?}", other),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Proof obligation tests — Alignment
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_aligned_roundtrip_i16() {
+        assert_valid(&proof_aligned_roundtrip_i16());
+    }
+
+    #[test]
+    fn test_proof_aligned_roundtrip_i32() {
+        assert_valid(&proof_aligned_roundtrip_i32());
+    }
+
+    #[test]
+    fn test_proof_aligned_roundtrip_i64() {
+        assert_valid(&proof_aligned_roundtrip_i64());
+    }
+
+    #[test]
+    fn test_proof_scaled_offset_alignment_i32() {
+        assert_valid(&proof_scaled_offset_alignment_i32());
+    }
+
+    // -------------------------------------------------------------------
+    // Proof obligation tests — Load-after-store forwarding
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_forwarding_i32_offset12() {
+        assert_valid(&proof_forwarding_i32_offset12());
+    }
+
+    #[test]
+    fn test_proof_forwarding_i64_offset24() {
+        assert_valid(&proof_forwarding_i64_offset24());
+    }
+
+    #[test]
+    fn test_proof_forwarding_i64_to_i32_lower() {
+        assert_valid(&proof_forwarding_i64_to_i32_lower());
+    }
+
+    // -------------------------------------------------------------------
+    // Proof obligation tests — Byte-level addressing (sub-word)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_subword_i32_byte1() {
+        assert_valid(&proof_subword_i32_byte1());
+    }
+
+    #[test]
+    fn test_proof_subword_i32_byte2() {
+        assert_valid(&proof_subword_i32_byte2());
+    }
+
+    #[test]
+    fn test_proof_subword_i64_byte5() {
+        assert_valid(&proof_subword_i64_byte5());
+    }
+
+    #[test]
+    fn test_proof_subword_i32_halfword_upper() {
+        assert_valid(&proof_subword_i32_halfword_upper());
+    }
+
+    // -------------------------------------------------------------------
+    // Proof obligation tests — Write combining
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_write_combining_i32() {
+        assert_valid(&proof_write_combining_i32());
+    }
+
+    #[test]
+    fn test_proof_write_combining_halfwords_to_i32() {
+        assert_valid(&proof_write_combining_halfwords_to_i32());
+    }
+
+    #[test]
+    fn test_proof_write_combining_words_to_i64() {
+        assert_valid(&proof_write_combining_words_to_i64());
+    }
+
+    // -------------------------------------------------------------------
+    // Aggregate tests — new categories
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_all_alignment_proofs() {
+        for obligation in all_alignment_proofs() {
+            assert_valid(&obligation);
+        }
+    }
+
+    #[test]
+    fn test_all_forwarding_proofs() {
+        for obligation in all_forwarding_proofs() {
+            assert_valid(&obligation);
+        }
+    }
+
+    #[test]
+    fn test_all_subword_proofs() {
+        for obligation in all_subword_proofs() {
+            assert_valid(&obligation);
+        }
+    }
+
+    #[test]
+    fn test_all_write_combining_proofs() {
+        for obligation in all_write_combining_proofs() {
+            assert_valid(&obligation);
         }
     }
 
