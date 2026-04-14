@@ -12,6 +12,7 @@
 //! x86-64 and RISC-V are future targets.
 
 pub mod aarch64;
+pub mod compiler;
 pub mod dwarf_cfi;
 pub mod dwarf_info;
 pub mod error;
@@ -25,6 +26,10 @@ pub mod target;
 pub mod unwind;
 pub mod x86_64;
 
+pub use compiler::{
+    CompilationMetrics, CompilationResult, CompilationTrace, CompileError,
+    Compiler, CompilerConfig, ProofCertificate, TraceLevel,
+};
 pub use error::CodegenError;
 pub use pipeline::{Pipeline, PipelineConfig, PipelineError, compile_to_object};
 pub use relax::RelaxError;
