@@ -920,6 +920,18 @@ fn sign_extend(value: u64, width: u32) -> i64 {
     ((value << shift) as i64) >> shift
 }
 
+/// Sign-extend a `width`-bit value stored in a u128 to i128.
+fn sign_extend128(value: u128, width: u32) -> i128 {
+    if width == 0 {
+        return 0;
+    }
+    if width >= 128 {
+        return value as i128;
+    }
+    let shift = 128 - width;
+    ((value << shift) as i128) >> shift
+}
+
 impl SmtExpr {
     /// Evaluate this expression under the given variable assignment (fallible).
     ///
@@ -1013,36 +1025,70 @@ impl SmtExpr {
                 }
             }
             SmtExpr::BvShl { lhs, rhs, width } => {
-                let a = lhs.try_eval(env)?.as_u64();
-                let b = rhs.try_eval(env)?.as_u64();
-                // SMT-LIB: if shift amount >= width, result is 0.
-                if b >= *width as u64 {
-                    Ok(EvalResult::Bv(0))
+                if *width > 64 {
+                    let a = lhs.try_eval(env)?.as_u128();
+                    let b = rhs.try_eval(env)?.as_u128();
+                    if b >= *width as u128 {
+                        Ok(EvalResult::Bv128(0))
+                    } else {
+                        Ok(EvalResult::Bv128(mask128(a << b, *width)))
+                    }
                 } else {
-                    Ok(EvalResult::Bv(mask(a << b, *width)))
+                    let a = lhs.try_eval(env)?.as_u64();
+                    let b = rhs.try_eval(env)?.as_u64();
+                    // SMT-LIB: if shift amount >= width, result is 0.
+                    if b >= *width as u64 {
+                        Ok(EvalResult::Bv(0))
+                    } else {
+                        Ok(EvalResult::Bv(mask(a << b, *width)))
+                    }
                 }
             }
             SmtExpr::BvLshr { lhs, rhs, width } => {
-                let a = lhs.try_eval(env)?.as_u64();
-                let b = rhs.try_eval(env)?.as_u64();
-                if b >= *width as u64 {
-                    Ok(EvalResult::Bv(0))
+                if *width > 64 {
+                    let a = lhs.try_eval(env)?.as_u128();
+                    let b = rhs.try_eval(env)?.as_u128();
+                    if b >= *width as u128 {
+                        Ok(EvalResult::Bv128(0))
+                    } else {
+                        Ok(EvalResult::Bv128(mask128(a >> b, *width)))
+                    }
                 } else {
-                    Ok(EvalResult::Bv(mask(a >> b, *width)))
+                    let a = lhs.try_eval(env)?.as_u64();
+                    let b = rhs.try_eval(env)?.as_u64();
+                    if b >= *width as u64 {
+                        Ok(EvalResult::Bv(0))
+                    } else {
+                        Ok(EvalResult::Bv(mask(a >> b, *width)))
+                    }
                 }
             }
             SmtExpr::BvAshr { lhs, rhs, width } => {
-                let a = sign_extend(lhs.try_eval(env)?.as_u64(), *width);
-                let b = rhs.try_eval(env)?.as_u64();
-                if b >= *width as u64 {
-                    // Sign-fill: all 1s if negative, all 0s if positive.
-                    if a < 0 {
-                        Ok(EvalResult::Bv(mask(u64::MAX, *width)))
+                if *width > 64 {
+                    let a = sign_extend128(lhs.try_eval(env)?.as_u128(), *width);
+                    let b = rhs.try_eval(env)?.as_u128();
+                    if b >= *width as u128 {
+                        if a < 0 {
+                            Ok(EvalResult::Bv128(mask128(u128::MAX, *width)))
+                        } else {
+                            Ok(EvalResult::Bv128(0))
+                        }
                     } else {
-                        Ok(EvalResult::Bv(0))
+                        Ok(EvalResult::Bv128(mask128((a >> b) as u128, *width)))
                     }
                 } else {
-                    Ok(EvalResult::Bv(mask((a >> b) as u64, *width)))
+                    let a = sign_extend(lhs.try_eval(env)?.as_u64(), *width);
+                    let b = rhs.try_eval(env)?.as_u64();
+                    if b >= *width as u64 {
+                        // Sign-fill: all 1s if negative, all 0s if positive.
+                        if a < 0 {
+                            Ok(EvalResult::Bv(mask(u64::MAX, *width)))
+                        } else {
+                            Ok(EvalResult::Bv(0))
+                        }
+                    } else {
+                        Ok(EvalResult::Bv(mask((a >> b) as u64, *width)))
+                    }
                 }
             }
             SmtExpr::BvNeg { operand, width } => {
@@ -2061,5 +2107,220 @@ mod tests {
         // UF with args
         let uf = SmtExpr::uf("f", vec![SmtExpr::var("x", 32)], SmtSort::BitVec(32));
         assert_eq!(uf.free_vars(), vec!["x".to_string()]);
+    }
+
+    // -----------------------------------------------------------------------
+    // 128-bit shift operation tests (BvShl, BvLshr, BvAshr with width > 64)
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a 128-bit BvShl expression from two concatenated 64-bit halves.
+    fn make_128bit_shl(hi_val: u64, lo_val: u64, shift: u64) -> EvalResult {
+        let hi = SmtExpr::var("hi", 64);
+        let lo = SmtExpr::var("lo", 64);
+        let vec128 = hi.concat(lo); // 128-bit value
+        let shift_amt = SmtExpr::bv_const(shift, 128);
+        let expr = SmtExpr::BvShl {
+            lhs: Box::new(vec128),
+            rhs: Box::new(shift_amt),
+            width: 128,
+        };
+        expr.eval(&env(&[("hi", hi_val), ("lo", lo_val)]))
+    }
+
+    #[test]
+    fn test_bvshl_128bit_basic() {
+        // 1 << 64 should set bit 64
+        let result = make_128bit_shl(0, 1, 64);
+        assert_eq!(result, EvalResult::Bv128(1u128 << 64));
+    }
+
+    #[test]
+    fn test_bvshl_128bit_shift_by_zero() {
+        // Shift by 0 = identity
+        let result = make_128bit_shl(0xDEAD, 0xBEEF, 0);
+        let expected = (0xDEADu128 << 64) | 0xBEEFu128;
+        assert_eq!(result, EvalResult::Bv128(expected));
+    }
+
+    #[test]
+    fn test_bvshl_128bit_shift_by_width_minus_1() {
+        // 1 << 127 should produce the sign bit
+        let result = make_128bit_shl(0, 1, 127);
+        assert_eq!(result, EvalResult::Bv128(1u128 << 127));
+    }
+
+    #[test]
+    fn test_bvshl_128bit_shift_by_width() {
+        // Shift by >= width produces 0
+        let result = make_128bit_shl(0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 128);
+        assert_eq!(result, EvalResult::Bv128(0));
+    }
+
+    #[test]
+    fn test_bvshl_128bit_shift_exceeds_width() {
+        // Shift by > width produces 0
+        let result = make_128bit_shl(0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 200);
+        assert_eq!(result, EvalResult::Bv128(0));
+    }
+
+    /// Helper: build a 128-bit BvLshr expression.
+    fn make_128bit_lshr(hi_val: u64, lo_val: u64, shift: u64) -> EvalResult {
+        let hi = SmtExpr::var("hi", 64);
+        let lo = SmtExpr::var("lo", 64);
+        let vec128 = hi.concat(lo);
+        let shift_amt = SmtExpr::bv_const(shift, 128);
+        let expr = SmtExpr::BvLshr {
+            lhs: Box::new(vec128),
+            rhs: Box::new(shift_amt),
+            width: 128,
+        };
+        expr.eval(&env(&[("hi", hi_val), ("lo", lo_val)]))
+    }
+
+    #[test]
+    fn test_bvlshr_128bit_basic() {
+        // (1 << 64) >> 64 = 1
+        let result = make_128bit_lshr(1, 0, 64);
+        assert_eq!(result, EvalResult::Bv128(1));
+    }
+
+    #[test]
+    fn test_bvlshr_128bit_shift_by_zero() {
+        let result = make_128bit_lshr(0xDEAD, 0xBEEF, 0);
+        let expected = (0xDEADu128 << 64) | 0xBEEFu128;
+        assert_eq!(result, EvalResult::Bv128(expected));
+    }
+
+    #[test]
+    fn test_bvlshr_128bit_shift_by_width_minus_1() {
+        // All 1s >> 127 = 1 (only the top bit survives)
+        let result = make_128bit_lshr(u64::MAX, u64::MAX, 127);
+        assert_eq!(result, EvalResult::Bv128(1));
+    }
+
+    #[test]
+    fn test_bvlshr_128bit_shift_by_width() {
+        let result = make_128bit_lshr(u64::MAX, u64::MAX, 128);
+        assert_eq!(result, EvalResult::Bv128(0));
+    }
+
+    /// Helper: build a 128-bit BvAshr expression.
+    fn make_128bit_ashr(hi_val: u64, lo_val: u64, shift: u64) -> EvalResult {
+        let hi = SmtExpr::var("hi", 64);
+        let lo = SmtExpr::var("lo", 64);
+        let vec128 = hi.concat(lo);
+        let shift_amt = SmtExpr::bv_const(shift, 128);
+        let expr = SmtExpr::BvAshr {
+            lhs: Box::new(vec128),
+            rhs: Box::new(shift_amt),
+            width: 128,
+        };
+        expr.eval(&env(&[("hi", hi_val), ("lo", lo_val)]))
+    }
+
+    #[test]
+    fn test_bvashr_128bit_positive() {
+        // Positive value (MSB = 0): same as logical shift right
+        let result = make_128bit_ashr(0x7FFF_FFFF_FFFF_FFFF, 0, 64);
+        // 0x7FFFFFFFFFFFFFFF_0000000000000000 >> 64 = 0x7FFFFFFFFFFFFFFF
+        assert_eq!(result, EvalResult::Bv128(0x7FFF_FFFF_FFFF_FFFF));
+    }
+
+    #[test]
+    fn test_bvashr_128bit_negative() {
+        // Negative value (MSB = 1): sign-extends with 1s
+        // All 1s >> 1 should stay all 1s (arithmetic)
+        let result = make_128bit_ashr(u64::MAX, u64::MAX, 1);
+        assert_eq!(result, EvalResult::Bv128(u128::MAX)); // all 1s
+    }
+
+    #[test]
+    fn test_bvashr_128bit_negative_shift_by_width() {
+        // Negative >> width = all 1s (sign fill)
+        let result = make_128bit_ashr(0x8000_0000_0000_0000, 0, 128);
+        assert_eq!(result, EvalResult::Bv128(u128::MAX));
+    }
+
+    #[test]
+    fn test_bvashr_128bit_positive_shift_by_width() {
+        // Positive >> width = 0
+        let result = make_128bit_ashr(0x7FFF_FFFF_FFFF_FFFF, u64::MAX, 128);
+        assert_eq!(result, EvalResult::Bv128(0));
+    }
+
+    #[test]
+    fn test_bvashr_128bit_shift_by_zero() {
+        let result = make_128bit_ashr(0xDEAD, 0xBEEF, 0);
+        let expected = (0xDEADu128 << 64) | 0xBEEFu128;
+        assert_eq!(result, EvalResult::Bv128(expected));
+    }
+
+    #[test]
+    fn test_bvshl_128bit_mixed_operands() {
+        // One operand from Concat (Bv128), shift amount from BvConst (Bv).
+        // This tests the as_u128() promotion on Bv values.
+        let hi = SmtExpr::bv_const(0, 64);
+        let lo = SmtExpr::bv_const(0xFF, 64);
+        let vec128 = hi.concat(lo); // Bv128
+        // Shift amount is a plain 128-bit const (internally Bv since value fits u64)
+        let shift = SmtExpr::bv_const(8, 128);
+        let expr = SmtExpr::BvShl {
+            lhs: Box::new(vec128),
+            rhs: Box::new(shift),
+            width: 128,
+        };
+        let result = expr.eval(&env(&[]));
+        assert_eq!(result, EvalResult::Bv128(0xFF00));
+    }
+
+    #[test]
+    fn test_bvlshr_128bit_mixed_operands() {
+        let hi = SmtExpr::bv_const(0, 64);
+        let lo = SmtExpr::bv_const(0xFF00, 64);
+        let vec128 = hi.concat(lo);
+        let shift = SmtExpr::bv_const(8, 128);
+        let expr = SmtExpr::BvLshr {
+            lhs: Box::new(vec128),
+            rhs: Box::new(shift),
+            width: 128,
+        };
+        let result = expr.eval(&env(&[]));
+        assert_eq!(result, EvalResult::Bv128(0xFF));
+    }
+
+    #[test]
+    fn test_bvashr_128bit_mixed_operands() {
+        // Negative 128-bit value with sign bit set, shift from BvConst
+        let hi = SmtExpr::bv_const(0x8000_0000_0000_0000, 64);
+        let lo = SmtExpr::bv_const(0, 64);
+        let vec128 = hi.concat(lo); // MSB set = negative
+        let shift = SmtExpr::bv_const(64, 128);
+        let expr = SmtExpr::BvAshr {
+            lhs: Box::new(vec128),
+            rhs: Box::new(shift),
+            width: 128,
+        };
+        let result = expr.eval(&env(&[]));
+        // Arithmetic shift right of a negative value:
+        // 0x80000000_00000000_00000000_00000000 (i128::MIN) >> 64 (arithmetic)
+        // = 0xFFFFFFFF_FFFFFFFF_80000000_00000000
+        // The upper 64 bits fill with 1s (sign extension), the original MSB
+        // (0x80000000_00000000) moves to the lower 64 bits.
+        let expected: u128 = 0xFFFF_FFFF_FFFF_FFFF_8000_0000_0000_0000;
+        assert_eq!(result, EvalResult::Bv128(expected));
+    }
+
+    #[test]
+    fn test_sign_extend128_helper() {
+        // -1 in 8 bits = 0xFF
+        assert_eq!(sign_extend128(0xFF, 8), -1i128);
+        // -128 in 8 bits = 0x80
+        assert_eq!(sign_extend128(0x80, 8), -128i128);
+        // Positive: 0x7F in 8 bits = 127
+        assert_eq!(sign_extend128(0x7F, 8), 127i128);
+        // Full width: passthrough
+        assert_eq!(sign_extend128(u128::MAX, 128), -1i128);
+        // Zero width
+        assert_eq!(sign_extend128(0xFF, 0), 0i128);
     }
 }
