@@ -1382,7 +1382,7 @@ mod tests {
     #[test]
     fn test_generate_smt2_query_with_extra_array_decls() {
         // Test the enhanced query generator with explicit array declarations
-        let mem_var = SmtExpr::var("mem", 64); // placeholder -- in real usage this would be array
+        let _mem_var = SmtExpr::var("mem", 64); // placeholder -- in real usage this would be array
         let addr = SmtExpr::var("a", 64);
 
         let obligation = ProofObligation {

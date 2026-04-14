@@ -3483,7 +3483,7 @@ mod tests {
     fn test_engine_uses_cost_model_for_scalar_ranking() {
         // The engine should use MultiTargetCostModel for scalar cost estimates
         // instead of the ad-hoc synthesis cost values.
-        use llvm2_ir::cost_model::{ComputeTarget, CostModelGen, MultiTargetCostModel};
+        use llvm2_ir::cost_model::ComputeTarget;
 
         let engine = UnifiedSynthesisEngine::with_defaults();
         let cm = engine.cost_model();
