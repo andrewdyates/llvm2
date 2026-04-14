@@ -16,6 +16,7 @@ pub mod abi;
 pub mod isel;
 pub mod adapter;
 pub mod target_analysis;
+pub mod compute_graph;
 
 pub use types::Type;
 pub use function::Function;
