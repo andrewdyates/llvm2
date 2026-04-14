@@ -17,8 +17,8 @@
 // Reference: relax.rs (branch relaxation pass)
 // Reference: frame.rs (prologue/epilogue insertion, frame index elimination)
 
+use crate::aarch64::encode::{encode_instruction, EncodeError};
 use crate::aarch64::encoding;
-use crate::aarch64::encoding_mem;
 use crate::frame::{self, FrameLayout};
 use crate::relax;
 use llvm2_ir::function::MachFunction as IrMachFunction;
@@ -199,11 +199,22 @@ pub fn expand_pseudos(func: &mut IrMachFunction) {
 
 /// Encode a single IR instruction to a 32-bit AArch64 instruction word.
 ///
-/// This is the core encoding dispatch. It extracts operands and calls
-/// the appropriate encoder function from the aarch64::encoding module.
+/// Delegates to the unified encoder (`encode_instruction` from `aarch64::encode`)
+/// for all opcodes it supports. Handles pipeline-specific opcodes locally:
 ///
-/// Returns the encoded 4-byte word, or an error if the instruction cannot
-/// be encoded.
+/// - **Adrp / AddPCRel**: Emit with imm=0; relocations will patch the offset.
+///   The unified encoder uses the actual immediate, which is wrong for the
+///   pipeline's relocation-based patching model.
+/// - **BicRR, Csinc, Csinv, Csneg, Movn**: Not yet implemented in the unified
+///   encoder (encode.rs lists them as UnsupportedOpcode). Implemented here
+///   until encode.rs catches up.
+/// - **LdrRO, StrRO**: Integer-only register-offset encoding. The unified
+///   encoder handles FPR paths via encoding_mem; this uses inline encoding
+///   for integer loads/stores which matches the pipeline's needs.
+/// - **LdrGot, LdrTlvp**: Always 64-bit GOT/TLV loads, pipeline-specific.
+///
+/// Pre-validates operands (#98, #105) before delegation to catch malformed
+/// instructions early rather than silently encoding wrong values.
 fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
     // Helper: extract physical register hardware encoding from operand.
     // Returns an error for non-register operands instead of silently
@@ -279,640 +290,13 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
     };
 
     match inst.opcode {
-        // --- Arithmetic ---
-        AArch64Opcode::AddRR => {
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            Ok(encoding::encode_add_sub_shifted_reg(
-                sf,
-                0,
-                0,
-                0,
-                preg_hw(2)?,
-                0,
-                preg_hw(1)?,
-                preg_hw(0)?,
-            ))
-        }
-        AArch64Opcode::AddRI => {
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            let imm = imm_val(2) as u32 & 0xFFF;
-            Ok(encoding::encode_add_sub_imm(
-                sf,
-                0,
-                0,
-                0,
-                imm,
-                preg_hw(1)?,
-                preg_hw(0)?,
-            ))
-        }
-        AArch64Opcode::SubRR => {
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            Ok(encoding::encode_add_sub_shifted_reg(
-                sf,
-                1,
-                0,
-                0,
-                preg_hw(2)?,
-                0,
-                preg_hw(1)?,
-                preg_hw(0)?,
-            ))
-        }
-        AArch64Opcode::SubRI => {
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            let imm = imm_val(2) as u32 & 0xFFF;
-            Ok(encoding::encode_add_sub_imm(
-                sf,
-                1,
-                0,
-                0,
-                imm,
-                preg_hw(1)?,
-                preg_hw(0)?,
-            ))
-        }
-        AArch64Opcode::MulRR => {
-            // MADD Rd, Rn, Rm, XZR (multiply-accumulate with zero addend = MUL)
-            // Encoding: sf | 0 | 0 | 11011 | 000 | Rm | 0 | Ra(=31) | Rn | Rd
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let rm = preg_hw(2)?;
-            let ra = 31u32; // XZR — makes MADD act as MUL
-            Ok((sf << 31)
-                | (0b0011011u32 << 24)
-                | (rm << 16)
-                | (0 << 15) // o0=0 for MADD
-                | (ra << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::SDiv => {
-            // SDIV Rd, Rn, Rm
-            // Encoding: sf | 0 | 0 | 11010110 | Rm | 00001 | 1 | Rn | Rd
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let rm = preg_hw(2)?;
-            Ok((sf << 31)
-                | (0b0011010110u32 << 21)
-                | (rm << 16)
-                | (0b000011u32 << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::UDiv => {
-            // UDIV Rd, Rn, Rm
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let rm = preg_hw(2)?;
-            Ok((sf << 31)
-                | (0b0011010110u32 << 21)
-                | (rm << 16)
-                | (0b000010u32 << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::Neg => {
-            // NEG Rd, Rm = SUB Rd, XZR, Rm
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            Ok(encoding::encode_add_sub_shifted_reg(
-                sf,
-                1,
-                0,
-                0,
-                preg_hw(1)?,
-                0,
-                31, // XZR as Rn
-                preg_hw(0)?,
-            ))
-        }
-
-        // --- Compare ---
-        AArch64Opcode::CmpRR => {
-            // CMP Rn, Rm = SUBS XZR, Rn, Rm
-            let sf = 1u32;
-            Ok(encoding::encode_add_sub_shifted_reg(
-                sf,
-                1,
-                1,
-                0,
-                preg_hw(1)?,
-                0,
-                preg_hw(0)?,
-                31,
-            ))
-        }
-        AArch64Opcode::CmpRI => {
-            let sf = 1u32;
-            let imm = imm_val(1) as u32 & 0xFFF;
-            Ok(encoding::encode_add_sub_imm(
-                sf,
-                1,
-                1,
-                0,
-                imm,
-                preg_hw(0)?,
-                31,
-            ))
-        }
-        AArch64Opcode::Tst => {
-            // TST Rn, Rm = ANDS XZR, Rn, Rm
-            let sf = 1u32;
-            Ok(encoding::encode_logical_shifted_reg(
-                sf,
-                0b11, // ANDS
-                0,
-                0,
-                preg_hw(1)?,
-                0,
-                preg_hw(0)?,
-                31, // XZR
-            ))
-        }
-
-        // --- Logical ---
-        AArch64Opcode::AndRR => {
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            Ok(encoding::encode_logical_shifted_reg(
-                sf,
-                0b00,
-                0,
-                0,
-                preg_hw(2)?,
-                0,
-                preg_hw(1)?,
-                preg_hw(0)?,
-            ))
-        }
-        AArch64Opcode::OrrRR => {
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            Ok(encoding::encode_logical_shifted_reg(
-                sf,
-                0b01,
-                0,
-                0,
-                preg_hw(2)?,
-                0,
-                preg_hw(1)?,
-                preg_hw(0)?,
-            ))
-        }
-        AArch64Opcode::EorRR => {
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            Ok(encoding::encode_logical_shifted_reg(
-                sf,
-                0b10,
-                0,
-                0,
-                preg_hw(2)?,
-                0,
-                preg_hw(1)?,
-                preg_hw(0)?,
-            ))
-        }
-        AArch64Opcode::OrnRR => {
-            // ORN Rd, Rn, Rm — bitwise OR-NOT (N=1, opc=01)
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            Ok(encoding::encode_logical_shifted_reg(
-                sf,
-                0b01,
-                1, // N=1 for ORN
-                0,
-                preg_hw(2)?,
-                0,
-                preg_hw(1)?,
-                preg_hw(0)?,
-            ))
-        }
-
-        // --- Shifts ---
-        AArch64Opcode::LslRR => {
-            // LSLV Rd, Rn, Rm
-            // Encoding: sf | 0 | 0 | 11010110 | Rm | 0010 | 00 | Rn | Rd
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            Ok((sf << 31)
-                | (0b0011010110u32 << 21)
-                | (preg_hw(2)? << 16)
-                | (0b001000u32 << 10)
-                | (preg_hw(1)? << 5)
-                | preg_hw(0)?)
-        }
-        AArch64Opcode::LsrRR => {
-            // LSRV Rd, Rn, Rm
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            Ok((sf << 31)
-                | (0b0011010110u32 << 21)
-                | (preg_hw(2)? << 16)
-                | (0b001001u32 << 10)
-                | (preg_hw(1)? << 5)
-                | preg_hw(0)?)
-        }
-        AArch64Opcode::AsrRR => {
-            // ASRV Rd, Rn, Rm
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            Ok((sf << 31)
-                | (0b0011010110u32 << 21)
-                | (preg_hw(2)? << 16)
-                | (0b001010u32 << 10)
-                | (preg_hw(1)? << 5)
-                | preg_hw(0)?)
-        }
-        AArch64Opcode::LslRI => {
-            // LSL Rd, Rn, #shift = UBFM Rd, Rn, #(-shift MOD regsize), #(regsize-1-shift)
-            // Bitfield format: sf | opc(10) | 100110 | N | immr(6) | imms(6) | Rn | Rd
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let shift = imm_val(2) as u32;
-            let regsize = if sf == 1 { 64u32 } else { 32u32 };
-            let n = sf;
-            let immr = regsize.wrapping_sub(shift) & (regsize - 1);
-            let imms = regsize - 1 - shift;
-            Ok((sf << 31)
-                | (0b10 << 29)      // opc = 10 (UBFM)
-                | (0b100110 << 23)
-                | (n << 22)
-                | (immr << 16)
-                | (imms << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::LsrRI => {
-            // LSR Rd, Rn, #shift = UBFM Rd, Rn, #shift, #(regsize-1)
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let shift = imm_val(2) as u32;
-            let regsize = if sf == 1 { 64u32 } else { 32u32 };
-            let n = sf;
-            let immr = shift;
-            let imms = regsize - 1;
-            Ok((sf << 31)
-                | (0b10 << 29)      // opc = 10 (UBFM)
-                | (0b100110 << 23)
-                | (n << 22)
-                | (immr << 16)
-                | (imms << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::AsrRI => {
-            // ASR Rd, Rn, #shift = SBFM Rd, Rn, #shift, #(regsize-1)
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let shift = imm_val(2) as u32;
-            let regsize = if sf == 1 { 64u32 } else { 32u32 };
-            let n = sf;
-            let immr = shift;
-            let imms = regsize - 1;
-            Ok((sf << 31)
-                | (0b00 << 29)      // opc = 00 (SBFM)
-                | (0b100110 << 23)
-                | (n << 22)
-                | (immr << 16)
-                | (imms << 10)
-                | (rn << 5)
-                | rd)
-        }
-
-        // --- Move ---
-        AArch64Opcode::MovR => {
-            // MOV Rd, Rm
-            // When source is SP, use ADD Rd, SP, #0 (reg 31 = SP in ADD context).
-            // Otherwise, use ORR Rd, XZR, Rm (reg 31 = XZR in logical context).
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            let is_sp_source = matches!(
-                inst.operands.get(1),
-                Some(MachOperand::Special(SpecialReg::SP))
-            );
-            if is_sp_source {
-                Ok(encoding::encode_add_sub_imm(
-                    sf, 0, 0, 0, 0, 31, preg_hw(0)?,
-                ))
-            } else {
-                Ok(encoding::encode_logical_shifted_reg(
-                    sf,
-                    0b01,
-                    0,
-                    0,
-                    preg_hw(1)?,
-                    0,
-                    31,
-                    preg_hw(0)?,
-                ))
-            }
-        }
-        AArch64Opcode::MovI | AArch64Opcode::Movz => {
-            // MOVZ Rd, #imm16
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            let imm16 = imm_val(1) as u32 & 0xFFFF;
-            Ok(encoding::encode_move_wide(sf, 0b10, 0, imm16, preg_hw(0)?))
-        }
-        AArch64Opcode::Movk => {
-            // MOVK Rd, #imm16
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            let imm16 = imm_val(1) as u32 & 0xFFFF;
-            Ok(encoding::encode_move_wide(sf, 0b11, 0, imm16, preg_hw(0)?))
-        }
-        AArch64Opcode::CSet => {
-            // CSET Xd/Wd, cond — encoded as CSINC Xd, XZR, XZR, invert(cond)
-            // ARM ARM C6.2.70: sf | 0 | 0 | 11010100 | Rm(=XZR) | inv_cond | 0 | 1 | Rn(=XZR) | Rd
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let rd = preg_hw(0)?;
-            let cond = imm_val(1) as u32 & 0xF;
-            let inv_cond = cond ^ 1;
-            let rn = 31u32; // XZR/WZR
-            let rm = 31u32; // XZR/WZR
-            Ok((sf << 31)
-                | (0b00 << 29)
-                | (0b11010100 << 21)
-                | (rm << 16)
-                | (inv_cond << 12)
-                | (0b01 << 10)     // op2 = 01 (CSINC)
-                | (rn << 5)
-                | rd)
-        }
-
-        // --- Extension ---
-        AArch64Opcode::Sxtw => {
-            // SXTW Xd, Wn = SBFM Xd, Xn, #0, #31
-            // Encoding: 1 | 00 | 100110 | 1 | 000000 | 011111 | Rn | Rd
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            Ok((1u32 << 31)  // sf=1
-                | (0b00u32 << 29)
-                | (0b100110u32 << 23)
-                | (1u32 << 22)  // N=1 for 64-bit
-                | (0u32 << 16)  // immr=0
-                | (31u32 << 10) // imms=31
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::Uxtw => {
-            // UXTW = MOV Wd, Wn (implicit zero-extend in AArch64)
-            // Actually a 32-bit ORR Wd, WZR, Wn
-            Ok(encoding::encode_logical_shifted_reg(
-                0, // sf=0 (32-bit)
-                0b01,
-                0,
-                0,
-                preg_hw(1)?,
-                0,
-                31,
-                preg_hw(0)?,
-            ))
-        }
-        AArch64Opcode::Sxtb => {
-            // SXTB Xd, Wn = SBFM Xd, Xn, #0, #7
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            Ok((1u32 << 31)
-                | (0b00u32 << 29)
-                | (0b100110u32 << 23)
-                | (1u32 << 22)
-                | (0u32 << 16)  // immr=0
-                | (7u32 << 10)  // imms=7
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::Sxth => {
-            // SXTH Xd, Wn = SBFM Xd, Xn, #0, #15
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            Ok((1u32 << 31)
-                | (0b00u32 << 29)
-                | (0b100110u32 << 23)
-                | (1u32 << 22)
-                | (0u32 << 16)   // immr=0
-                | (15u32 << 10)  // imms=15
-                | (rn << 5)
-                | rd)
-        }
-
-        // --- Load/Store ---
-        AArch64Opcode::LdrRI => {
-            // LDR Rt, [Rn, #offset]
-            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
-            let scaled = (offset / 8) as u32 & 0xFFF;
-            Ok(encoding::encode_load_store_ui(
-                0b11,
-                0,
-                0b01,
-                scaled,
-                preg_hw(1)?,
-                preg_hw(0)?,
-            ))
-        }
-        AArch64Opcode::StrRI => {
-            // STR Rt, [Rn, #offset]
-            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
-            let scaled = (offset / 8) as u32 & 0xFFF;
-            Ok(encoding::encode_load_store_ui(
-                0b11,
-                0,
-                0b00,
-                scaled,
-                preg_hw(1)?,
-                preg_hw(0)?,
-            ))
-        }
-        // Byte/halfword extending loads and truncating stores
-        AArch64Opcode::LdrbRI => {
-            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
-            let scaled = offset as u32 & 0xFFF;
-            Ok(encoding::encode_load_store_ui(0b00, 0, 0b01, scaled, preg_hw(1)?, preg_hw(0)?))
-        }
-        AArch64Opcode::LdrhRI => {
-            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
-            let scaled = (offset / 2) as u32 & 0xFFF;
-            Ok(encoding::encode_load_store_ui(0b01, 0, 0b01, scaled, preg_hw(1)?, preg_hw(0)?))
-        }
-        AArch64Opcode::LdrsbRI => {
-            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
-            let scaled = offset as u32 & 0xFFF;
-            Ok(encoding::encode_load_store_ui(0b00, 0, 0b11, scaled, preg_hw(1)?, preg_hw(0)?))
-        }
-        AArch64Opcode::LdrshRI => {
-            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
-            let scaled = (offset / 2) as u32 & 0xFFF;
-            Ok(encoding::encode_load_store_ui(0b01, 0, 0b11, scaled, preg_hw(1)?, preg_hw(0)?))
-        }
-        AArch64Opcode::StrbRI => {
-            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
-            let scaled = offset as u32 & 0xFFF;
-            Ok(encoding::encode_load_store_ui(0b00, 0, 0b00, scaled, preg_hw(1)?, preg_hw(0)?))
-        }
-        AArch64Opcode::StrhRI => {
-            let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
-            let scaled = (offset / 2) as u32 & 0xFFF;
-            Ok(encoding::encode_load_store_ui(0b01, 0, 0b00, scaled, preg_hw(1)?, preg_hw(0)?))
-        }
-        AArch64Opcode::StpRI => {
-            // STP Rt, Rt2, [Rn, #offset] (signed offset)
-            let offset = if inst.operands.len() > 3 { imm_val(3) } else { 0 };
-            let scaled_imm7 = ((offset / 8) as i32 as u32) & 0x7F;
-            Ok(encoding::encode_load_store_pair(
-                0b10,
-                0,
-                0,
-                scaled_imm7,
-                preg_hw(1)?,
-                preg_hw(2)?,
-                preg_hw(0)?,
-            ))
-        }
-        AArch64Opcode::StpPreIndex => {
-            // STP Rt, Rt2, [Rn, #offset]! (pre-index writeback)
-            let offset = if inst.operands.len() > 3 { imm_val(3) } else { 0 };
-            let scaled_imm7 = (offset / 8) as i8;
-            encoding_mem::encode_ldp_stp_pre_index(
-                encoding_mem::PairSize::X64,
-                false,
-                encoding_mem::PairOp::StorePair,
-                scaled_imm7,
-                preg_hw(1)? as u8,
-                preg_hw(2)? as u8,
-                preg_hw(0)? as u8,
-            ).map_err(|e| LowerError::EncodingFailed(e.to_string()))
-        }
-        AArch64Opcode::LdpRI => {
-            // LDP Rt, Rt2, [Rn, #offset] (signed offset)
-            let offset = if inst.operands.len() > 3 { imm_val(3) } else { 0 };
-            let scaled_imm7 = ((offset / 8) as i32 as u32) & 0x7F;
-            Ok(encoding::encode_load_store_pair(
-                0b10,
-                0,
-                1,
-                scaled_imm7,
-                preg_hw(1)?,
-                preg_hw(2)?,
-                preg_hw(0)?,
-            ))
-        }
-        AArch64Opcode::LdpPostIndex => {
-            // LDP Rt, Rt2, [Rn], #offset (post-index writeback)
-            let offset = if inst.operands.len() > 3 { imm_val(3) } else { 0 };
-            let scaled_imm7 = (offset / 8) as i8;
-            encoding_mem::encode_ldp_stp_post_index(
-                encoding_mem::PairSize::X64,
-                false,
-                encoding_mem::PairOp::LoadPair,
-                scaled_imm7,
-                preg_hw(1)? as u8,
-                preg_hw(2)? as u8,
-                preg_hw(0)? as u8,
-            ).map_err(|e| LowerError::EncodingFailed(e.to_string()))
-        }
-        AArch64Opcode::LdrLiteral => {
-            // LDR Xt, <literal> — PC-relative literal load
-            // Encoding: opc=01 | 011 | V=0 | 00 | imm19 | Rt
-            let imm19 = imm_val(1) as u32 & 0x7FFFF;
-            let rt = preg_hw(0)?;
-            Ok((0b01u32 << 30)
-                | (0b011u32 << 27)
-                | (0u32 << 26) // V=0
-                | (0b00u32 << 24)
-                | (imm19 << 5)
-                | rt)
-        }
-
-        // --- Branch ---
-        AArch64Opcode::B => {
-            let offset = imm_val(0) as u32 & 0x3FFFFFF;
-            Ok(encoding::encode_uncond_branch(0, offset))
-        }
-        AArch64Opcode::BCond => {
-            let cond = imm_val(0) as u32 & 0xF;
-            let offset = if inst.operands.len() > 1 {
-                imm_val(1) as u32 & 0x7FFFF
-            } else {
-                0
-            };
-            Ok(encoding::encode_cond_branch(offset, cond))
-        }
-        AArch64Opcode::Cbz => {
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            let rt = preg_hw(0)?;
-            let imm19 = if inst.operands.len() > 1 {
-                imm_val(1) as u32 & 0x7FFFF
-            } else {
-                0
-            };
-            Ok(encoding::encode_cmp_branch(sf, 0, imm19, rt))
-        }
-        AArch64Opcode::Cbnz => {
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            let rt = preg_hw(0)?;
-            let imm19 = if inst.operands.len() > 1 {
-                imm_val(1) as u32 & 0x7FFFF
-            } else {
-                0
-            };
-            Ok(encoding::encode_cmp_branch(sf, 1, imm19, rt))
-        }
-        AArch64Opcode::Tbz => {
-            // TBZ Rt, #bit, <offset>
-            // Encoding: b5 | 011011 | 0 | b40 | imm14 | Rt
-            // b5 = bit[5] (high bit of bit number), b40 = bit[4:0]
-            let rt = preg_hw(0)?;
-            let bit = imm_val(1) as u32;
-            let imm14 = if inst.operands.len() > 2 {
-                imm_val(2) as u32 & 0x3FFF
-            } else {
-                0
-            };
-            let b5 = (bit >> 5) & 1;
-            let b40 = bit & 0x1F;
-            Ok((b5 << 31)
-                | (0b011011 << 25)
-                | (0 << 24) // op=0 for TBZ
-                | (b40 << 19)
-                | (imm14 << 5)
-                | rt)
-        }
-        AArch64Opcode::Tbnz => {
-            // TBNZ Rt, #bit, <offset>
-            // Encoding: b5 | 011011 | 1 | b40 | imm14 | Rt
-            let rt = preg_hw(0)?;
-            let bit = imm_val(1) as u32;
-            let imm14 = if inst.operands.len() > 2 {
-                imm_val(2) as u32 & 0x3FFF
-            } else {
-                0
-            };
-            let b5 = (bit >> 5) & 1;
-            let b40 = bit & 0x1F;
-            Ok((b5 << 31)
-                | (0b011011 << 25)
-                | (1 << 24) // op=1 for TBNZ
-                | (b40 << 19)
-                | (imm14 << 5)
-                | rt)
-        }
-        AArch64Opcode::Bl => {
-            let offset = imm_val(0) as u32 & 0x3FFFFFF;
-            Ok(encoding::encode_uncond_branch(1, offset))
-        }
-        AArch64Opcode::Blr => {
-            Ok(encoding::encode_branch_reg(0b0001, preg_hw(0)?))
-        }
-        AArch64Opcode::Br => {
-            Ok(encoding::encode_branch_reg(0b0000, preg_hw(0)?))
-        }
-        AArch64Opcode::Ret => {
-            // RET (X30)
-            Ok(encoding::encode_branch_reg(0b0010, 30))
-        }
-
-        // --- Address ---
+        // =================================================================
+        // Pipeline-specific: ADRP and AddPCRel emit with imm=0 for
+        // relocation patching. The unified encoder uses the actual
+        // immediate, which doesn't work in the relocation model.
+        // =================================================================
         AArch64Opcode::Adrp => {
             // ADRP Xd, <page>
-            // Encoding: 1 | immlo(2) | 10000 | immhi(19) | Rd
-            // The immediate is page-relative and will be relocated.
             // Emit with imm=0; relocation will patch it.
             let rd = preg_hw(0)?;
             Ok((1u32 << 31) | (0b10000u32 << 24) | rd)
@@ -932,280 +316,20 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             ))
         }
 
-        // --- Floating-point ---
-        AArch64Opcode::FaddRR
-        | AArch64Opcode::FsubRR
-        | AArch64Opcode::FmulRR
-        | AArch64Opcode::FdivRR => {
-            // FP data-processing 2-source:
-            // 0 | 0 | 0 | 11110 | ftype(2) | 1 | Rm | opcode(4) | 10 | Rn | Rd
-            let ftype = fp_size(0)?; // derive precision from destination FPR (#105)
-            let fp_op = match inst.opcode {
-                AArch64Opcode::FaddRR => 0b0010u32,
-                AArch64Opcode::FsubRR => 0b0011u32,
-                AArch64Opcode::FmulRR => 0b0000u32,
-                AArch64Opcode::FdivRR => 0b0001u32,
-                // SAFETY: inner match is constrained by outer arm to FaddRR|FsubRR|FmulRR|FdivRR
-                _ => unreachable!("inner match constrained by outer arm"),
-            };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let rm = preg_hw(2)?;
-            Ok((0b00011110u32 << 24)
-                | (ftype << 22)
-                | (1u32 << 21)
-                | (rm << 16)
-                | (fp_op << 12)
-                | (0b10u32 << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::FnegRR => {
-            // FNEG Dd, Dn — FP 1-source data-processing
-            // 0 | 00 | 11110 | ftype(2) | 1 | 0000 | opcode(2) | 10000 | Rn | Rd
-            let ftype = fp_size(0)?; // derive precision from destination FPR (#105)
-            let fp_op = 0b10u32; // FNEG opcode
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            Ok((0b00011110u32 << 24)
-                | (ftype << 22)
-                | (1u32 << 21)
-                // bits [20:17] = 0000
-                | (fp_op << 15)
-                | (0b10000u32 << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::Fcmp => {
-            // FCMP Rn, Rm
-            // 0 | 0 | 0 | 11110 | ftype | 1 | Rm | 00 | 1000 | Rn | 00000
-            let ftype = fp_size(0)?; // derive precision from first source FPR (#105)
-            let rn = preg_hw(0)?;
-            let rm = preg_hw(1)?;
-            Ok((0b00011110u32 << 24)
-                | (ftype << 22)
-                | (1u32 << 21)
-                | (rm << 16)
-                | (0b00u32 << 14)
-                | (0b1000u32 << 10)
-                | (rn << 5)
-                | 0b00000u32)
-        }
-        AArch64Opcode::FcvtzsRR => {
-            // FCVTZS Wd/Xd, Dn/Sn — FPR source determines precision
-            // sf | 0 | 0 | 11110 | ftype | 1 | 11 | 000 | 000000 | Rn | Rd
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let ftype = fp_size(1)?; // derive precision from FPR source (#105)
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            Ok((sf << 31)
-                | (0b0011110u32 << 24)
-                | (ftype << 22)
-                | (1u32 << 21)
-                | (0b11u32 << 19)
-                | (0b000u32 << 16)
-                | (0u32 << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::ScvtfRR => {
-            // SCVTF Dd/Sd, Wn/Xn — FPR destination determines precision
-            // sf | 0 | 0 | 11110 | ftype | 1 | 00 | 010 | 000000 | Rn | Rd
-            let sf = if is_64bit(1) { 1u32 } else { 0u32 };
-            let ftype = fp_size(0)?; // derive precision from FPR destination (#105)
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            Ok((sf << 31)
-                | (0b0011110u32 << 24)
-                | (ftype << 22)
-                | (1u32 << 21)
-                | (0b00u32 << 19)
-                | (0b010u32 << 16)
-                | (0u32 << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::FcvtzuRR => {
-            // FCVTZU Wd/Xd, Dn/Sn (unsigned variant) — FPR source determines precision
-            // sf | 0 | 0 | 11110 | ftype | 1 | 11 | 001 | 000000 | Rn | Rd
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let ftype = fp_size(1)?; // derive precision from FPR source (#105)
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            Ok((sf << 31)
-                | (0b0011110u32 << 24)
-                | (ftype << 22)
-                | (1u32 << 21)
-                | (0b11u32 << 19)
-                | (0b001u32 << 16)
-                | (0u32 << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::UcvtfRR => {
-            // UCVTF Dd/Sd, Wn/Xn (unsigned variant) — FPR destination determines precision
-            // sf | 0 | 0 | 11110 | ftype | 1 | 00 | 011 | 000000 | Rn | Rd
-            let sf = if is_64bit(1) { 1u32 } else { 0u32 };
-            let ftype = fp_size(0)?; // derive precision from FPR destination (#105)
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            Ok((sf << 31)
-                | (0b0011110u32 << 24)
-                | (ftype << 22)
-                | (1u32 << 21)
-                | (0b00u32 << 19)
-                | (0b011u32 << 16)
-                | (0u32 << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::FcvtSD => {
-            // FCVT Dd, Sn (f32 -> f64)
-            // 0 | 00 | 11110 | 00 | 1 | 0001 | 01 | 10000 | Rn | Rd
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            Ok((0b0011110u32 << 24)
-                | (0b00u32 << 22)  // ftype = single source
-                | (1u32 << 21)
-                | (0b0001u32 << 17)
-                | (0b01u32 << 15)  // opc = convert to double
-                | (0b10000u32 << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::FcvtDS => {
-            // FCVT Ss, Dn (f64 -> f32)
-            // 0 | 00 | 11110 | 01 | 1 | 0001 | 00 | 10000 | Rn | Rd
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            Ok((0b0011110u32 << 24)
-                | (0b01u32 << 22)  // ftype = double source
-                | (1u32 << 21)
-                | (0b0001u32 << 17)
-                | (0b00u32 << 15)  // opc = convert to single
-                | (0b10000u32 << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::FmovGprFpr => {
-            // FMOV Sd, Wn (or FMOV Dd, Xn)
-            // sf | 0 | 0 | 11110 | ftype | 1 | 00 | 111 | 000000 | Rn | Rd
-            let sf = if is_64bit(1) { 1u32 } else { 0u32 };
-            let ftype = if sf == 1 { 0b01u32 } else { 0b00u32 };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            Ok((sf << 31)
-                | (0b0011110u32 << 24)
-                | (ftype << 22)
-                | (1u32 << 21)
-                | (0b00u32 << 19)
-                | (0b111u32 << 16)
-                | (0u32 << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::FmovFprGpr => {
-            // FMOV Wn, Sd (or FMOV Xn, Dd)
-            // sf | 0 | 0 | 11110 | ftype | 1 | 00 | 110 | 000000 | Rn | Rd
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let ftype = if sf == 1 { 0b01u32 } else { 0b00u32 };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            Ok((sf << 31)
-                | (0b0011110u32 << 24)
-                | (ftype << 22)
-                | (1u32 << 21)
-                | (0b00u32 << 19)
-                | (0b110u32 << 16)
-                | (0u32 << 10)
-                | (rn << 5)
-                | rd)
-        }
-
-        // --- Data-processing (3 source): MSUB, SMULL, UMULL ---
-        AArch64Opcode::Msub => {
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let rm = preg_hw(2)?;
-            let ra = if inst.operands.len() > 3 { preg_hw(3)? } else { 31 };
-            Ok((sf << 31)
-                | (0b0011011u32 << 24)
-                | (rm << 16)
-                | (1 << 15) // o0=1 for MSUB
-                | (ra << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::Smull => {
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let rm = preg_hw(2)?;
-            Ok((1u32 << 31)
-                | (0b0011011u32 << 24)
-                | (0b001 << 21)
-                | (rm << 16)
-                | (0 << 15)
-                | (31 << 10) // Ra = XZR
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::Umull => {
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let rm = preg_hw(2)?;
-            Ok((1u32 << 31)
-                | (0b0011011u32 << 24)
-                | (0b101 << 21)
-                | (rm << 16)
-                | (0 << 15)
-                | (31 << 10) // Ra = XZR
-                | (rn << 5)
-                | rd)
-        }
-
-        // --- Flag-setting arithmetic (ADDS/SUBS) ---
-        AArch64Opcode::AddsRR => {
+        // =================================================================
+        // Opcodes not yet in the unified encoder (encode.rs returns
+        // UnsupportedOpcode for these). Keep local implementations
+        // until encode.rs is updated.
+        // =================================================================
+        AArch64Opcode::BicRR => {
+            // BIC Rd, Rn, Rm = AND Rd, Rn, NOT(Rm)
             let sf = if is_64bit(0) { 1 } else { 0 };
-            Ok(encoding::encode_add_sub_shifted_reg(
-                sf, 0, 1, 0, preg_hw(2)?, 0, preg_hw(1)?, preg_hw(0)?,
+            Ok(encoding::encode_logical_shifted_reg(
+                sf, 0b00, 1, 0, preg_hw(2)?, 0, preg_hw(1)?, preg_hw(0)?,
             ))
         }
-        AArch64Opcode::AddsRI => {
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            let imm = imm_val(2) as u32 & 0xFFF;
-            Ok(encoding::encode_add_sub_imm(
-                sf, 0, 1, 0, imm, preg_hw(1)?, preg_hw(0)?,
-            ))
-        }
-        AArch64Opcode::SubsRR => {
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            Ok(encoding::encode_add_sub_shifted_reg(
-                sf, 1, 1, 0, preg_hw(2)?, 0, preg_hw(1)?, preg_hw(0)?,
-            ))
-        }
-        AArch64Opcode::SubsRI => {
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            let imm = imm_val(2) as u32 & 0xFFF;
-            Ok(encoding::encode_add_sub_imm(
-                sf, 1, 1, 0, imm, preg_hw(1)?, preg_hw(0)?,
-            ))
-        }
-
-        // --- Trap pseudo-instructions: emit BRK #1 ---
-        AArch64Opcode::TrapOverflow
-        | AArch64Opcode::TrapBoundsCheck
-        | AArch64Opcode::TrapNull
-        | AArch64Opcode::TrapDivZero
-        | AArch64Opcode::TrapShiftRange => {
-            Ok(0xD4200020) // BRK #1
-        }
-
-        // --- Conditional select/set ---
-
-        // CSEL Xd, Xn, Xm, cond
-        // Operands: [dst, true_src, false_src, Imm(cond_code_encoding)]
-        AArch64Opcode::Csel => {
+        AArch64Opcode::Csinc => {
+            // CSINC Xd, Xn, Xm, cond
             let sf = if is_64bit(0) { 1u32 } else { 0u32 };
             let rd = preg_hw(0)?;
             let rn = preg_hw(1)?;
@@ -1216,88 +340,60 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 | (0b11010100 << 21)
                 | (rm << 16)
                 | (cond << 12)
+                | (0b01 << 10)
+                | (rn << 5)
+                | rd)
+        }
+        AArch64Opcode::Csinv => {
+            // CSINV Xd, Xn, Xm, cond
+            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
+            let rd = preg_hw(0)?;
+            let rn = preg_hw(1)?;
+            let rm = preg_hw(2)?;
+            let cond = imm_val(3) as u32 & 0xF;
+            Ok((sf << 31)
+                | (0b10 << 29)
+                | (0b11010100 << 21)
+                | (rm << 16)
+                | (cond << 12)
                 | (0b00 << 10)
                 | (rn << 5)
                 | rd)
         }
-
-        // --- Pseudo-instructions: emit NOP ---
-        AArch64Opcode::Phi
-        | AArch64Opcode::StackAlloc
-        | AArch64Opcode::Copy
-        | AArch64Opcode::Nop
-        | AArch64Opcode::Retain
-        | AArch64Opcode::Release => {
-            // These should have been eliminated, but emit NOP as safe fallback.
-            Ok(0xD503201F)
-        }
-
-        // --- Bitfield move instructions ---
-        AArch64Opcode::Ubfm => {
-            // UBFM Rd, Rn, #immr, #imms
-            // sf | 10 | 100110 | N | immr(6) | imms(6) | Rn | Rd
+        AArch64Opcode::Csneg => {
+            // CSNEG Xd, Xn, Xm, cond
             let sf = if is_64bit(0) { 1u32 } else { 0u32 };
             let rd = preg_hw(0)?;
             let rn = preg_hw(1)?;
-            let immr = imm_val(2) as u32 & 0x3F;
-            let imms = imm_val(3) as u32 & 0x3F;
-            let n = sf;
+            let rm = preg_hw(2)?;
+            let cond = imm_val(3) as u32 & 0xF;
             Ok((sf << 31)
                 | (0b10 << 29)
-                | (0b100110 << 23)
-                | (n << 22)
-                | (immr << 16)
-                | (imms << 10)
+                | (0b11010100 << 21)
+                | (rm << 16)
+                | (cond << 12)
+                | (0b01 << 10)
                 | (rn << 5)
                 | rd)
         }
-        AArch64Opcode::Sbfm => {
-            // SBFM Rd, Rn, #immr, #imms
-            // sf | 00 | 100110 | N | immr(6) | imms(6) | Rn | Rd
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let immr = imm_val(2) as u32 & 0x3F;
-            let imms = imm_val(3) as u32 & 0x3F;
-            let n = sf;
-            Ok((sf << 31)
-                | (0b00 << 29)
-                | (0b100110 << 23)
-                | (n << 22)
-                | (immr << 16)
-                | (imms << 10)
-                | (rn << 5)
-                | rd)
-        }
-        AArch64Opcode::Bfm => {
-            // BFM Rd, Rn, #immr, #imms
-            // sf | 01 | 100110 | N | immr(6) | imms(6) | Rn | Rd
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let immr = imm_val(2) as u32 & 0x3F;
-            let imms = imm_val(3) as u32 & 0x3F;
-            let n = sf;
-            Ok((sf << 31)
-                | (0b01 << 29)
-                | (0b100110 << 23)
-                | (n << 22)
-                | (immr << 16)
-                | (imms << 10)
-                | (rn << 5)
-                | rd)
+        AArch64Opcode::Movn => {
+            // MOVN Rd, #imm16
+            let sf = if is_64bit(0) { 1 } else { 0 };
+            let imm16 = imm_val(1) as u32 & 0xFFFF;
+            Ok(encoding::encode_move_wide(sf, 0b00, 0, imm16, preg_hw(0)?))
         }
 
-        // --- Load/Store register offset ---
+        // =================================================================
+        // Pipeline-specific: integer-only register-offset loads/stores.
+        // The unified encoder handles FPR paths differently via encoding_mem.
+        // Keep local for integer pipeline consistency.
+        // =================================================================
         AArch64Opcode::LdrRO => {
-            // LDR Rt, [Rn, Rm] — base + register offset
-            // size | 111 | V | 00 | opc(01) | 1 | Rm | option(3) | S | 10 | Rn | Rt
             let sf = if is_64bit(0) { 1u32 } else { 0u32 };
             let rt = preg_hw(0)?;
             let rn = preg_hw(1)?;
             let rm = preg_hw(2)?;
             let size = if sf == 1 { 0b11u32 } else { 0b10u32 };
-            // Default: LSL extend (option=011), no shift (S=0)
             let (option, s) = if inst.operands.len() > 3 {
                 let packed = imm_val(3) as u32;
                 ((packed >> 1) & 0b111, packed & 1)
@@ -1306,9 +402,9 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             };
             Ok((size << 30)
                 | (0b111 << 27)
-                | (0 << 26)     // V=0 (integer)
+                | (0 << 26)
                 | (0b00 << 24)
-                | (0b01 << 22)  // opc=01 (load)
+                | (0b01 << 22)
                 | (1 << 21)
                 | (rm << 16)
                 | (option << 13)
@@ -1318,7 +414,6 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 | rt)
         }
         AArch64Opcode::StrRO => {
-            // STR Rt, [Rn, Rm] — base + register offset store
             let sf = if is_64bit(0) { 1u32 } else { 0u32 };
             let rt = preg_hw(0)?;
             let rn = preg_hw(1)?;
@@ -1332,9 +427,9 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             };
             Ok((size << 30)
                 | (0b111 << 27)
-                | (0 << 26)     // V=0 (integer)
+                | (0 << 26)
                 | (0b00 << 24)
-                | (0b00 << 22)  // opc=00 (store)
+                | (0b00 << 22)
                 | (1 << 21)
                 | (rm << 16)
                 | (option << 13)
@@ -1344,9 +439,10 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
                 | rt)
         }
 
-        // --- GOT and TLV loads ---
+        // =================================================================
+        // Pipeline-specific: GOT/TLV loads always use 64-bit unsigned offset.
+        // =================================================================
         AArch64Opcode::LdrGot => {
-            // LDR Xd, [Xn, #offset] — GOT slot load (always 64-bit)
             let rd = preg_hw(0)?;
             let rn = preg_hw(1)?;
             let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
@@ -1354,7 +450,6 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             Ok(encoding::encode_load_store_ui(0b11, 0, 0b01, scaled, rn, rd))
         }
         AArch64Opcode::LdrTlvp => {
-            // LDR Xd, [Xn, #offset] — TLV descriptor load (always 64-bit)
             let rd = preg_hw(0)?;
             let rn = preg_hw(1)?;
             let offset = if inst.operands.len() > 2 { imm_val(2) } else { 0 };
@@ -1362,118 +457,151 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             Ok(encoding::encode_load_store_ui(0b11, 0, 0b01, scaled, rn, rd))
         }
 
-        // --- BIC (bit clear) ---
-        AArch64Opcode::BicRR => {
-            // BIC Rd, Rn, Rm = AND Rd, Rn, NOT(Rm)
-            // Logical shifted register with opc=00, N=1.
-            // Convention matches ORN encoding in both encoders.
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            Ok(encoding::encode_logical_shifted_reg(
-                sf,
-                0b00,
-                1, // N=1 for BIC (same convention as ORN)
-                0,
-                preg_hw(2)?,
-                0,
-                preg_hw(1)?,
-                preg_hw(0)?,
-            ))
+        // =================================================================
+        // FP instructions: pre-validate operand types (#105) then delegate.
+        // The unified encoder silently defaults non-FPR operands to Double
+        // precision, masking bugs. We validate first to preserve stricter
+        // error checking, then delegate to encode_instruction.
+        // =================================================================
+        AArch64Opcode::FaddRR
+        | AArch64Opcode::FsubRR
+        | AArch64Opcode::FmulRR
+        | AArch64Opcode::FdivRR => {
+            // Validate that operand 0 is an FPR before delegating.
+            fp_size(0)?;
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::FnegRR => {
+            fp_size(0)?;
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::Fcmp => {
+            fp_size(0)?;
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::FcvtzsRR | AArch64Opcode::FcvtzuRR => {
+            // Source is FPR (operand 1)
+            fp_size(1)?;
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::ScvtfRR | AArch64Opcode::UcvtfRR => {
+            // Destination is FPR (operand 0)
+            fp_size(0)?;
+            encode_instruction(inst).map_err(map_encode_error)
         }
 
-        // --- Conditional select variants ---
-        AArch64Opcode::Csinc => {
-            // CSINC Xd, Xn, Xm, cond
-            // sf | 0 | 0 | 11010100 | Rm | cond | 0 | 1 | Rn | Rd
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let rm = preg_hw(2)?;
-            let cond = imm_val(3) as u32 & 0xF;
-            Ok((sf << 31)
-                | (0b00 << 29)
-                | (0b11010100 << 21)
-                | (rm << 16)
-                | (cond << 12)
-                | (0b01 << 10)  // op2=01 (CSINC)
-                | (rn << 5)
-                | rd)
+        // =================================================================
+        // Integer instructions with register operands: pre-validate that
+        // register operands are actual registers (#98), then delegate.
+        // The unified encoder defaults non-register operands to XZR (31),
+        // which silently produces wrong code.
+        // =================================================================
+        AArch64Opcode::AddRR | AArch64Opcode::SubRR => {
+            preg_hw(0)?; preg_hw(1)?; preg_hw(2)?;
+            encode_instruction(inst).map_err(map_encode_error)
         }
-        AArch64Opcode::Csinv => {
-            // CSINV Xd, Xn, Xm, cond
-            // sf | 1 | 0 | 11010100 | Rm | cond | 0 | 0 | Rn | Rd
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let rm = preg_hw(2)?;
-            let cond = imm_val(3) as u32 & 0xF;
-            Ok((sf << 31)
-                | (0b10 << 29)
-                | (0b11010100 << 21)
-                | (rm << 16)
-                | (cond << 12)
-                | (0b00 << 10)  // op2=00 (CSINV)
-                | (rn << 5)
-                | rd)
+        AArch64Opcode::MulRR | AArch64Opcode::SDiv | AArch64Opcode::UDiv => {
+            preg_hw(0)?; preg_hw(1)?; preg_hw(2)?;
+            encode_instruction(inst).map_err(map_encode_error)
         }
-        AArch64Opcode::Csneg => {
-            // CSNEG Xd, Xn, Xm, cond
-            // sf | 1 | 0 | 11010100 | Rm | cond | 0 | 1 | Rn | Rd
-            let sf = if is_64bit(0) { 1u32 } else { 0u32 };
-            let rd = preg_hw(0)?;
-            let rn = preg_hw(1)?;
-            let rm = preg_hw(2)?;
-            let cond = imm_val(3) as u32 & 0xF;
-            Ok((sf << 31)
-                | (0b10 << 29)
-                | (0b11010100 << 21)
-                | (rm << 16)
-                | (cond << 12)
-                | (0b01 << 10)  // op2=01 (CSNEG)
-                | (rn << 5)
-                | rd)
+        AArch64Opcode::AndRR | AArch64Opcode::OrrRR | AArch64Opcode::EorRR
+        | AArch64Opcode::OrnRR => {
+            preg_hw(0)?; preg_hw(1)?; preg_hw(2)?;
+            encode_instruction(inst).map_err(map_encode_error)
         }
-
-        // --- MOVN (move wide with NOT) ---
-        AArch64Opcode::Movn => {
-            // MOVN Rd, #imm16 — move wide with NOT
-            // sf | 00 | 100101 | hw(2) | imm16(16) | Rd(5)
-            let sf = if is_64bit(0) { 1 } else { 0 };
-            let imm16 = imm_val(1) as u32 & 0xFFFF;
-            Ok(encoding::encode_move_wide(sf, 0b00, 0, imm16, preg_hw(0)?))
+        AArch64Opcode::LslRR | AArch64Opcode::LsrRR | AArch64Opcode::AsrRR => {
+            preg_hw(0)?; preg_hw(1)?; preg_hw(2)?;
+            encode_instruction(inst).map_err(map_encode_error)
         }
-
-        // Opcodes not yet implemented — return error.
-        // TODO(#73): Implement encoding for logical immediates and FP immediates.
-        AArch64Opcode::AndRI
-        | AArch64Opcode::OrrRI
-        | AArch64Opcode::EorRI
-        | AArch64Opcode::FmovImm => {
-            Err(LowerError::UnsupportedInstruction(
-                format!("{:?} encoding not yet implemented (issue #73)", inst.opcode),
-            ))
+        AArch64Opcode::Neg => {
+            preg_hw(0)?; preg_hw(1)?;
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::CmpRR | AArch64Opcode::Tst => {
+            preg_hw(0)?; preg_hw(1)?;
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::MovR => {
+            preg_hw(0)?;
+            // Operand 1 may be Special(SP) — that's fine, preg_hw handles it
+            if inst.operands.len() >= 2 { preg_hw(1)?; }
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::Sxtw | AArch64Opcode::Uxtw
+        | AArch64Opcode::Sxtb | AArch64Opcode::Sxth => {
+            preg_hw(0)?; preg_hw(1)?;
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::AddsRR | AArch64Opcode::SubsRR => {
+            preg_hw(0)?; preg_hw(1)?; preg_hw(2)?;
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::Csel => {
+            preg_hw(0)?; preg_hw(1)?; preg_hw(2)?;
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::Msub => {
+            preg_hw(0)?; preg_hw(1)?; preg_hw(2)?;
+            if inst.operands.len() > 3 { preg_hw(3)?; }
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::Smull | AArch64Opcode::Umull => {
+            preg_hw(0)?; preg_hw(1)?; preg_hw(2)?;
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::Blr | AArch64Opcode::Br => {
+            preg_hw(0)?;
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::Cbz | AArch64Opcode::Cbnz => {
+            preg_hw(0)?;
+            encode_instruction(inst).map_err(map_encode_error)
         }
 
-        // LLVM-style typed aliases (used by llvm2-lower isel)
-        AArch64Opcode::MOVWrr
-        | AArch64Opcode::MOVXrr
-        | AArch64Opcode::STRWui
-        | AArch64Opcode::STRXui
-        | AArch64Opcode::STRSui
-        | AArch64Opcode::STRDui
-        | AArch64Opcode::BL
-        | AArch64Opcode::BLR
-        | AArch64Opcode::CMPWrr
-        | AArch64Opcode::CMPXrr
-        | AArch64Opcode::CMPWri
-        | AArch64Opcode::CMPXri
-        | AArch64Opcode::MOVZWi
-        | AArch64Opcode::MOVZXi
-        | AArch64Opcode::Bcc => {
-            Err(LowerError::UnsupportedInstruction(
-                format!("{:?} typed alias not yet lowered (issue #73)", inst.opcode),
-            ))
+        // LDR/STR with immediate offset — validate base register (#98)
+        AArch64Opcode::LdrRI | AArch64Opcode::StrRI => {
+            preg_hw(0)?; preg_hw(1)?;
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::LdrbRI | AArch64Opcode::LdrhRI
+        | AArch64Opcode::LdrsbRI | AArch64Opcode::LdrshRI
+        | AArch64Opcode::StrbRI | AArch64Opcode::StrhRI => {
+            preg_hw(0)?; preg_hw(1)?;
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::StpRI | AArch64Opcode::LdpRI => {
+            preg_hw(0)?; preg_hw(1)?; preg_hw(2)?;
+            encode_instruction(inst).map_err(map_encode_error)
+        }
+        AArch64Opcode::StpPreIndex | AArch64Opcode::LdpPostIndex => {
+            preg_hw(0)?; preg_hw(1)?; preg_hw(2)?;
+            encode_instruction(inst).map_err(map_encode_error)
         }
 
+        // =================================================================
+        // All remaining opcodes: delegate directly to unified encoder.
+        // No pre-validation needed (either no register operands to
+        // validate, or the unified encoder handles them correctly).
+        // =================================================================
+        _ => encode_instruction(inst).map_err(map_encode_error),
+    }
+}
+
+/// Map an `EncodeError` from the unified encoder to a `LowerError`.
+fn map_encode_error(e: EncodeError) -> LowerError {
+    match e {
+        EncodeError::UnsupportedOpcode(op) => {
+            LowerError::UnsupportedInstruction(format!("{:?}", op))
+        }
+        EncodeError::PseudoInstruction(op) => {
+            LowerError::UnresolvedPseudo(op)
+        }
+        EncodeError::MissingOperand { opcode, index, .. } => {
+            LowerError::MissingOperand { opcode, index }
+        }
+        other => {
+            LowerError::EncodingFailed(other.to_string())
+        }
     }
 }
 
