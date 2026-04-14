@@ -1571,15 +1571,18 @@ mod tests {
                                 rhs: ValueId(1),
                             },
                             results: vec![ValueId(2)],
+                            proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
                                 values: vec![ValueId(2)],
                             },
                             results: vec![],
+                            proofs: vec![],
                         },
                     ],
                 }],
+                proofs: vec![],
             }],
             structs: vec![],
         }
@@ -1617,6 +1620,7 @@ mod tests {
                                 rhs: ValueId(1),
                             },
                             results: vec![ValueId(2)],
+                            proofs: vec![],
                         },
                         // FAdd: accumulate (MAC pattern)
                         InstrNode {
@@ -1627,15 +1631,18 @@ mod tests {
                                 rhs: ValueId(2),
                             },
                             results: vec![ValueId(3)],
+                            proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
                                 values: vec![ValueId(3)],
                             },
                             results: vec![],
+                            proofs: vec![],
                         },
                     ],
                 }],
+                proofs: vec![],
             }],
             structs: vec![],
         }
@@ -3141,15 +3148,18 @@ mod tests {
                                 rhs: ValueId(1),
                             },
                             results: vec![ValueId(2)],
+                            proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
                                 values: vec![ValueId(2)],
                             },
                             results: vec![],
+                            proofs: vec![],
                         },
                     ],
                 }],
+                proofs: vec![],
             }],
             structs: vec![],
         };
