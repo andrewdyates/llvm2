@@ -58,6 +58,7 @@ pub mod dce_proofs;
 pub mod copy_prop_proofs;
 pub mod cfg_proofs;
 pub mod memory_model;
+pub mod memory_proofs;
 pub mod verify;
 pub mod z4_bridge;
 pub mod synthesis;

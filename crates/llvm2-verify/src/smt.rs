@@ -642,7 +642,13 @@ impl SmtExpr {
             SmtExpr::SignExtend { width, .. } => Ok(*width),
             SmtExpr::Ite { then_expr, .. } => then_expr.try_bv_width(),
             // Array select returns the element sort; if it's BV, extract width.
-            SmtExpr::Select { .. } => Err(SmtError::BoolHasNoWidth),
+            SmtExpr::Select { array, .. } => {
+                if let SmtSort::Array(_, elem_sort) = array.sort() {
+                    elem_sort.bv_width().ok_or(SmtError::BoolHasNoWidth)
+                } else {
+                    Err(SmtError::BoolHasNoWidth)
+                }
+            }
             // UF returns its declared sort.
             SmtExpr::UF { ret_sort, .. } => ret_sort.bv_width().ok_or(SmtError::BoolHasNoWidth),
             SmtExpr::BoolConst(_)

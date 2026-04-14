@@ -102,16 +102,55 @@ impl ProofObligation {
 /// Verify a proof obligation by exhaustive testing for small widths
 /// or random sampling for larger widths.
 ///
-/// For widths <= 8: tests all 2^(n*inputs) combinations.
-/// For widths > 8: tests random samples (default: 100_000 trials).
+/// For widths <= 8 and <= 2 inputs: tests all 2^(n*inputs) combinations.
+/// For widths > 8 or > 2 inputs: tests random samples (default: 100_000 trials).
 pub fn verify_by_evaluation(obligation: &ProofObligation) -> VerificationResult {
     let width = obligation.inputs.first().map(|(_, w)| *w).unwrap_or(32);
+    let num_inputs = obligation.inputs.len();
+
+    // For 3+ inputs or mixed widths, use multi-input random sampling.
+    if num_inputs > 2 {
+        return verify_random_multi(obligation, 100_000);
+    }
 
     if width <= 8 {
         verify_exhaustive(obligation, width)
     } else {
         verify_random(obligation, width, 100_000)
     }
+}
+
+/// Random-sampling verification for obligations with any number of inputs.
+///
+/// Each input gets random values masked to its own width. This handles
+/// mixed-width inputs (e.g., base:BV64, value:BV32, mem_default:BV8).
+fn verify_random_multi(obligation: &ProofObligation, trials: u64) -> VerificationResult {
+    let mut rng_state: u64 = {
+        let mut h: u64 = 0xcafe_babe_dead_beef;
+        for byte in obligation.name.bytes() {
+            h = h.wrapping_mul(6364136223846793005).wrapping_add(byte as u64);
+        }
+        h
+    };
+
+    // Edge cases: cycle through multiple edge-case combinations
+    let num_edge_combos = 36;
+    for edge_idx in 0..num_edge_combos {
+        let env = build_env_edge(&obligation.inputs, edge_idx);
+        if let Some(result) = check_single_point(obligation, &env) {
+            return result;
+        }
+    }
+
+    // Random trials
+    for _ in 0..trials {
+        let env = build_env_multi(&obligation.inputs, &mut rng_state);
+        if let Some(result) = check_single_point(obligation, &env) {
+            return result;
+        }
+    }
+
+    VerificationResult::Valid
 }
 
 /// Exhaustive verification for small bit-widths.
@@ -213,6 +252,44 @@ fn build_env(
         if let Some(bv) = b_val {
             env.insert(name.clone(), mask(bv, width));
         }
+    }
+    env
+}
+
+/// Build an environment from input descriptors and per-input random values.
+///
+/// Unlike `build_env` which only handles 2 inputs with a shared width,
+/// this function populates all inputs with values masked to their individual widths.
+fn build_env_multi(
+    inputs: &[(String, u32)],
+    rng_state: &mut u64,
+) -> HashMap<String, u64> {
+    let mut env = HashMap::new();
+    for (name, width) in inputs {
+        *rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        env.insert(name.clone(), mask(*rng_state, *width));
+    }
+    env
+}
+
+/// Build an environment with specific edge-case values for all inputs.
+fn build_env_edge(
+    inputs: &[(String, u32)],
+    edge_idx: usize,
+) -> HashMap<String, u64> {
+    let mut env = HashMap::new();
+    for (i, (name, width)) in inputs.iter().enumerate() {
+        let mask_val = mask(u64::MAX, *width);
+        let edges: Vec<u64> = vec![
+            0,
+            1,
+            mask_val,
+            mask_val.wrapping_sub(1),
+            1u64 << (width.saturating_sub(1)),
+            (1u64 << (width.saturating_sub(1))).wrapping_sub(1),
+        ];
+        let idx = (edge_idx.wrapping_add(i * 3)) % edges.len();
+        env.insert(name.clone(), edges[idx]);
     }
     env
 }
