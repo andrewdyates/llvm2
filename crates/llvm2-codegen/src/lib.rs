@@ -33,6 +33,9 @@ pub use compiler::{
     Compiler, CompilerConfig, CompilerTrace, CompilerTraceLevel, ProofCertificate,
 };
 pub use error::CodegenError;
-pub use pipeline::{Pipeline, PipelineConfig, PipelineError, compile_to_object};
+pub use pipeline::{
+    Pipeline, PipelineConfig, PipelineError, DispatchVerifyMode,
+    compile_to_object, generate_cpu_only_plan,
+};
 pub use relax::RelaxError;
 pub use target::{CallingConvention, Target};

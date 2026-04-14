@@ -684,6 +684,7 @@ fn test_full_pipeline_frame_lowering_encoding_gaps() {
     let pipeline = Pipeline::new(PipelineConfig {
         opt_level: OptLevel::O0,
         emit_debug: false,
+        ..Default::default()
     });
 
     let obj_bytes = pipeline
