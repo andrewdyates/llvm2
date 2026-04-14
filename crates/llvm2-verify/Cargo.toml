@@ -24,4 +24,4 @@ thiserror = { workspace = true }
 # Local path assumes z4 repo is checked out at ~/z4/ (see CLAUDE.md).
 # For worktree compatibility, use absolute-style relative path.
 # z4 = { git = "https://github.com/dropbox-ai-prototypes/z4", optional = true }
-z4 = { path = "/Users/ayates/z4/crates/z4", optional = true }
+z4 = { git = "https://github.com/dropbox-ai-prototypes/z4", optional = true }

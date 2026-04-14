@@ -1,3 +1,4 @@
+<!-- dscan:allow(volatile_numbers) -->
 # LLVM2 — Verified Compiler Backend
 
 **Author:** Andrew Yates
@@ -177,7 +178,7 @@ The programmer writes pure math. The compiler maps it to the best hardware. With
 
 **Totals:** ~61,000 lines of Rust, 1,688 tests across 89 source files. Plus 4 tMIR stub crates for development.
 
-## Quick Start
+## Installation
 
 ```bash
 git clone git@github.com:dropbox-ai-prototypes/LLVM2.git
