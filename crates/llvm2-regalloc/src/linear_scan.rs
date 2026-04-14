@@ -545,4 +545,554 @@ mod tests {
         // FPR32: S0-S31 = 32
         assert_eq!(regs[&RegClass::Fpr32].len(), 32);
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case tests (issue #139)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_all_intervals_fixed_nothing_to_allocate() {
+        let regs = HashMap::new();
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 0,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(0, 10);
+                i.is_fixed = true;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 1,
+                    class: RegClass::Fpr32,
+                });
+                i.add_range(3, 12);
+                i.is_fixed = true;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 2,
+                    class: RegClass::Gpr32,
+                });
+                i.add_range(12, 20);
+                i.is_fixed = true;
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("all-fixed allocation should succeed");
+
+        assert!(result.allocation.is_empty());
+        assert!(scan.spilled_vregs().is_empty());
+    }
+
+    #[test]
+    fn test_single_interval_with_zero_spill_weight() {
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);
+
+        let intervals = vec![{
+            let mut i = LiveInterval::new(VReg {
+                id: 0,
+                class: RegClass::Gpr64,
+            });
+            i.add_range(0, 10);
+            i.spill_weight = 0.0;
+            i
+        }];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+
+        assert_eq!(result.allocation.len(), 1);
+        assert_eq!(
+            result.allocation[&VReg {
+                id: 0,
+                class: RegClass::Gpr64,
+            }],
+            PReg::new(0)
+        );
+        assert!(scan.spilled_vregs().is_empty());
+    }
+
+    #[test]
+    fn test_extreme_register_pressure_spills_exactly_one_interval() {
+        let mut regs = HashMap::new();
+        regs.insert(
+            RegClass::Gpr64,
+            vec![PReg::new(0), PReg::new(1), PReg::new(2), PReg::new(3)],
+        );
+
+        let intervals: Vec<LiveInterval> = (0u32..=4)
+            .map(|id| {
+                let mut i = LiveInterval::new(VReg {
+                    id,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(0, 20);
+                i.spill_weight = (id + 1) as f64;
+                i
+            })
+            .collect();
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+
+        assert_eq!(result.allocation.len(), 4);
+        assert_eq!(
+            scan.spilled_vregs(),
+            &[VReg {
+                id: 0,
+                class: RegClass::Gpr64,
+            }]
+        );
+        for id in 1u32..=4 {
+            assert!(result.allocation.contains_key(&VReg {
+                id,
+                class: RegClass::Gpr64,
+            }));
+        }
+    }
+
+    #[test]
+    fn test_intervals_sorted_in_reverse_order_are_processed_by_start() {
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);
+
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 1,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(10, 20);
+                i.spill_weight = 1.0;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 0,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(0, 5);
+                i.spill_weight = 1.0;
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+
+        assert_eq!(result.allocation.len(), 2);
+        assert!(scan.spilled_vregs().is_empty());
+        assert_eq!(
+            result.allocation[&VReg {
+                id: 0,
+                class: RegClass::Gpr64,
+            }],
+            result.allocation[&VReg {
+                id: 1,
+                class: RegClass::Gpr64,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_very_long_interval_vs_many_short_intervals() {
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);
+
+        let mut intervals = vec![{
+            let mut i = LiveInterval::new(VReg {
+                id: 0,
+                class: RegClass::Gpr64,
+            });
+            i.add_range(0, 1000);
+            i.spill_weight = 1.0;
+            i
+        }];
+
+        for id in 1u32..=5 {
+            let mut i = LiveInterval::new(VReg {
+                id,
+                class: RegClass::Gpr64,
+            });
+            i.add_range(id * 100, id * 100 + 10);
+            i.spill_weight = 10.0;
+            intervals.push(i);
+        }
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+
+        assert_eq!(
+            scan.spilled_vregs(),
+            &[VReg {
+                id: 0,
+                class: RegClass::Gpr64,
+            }]
+        );
+        assert_eq!(result.allocation.len(), 5);
+        for id in 1u32..=5 {
+            assert!(result.allocation.contains_key(&VReg {
+                id,
+                class: RegClass::Gpr64,
+            }));
+            assert_eq!(
+                result.allocation[&VReg {
+                    id,
+                    class: RegClass::Gpr64,
+                }],
+                PReg::new(0)
+            );
+        }
+    }
+
+    #[test]
+    fn test_spill_with_equal_weights_is_deterministic() {
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);
+
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 0,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(0, 20);
+                i.spill_weight = 5.0;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 1,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(5, 15);
+                i.spill_weight = 5.0;
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+
+        assert_eq!(result.allocation.len(), 1);
+        assert_eq!(
+            scan.spilled_vregs(),
+            &[VReg {
+                id: 1,
+                class: RegClass::Gpr64,
+            }]
+        );
+        assert!(result.allocation.contains_key(&VReg {
+            id: 0,
+            class: RegClass::Gpr64,
+        }));
+        assert!(!result.allocation.contains_key(&VReg {
+            id: 1,
+            class: RegClass::Gpr64,
+        }));
+    }
+
+    #[test]
+    fn test_allocation_with_only_fpr32_class_registers() {
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Fpr32, vec![PReg::new(128), PReg::new(129)]);
+
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 0,
+                    class: RegClass::Fpr32,
+                });
+                i.add_range(0, 10);
+                i.spill_weight = 1.0;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 1,
+                    class: RegClass::Fpr32,
+                });
+                i.add_range(0, 10);
+                i.spill_weight = 2.0;
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+
+        let allowed = [PReg::new(128), PReg::new(129)];
+        let preg0 = result.allocation[&VReg {
+            id: 0,
+            class: RegClass::Fpr32,
+        }];
+        let preg1 = result.allocation[&VReg {
+            id: 1,
+            class: RegClass::Fpr32,
+        }];
+
+        assert_eq!(result.allocation.len(), 2);
+        assert!(scan.spilled_vregs().is_empty());
+        assert_ne!(preg0, preg1);
+        assert!(allowed.contains(&preg0));
+        assert!(allowed.contains(&preg1));
+    }
+
+    #[test]
+    fn test_three_way_register_pressure_with_mixed_fixed_and_non_fixed_intervals() {
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);
+
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 0,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(0, 20);
+                i.is_fixed = true;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 1,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(0, 20);
+                i.spill_weight = 1.0;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 2,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(0, 20);
+                i.spill_weight = 10.0;
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+
+        assert_eq!(result.allocation.len(), 1);
+        assert!(!result.allocation.contains_key(&VReg {
+            id: 0,
+            class: RegClass::Gpr64,
+        }));
+        assert_eq!(
+            scan.spilled_vregs(),
+            &[VReg {
+                id: 1,
+                class: RegClass::Gpr64,
+            }]
+        );
+        assert_eq!(
+            result.allocation[&VReg {
+                id: 2,
+                class: RegClass::Gpr64,
+            }],
+            PReg::new(0)
+        );
+    }
+
+    #[test]
+    fn test_sequential_intervals_with_gaps_free_register_properly() {
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);
+
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 0,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(0, 2);
+                i.spill_weight = 1.0;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 1,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(4, 6);
+                i.spill_weight = 1.0;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 2,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(9, 11);
+                i.spill_weight = 1.0;
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+
+        assert_eq!(result.allocation.len(), 3);
+        assert!(scan.spilled_vregs().is_empty());
+        assert_eq!(
+            result.allocation[&VReg {
+                id: 0,
+                class: RegClass::Gpr64,
+            }],
+            PReg::new(0)
+        );
+        assert_eq!(
+            result.allocation[&VReg {
+                id: 1,
+                class: RegClass::Gpr64,
+            }],
+            PReg::new(0)
+        );
+        assert_eq!(
+            result.allocation[&VReg {
+                id: 2,
+                class: RegClass::Gpr64,
+            }],
+            PReg::new(0)
+        );
+    }
+
+    #[test]
+    fn test_adjacent_intervals_with_exact_matching_boundaries() {
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);
+
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 0,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(0, 5);
+                i.spill_weight = 1.0;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 1,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(5, 10);
+                i.spill_weight = 1.0;
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+
+        assert_eq!(result.allocation.len(), 2);
+        assert!(scan.spilled_vregs().is_empty());
+        assert_eq!(
+            result.allocation[&VReg {
+                id: 0,
+                class: RegClass::Gpr64,
+            }],
+            PReg::new(0)
+        );
+        assert_eq!(
+            result.allocation[&VReg {
+                id: 1,
+                class: RegClass::Gpr64,
+            }],
+            PReg::new(0)
+        );
+    }
+
+    #[test]
+    fn test_very_short_intervals_length_one_interleaved_with_long_ones() {
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0), PReg::new(1)]);
+
+        let intervals = vec![
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 0,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(0, 100);
+                i.spill_weight = 100.0;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 1,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(0, 100);
+                i.spill_weight = 1.0;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 2,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(10, 11);
+                i.spill_weight = 10.0;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 3,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(50, 51);
+                i.spill_weight = 10.0;
+                i
+            },
+            {
+                let mut i = LiveInterval::new(VReg {
+                    id: 4,
+                    class: RegClass::Gpr64,
+                });
+                i.add_range(90, 91);
+                i.spill_weight = 10.0;
+                i
+            },
+        ];
+
+        let mut scan = LinearScan::new(intervals, &regs);
+        let result = scan.allocate().expect("allocation should succeed");
+
+        assert_eq!(
+            scan.spilled_vregs(),
+            &[VReg {
+                id: 1,
+                class: RegClass::Gpr64,
+            }]
+        );
+        assert_eq!(result.allocation.len(), 4);
+        assert!(result.allocation.contains_key(&VReg {
+            id: 0,
+            class: RegClass::Gpr64,
+        }));
+        assert!(result.allocation.contains_key(&VReg {
+            id: 2,
+            class: RegClass::Gpr64,
+        }));
+        assert!(result.allocation.contains_key(&VReg {
+            id: 3,
+            class: RegClass::Gpr64,
+        }));
+        assert!(result.allocation.contains_key(&VReg {
+            id: 4,
+            class: RegClass::Gpr64,
+        }));
+    }
 }

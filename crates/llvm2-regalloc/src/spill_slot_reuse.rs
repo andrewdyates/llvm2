@@ -437,4 +437,147 @@ mod tests {
         let slot_op = &func.insts[0].uses[0];
         assert_eq!(*slot_op, MachOperand::StackSlot(StackSlotId(0)));
     }
+
+    #[test]
+    fn test_many_non_overlapping_all_share_one_slot() {
+        let spills = vec![
+            SpillInfo { vreg: vreg(0), slot: StackSlotId(0) },
+            SpillInfo { vreg: vreg(1), slot: StackSlotId(1) },
+            SpillInfo { vreg: vreg(2), slot: StackSlotId(2) },
+            SpillInfo { vreg: vreg(3), slot: StackSlotId(3) },
+            SpillInfo { vreg: vreg(4), slot: StackSlotId(4) },
+        ];
+
+        let intervals = HashMap::from([
+            (0, interval(0, &[(0, 5)])),
+            (1, interval(1, &[(10, 15)])),
+            (2, interval(2, &[(20, 25)])),
+            (3, interval(3, &[(30, 35)])),
+            (4, interval(4, &[(40, 45)])),
+        ]);
+
+        let result = compute_spill_slot_reuse(&spills, &intervals);
+        assert_eq!(result.slots_eliminated, 4);
+        assert_eq!(result.slot_rewrites.len(), 4);
+        assert_eq!(result.slot_rewrites.get(&StackSlotId(1)), Some(&StackSlotId(0)));
+        assert_eq!(result.slot_rewrites.get(&StackSlotId(2)), Some(&StackSlotId(0)));
+        assert_eq!(result.slot_rewrites.get(&StackSlotId(3)), Some(&StackSlotId(0)));
+        assert_eq!(result.slot_rewrites.get(&StackSlotId(4)), Some(&StackSlotId(0)));
+    }
+
+    #[test]
+    fn test_interleaved_overlapping_uses_two_slots() {
+        let spills = vec![
+            SpillInfo { vreg: vreg(0), slot: StackSlotId(0) },
+            SpillInfo { vreg: vreg(1), slot: StackSlotId(1) },
+            SpillInfo { vreg: vreg(2), slot: StackSlotId(2) },
+            SpillInfo { vreg: vreg(3), slot: StackSlotId(3) },
+        ];
+
+        let intervals = HashMap::from([
+            (0, interval(0, &[(0, 10)])),
+            (1, interval(1, &[(5, 15)])),
+            (2, interval(2, &[(10, 20)])),
+            (3, interval(3, &[(15, 25)])),
+        ]);
+
+        let result = compute_spill_slot_reuse(&spills, &intervals);
+        assert_eq!(result.slots_eliminated, 2);
+        assert_eq!(result.slot_rewrites.len(), 2);
+        assert_eq!(result.slot_rewrites.get(&StackSlotId(2)), Some(&StackSlotId(0)));
+        assert_eq!(result.slot_rewrites.get(&StackSlotId(3)), Some(&StackSlotId(1)));
+    }
+
+    #[test]
+    fn test_same_slot_id_no_rewrite() {
+        let spills = vec![
+            SpillInfo { vreg: vreg(0), slot: StackSlotId(7) },
+            SpillInfo { vreg: vreg(1), slot: StackSlotId(7) },
+        ];
+
+        let intervals = HashMap::from([
+            (0, interval(0, &[(0, 5)])),
+            (1, interval(1, &[(10, 15)])),
+        ]);
+
+        let result = compute_spill_slot_reuse(&spills, &intervals);
+        assert_eq!(result.slots_eliminated, 0);
+        assert!(result.slot_rewrites.is_empty());
+    }
+
+    #[test]
+    fn test_chain_of_adjacent_intervals_reuse() {
+        let spills = vec![
+            SpillInfo { vreg: vreg(0), slot: StackSlotId(0) },
+            SpillInfo { vreg: vreg(1), slot: StackSlotId(1) },
+            SpillInfo { vreg: vreg(2), slot: StackSlotId(2) },
+            SpillInfo { vreg: vreg(3), slot: StackSlotId(3) },
+            SpillInfo { vreg: vreg(4), slot: StackSlotId(4) },
+            SpillInfo { vreg: vreg(5), slot: StackSlotId(5) },
+            SpillInfo { vreg: vreg(6), slot: StackSlotId(6) },
+            SpillInfo { vreg: vreg(7), slot: StackSlotId(7) },
+            SpillInfo { vreg: vreg(8), slot: StackSlotId(8) },
+            SpillInfo { vreg: vreg(9), slot: StackSlotId(9) },
+        ];
+
+        let intervals = HashMap::from([
+            (0, interval(0, &[(0, 5)])),
+            (1, interval(1, &[(5, 10)])),
+            (2, interval(2, &[(10, 15)])),
+            (3, interval(3, &[(15, 20)])),
+            (4, interval(4, &[(20, 25)])),
+            (5, interval(5, &[(25, 30)])),
+            (6, interval(6, &[(30, 35)])),
+            (7, interval(7, &[(35, 40)])),
+            (8, interval(8, &[(40, 45)])),
+            (9, interval(9, &[(45, 50)])),
+        ]);
+
+        let result = compute_spill_slot_reuse(&spills, &intervals);
+        assert_eq!(result.slots_eliminated, 9);
+        assert_eq!(result.slot_rewrites.len(), 9);
+        for slot in 1..10 {
+            assert_eq!(
+                result.slot_rewrites.get(&StackSlotId(slot)),
+                Some(&StackSlotId(0))
+            );
+        }
+    }
+
+    #[test]
+    fn test_mixed_classes_separate_groups() {
+        let g0 = VReg { id: 0, class: RegClass::Gpr64 };
+        let g1 = VReg { id: 1, class: RegClass::Gpr64 };
+        let g2 = VReg { id: 2, class: RegClass::Gpr64 };
+        let f3 = VReg { id: 3, class: RegClass::Fpr64 };
+        let f4 = VReg { id: 4, class: RegClass::Fpr64 };
+
+        let spills = vec![
+            SpillInfo { vreg: g0, slot: StackSlotId(0) },
+            SpillInfo { vreg: g1, slot: StackSlotId(1) },
+            SpillInfo { vreg: g2, slot: StackSlotId(2) },
+            SpillInfo { vreg: f3, slot: StackSlotId(10) },
+            SpillInfo { vreg: f4, slot: StackSlotId(11) },
+        ];
+
+        let mut f3_iv = LiveInterval::new(f3);
+        f3_iv.add_range(100, 105);
+        let mut f4_iv = LiveInterval::new(f4);
+        f4_iv.add_range(110, 115);
+
+        let intervals = HashMap::from([
+            (0, interval(0, &[(0, 5)])),
+            (1, interval(1, &[(10, 15)])),
+            (2, interval(2, &[(20, 25)])),
+            (3, f3_iv),
+            (4, f4_iv),
+        ]);
+
+        let result = compute_spill_slot_reuse(&spills, &intervals);
+        assert_eq!(result.slots_eliminated, 3);
+        assert_eq!(result.slot_rewrites.len(), 3);
+        assert_eq!(result.slot_rewrites.get(&StackSlotId(1)), Some(&StackSlotId(0)));
+        assert_eq!(result.slot_rewrites.get(&StackSlotId(2)), Some(&StackSlotId(0)));
+        assert_eq!(result.slot_rewrites.get(&StackSlotId(11)), Some(&StackSlotId(10)));
+    }
 }

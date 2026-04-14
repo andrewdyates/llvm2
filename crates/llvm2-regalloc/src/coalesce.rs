@@ -464,4 +464,307 @@ mod tests {
             .collect();
         assert_eq!(use_ids, vec![2, 2, 2]);
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case tests (issue #139)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_coalesce_rejects_cross_class_copy() {
+        let dst = vreg(1);
+        let src = VReg {
+            id: 0,
+            class: RegClass::Fpr64,
+        };
+        let func = make_function(vec![vec![copy_inst(dst, src)]]);
+
+        let mut src_interval = LiveInterval::new(src);
+        src_interval.add_range(0, 1);
+        let mut intervals = HashMap::from([(0, src_interval), (1, interval(1, &[(1, 2)]))]);
+
+        let result = coalesce_copies(&func, &mut intervals);
+
+        assert_eq!(result.copies_removed, 0);
+        assert_eq!(result.intervals_merged, 0);
+        assert!(result.removals.is_empty());
+        assert!(result.rewrites.is_empty());
+        assert_eq!(intervals.len(), 2);
+        assert_eq!(intervals.get(&0).unwrap().vreg.class, RegClass::Fpr64);
+        assert_eq!(interval_ranges(intervals.get(&1).unwrap()), vec![(1, 2)]);
+    }
+
+    #[test]
+    fn test_coalesce_empty_function_no_instructions() {
+        let func = make_function(vec![vec![]]);
+        let mut intervals = HashMap::from([(0, interval(0, &[(0, 1)]))]);
+
+        let result = coalesce_copies(&func, &mut intervals);
+
+        assert_eq!(result, CoalesceResult::default());
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(interval_ranges(intervals.get(&0).unwrap()), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn test_coalesce_across_multiple_blocks() {
+        let func = make_function(vec![
+            vec![copy_inst(vreg(1), vreg(0))],
+            vec![copy_inst(vreg(2), vreg(1))],
+        ]);
+        let copy1 = func.blocks[0].insts[0];
+        let copy2 = func.blocks[1].insts[0];
+
+        let mut intervals = HashMap::from([
+            (0, interval(0, &[(0, 1)])),
+            (1, interval(1, &[(1, 2)])),
+            (2, interval(2, &[(2, 3)])),
+        ]);
+
+        let result = coalesce_copies(&func, &mut intervals);
+
+        assert_eq!(result.copies_removed, 2);
+        assert_eq!(result.intervals_merged, 2);
+        assert_eq!(result.removals, vec![copy1, copy2]);
+        assert_eq!(result.rewrites, HashMap::from([(0, 2), (1, 2)]));
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(interval_ranges(intervals.get(&2).unwrap()), vec![(0, 3)]);
+    }
+
+    #[test]
+    fn test_coalesce_with_missing_intervals_for_src_and_dst() {
+        let func = make_function(vec![vec![copy_inst(vreg(1), vreg(0))]]);
+        let copy_id = func.blocks[0].insts[0];
+        let mut intervals = HashMap::new();
+
+        let result = coalesce_copies(&func, &mut intervals);
+
+        assert_eq!(result.copies_removed, 1);
+        assert_eq!(result.intervals_merged, 1);
+        assert_eq!(result.removals, vec![copy_id]);
+        assert_eq!(result.rewrites.get(&0), Some(&1));
+        assert!(intervals.is_empty());
+    }
+
+    #[test]
+    fn test_apply_coalescing_without_removals() {
+        let mut func = make_function(vec![vec![
+            generic_inst(1, vec![vreg(0)], vec![]),
+            generic_inst(2, vec![vreg(3)], vec![vreg(0), vreg(1)]),
+        ]]);
+        let def_id = func.blocks[0].insts[0];
+        let user_id = func.blocks[0].insts[1];
+
+        let rewrites = HashMap::from([(0, 1), (1, 2)]);
+        apply_coalescing(&mut func, &[], &rewrites);
+
+        assert_eq!(func.blocks[0].insts, vec![def_id, user_id]);
+
+        let def_vreg = func.insts[def_id.0 as usize].defs[0].as_vreg().unwrap();
+        assert_eq!(def_vreg.id, 2);
+
+        let user_def = func.insts[user_id.0 as usize].defs[0].as_vreg().unwrap();
+        assert_eq!(user_def.id, 3);
+
+        let use_ids: Vec<u32> = func.insts[user_id.0 as usize]
+            .uses
+            .iter()
+            .map(|operand| operand.as_vreg().unwrap().id)
+            .collect();
+        assert_eq!(use_ids, vec![2, 2]);
+    }
+
+    #[test]
+    fn test_apply_coalescing_without_rewrites() {
+        let mut func = make_function(vec![vec![
+            generic_inst(1, vec![vreg(0)], vec![]),
+            copy_inst(vreg(1), vreg(0)),
+            generic_inst(2, vec![vreg(2)], vec![vreg(1)]),
+        ]]);
+        let def_id = func.blocks[0].insts[0];
+        let copy_id = func.blocks[0].insts[1];
+        let user_id = func.blocks[0].insts[2];
+
+        apply_coalescing(&mut func, &[copy_id], &HashMap::new());
+
+        assert_eq!(func.blocks[0].insts, vec![def_id, user_id]);
+
+        let def_vreg = func.insts[def_id.0 as usize].defs[0].as_vreg().unwrap();
+        assert_eq!(def_vreg.id, 0);
+
+        let use_ids: Vec<u32> = func.insts[user_id.0 as usize]
+            .uses
+            .iter()
+            .map(|operand| operand.as_vreg().unwrap().id)
+            .collect();
+        assert_eq!(use_ids, vec![1]);
+    }
+
+    #[test]
+    fn test_coalesce_long_transitive_chain() {
+        let func = make_function(vec![vec![
+            copy_inst(vreg(1), vreg(0)),
+            copy_inst(vreg(2), vreg(1)),
+            copy_inst(vreg(3), vreg(2)),
+            copy_inst(vreg(4), vreg(3)),
+        ]]);
+        let copy1 = func.blocks[0].insts[0];
+        let copy2 = func.blocks[0].insts[1];
+        let copy3 = func.blocks[0].insts[2];
+        let copy4 = func.blocks[0].insts[3];
+
+        let mut intervals = HashMap::from([
+            (0, interval(0, &[(0, 1)])),
+            (1, interval(1, &[(1, 2)])),
+            (2, interval(2, &[(2, 3)])),
+            (3, interval(3, &[(3, 4)])),
+            (4, interval(4, &[(4, 5)])),
+        ]);
+
+        let result = coalesce_copies(&func, &mut intervals);
+
+        assert_eq!(result.copies_removed, 4);
+        assert_eq!(result.intervals_merged, 4);
+        assert_eq!(result.removals, vec![copy1, copy2, copy3, copy4]);
+        assert_eq!(
+            result.rewrites,
+            HashMap::from([(0, 4), (1, 4), (2, 4), (3, 4)])
+        );
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(interval_ranges(intervals.get(&4).unwrap()), vec![(0, 5)]);
+    }
+
+    #[test]
+    fn test_coalesce_skips_when_all_intervals_overlap() {
+        let func = make_function(vec![vec![
+            copy_inst(vreg(1), vreg(0)),
+            copy_inst(vreg(2), vreg(1)),
+        ]]);
+
+        let mut intervals = HashMap::from([
+            (0, interval(0, &[(0, 4)])),
+            (1, interval(1, &[(1, 5)])),
+            (2, interval(2, &[(2, 6)])),
+        ]);
+
+        let result = coalesce_copies(&func, &mut intervals);
+
+        assert_eq!(result.copies_removed, 0);
+        assert_eq!(result.intervals_merged, 0);
+        assert!(result.removals.is_empty());
+        assert!(result.rewrites.is_empty());
+        assert_eq!(intervals.len(), 3);
+        assert_eq!(interval_ranges(intervals.get(&0).unwrap()), vec![(0, 4)]);
+        assert_eq!(interval_ranges(intervals.get(&1).unwrap()), vec![(1, 5)]);
+        assert_eq!(interval_ranges(intervals.get(&2).unwrap()), vec![(2, 6)]);
+    }
+
+    #[test]
+    fn test_coalesce_uses_block_indices_when_block_order_is_empty() {
+        let mut func = make_function(vec![
+            vec![copy_inst(vreg(1), vreg(0))],
+            vec![copy_inst(vreg(2), vreg(1))],
+        ]);
+        let copy1 = func.blocks[0].insts[0];
+        let copy2 = func.blocks[1].insts[0];
+        func.block_order.clear();
+
+        let mut intervals = HashMap::from([
+            (0, interval(0, &[(0, 1)])),
+            (1, interval(1, &[(1, 2)])),
+            (2, interval(2, &[(2, 3)])),
+        ]);
+
+        let result = coalesce_copies(&func, &mut intervals);
+
+        assert_eq!(result.copies_removed, 2);
+        assert_eq!(result.intervals_merged, 2);
+        assert_eq!(result.removals, vec![copy1, copy2]);
+        assert_eq!(result.rewrites, HashMap::from([(0, 2), (1, 2)]));
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(interval_ranges(intervals.get(&2).unwrap()), vec![(0, 3)]);
+    }
+
+    #[test]
+    fn test_apply_coalescing_detects_rewrite_cycles() {
+        let rewrites = HashMap::from([(0, 1), (1, 2), (2, 0)]);
+        assert_eq!(resolve_rewrite(0, &rewrites), 0);
+        assert_eq!(resolve_rewrite(1, &rewrites), 1);
+        assert_eq!(resolve_rewrite(2, &rewrites), 2);
+
+        let mut func = make_function(vec![vec![generic_inst(1, vec![vreg(0)], vec![vreg(1), vreg(2)])]]);
+        let inst_id = func.blocks[0].insts[0];
+
+        apply_coalescing(&mut func, &[], &rewrites);
+
+        let def_vreg = func.insts[inst_id.0 as usize].defs[0].as_vreg().unwrap();
+        assert_eq!(def_vreg.id, 0);
+
+        let use_ids: Vec<u32> = func.insts[inst_id.0 as usize]
+            .uses
+            .iter()
+            .map(|operand| operand.as_vreg().unwrap().id)
+            .collect();
+        assert_eq!(use_ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_coalesce_merge_preserves_spill_weight() {
+        let func = make_function(vec![vec![copy_inst(vreg(1), vreg(0))]]);
+
+        let mut src_interval = interval(0, &[(0, 1)]);
+        src_interval.spill_weight = 1.5;
+
+        let mut dst_interval = interval(1, &[(1, 2)]);
+        dst_interval.spill_weight = 2.25;
+
+        let mut intervals = HashMap::from([(0, src_interval), (1, dst_interval)]);
+
+        let result = coalesce_copies(&func, &mut intervals);
+
+        assert_eq!(result.copies_removed, 1);
+        assert_eq!(result.intervals_merged, 1);
+        assert_eq!(result.rewrites.get(&0), Some(&1));
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(interval_ranges(intervals.get(&1).unwrap()), vec![(0, 2)]);
+        assert_eq!(intervals.get(&1).unwrap().spill_weight, 3.75);
+    }
+
+    #[test]
+    fn test_coalesce_multiple_copies_across_multiple_blocks() {
+        let func = make_function(vec![
+            vec![copy_inst(vreg(1), vreg(0)), copy_inst(vreg(3), vreg(2))],
+            vec![copy_inst(vreg(5), vreg(4))],
+            vec![copy_inst(vreg(7), vreg(6))],
+        ]);
+        let copy1 = func.blocks[0].insts[0];
+        let copy2 = func.blocks[0].insts[1];
+        let copy3 = func.blocks[1].insts[0];
+        let copy4 = func.blocks[2].insts[0];
+
+        let mut intervals = HashMap::from([
+            (0, interval(0, &[(0, 1)])),
+            (1, interval(1, &[(1, 2)])),
+            (2, interval(2, &[(2, 3)])),
+            (3, interval(3, &[(3, 4)])),
+            (4, interval(4, &[(4, 5)])),
+            (5, interval(5, &[(5, 6)])),
+            (6, interval(6, &[(6, 7)])),
+            (7, interval(7, &[(7, 8)])),
+        ]);
+
+        let result = coalesce_copies(&func, &mut intervals);
+
+        assert_eq!(result.copies_removed, 4);
+        assert_eq!(result.intervals_merged, 4);
+        assert_eq!(result.removals, vec![copy1, copy2, copy3, copy4]);
+        assert_eq!(
+            result.rewrites,
+            HashMap::from([(0, 1), (2, 3), (4, 5), (6, 7)])
+        );
+        assert_eq!(intervals.len(), 4);
+        assert_eq!(interval_ranges(intervals.get(&1).unwrap()), vec![(0, 2)]);
+        assert_eq!(interval_ranges(intervals.get(&3).unwrap()), vec![(2, 4)]);
+        assert_eq!(interval_ranges(intervals.get(&5).unwrap()), vec![(4, 6)]);
+        assert_eq!(interval_ranges(intervals.get(&7).unwrap()), vec![(6, 8)]);
+    }
 }

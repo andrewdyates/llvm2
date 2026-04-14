@@ -1299,4 +1299,43 @@ mod tests {
         assert_eq!(result.allocation.len(), 2);
         assert!(alloc.spilled.is_empty());
     }
+
+    #[test]
+    fn test_greedy_all_same_weight_deterministic_spill_order() {
+        // 4 overlapping intervals with identical weight and 2 registers.
+        // The allocator should be deterministic: lower vreg_id breaks ties
+        // in the priority queue (higher priority for lower id with same weight).
+        let intervals = vec![
+            make_interval(0, &[(0, 20)], 3.0),
+            make_interval(1, &[(0, 20)], 3.0),
+            make_interval(2, &[(0, 20)], 3.0),
+            make_interval(3, &[(0, 20)], 3.0),
+        ];
+        let regs = two_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        // Exactly 2 should be allocated, 2 spilled.
+        assert_eq!(result.allocation.len(), 2);
+        assert_eq!(alloc.spilled.len(), 2);
+    }
+
+    #[test]
+    fn test_greedy_hundred_non_overlapping_one_register() {
+        // 100 sequential non-overlapping intervals should all fit in 1 register.
+        let intervals: Vec<LiveInterval> = (0..100)
+            .map(|i| make_interval(i, &[(i * 10, i * 10 + 5)], 1.0))
+            .collect();
+        let regs = one_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        assert_eq!(result.allocation.len(), 100);
+        assert!(alloc.spilled.is_empty());
+        // All should share the single register.
+        let preg0 = result.allocation[&vreg(0)];
+        for i in 1..100 {
+            assert_eq!(result.allocation[&vreg(i)], preg0);
+        }
+    }
 }

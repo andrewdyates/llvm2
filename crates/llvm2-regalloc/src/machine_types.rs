@@ -227,3 +227,190 @@ impl RegAllocFunction {
         VReg { id, class }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn reg_alloc_operand_as_vreg_returns_some_for_vreg_variant() {
+        let vreg = VReg::new(7, RegClass::Gpr64);
+        let operand = RegAllocOperand::VReg(vreg);
+
+        assert_eq!(operand.as_vreg(), Some(vreg));
+    }
+
+    #[test]
+    fn reg_alloc_operand_as_vreg_returns_none_for_non_vreg_variants() {
+        let operands = vec![
+            RegAllocOperand::PReg(PReg::new(3)),
+            RegAllocOperand::Imm(42),
+            RegAllocOperand::FImm(3.25),
+            RegAllocOperand::Block(BlockId(2)),
+            RegAllocOperand::StackSlot(StackSlotId(7)),
+        ];
+
+        for operand in operands {
+            assert_eq!(operand.as_vreg(), None);
+        }
+    }
+
+    #[test]
+    fn reg_alloc_operand_as_preg_returns_some_for_preg_variant() {
+        let preg = PReg::new(11);
+        let operand = RegAllocOperand::PReg(preg);
+
+        assert_eq!(operand.as_preg(), Some(preg));
+    }
+
+    #[test]
+    fn reg_alloc_operand_as_preg_returns_none_for_non_preg_variants() {
+        let operands = vec![
+            RegAllocOperand::VReg(VReg::new(1, RegClass::Gpr64)),
+            RegAllocOperand::Imm(99),
+            RegAllocOperand::FImm(1.5),
+            RegAllocOperand::Block(BlockId(4)),
+            RegAllocOperand::StackSlot(StackSlotId(9)),
+        ];
+
+        for operand in operands {
+            assert_eq!(operand.as_preg(), None);
+        }
+    }
+
+    #[test]
+    fn reg_alloc_inst_vreg_defs_extracts_only_vreg_operands_from_defs() {
+        let vreg0 = VReg::new(1, RegClass::Gpr64);
+        let vreg1 = VReg::new(2, RegClass::Fpr64);
+        let inst = RegAllocInst {
+            opcode: 123,
+            defs: vec![
+                RegAllocOperand::Imm(10),
+                RegAllocOperand::VReg(vreg0),
+                RegAllocOperand::PReg(PReg::new(5)),
+                RegAllocOperand::Block(BlockId(1)),
+                RegAllocOperand::FImm(2.0),
+                RegAllocOperand::VReg(vreg1),
+                RegAllocOperand::StackSlot(StackSlotId(3)),
+            ],
+            uses: vec![],
+            implicit_defs: vec![],
+            implicit_uses: vec![],
+            flags: InstFlags::default(),
+        };
+
+        let defs: Vec<_> = inst.vreg_defs().collect();
+
+        assert_eq!(defs, vec![vreg0, vreg1]);
+    }
+
+    #[test]
+    fn reg_alloc_inst_vreg_uses_extracts_only_vreg_operands_from_uses() {
+        let vreg0 = VReg::new(8, RegClass::Gpr32);
+        let vreg1 = VReg::new(9, RegClass::Fpr32);
+        let inst = RegAllocInst {
+            opcode: 456,
+            defs: vec![],
+            uses: vec![
+                RegAllocOperand::PReg(PReg::new(1)),
+                RegAllocOperand::VReg(vreg0),
+                RegAllocOperand::Imm(7),
+                RegAllocOperand::StackSlot(StackSlotId(5)),
+                RegAllocOperand::VReg(vreg1),
+                RegAllocOperand::Block(BlockId(2)),
+                RegAllocOperand::FImm(4.5),
+            ],
+            implicit_defs: vec![],
+            implicit_uses: vec![],
+            flags: InstFlags::default(),
+        };
+
+        let uses: Vec<_> = inst.vreg_uses().collect();
+
+        assert_eq!(uses, vec![vreg0, vreg1]);
+    }
+
+    #[test]
+    fn reg_alloc_inst_vreg_defs_returns_empty_when_defs_only_contain_preg_and_imm() {
+        let inst = RegAllocInst {
+            opcode: 789,
+            defs: vec![
+                RegAllocOperand::PReg(PReg::new(2)),
+                RegAllocOperand::Imm(17),
+                RegAllocOperand::PReg(PReg::new(6)),
+                RegAllocOperand::Imm(-1),
+            ],
+            uses: vec![],
+            implicit_defs: vec![],
+            implicit_uses: vec![],
+            flags: InstFlags::default(),
+        };
+
+        assert!(inst.vreg_defs().collect::<Vec<_>>().is_empty());
+    }
+
+    #[test]
+    fn reg_alloc_function_alloc_stack_slot_increments_next_stack_slot() {
+        let mut func = RegAllocFunction {
+            name: "test".into(),
+            insts: vec![],
+            blocks: vec![],
+            block_order: vec![],
+            entry_block: BlockId(0),
+            next_vreg: 0,
+            next_stack_slot: 3,
+            stack_slots: HashMap::new(),
+        };
+
+        let first = func.alloc_stack_slot(8, 8);
+        let second = func.alloc_stack_slot(4, 4);
+
+        assert_eq!(first, StackSlotId(3));
+        assert_eq!(second, StackSlotId(4));
+        assert_eq!(func.next_stack_slot, 5);
+    }
+
+    #[test]
+    fn reg_alloc_function_alloc_vreg_increments_next_vreg() {
+        let mut func = RegAllocFunction {
+            name: "test".into(),
+            insts: vec![],
+            blocks: vec![],
+            block_order: vec![],
+            entry_block: BlockId(0),
+            next_vreg: 11,
+            next_stack_slot: 0,
+            stack_slots: HashMap::new(),
+        };
+
+        let first = func.alloc_vreg(RegClass::Gpr32);
+        let second = func.alloc_vreg(RegClass::Fpr64);
+
+        assert_eq!(first, VReg::new(11, RegClass::Gpr32));
+        assert_eq!(second, VReg::new(12, RegClass::Fpr64));
+        assert_eq!(func.next_vreg, 13);
+    }
+
+    #[test]
+    fn reg_alloc_function_alloc_stack_slot_inserts_into_stack_slots_map() {
+        let mut func = RegAllocFunction {
+            name: "test".into(),
+            insts: vec![],
+            blocks: vec![],
+            block_order: vec![],
+            entry_block: BlockId(0),
+            next_vreg: 0,
+            next_stack_slot: 0,
+            stack_slots: HashMap::new(),
+        };
+
+        let slot_id = func.alloc_stack_slot(16, 8);
+
+        assert_eq!(func.stack_slots.len(), 1);
+        assert_eq!(
+            func.stack_slots.get(&slot_id).map(|slot| (slot.size, slot.align)),
+            Some((16, 8))
+        );
+    }
+}
