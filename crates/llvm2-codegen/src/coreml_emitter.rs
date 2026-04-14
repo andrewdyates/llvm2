@@ -31,7 +31,51 @@
 //! The emitter detects and emits fused operation patterns that CoreML maps
 //! to single ANE passes: GEMM+bias+ReLU, Conv+BatchNorm+ReLU, MatMul+GELU.
 
+use std::collections::HashMap;
 use std::fmt;
+
+use llvm2_lower::compute_graph::{ComputeNode, ComputeNodeId, NodeKind};
+use llvm2_lower::target_analysis::ComputeTarget;
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur during CoreML MIL emission from ComputeGraph nodes.
+#[derive(Debug, Clone)]
+pub enum CoreMLEmitError {
+    /// A node is not legal on the NeuralEngine target.
+    NotAneCompatible { node_id: ComputeNodeId, kind: NodeKind },
+    /// Empty node list provided.
+    EmptyNodeList,
+    /// A node references a predecessor that was not emitted yet.
+    MissingPredecessor { node_id: ComputeNodeId, missing_dep: String },
+    /// Unsupported dominant operation for ANE lowering.
+    UnsupportedOp { node_id: ComputeNodeId, op: String },
+}
+
+impl fmt::Display for CoreMLEmitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CoreMLEmitError::NotAneCompatible { node_id, kind } => {
+                write!(f, "node {} ({}) is not ANE-compatible", node_id, kind)
+            }
+            CoreMLEmitError::EmptyNodeList => write!(f, "empty node list"),
+            CoreMLEmitError::MissingPredecessor { node_id, missing_dep } => {
+                write!(
+                    f,
+                    "node {} references missing predecessor '{}'",
+                    node_id, missing_dep
+                )
+            }
+            CoreMLEmitError::UnsupportedOp { node_id, op } => {
+                write!(f, "node {} has unsupported op '{}' for ANE", node_id, op)
+            }
+        }
+    }
+}
+
+impl std::error::Error for CoreMLEmitError {}
 
 // ---------------------------------------------------------------------------
 // MIL data types
@@ -693,6 +737,534 @@ impl Default for CoreMLEmitter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ComputeGraph -> MIL program generation
+// ---------------------------------------------------------------------------
+
+/// Fusion pattern detected between consecutive ANE-targeted nodes.
+///
+/// CoreML maps these fused patterns to single ANE passes for maximum
+/// throughput. Detection runs on consecutive node triples/pairs before
+/// individual emission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FusionPattern {
+    /// Conv2D -> BatchNorm -> ReLU  (single ANE pass)
+    ConvBnRelu { conv_idx: usize, bn_idx: usize, relu_idx: usize },
+    /// GEMM -> Bias(Add) -> Activation  (single ANE pass)
+    GemmBiasAct { gemm_idx: usize, bias_idx: usize, act_idx: usize },
+    /// MatMul -> GELU  (single ANE pass)
+    MatMulGelu { mm_idx: usize, gelu_idx: usize },
+}
+
+/// Detect fusion patterns in a sequence of ANE-targeted nodes.
+///
+/// Returns a list of fusion patterns with indices into the node slice.
+/// Each node index can appear in at most one pattern; earlier patterns win.
+fn detect_fusion_patterns(nodes: &[ComputeNode]) -> Vec<FusionPattern> {
+    let mut patterns = Vec::new();
+    let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+    // Pass 1: detect 3-node fusions (higher priority)
+    for i in 0..nodes.len().saturating_sub(2) {
+        if consumed.contains(&i) || consumed.contains(&(i + 1)) || consumed.contains(&(i + 2)) {
+            continue;
+        }
+
+        let op_a = nodes[i].dominant_op.as_str();
+        let op_b = nodes[i + 1].dominant_op.as_str();
+        let op_c = nodes[i + 2].dominant_op.as_str();
+
+        // Conv -> BN -> ReLU
+        if is_conv_op(op_a) && is_batchnorm_op(op_b) && is_relu_op(op_c) {
+            patterns.push(FusionPattern::ConvBnRelu {
+                conv_idx: i,
+                bn_idx: i + 1,
+                relu_idx: i + 2,
+            });
+            consumed.insert(i);
+            consumed.insert(i + 1);
+            consumed.insert(i + 2);
+            continue;
+        }
+
+        // GEMM -> Bias(ADD) -> Activation
+        if is_gemm_op(op_a) && is_bias_op(op_b) && is_activation_op(op_c) {
+            patterns.push(FusionPattern::GemmBiasAct {
+                gemm_idx: i,
+                bias_idx: i + 1,
+                act_idx: i + 2,
+            });
+            consumed.insert(i);
+            consumed.insert(i + 1);
+            consumed.insert(i + 2);
+            continue;
+        }
+    }
+
+    // Pass 2: detect 2-node fusions
+    for i in 0..nodes.len().saturating_sub(1) {
+        if consumed.contains(&i) || consumed.contains(&(i + 1)) {
+            continue;
+        }
+
+        let op_a = nodes[i].dominant_op.as_str();
+        let op_b = nodes[i + 1].dominant_op.as_str();
+
+        // MatMul -> GELU
+        if is_gemm_op(op_a) && is_gelu_op(op_b) {
+            patterns.push(FusionPattern::MatMulGelu {
+                mm_idx: i,
+                gelu_idx: i + 1,
+            });
+            consumed.insert(i);
+            consumed.insert(i + 1);
+        }
+    }
+
+    patterns
+}
+
+/// Helper: is this op a convolution?
+fn is_conv_op(op: &str) -> bool {
+    matches!(op, "CONV" | "CONV2D" | "Conv2D" | "conv" | "conv2d")
+}
+
+/// Helper: is this op batch normalization?
+fn is_batchnorm_op(op: &str) -> bool {
+    matches!(op, "BN" | "BATCHNORM" | "BatchNorm" | "batchnorm" | "bn")
+}
+
+/// Helper: is this op ReLU?
+fn is_relu_op(op: &str) -> bool {
+    matches!(op, "RELU" | "ReLU" | "relu")
+}
+
+/// Helper: is this op GEMM/matmul?
+fn is_gemm_op(op: &str) -> bool {
+    matches!(op, "GEMM" | "gemm" | "MATMUL" | "matmul" | "MatMul")
+}
+
+/// Helper: is this op a bias addition?
+fn is_bias_op(op: &str) -> bool {
+    matches!(op, "ADD" | "BIAS" | "add" | "bias")
+}
+
+/// Helper: is this op any activation function?
+fn is_activation_op(op: &str) -> bool {
+    matches!(
+        op,
+        "RELU" | "ReLU" | "relu" | "SIGMOID" | "sigmoid" | "TANH"
+            | "tanh" | "GELU" | "gelu" | "LEAKY_RELU" | "leaky_relu"
+    )
+}
+
+/// Helper: is this op GELU specifically?
+fn is_gelu_op(op: &str) -> bool {
+    matches!(op, "GELU" | "gelu")
+}
+
+/// Helper: is this op a reduction?
+fn is_reduce_op(op: &str) -> bool {
+    matches!(
+        op,
+        "REDUCE_SUM" | "reduce_sum" | "REDUCE_MEAN" | "reduce_mean"
+            | "REDUCE_MAX" | "reduce_max" | "REDUCE_MIN" | "reduce_min"
+            | "SUM" | "sum" | "MEAN" | "mean"
+    )
+}
+
+/// Map a dominant_op string to a MilActivationOp.
+fn activation_from_op(op: &str) -> MilActivationOp {
+    match op {
+        "RELU" | "ReLU" | "relu" => MilActivationOp::ReLU,
+        "SIGMOID" | "sigmoid" => MilActivationOp::Sigmoid,
+        "TANH" | "tanh" => MilActivationOp::Tanh,
+        "GELU" | "gelu" => MilActivationOp::GELU { mode: GeLUMode::TanhApprox },
+        "LEAKY_RELU" | "leaky_relu" => MilActivationOp::LeakyReLU { alpha: 0.01 },
+        _ => MilActivationOp::ReLU, // default fallback
+    }
+}
+
+/// Map a dominant_op string to a MilElementWiseOp.
+fn elementwise_from_op(op: &str) -> MilElementWiseOp {
+    match op {
+        "ADD" | "add" | "BIAS" | "bias" => MilElementWiseOp::Add,
+        "SUB" | "sub" => MilElementWiseOp::Sub,
+        "MUL" | "mul" => MilElementWiseOp::Mul,
+        "DIV" | "div" | "REAL_DIV" | "real_div" => MilElementWiseOp::RealDiv,
+        _ => MilElementWiseOp::Add,
+    }
+}
+
+/// Map a dominant_op string to a MilReduceOp.
+fn reduce_from_op(op: &str) -> MilReduceOp {
+    match op {
+        "REDUCE_SUM" | "reduce_sum" | "SUM" | "sum" => MilReduceOp::Sum,
+        "REDUCE_MEAN" | "reduce_mean" | "MEAN" | "mean" => MilReduceOp::Mean,
+        "REDUCE_MAX" | "reduce_max" | "MAX" | "max" => MilReduceOp::Max,
+        "REDUCE_MIN" | "reduce_min" | "MIN" | "min" => MilReduceOp::Min,
+        _ => MilReduceOp::Sum,
+    }
+}
+
+/// Determine the MIL tensor shape for a node based on its data size and kind.
+///
+/// Uses the node's `data_size_bytes` to estimate a reasonable shape. For
+/// matrix-heavy nodes, assumes square matrices in FP16. For data-parallel,
+/// assumes a 1D vector.
+fn shape_from_node(node: &ComputeNode, dtype: MilDataType) -> MilTensorShape {
+    let elem_bytes: u64 = match dtype {
+        MilDataType::Float16 => 2,
+        MilDataType::Float32 => 4,
+        MilDataType::Int32 => 4,
+    };
+
+    let num_elements = node.data_size_bytes.max(elem_bytes) / elem_bytes;
+
+    match node.kind {
+        NodeKind::MatrixHeavy => {
+            // Estimate square matrix dimensions
+            let side = (num_elements as f64).sqrt() as u64;
+            let side = side.max(1);
+            MilTensorShape::matrix(side, side)
+        }
+        NodeKind::DataParallel => {
+            MilTensorShape::vector(num_elements.max(1))
+        }
+        NodeKind::Scalar => {
+            MilTensorShape::vector(num_elements.max(1))
+        }
+    }
+}
+
+/// SSA name for a ComputeNode's weight/parameter input.
+fn node_weight_name(node: &ComputeNode) -> String {
+    format!("weight_{}", node.id.0)
+}
+
+/// SSA name for a ComputeNode's bias input.
+fn node_bias_name(node: &ComputeNode) -> String {
+    format!("bias_{}", node.id.0)
+}
+
+impl CoreMLEmitter {
+    /// Generate a complete MIL program from a slice of ANE-targeted ComputeNodes.
+    ///
+    /// Each node must have `ComputeTarget::NeuralEngine` in its `legal_targets`.
+    /// The emitter:
+    /// 1. Detects fusion patterns (Conv-BN-ReLU, GEMM-Bias-Act, MatMul-GELU)
+    /// 2. Emits fused patterns as combined operations
+    /// 3. Emits remaining nodes individually
+    /// 4. Wires SSA references using node input/output relationships
+    ///
+    /// Returns a `MilProgram` with inputs derived from the first node and
+    /// outputs derived from the last node.
+    pub fn emit_program_from_nodes(
+        &mut self,
+        nodes: &[ComputeNode],
+    ) -> Result<MilProgram, CoreMLEmitError> {
+        if nodes.is_empty() {
+            return Err(CoreMLEmitError::EmptyNodeList);
+        }
+
+        // Validate all nodes are ANE-compatible
+        for node in nodes {
+            if !node.legal_targets.contains(&ComputeTarget::NeuralEngine) {
+                return Err(CoreMLEmitError::NotAneCompatible {
+                    node_id: node.id,
+                    kind: node.kind,
+                });
+            }
+        }
+
+        let mut program = MilProgram::new();
+
+        // The first node's input is the program input
+        let input_shape = shape_from_node(&nodes[0], self.dtype);
+        let input_name = "input_0".to_string();
+        program.add_input(CoreMLFeature::new(&input_name, input_shape, self.dtype));
+
+        // For matrix/conv ops, we need a weight input
+        let weight_name = "weight_0".to_string();
+        if is_gemm_op(&nodes[0].dominant_op) || is_conv_op(&nodes[0].dominant_op) {
+            let weight_shape = shape_from_node(&nodes[0], self.dtype);
+            program.add_input(CoreMLFeature::new(&weight_name, weight_shape, self.dtype));
+        }
+
+        // Detect fusion patterns
+        let fusions = detect_fusion_patterns(nodes);
+
+        // Build set of indices consumed by fusions
+        let mut fused_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for pattern in &fusions {
+            match pattern {
+                FusionPattern::ConvBnRelu { conv_idx, bn_idx, relu_idx } => {
+                    fused_indices.insert(*conv_idx);
+                    fused_indices.insert(*bn_idx);
+                    fused_indices.insert(*relu_idx);
+                }
+                FusionPattern::GemmBiasAct { gemm_idx, bias_idx, act_idx } => {
+                    fused_indices.insert(*gemm_idx);
+                    fused_indices.insert(*bias_idx);
+                    fused_indices.insert(*act_idx);
+                }
+                FusionPattern::MatMulGelu { mm_idx, gelu_idx } => {
+                    fused_indices.insert(*mm_idx);
+                    fused_indices.insert(*gelu_idx);
+                }
+            }
+        }
+
+        // Track the last SSA name produced
+        let mut last_output = input_name;
+        // Map node index -> SSA output name
+        let mut node_outputs: HashMap<u32, String> = HashMap::new();
+
+        // Process nodes in order, emitting fusions or individual ops
+        let mut i = 0;
+        while i < nodes.len() {
+            if fused_indices.contains(&i) {
+                // Find which fusion pattern starts at this index
+                if let Some(pattern) = fusions.iter().find(|p| match p {
+                    FusionPattern::ConvBnRelu { conv_idx, .. } => *conv_idx == i,
+                    FusionPattern::GemmBiasAct { gemm_idx, .. } => *gemm_idx == i,
+                    FusionPattern::MatMulGelu { mm_idx, .. } => *mm_idx == i,
+                }) {
+                    match pattern {
+                        FusionPattern::ConvBnRelu { conv_idx, bn_idx, relu_idx } => {
+                            // Emit Conv -> BN (as elementwise mul) -> ReLU
+                            let wn = node_weight_name(&nodes[*conv_idx]);
+                            let ws = shape_from_node(&nodes[*conv_idx], self.dtype);
+                            program.add_input(CoreMLFeature::new(&wn, ws, self.dtype));
+
+                            let conv_out = self.emit_conv2d(
+                                &mut program,
+                                &last_output,
+                                &wn,
+                                None,
+                                [1, 1],
+                                PadType::Same,
+                                [1, 1],
+                                1,
+                            );
+
+                            // BN is approximated as elementwise scale
+                            let bn_scale_name = node_bias_name(&nodes[*bn_idx]);
+                            let bn_shape = shape_from_node(&nodes[*bn_idx], self.dtype);
+                            program.add_input(CoreMLFeature::new(
+                                &bn_scale_name,
+                                bn_shape,
+                                self.dtype,
+                            ));
+                            let bn_out = self.emit_elementwise(
+                                &mut program,
+                                MilElementWiseOp::Mul,
+                                &conv_out,
+                                &bn_scale_name,
+                            );
+
+                            let relu_out = self.emit_activation(
+                                &mut program,
+                                MilActivationOp::ReLU,
+                                &bn_out,
+                            );
+
+                            node_outputs.insert(nodes[*conv_idx].id.0, conv_out);
+                            node_outputs.insert(nodes[*bn_idx].id.0, bn_out);
+                            node_outputs.insert(nodes[*relu_idx].id.0, relu_out.clone());
+                            last_output = relu_out;
+                            i = relu_idx + 1;
+                        }
+                        FusionPattern::GemmBiasAct { gemm_idx, bias_idx, act_idx } => {
+                            // Emit GEMM -> Bias -> Activation as fused pattern
+                            let wn = node_weight_name(&nodes[*gemm_idx]);
+                            let ws = shape_from_node(&nodes[*gemm_idx], self.dtype);
+                            program.add_input(CoreMLFeature::new(&wn, ws, self.dtype));
+
+                            let bn = node_bias_name(&nodes[*bias_idx]);
+                            let bs = shape_from_node(&nodes[*bias_idx], self.dtype);
+                            program.add_input(CoreMLFeature::new(&bn, bs, self.dtype));
+
+                            let mm_out =
+                                self.emit_matmul(&mut program, &last_output, &wn, false, false);
+                            let add_out = self.emit_elementwise(
+                                &mut program,
+                                MilElementWiseOp::Add,
+                                &mm_out,
+                                &bn,
+                            );
+                            let act_op = activation_from_op(&nodes[*act_idx].dominant_op);
+                            let act_out =
+                                self.emit_activation(&mut program, act_op, &add_out);
+
+                            node_outputs.insert(nodes[*gemm_idx].id.0, mm_out);
+                            node_outputs.insert(nodes[*bias_idx].id.0, add_out);
+                            node_outputs.insert(nodes[*act_idx].id.0, act_out.clone());
+                            last_output = act_out;
+                            i = act_idx + 1;
+                        }
+                        FusionPattern::MatMulGelu { mm_idx, gelu_idx } => {
+                            let wn = node_weight_name(&nodes[*mm_idx]);
+                            let ws = shape_from_node(&nodes[*mm_idx], self.dtype);
+                            program.add_input(CoreMLFeature::new(&wn, ws, self.dtype));
+
+                            let gelu_out =
+                                self.emit_matmul_gelu(&mut program, &last_output, &wn);
+
+                            node_outputs.insert(nodes[*mm_idx].id.0, gelu_out.clone());
+                            node_outputs.insert(nodes[*gelu_idx].id.0, gelu_out.clone());
+                            last_output = gelu_out;
+                            i = gelu_idx + 1;
+                        }
+                    }
+                } else {
+                    // Consumed by a fusion that starts earlier; skip
+                    i += 1;
+                }
+            } else {
+                // Emit individual node
+                let node = &nodes[i];
+                let op = node.dominant_op.as_str();
+
+                let out = if is_gemm_op(op) {
+                    let wn = node_weight_name(node);
+                    let ws = shape_from_node(node, self.dtype);
+                    program.add_input(CoreMLFeature::new(&wn, ws, self.dtype));
+                    self.emit_matmul(&mut program, &last_output, &wn, false, false)
+                } else if is_conv_op(op) {
+                    let wn = node_weight_name(node);
+                    let ws = shape_from_node(node, self.dtype);
+                    program.add_input(CoreMLFeature::new(&wn, ws, self.dtype));
+                    self.emit_conv2d(
+                        &mut program,
+                        &last_output,
+                        &wn,
+                        None,
+                        [1, 1],
+                        PadType::Same,
+                        [1, 1],
+                        1,
+                    )
+                } else if is_activation_op(op) {
+                    let act_op = activation_from_op(op);
+                    self.emit_activation(&mut program, act_op, &last_output)
+                } else if is_reduce_op(op) {
+                    let reduce_op = reduce_from_op(op);
+                    self.emit_reduce(&mut program, reduce_op, &last_output, &[-1], true)
+                } else {
+                    // Default: elementwise
+                    let ew_op = elementwise_from_op(op);
+                    // For elementwise ops, use last_output for both operands.
+                    // In real usage, the node's consumed_values would identify
+                    // the second operand.
+                    self.emit_elementwise(&mut program, ew_op, &last_output, &last_output)
+                };
+
+                node_outputs.insert(node.id.0, out.clone());
+                last_output = out;
+                i += 1;
+            }
+        }
+
+        // Set the last output as the program output
+        let output_shape = shape_from_node(nodes.last().unwrap(), self.dtype);
+        program.add_output(CoreMLFeature::new(&last_output, output_shape, self.dtype));
+
+        Ok(program)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ANE compatibility validation
+// ---------------------------------------------------------------------------
+
+/// ANE-compatible MIL operation types.
+///
+/// Operations outside this set will be rejected by the ANE compiler and
+/// fall back to CPU/GPU execution, defeating the purpose of ANE targeting.
+const ANE_COMPATIBLE_OPS: &[&str] = &[
+    "matmul",
+    "conv",
+    "add",
+    "sub",
+    "mul",
+    "real_div",
+    "relu",
+    "leaky_relu",
+    "sigmoid",
+    "tanh",
+    "gelu",
+    "reduce_sum",
+    "reduce_mean",
+    "reduce_max",
+    "reduce_min",
+    "reshape",
+    "transpose",
+];
+
+/// Validate that all operations in a MIL program are ANE-compatible.
+///
+/// Returns a list of warning messages for operations that are not known
+/// to run efficiently on the Apple Neural Engine. An empty list means
+/// the program is fully ANE-compatible.
+///
+/// Checks performed:
+/// 1. All operation types are in the ANE-compatible set
+/// 2. Data types are FP16 (primary ANE type) or FP32 (requires quantization)
+/// 3. No unsupported reduction axes configurations
+pub fn validate_ane_compatibility(program: &MilProgram) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    // Check operation types
+    for (idx, op) in program.operations.iter().enumerate() {
+        let op_type = op.op_type();
+        if !ANE_COMPATIBLE_OPS.contains(&op_type) {
+            warnings.push(format!(
+                "op[{}] '{}' (type '{}') is not in ANE-compatible op set",
+                idx,
+                op.output_name(),
+                op_type,
+            ));
+        }
+    }
+
+    // Check input data types
+    for input in &program.inputs {
+        if input.dtype == MilDataType::Int32 {
+            warnings.push(format!(
+                "input '{}' uses Int32 which has limited ANE support; prefer Float16",
+                input.name,
+            ));
+        }
+    }
+
+    // Check output data types
+    for output in &program.outputs {
+        if output.dtype == MilDataType::Int32 {
+            warnings.push(format!(
+                "output '{}' uses Int32 which has limited ANE support; prefer Float16",
+                output.name,
+            ));
+        }
+    }
+
+    // Check for excessive reduction dimensions (ANE prefers single-axis reductions)
+    for (idx, op) in program.operations.iter().enumerate() {
+        if let MilOperation::Reduce { axes, .. } = op {
+            if axes.len() > 2 {
+                warnings.push(format!(
+                    "op[{}] '{}' reduces over {} axes; ANE may fall back to CPU for >2 axes",
+                    idx,
+                    op.output_name(),
+                    axes.len(),
+                ));
+            }
+        }
+    }
+
+    warnings
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -846,5 +1418,340 @@ mod tests {
         } else {
             panic!("expected Conv operation");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper to create a test ComputeNode with ANE targeting
+    // -----------------------------------------------------------------------
+
+    fn make_ane_node(id: u32, kind: NodeKind, dominant_op: &str, data_size: u64) -> ComputeNode {
+        let mut costs = HashMap::new();
+        costs.insert(
+            ComputeTarget::NeuralEngine,
+            llvm2_lower::compute_graph::ComputeCost {
+                latency_cycles: 100,
+                throughput_ops_per_kcycle: 5000,
+            },
+        );
+        ComputeNode {
+            id: ComputeNodeId(id),
+            instructions: vec![],
+            costs,
+            legal_targets: vec![ComputeTarget::NeuralEngine, ComputeTarget::CpuScalar],
+            kind,
+            data_size_bytes: data_size,
+            produced_values: vec![],
+            consumed_values: vec![],
+            dominant_op: dominant_op.to_string(),
+            target_legality: None,
+        }
+    }
+
+    fn make_cpu_only_node(id: u32) -> ComputeNode {
+        let mut costs = HashMap::new();
+        costs.insert(
+            ComputeTarget::CpuScalar,
+            llvm2_lower::compute_graph::ComputeCost {
+                latency_cycles: 50,
+                throughput_ops_per_kcycle: 1000,
+            },
+        );
+        ComputeNode {
+            id: ComputeNodeId(id),
+            instructions: vec![],
+            costs,
+            legal_targets: vec![ComputeTarget::CpuScalar],
+            kind: NodeKind::Scalar,
+            data_size_bytes: 64,
+            produced_values: vec![],
+            consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
+            target_legality: None,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // emit_program_from_nodes tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_emit_program_from_nodes_empty() {
+        let mut emitter = CoreMLEmitter::new();
+        let result = emitter.emit_program_from_nodes(&[]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            CoreMLEmitError::EmptyNodeList => {}
+            e => panic!("expected EmptyNodeList, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_emit_program_from_nodes_not_ane_compatible() {
+        let mut emitter = CoreMLEmitter::new();
+        let node = make_cpu_only_node(0);
+        let result = emitter.emit_program_from_nodes(&[node]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            CoreMLEmitError::NotAneCompatible { node_id, .. } => {
+                assert_eq!(node_id.0, 0);
+            }
+            e => panic!("expected NotAneCompatible, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_emit_single_gemm_node() {
+        let mut emitter = CoreMLEmitter::new();
+        let node = make_ane_node(0, NodeKind::MatrixHeavy, "GEMM", 8192);
+        let program = emitter.emit_program_from_nodes(&[node]).unwrap();
+
+        // Should have: matmul op
+        assert_eq!(program.op_count(), 1);
+        assert_eq!(program.operations[0].op_type(), "matmul");
+        assert!(program.validate().is_ok());
+    }
+
+    #[test]
+    fn test_emit_single_conv_node() {
+        let mut emitter = CoreMLEmitter::new();
+        let node = make_ane_node(0, NodeKind::DataParallel, "CONV", 4096);
+        let program = emitter.emit_program_from_nodes(&[node]).unwrap();
+
+        assert_eq!(program.op_count(), 1);
+        assert_eq!(program.operations[0].op_type(), "conv");
+        assert!(program.validate().is_ok());
+    }
+
+    #[test]
+    fn test_emit_single_relu_node() {
+        let mut emitter = CoreMLEmitter::new();
+        let node = make_ane_node(0, NodeKind::DataParallel, "RELU", 2048);
+        let program = emitter.emit_program_from_nodes(&[node]).unwrap();
+
+        assert_eq!(program.op_count(), 1);
+        assert_eq!(program.operations[0].op_type(), "relu");
+        assert!(program.validate().is_ok());
+    }
+
+    #[test]
+    fn test_emit_elementwise_add_node() {
+        let mut emitter = CoreMLEmitter::new();
+        let node = make_ane_node(0, NodeKind::DataParallel, "ADD", 1024);
+        let program = emitter.emit_program_from_nodes(&[node]).unwrap();
+
+        assert_eq!(program.op_count(), 1);
+        assert_eq!(program.operations[0].op_type(), "add");
+        assert!(program.validate().is_ok());
+    }
+
+    #[test]
+    fn test_emit_reduce_mean_node() {
+        let mut emitter = CoreMLEmitter::new();
+        let node = make_ane_node(0, NodeKind::DataParallel, "REDUCE_MEAN", 2048);
+        let program = emitter.emit_program_from_nodes(&[node]).unwrap();
+
+        assert_eq!(program.op_count(), 1);
+        assert_eq!(program.operations[0].op_type(), "reduce_mean");
+        assert!(program.validate().is_ok());
+    }
+
+    #[test]
+    fn test_emit_gemm_bias_act_fusion() {
+        let mut emitter = CoreMLEmitter::new();
+        let nodes = vec![
+            make_ane_node(0, NodeKind::MatrixHeavy, "GEMM", 8192),
+            make_ane_node(1, NodeKind::DataParallel, "ADD", 256),
+            make_ane_node(2, NodeKind::DataParallel, "RELU", 256),
+        ];
+        let program = emitter.emit_program_from_nodes(&nodes).unwrap();
+
+        // GEMM-Bias-Act fusion: matmul + add + relu = 3 ops
+        assert_eq!(program.op_count(), 3);
+        assert_eq!(program.operations[0].op_type(), "matmul");
+        assert_eq!(program.operations[1].op_type(), "add");
+        assert_eq!(program.operations[2].op_type(), "relu");
+        assert!(program.validate().is_ok());
+    }
+
+    #[test]
+    fn test_emit_conv_bn_relu_fusion() {
+        let mut emitter = CoreMLEmitter::new();
+        let nodes = vec![
+            make_ane_node(0, NodeKind::DataParallel, "CONV", 4096),
+            make_ane_node(1, NodeKind::DataParallel, "BN", 512),
+            make_ane_node(2, NodeKind::DataParallel, "RELU", 512),
+        ];
+        let program = emitter.emit_program_from_nodes(&nodes).unwrap();
+
+        // Conv-BN-ReLU fusion: conv + mul (BN scale) + relu = 3 ops
+        assert_eq!(program.op_count(), 3);
+        assert_eq!(program.operations[0].op_type(), "conv");
+        assert_eq!(program.operations[1].op_type(), "mul");
+        assert_eq!(program.operations[2].op_type(), "relu");
+        assert!(program.validate().is_ok());
+    }
+
+    #[test]
+    fn test_emit_matmul_gelu_fusion() {
+        let mut emitter = CoreMLEmitter::new();
+        let nodes = vec![
+            make_ane_node(0, NodeKind::MatrixHeavy, "GEMM", 8192),
+            make_ane_node(1, NodeKind::DataParallel, "GELU", 4096),
+        ];
+        let program = emitter.emit_program_from_nodes(&nodes).unwrap();
+
+        // MatMul-GELU fusion: matmul + gelu = 2 ops
+        assert_eq!(program.op_count(), 2);
+        assert_eq!(program.operations[0].op_type(), "matmul");
+        assert_eq!(program.operations[1].op_type(), "gelu");
+        assert!(program.validate().is_ok());
+    }
+
+    #[test]
+    fn test_emit_mixed_nodes_no_fusion() {
+        let mut emitter = CoreMLEmitter::new();
+        let nodes = vec![
+            make_ane_node(0, NodeKind::MatrixHeavy, "GEMM", 8192),
+            make_ane_node(1, NodeKind::DataParallel, "SIGMOID", 256),
+        ];
+        let program = emitter.emit_program_from_nodes(&nodes).unwrap();
+
+        // No fusion pattern matches (GEMM + SIGMOID is not a recognized fusion)
+        assert_eq!(program.op_count(), 2);
+        assert_eq!(program.operations[0].op_type(), "matmul");
+        assert_eq!(program.operations[1].op_type(), "sigmoid");
+        assert!(program.validate().is_ok());
+    }
+
+    #[test]
+    fn test_emit_multi_layer_network() {
+        let mut emitter = CoreMLEmitter::new();
+        // Simulate a 4-layer pattern: GEMM -> ADD -> RELU -> GEMM
+        let nodes = vec![
+            make_ane_node(0, NodeKind::MatrixHeavy, "GEMM", 8192),
+            make_ane_node(1, NodeKind::DataParallel, "ADD", 256),
+            make_ane_node(2, NodeKind::DataParallel, "RELU", 256),
+            make_ane_node(3, NodeKind::MatrixHeavy, "GEMM", 4096),
+        ];
+        let program = emitter.emit_program_from_nodes(&nodes).unwrap();
+
+        // GEMM-Bias-Act fusion on first 3 nodes (3 ops), then standalone GEMM (1 op)
+        assert_eq!(program.op_count(), 4);
+        assert_eq!(program.operations[0].op_type(), "matmul");
+        assert_eq!(program.operations[1].op_type(), "add");
+        assert_eq!(program.operations[2].op_type(), "relu");
+        assert_eq!(program.operations[3].op_type(), "matmul");
+        assert!(program.validate().is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_ane_compatibility tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_ane_all_compatible() {
+        let mut emitter = CoreMLEmitter::new();
+        let nodes = vec![
+            make_ane_node(0, NodeKind::MatrixHeavy, "GEMM", 8192),
+            make_ane_node(1, NodeKind::DataParallel, "RELU", 256),
+        ];
+        let program = emitter.emit_program_from_nodes(&nodes).unwrap();
+
+        let warnings = validate_ane_compatibility(&program);
+        assert!(warnings.is_empty(), "expected no warnings, got: {:?}", warnings);
+    }
+
+    #[test]
+    fn test_validate_ane_int32_warning() {
+        let mut program = MilProgram::new();
+        program.add_input(CoreMLFeature::new(
+            "x",
+            MilTensorShape::vector(64),
+            MilDataType::Int32,
+        ));
+        let mut emitter = CoreMLEmitter::with_dtype(MilDataType::Float16);
+        let out = emitter.emit_activation(&mut program, MilActivationOp::ReLU, "x");
+        program.add_output(CoreMLFeature::new(
+            &out,
+            MilTensorShape::vector(64),
+            MilDataType::Float16,
+        ));
+
+        let warnings = validate_ane_compatibility(&program);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Int32"));
+    }
+
+    #[test]
+    fn test_validate_ane_multi_axis_reduce_warning() {
+        let mut program = MilProgram::new();
+        program.add_input(CoreMLFeature::new(
+            "x",
+            MilTensorShape::tensor_4d(1, 3, 8, 8),
+            MilDataType::Float16,
+        ));
+        program.push_op(MilOperation::Reduce {
+            output: "reduce_0".to_string(),
+            op: MilReduceOp::Sum,
+            x: "x".to_string(),
+            axes: vec![1, 2, 3], // 3 axes -- triggers warning
+            keep_dims: false,
+        });
+        program.add_output(CoreMLFeature::new(
+            "reduce_0",
+            MilTensorShape::vector(1),
+            MilDataType::Float16,
+        ));
+
+        let warnings = validate_ane_compatibility(&program);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("3 axes"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Fusion pattern detection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_detect_fusion_conv_bn_relu() {
+        let nodes = vec![
+            make_ane_node(0, NodeKind::DataParallel, "CONV", 4096),
+            make_ane_node(1, NodeKind::DataParallel, "BN", 512),
+            make_ane_node(2, NodeKind::DataParallel, "RELU", 512),
+        ];
+        let patterns = detect_fusion_patterns(&nodes);
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(
+            patterns[0],
+            FusionPattern::ConvBnRelu { conv_idx: 0, bn_idx: 1, relu_idx: 2 }
+        );
+    }
+
+    #[test]
+    fn test_detect_fusion_none_for_unmatched() {
+        let nodes = vec![
+            make_ane_node(0, NodeKind::DataParallel, "ADD", 256),
+            make_ane_node(1, NodeKind::DataParallel, "SUB", 256),
+        ];
+        let patterns = detect_fusion_patterns(&nodes);
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_shape_from_node_matrix() {
+        let node = make_ane_node(0, NodeKind::MatrixHeavy, "GEMM", 8192);
+        let shape = shape_from_node(&node, MilDataType::Float16);
+        // 8192 bytes / 2 bytes per FP16 = 4096 elements, sqrt(4096) = 64
+        assert_eq!(shape.height, 64);
+        assert_eq!(shape.width, 64);
+    }
+
+    #[test]
+    fn test_shape_from_node_vector() {
+        let node = make_ane_node(0, NodeKind::DataParallel, "ADD", 1024);
+        let shape = shape_from_node(&node, MilDataType::Float16);
+        // 1024 bytes / 2 = 512 elements as a vector
+        assert_eq!(shape.width, 512);
+        assert_eq!(shape.height, 1);
     }
 }
