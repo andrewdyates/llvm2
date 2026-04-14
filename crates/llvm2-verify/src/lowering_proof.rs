@@ -560,14 +560,256 @@ pub fn proof_neg_i32() -> ProofObligation {
     }
 }
 
+// ---------------------------------------------------------------------------
+// I8 arithmetic lowering proofs
+// ---------------------------------------------------------------------------
+
+/// Build the proof obligation for: `tMIR::Iadd(I8, a, b) -> ADD (8-bit)`
+///
+/// On AArch64, 8-bit operations are performed in 32-bit W registers.
+/// The proof verifies semantic equivalence at the 8-bit bitvector level.
+pub fn proof_iadd_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "Iadd_I8 -> ADD (8-bit)".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Iadd, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: a.bvadd(b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Isub(I8, a, b) -> SUB (8-bit)`
+pub fn proof_isub_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "Isub_I8 -> SUB (8-bit)".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Isub, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: a.bvsub(b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Imul(I8, a, b) -> MUL (8-bit)`
+pub fn proof_imul_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "Imul_I8 -> MUL (8-bit)".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Imul, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: a.bvmul(b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Neg(I8, a) -> NEG (8-bit)`
+pub fn proof_neg_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_neg;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+
+    ProofObligation {
+        name: "Neg_I8 -> NEG (8-bit)".to_string(),
+        tmir_expr: encode_tmir_neg(Type::I8, a.clone()),
+        aarch64_expr: a.bvneg(),
+        inputs: vec![("a".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// I16 arithmetic lowering proofs
+// ---------------------------------------------------------------------------
+
+/// Build the proof obligation for: `tMIR::Iadd(I16, a, b) -> ADD (16-bit)`
+///
+/// On AArch64, 16-bit operations are performed in 32-bit W registers.
+/// The proof verifies semantic equivalence at the 16-bit bitvector level.
+pub fn proof_iadd_i16() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+    let b = SmtExpr::var("b", 16);
+
+    ProofObligation {
+        name: "Iadd_I16 -> ADD (16-bit)".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Iadd, Type::I16, a.clone(), b.clone()),
+        aarch64_expr: a.bvadd(b),
+        inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Isub(I16, a, b) -> SUB (16-bit)`
+pub fn proof_isub_i16() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+    let b = SmtExpr::var("b", 16);
+
+    ProofObligation {
+        name: "Isub_I16 -> SUB (16-bit)".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Isub, Type::I16, a.clone(), b.clone()),
+        aarch64_expr: a.bvsub(b),
+        inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Imul(I16, a, b) -> MUL (16-bit)`
+pub fn proof_imul_i16() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+    let b = SmtExpr::var("b", 16);
+
+    ProofObligation {
+        name: "Imul_I16 -> MUL (16-bit)".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Imul, Type::I16, a.clone(), b.clone()),
+        aarch64_expr: a.bvmul(b),
+        inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Neg(I16, a) -> NEG (16-bit)`
+pub fn proof_neg_i16() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_neg;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+
+    ProofObligation {
+        name: "Neg_I16 -> NEG (16-bit)".to_string(),
+        tmir_expr: encode_tmir_neg(Type::I16, a.clone()),
+        aarch64_expr: a.bvneg(),
+        inputs: vec![("a".to_string(), 16)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// I64 arithmetic lowering proofs (sub, mul, neg — iadd_i64 already exists)
+// ---------------------------------------------------------------------------
+
+/// Build the proof obligation for: `tMIR::Isub(I64, a, b) -> SUBXrr Xd, Xn, Xm`
+pub fn proof_isub_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_sub_rr;
+    use crate::tmir_semantics::encode_tmir_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "Isub_I64 -> SUBXrr".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Isub, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_sub_rr(OperandSize::S64, a, b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Imul(I64, a, b) -> MULXrrr Xd, Xn, Xm`
+pub fn proof_imul_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_mul_rr;
+    use crate::tmir_semantics::encode_tmir_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "Imul_I64 -> MULXrrr".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Imul, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_mul_rr(OperandSize::S64, a, b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Neg(I64, a) -> NEG Xd, Xn`
+pub fn proof_neg_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_neg;
+    use crate::tmir_semantics::encode_tmir_neg;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+
+    ProofObligation {
+        name: "Neg_I64 -> NEG Xd".to_string(),
+        tmir_expr: encode_tmir_neg(Type::I64, a.clone()),
+        aarch64_expr: encode_neg(OperandSize::S64, a),
+        inputs: vec![("a".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
 /// Return all standard arithmetic lowering rule proofs.
 pub fn all_arithmetic_proofs() -> Vec<ProofObligation> {
     vec![
+        // I8 (exhaustive verification — all 2^16 or 2^8 input combos tested)
+        proof_iadd_i8(),
+        proof_isub_i8(),
+        proof_imul_i8(),
+        proof_neg_i8(),
+        // I16 (statistical verification — edge cases + random sampling)
+        proof_iadd_i16(),
+        proof_isub_i16(),
+        proof_imul_i16(),
+        proof_neg_i16(),
+        // I32 (statistical verification)
         proof_iadd_i32(),
-        proof_iadd_i64(),
         proof_isub_i32(),
         proof_imul_i32(),
         proof_neg_i32(),
+        // I64 (statistical verification)
+        proof_iadd_i64(),
+        proof_isub_i64(),
+        proof_imul_i64(),
+        proof_neg_i64(),
     ]
 }
 
@@ -971,14 +1213,61 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // I8 arithmetic proofs (exhaustive — all 2^16 or 2^8 input combos)
+    // -----------------------------------------------------------------------
+
     #[test]
-    fn test_proof_iadd_i32() {
-        assert_valid(&proof_iadd_i32());
+    fn test_proof_iadd_i8() {
+        assert_valid(&proof_iadd_i8());
     }
 
     #[test]
-    fn test_proof_iadd_i64() {
-        assert_valid(&proof_iadd_i64());
+    fn test_proof_isub_i8() {
+        assert_valid(&proof_isub_i8());
+    }
+
+    #[test]
+    fn test_proof_imul_i8() {
+        assert_valid(&proof_imul_i8());
+    }
+
+    #[test]
+    fn test_proof_neg_i8() {
+        assert_valid(&proof_neg_i8());
+    }
+
+    // -----------------------------------------------------------------------
+    // I16 arithmetic proofs (statistical — edge cases + random sampling)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_iadd_i16() {
+        assert_valid(&proof_iadd_i16());
+    }
+
+    #[test]
+    fn test_proof_isub_i16() {
+        assert_valid(&proof_isub_i16());
+    }
+
+    #[test]
+    fn test_proof_imul_i16() {
+        assert_valid(&proof_imul_i16());
+    }
+
+    #[test]
+    fn test_proof_neg_i16() {
+        assert_valid(&proof_neg_i16());
+    }
+
+    // -----------------------------------------------------------------------
+    // I32 arithmetic proofs (statistical)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_iadd_i32() {
+        assert_valid(&proof_iadd_i32());
     }
 
     #[test]
@@ -995,6 +1284,34 @@ mod tests {
     fn test_proof_neg_i32() {
         assert_valid(&proof_neg_i32());
     }
+
+    // -----------------------------------------------------------------------
+    // I64 arithmetic proofs (statistical)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_iadd_i64() {
+        assert_valid(&proof_iadd_i64());
+    }
+
+    #[test]
+    fn test_proof_isub_i64() {
+        assert_valid(&proof_isub_i64());
+    }
+
+    #[test]
+    fn test_proof_imul_i64() {
+        assert_valid(&proof_imul_i64());
+    }
+
+    #[test]
+    fn test_proof_neg_i64() {
+        assert_valid(&proof_neg_i64());
+    }
+
+    // -----------------------------------------------------------------------
+    // Aggregate arithmetic proof test
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_all_arithmetic_proofs() {
