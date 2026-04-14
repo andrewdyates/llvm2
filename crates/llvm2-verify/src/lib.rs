@@ -67,7 +67,7 @@ pub mod rule_discovery;
 pub mod neon_semantics;
 pub mod unified_synthesis;
 
-pub use verify::{VerificationResult, Verifier};
+pub use verify::{VerificationResult, VerificationReport, ProofResult, Verifier};
 pub use lowering_proof::{ProofObligation, verify_by_evaluation};
 pub use smt::{SmtError, SmtExpr, SmtSort};
 pub use z4_bridge::{Z4Config, Z4Result, verify_with_z4};
