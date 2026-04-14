@@ -41,6 +41,24 @@ use crate::compute_graph::{
 use crate::target_analysis::ComputeTarget;
 
 // ---------------------------------------------------------------------------
+// Profitability mismatch detail
+// ---------------------------------------------------------------------------
+
+/// Detail of a single profitability mismatch between the dispatched target
+/// and the profitability-filtered recommendation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfitabilityMismatch {
+    /// The node with the mismatch.
+    pub node_id: ComputeNodeId,
+    /// The target dispatched in the plan.
+    pub dispatched_target: ComputeTarget,
+    /// The target recommended by profitability analysis.
+    pub recommended_target: ComputeTarget,
+    /// Human-readable explanation.
+    pub reason: String,
+}
+
+// ---------------------------------------------------------------------------
 // DispatchOp — individual dispatch operations
 // ---------------------------------------------------------------------------
 
@@ -236,6 +254,17 @@ pub enum DispatchError {
         /// The node trying to consume unsynced results.
         consumer: ComputeNodeId,
     },
+
+    /// A node's dispatched target does not match the profitability-filtered
+    /// recommendation from the compute graph.
+    ProfitabilityMismatch {
+        /// The mismatching node.
+        node_id: ComputeNodeId,
+        /// The target assigned in the dispatch plan.
+        dispatched_target: ComputeTarget,
+        /// The target recommended by profitability analysis.
+        recommended_target: ComputeTarget,
+    },
 }
 
 impl fmt::Display for DispatchError {
@@ -266,6 +295,13 @@ impl fmt::Display for DispatchError {
                     f,
                     "Node {} reads results of {} on {} without prior synchronization",
                     consumer, producer, target
+                )
+            }
+            DispatchError::ProfitabilityMismatch { node_id, dispatched_target, recommended_target } => {
+                write!(
+                    f,
+                    "Node {} dispatched to {} but profitability recommends {}",
+                    node_id, dispatched_target, recommended_target
                 )
             }
         }
@@ -436,6 +472,98 @@ pub fn generate_dispatch_plan(
     }
 }
 
+/// Generate a dispatch plan using profitability-filtered target recommendations
+/// from the compute graph.
+///
+/// When the graph has a [`ProfitabilityAnalyzer`] attached (via
+/// [`ComputeGraph::set_profitability`] or [`ComputeGraph::new_with_profitability`]),
+/// this function calls [`ComputeGraph::target_recommendations()`] to get
+/// profitability-aware recommendations. Otherwise, it falls back to building
+/// recommendations from each node's raw `legal_targets` (picking the cheapest
+/// target by latency).
+///
+/// This is the preferred entry point for dispatch plan generation when you
+/// have a fully-constructed [`ComputeGraph`] and want to leverage
+/// profitability analysis for GPU/ANE dispatch decisions.
+pub fn generate_profitability_aware_dispatch_plan(
+    graph: &ComputeGraph,
+) -> DispatchPlan {
+    let recommendations = if graph.has_profitability() {
+        // Use profitability-filtered recommendations from the graph.
+        graph.target_recommendations()
+    } else {
+        // No profitability analyzer: build recommendations from raw legal_targets.
+        // Pick the cheapest legal target by latency_cycles for each node.
+        graph.nodes.iter().map(|node| {
+            let recommended = node.legal_targets.iter()
+                .filter_map(|t| node.costs.get(t).map(|c| (*t, c.latency_cycles)))
+                .min_by_key(|(_, cost)| *cost)
+                .map(|(t, _)| t)
+                .unwrap_or(ComputeTarget::CpuScalar);
+
+            TargetRecommendation {
+                node_id: node.id,
+                recommended_target: recommended,
+                legal_targets: node.legal_targets.clone(),
+                reason: format!("{} selected as cheapest legal target (no profitability data)", recommended),
+                parallel_reduction_legal: false,
+            }
+        }).collect()
+    };
+
+    generate_dispatch_plan(graph, &recommendations)
+}
+
+/// Validate that a dispatch plan's target assignments match the
+/// profitability-filtered recommendations from the compute graph.
+///
+/// For each node, checks that the assigned target in the plan matches
+/// the `recommended_target` from [`ComputeGraph::target_recommendations()`].
+/// Returns `Ok(())` if all match, or a list of [`ProfitabilityMismatch`]
+/// details for nodes that diverge.
+///
+/// When the graph has no profitability analyzer, this always returns `Ok(())`
+/// since there are no profitability constraints to check.
+pub fn validate_profitability_compliance(
+    graph: &ComputeGraph,
+    plan: &DispatchPlan,
+) -> Result<(), Vec<ProfitabilityMismatch>> {
+    if !graph.has_profitability() {
+        return Ok(());
+    }
+
+    let recommendations = graph.target_recommendations();
+    let rec_map: HashMap<ComputeNodeId, &TargetRecommendation> = recommendations
+        .iter()
+        .map(|rec| (rec.node_id, rec))
+        .collect();
+
+    let mut mismatches = Vec::new();
+
+    for (node_id, &dispatched_target) in &plan.assignment {
+        if let Some(rec) = rec_map.get(node_id) {
+            if dispatched_target != rec.recommended_target {
+                mismatches.push(ProfitabilityMismatch {
+                    node_id: *node_id,
+                    dispatched_target,
+                    recommended_target: rec.recommended_target,
+                    reason: format!(
+                        "dispatched to {} but profitability analysis recommends {} ({})",
+                        dispatched_target, rec.recommended_target, rec.reason
+                    ),
+                });
+            }
+        }
+    }
+
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        mismatches.sort_by_key(|m| m.node_id.0);
+        Err(mismatches)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Plan validation
 // ---------------------------------------------------------------------------
@@ -578,6 +706,12 @@ pub struct VerificationReport {
     pub dependency_order_ok: bool,
     /// Descriptions of dependency ordering violations.
     pub dependency_errors: Vec<String>,
+
+    /// Whether dispatched targets match profitability recommendations.
+    /// Always `true` when the graph has no profitability analyzer.
+    pub profitability_ok: bool,
+    /// Profitability mismatches found during validation.
+    pub profitability_mismatches: Vec<ProfitabilityMismatch>,
 }
 
 impl VerificationReport {
@@ -587,6 +721,7 @@ impl VerificationReport {
             && self.data_transfers_ok
             && self.synchronization_ok
             && self.dependency_order_ok
+            && self.profitability_ok
     }
 
     /// Total number of individual violations across all properties.
@@ -595,6 +730,7 @@ impl VerificationReport {
             + self.data_transfer_errors.len()
             + self.synchronization_errors.len()
             + self.dependency_errors.len()
+            + self.profitability_mismatches.len()
     }
 }
 
@@ -616,6 +752,10 @@ impl fmt::Display for VerificationReport {
         writeln!(f, "  Dependency order: {}", if self.dependency_order_ok { "PASS" } else { "FAIL" })?;
         for msg in &self.dependency_errors {
             writeln!(f, "    - {}", msg)?;
+        }
+        writeln!(f, "  Profitability: {}", if self.profitability_ok { "PASS" } else { "FAIL" })?;
+        for mm in &self.profitability_mismatches {
+            writeln!(f, "    - {} dispatched to {} but recommended {}", mm.node_id, mm.dispatched_target, mm.recommended_target)?;
         }
         Ok(())
     }
@@ -768,6 +908,7 @@ pub fn verify_synchronization(
 /// 2. **Data transfer completeness**: every cross-target edge has a transfer op
 /// 3. **Synchronization sufficiency**: async results are synced before consumption
 /// 4. **Dependency ordering**: the plan respects the graph's data dependencies
+/// 5. **Profitability compliance**: dispatched targets match profitability recommendations
 ///
 /// Unlike [`validate_dispatch_plan`] which returns on the first error, this
 /// function collects ALL violations into a [`VerificationReport`].
@@ -819,6 +960,13 @@ pub fn verify_dispatch_plan_properties(
     }
     let dependency_order_ok = dependency_errors.is_empty();
 
+    // Property 5: Profitability compliance.
+    let (profitability_ok, profitability_mismatches) =
+        match validate_profitability_compliance(graph, plan) {
+            Ok(()) => (true, Vec::new()),
+            Err(mismatches) => (false, mismatches),
+        };
+
     VerificationReport {
         cpu_fallback_ok,
         missing_cpu_fallback,
@@ -828,6 +976,8 @@ pub fn verify_dispatch_plan_properties(
         synchronization_errors,
         dependency_order_ok,
         dependency_errors,
+        profitability_ok,
+        profitability_mismatches,
     }
 }
 
@@ -1619,14 +1769,14 @@ mod tests {
             data_size_bytes: 4096,
             produced_values: vec![],
             consumed_values: vec![],
-            dominant_op: String::new(),
+            dominant_op: "ADD".to_string(),
             target_legality: None,
         };
 
         let graph = ComputeGraph {
+            profitability: None,
             nodes: vec![node],
             edges: vec![],
-            profitability: None,
         };
 
         let recs = vec![TargetRecommendation {
@@ -1884,7 +2034,7 @@ mod tests {
                 data_size_bytes: 8,
                 produced_values: vec![],
                 consumed_values: vec![],
-                dominant_op: String::new(),
+                dominant_op: "ADD".to_string(),
                 target_legality: None,
             },
             ComputeNode {
@@ -1896,7 +2046,7 @@ mod tests {
                 data_size_bytes: 4096,
                 produced_values: vec![],
                 consumed_values: vec![],
-                dominant_op: String::new(),
+                dominant_op: "ADD".to_string(),
                 target_legality: None,
             },
             ComputeNode {
@@ -1908,7 +2058,7 @@ mod tests {
                 data_size_bytes: 128,
                 produced_values: vec![],
                 consumed_values: vec![],
-                dominant_op: String::new(),
+                dominant_op: "ADD".to_string(),
                 target_legality: None,
             },
             ComputeNode {
@@ -1920,7 +2070,7 @@ mod tests {
                 data_size_bytes: 8,
                 produced_values: vec![],
                 consumed_values: vec![],
-                dominant_op: String::new(),
+                dominant_op: "ADD".to_string(),
                 target_legality: None,
             },
         ];
@@ -1952,7 +2102,7 @@ mod tests {
             },
         ];
 
-        let graph = ComputeGraph { nodes, edges, profitability: None };
+        let graph = ComputeGraph { profitability: None, nodes, edges };
 
         let recs = vec![
             TargetRecommendation {
@@ -2025,7 +2175,7 @@ mod tests {
                 data_size_bytes: 4096,
                 produced_values: vec![],
                 consumed_values: vec![],
-                dominant_op: String::new(),
+                dominant_op: "ADD".to_string(),
                 target_legality: None,
             },
             ComputeNode {
@@ -2037,7 +2187,7 @@ mod tests {
                 data_size_bytes: 16384,
                 produced_values: vec![],
                 consumed_values: vec![],
-                dominant_op: String::new(),
+                dominant_op: "GEMM".to_string(),
                 target_legality: None,
             },
             ComputeNode {
@@ -2049,15 +2199,15 @@ mod tests {
                 data_size_bytes: 8,
                 produced_values: vec![],
                 consumed_values: vec![],
-                dominant_op: String::new(),
+                dominant_op: "ADD".to_string(),
                 target_legality: None,
             },
         ];
 
         let graph = ComputeGraph {
+            profitability: None,
             nodes,
             edges: vec![],
-            profitability: None,
         };
 
         let recs = vec![
@@ -2134,7 +2284,7 @@ mod tests {
                 data_size_bytes: 8,
                 produced_values: vec![],
                 consumed_values: vec![],
-                dominant_op: String::new(),
+                dominant_op: "ADD".to_string(),
                 target_legality: None,
             },
             ComputeNode {
@@ -2146,7 +2296,7 @@ mod tests {
                 data_size_bytes: 8,
                 produced_values: vec![],
                 consumed_values: vec![],
-                dominant_op: String::new(),
+                dominant_op: "ADD".to_string(),
                 target_legality: None,
             },
         ];
@@ -2158,7 +2308,7 @@ mod tests {
             transfer_cost: TransferCost::zero(),
         }];
 
-        let graph = ComputeGraph { nodes, edges, profitability: None };
+        let graph = ComputeGraph { profitability: None, nodes, edges };
 
         let recs = vec![
             TargetRecommendation {
@@ -2212,7 +2362,7 @@ mod tests {
                 data_size_bytes: 8,
                 produced_values: vec![],
                 consumed_values: vec![],
-                dominant_op: String::new(),
+                dominant_op: "ADD".to_string(),
                 target_legality: None,
             },
             ComputeNode {
@@ -2224,7 +2374,7 @@ mod tests {
                 data_size_bytes: 4096,
                 produced_values: vec![],
                 consumed_values: vec![],
-                dominant_op: String::new(),
+                dominant_op: "ADD".to_string(),
                 target_legality: None,
             },
         ];
@@ -2236,7 +2386,7 @@ mod tests {
             transfer_cost: TransferCost::zero(),
         }];
 
-        let graph = ComputeGraph { nodes, edges, profitability: None };
+        let graph = ComputeGraph { profitability: None, nodes, edges };
 
         // Manually construct plan without transfer.
         let mut assignment = HashMap::new();
@@ -2274,5 +2424,340 @@ mod tests {
 
         // Total violations should be at least 2.
         assert!(report.total_violations() >= 2);
+    }
+
+    // ===================================================================
+    // Profitability-aware dispatch plan generation tests
+    // ===================================================================
+
+    // -----------------------------------------------------------------------
+    // Test P1: Profitability-aware plan from graph without profitability
+    //          analyzer falls back to cheapest legal target
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_profitability_aware_plan_no_analyzer_falls_back() {
+        let (graph, _recs) = scalar_graph();
+        // graph has no profitability analyzer set.
+        assert!(!graph.has_profitability());
+
+        let plan = generate_profitability_aware_dispatch_plan(&graph);
+        assert_eq!(plan.count_launches(), 1);
+        assert_eq!(plan.count_fallbacks(), 0);
+        assert!(validate_dispatch_plan(&graph, &plan).is_ok());
+
+        // Should assign CpuScalar (cheapest/only target).
+        assert_eq!(
+            plan.assignment.get(&ComputeNodeId(0)).copied(),
+            Some(ComputeTarget::CpuScalar)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test P2: Profitability-aware plan from NEON graph without profitability
+    //          picks CpuSimd as cheapest
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_profitability_aware_plan_neon_no_analyzer() {
+        let (graph, _recs) = neon_graph();
+        assert!(!graph.has_profitability());
+
+        let plan = generate_profitability_aware_dispatch_plan(&graph);
+        assert_eq!(plan.count_launches(), 1);
+        assert!(validate_dispatch_plan(&graph, &plan).is_ok());
+
+        // NEON is cheaper (10 cycles) than scalar (40 cycles).
+        assert_eq!(
+            plan.assignment.get(&ComputeNodeId(0)).copied(),
+            Some(ComputeTarget::CpuSimd)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test P3: Profitability-aware plan from GPU graph without profitability
+    //          picks GPU as cheapest
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_profitability_aware_plan_gpu_no_analyzer() {
+        let (graph, _recs) = gpu_graph();
+        assert!(!graph.has_profitability());
+
+        let plan = generate_profitability_aware_dispatch_plan(&graph);
+        assert_eq!(plan.count_launches(), 2);
+        assert!(plan.count_transfers() >= 1, "should have CPU->GPU transfer");
+        assert!(validate_dispatch_plan(&graph, &plan).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test P4: Profitability-aware plan from mixed graph generates valid plan
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_profitability_aware_plan_mixed_graph_valid() {
+        let (graph, _recs) = mixed_graph();
+        let plan = generate_profitability_aware_dispatch_plan(&graph);
+
+        // All three nodes should have a launch.
+        assert_eq!(plan.count_launches(), 3);
+        // Cross-target edges: CPU->GPU and GPU->CPU.
+        assert_eq!(plan.count_transfers(), 2);
+        // GPU sync before CPU readback.
+        assert!(plan.count_syncs() >= 1);
+
+        assert!(validate_dispatch_plan(&graph, &plan).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test P5: validate_profitability_compliance passes when no analyzer
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_profitability_compliance_no_analyzer_always_ok() {
+        let (graph, recs) = gpu_graph();
+        assert!(!graph.has_profitability());
+
+        // Generate a plan with explicit recs (could be anything).
+        let plan = generate_dispatch_plan(&graph, &recs);
+
+        // Without profitability analyzer, compliance always passes.
+        assert!(validate_profitability_compliance(&graph, &plan).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test P6: validate_profitability_compliance detects mismatch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_profitability_compliance_detects_mismatch() {
+        use llvm2_ir::cost_model::{CostModelGen, ProfitabilityAnalyzer};
+
+        // Build a simple graph with profitability analyzer.
+        let mut graph = ComputeGraph::new();
+        graph.set_profitability(ProfitabilityAnalyzer::new(CostModelGen::M1));
+
+        let mut costs = HashMap::new();
+        costs.insert(ComputeTarget::CpuScalar, ComputeCost {
+            latency_cycles: 10,
+            throughput_ops_per_kcycle: 1000,
+        });
+        costs.insert(ComputeTarget::CpuSimd, ComputeCost {
+            latency_cycles: 5,
+            throughput_ops_per_kcycle: 4000,
+        });
+
+        graph.nodes.push(ComputeNode {
+            id: ComputeNodeId(0),
+            instructions: vec![],
+            costs,
+            legal_targets: vec![ComputeTarget::CpuScalar, ComputeTarget::CpuSimd],
+            kind: NodeKind::DataParallel,
+            data_size_bytes: 128,
+            produced_values: vec![],
+            consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
+            target_legality: None,
+        });
+
+        // Get what profitability would recommend.
+        let recs = graph.target_recommendations();
+        let expected_target = recs[0].recommended_target;
+
+        // Build a plan that assigns a DIFFERENT target than recommended.
+        let wrong_target = if expected_target == ComputeTarget::CpuScalar {
+            ComputeTarget::CpuSimd
+        } else {
+            ComputeTarget::CpuScalar
+        };
+
+        let mut assignment = HashMap::new();
+        assignment.insert(ComputeNodeId(0), wrong_target);
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: wrong_target,
+                    node_id: ComputeNodeId(0),
+                    estimated_cycles: 10,
+                },
+            ],
+            assignment,
+            estimated_total_cycles: 10,
+        };
+
+        let result = validate_profitability_compliance(&graph, &plan);
+        assert!(result.is_err());
+        let mismatches = result.unwrap_err();
+        assert_eq!(mismatches.len(), 1);
+        assert_eq!(mismatches[0].node_id, ComputeNodeId(0));
+        assert_eq!(mismatches[0].dispatched_target, wrong_target);
+        assert_eq!(mismatches[0].recommended_target, expected_target);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test P7: validate_profitability_compliance passes for matching plan
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_profitability_compliance_matching_plan_ok() {
+        use llvm2_ir::cost_model::{CostModelGen, ProfitabilityAnalyzer};
+
+        let mut graph = ComputeGraph::new();
+        graph.set_profitability(ProfitabilityAnalyzer::new(CostModelGen::M1));
+
+        let mut costs = HashMap::new();
+        costs.insert(ComputeTarget::CpuScalar, ComputeCost {
+            latency_cycles: 10,
+            throughput_ops_per_kcycle: 1000,
+        });
+
+        graph.nodes.push(ComputeNode {
+            id: ComputeNodeId(0),
+            instructions: vec![],
+            costs,
+            legal_targets: vec![ComputeTarget::CpuScalar],
+            kind: NodeKind::Scalar,
+            data_size_bytes: 8,
+            produced_values: vec![],
+            consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
+            target_legality: None,
+        });
+
+        // Generate plan using profitability-aware function.
+        let plan = generate_profitability_aware_dispatch_plan(&graph);
+
+        // Compliance should pass since the plan was generated from recommendations.
+        assert!(validate_profitability_compliance(&graph, &plan).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test P8: VerificationReport includes profitability check
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verification_report_includes_profitability() {
+        let (graph, recs) = scalar_graph();
+        let plan = generate_dispatch_plan(&graph, &recs);
+
+        let report = verify_dispatch_plan_properties(&graph, &plan);
+        // No profitability analyzer -> profitability_ok is true.
+        assert!(report.profitability_ok);
+        assert!(report.profitability_mismatches.is_empty());
+        assert!(report.all_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test P9: VerificationReport display includes profitability line
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verification_report_display_profitability() {
+        let (graph, recs) = mixed_graph();
+        let plan = generate_dispatch_plan(&graph, &recs);
+
+        let report = verify_dispatch_plan_properties(&graph, &plan);
+        let display = format!("{}", report);
+        assert!(display.contains("Profitability: PASS"), "Report should contain Profitability line");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test P10: Empty graph profitability-aware plan is empty
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_profitability_aware_plan_empty_graph() {
+        let graph = ComputeGraph::new();
+        let plan = generate_profitability_aware_dispatch_plan(&graph);
+        assert!(plan.is_empty());
+        assert_eq!(plan.estimated_total_cycles, 0);
+        assert!(validate_dispatch_plan(&graph, &plan).is_ok());
+        assert!(validate_profitability_compliance(&graph, &plan).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test P11: DispatchError::ProfitabilityMismatch display
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_profitability_mismatch_error_display() {
+        let err = DispatchError::ProfitabilityMismatch {
+            node_id: ComputeNodeId(3),
+            dispatched_target: ComputeTarget::Gpu,
+            recommended_target: ComputeTarget::CpuScalar,
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("node_3"));
+        assert!(display.contains("GPU (Metal)"));
+        assert!(display.contains("CPU (scalar)"));
+        assert!(display.contains("profitability"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test P12: Profitability mismatch in VerificationReport increases
+    //           total_violations count
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_profitability_mismatch_counted_in_total_violations() {
+        use llvm2_ir::cost_model::{CostModelGen, ProfitabilityAnalyzer};
+
+        let mut graph = ComputeGraph::new();
+        graph.set_profitability(ProfitabilityAnalyzer::new(CostModelGen::M1));
+
+        let mut costs = HashMap::new();
+        costs.insert(ComputeTarget::CpuScalar, ComputeCost {
+            latency_cycles: 10,
+            throughput_ops_per_kcycle: 1000,
+        });
+        costs.insert(ComputeTarget::CpuSimd, ComputeCost {
+            latency_cycles: 5,
+            throughput_ops_per_kcycle: 4000,
+        });
+
+        graph.nodes.push(ComputeNode {
+            id: ComputeNodeId(0),
+            instructions: vec![],
+            costs,
+            legal_targets: vec![ComputeTarget::CpuScalar, ComputeTarget::CpuSimd],
+            kind: NodeKind::DataParallel,
+            data_size_bytes: 128,
+            produced_values: vec![],
+            consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
+            target_legality: None,
+        });
+
+        // Get the recommended target and assign the opposite.
+        let recs = graph.target_recommendations();
+        let expected = recs[0].recommended_target;
+        let wrong = if expected == ComputeTarget::CpuScalar {
+            ComputeTarget::CpuSimd
+        } else {
+            ComputeTarget::CpuScalar
+        };
+
+        let mut assignment = HashMap::new();
+        assignment.insert(ComputeNodeId(0), wrong);
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: wrong,
+                    node_id: ComputeNodeId(0),
+                    estimated_cycles: 10,
+                },
+            ],
+            assignment,
+            estimated_total_cycles: 10,
+        };
+
+        let report = verify_dispatch_plan_properties(&graph, &plan);
+        assert!(!report.profitability_ok);
+        assert!(!report.profitability_mismatches.is_empty());
+        assert!(!report.all_ok());
+        // total_violations should include profitability mismatches.
+        assert!(report.total_violations() >= 1);
     }
 }

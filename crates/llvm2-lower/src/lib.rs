@@ -30,6 +30,7 @@ pub use adapter::{
 pub use target_analysis::{ComputeTarget, ProofAnalyzer, SubgraphProof, TargetLegality};
 pub use compute_graph::TargetRecommendation;
 pub use dispatch::{
-    DispatchPlan, DispatchOp, DispatchError, VerificationReport,
-    generate_dispatch_plan, validate_dispatch_plan, verify_dispatch_plan_properties,
+    DispatchPlan, DispatchOp, DispatchError, VerificationReport, ProfitabilityMismatch,
+    generate_dispatch_plan, generate_profitability_aware_dispatch_plan,
+    validate_dispatch_plan, validate_profitability_compliance, verify_dispatch_plan_properties,
 };

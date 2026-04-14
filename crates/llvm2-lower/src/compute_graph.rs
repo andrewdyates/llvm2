@@ -258,6 +258,11 @@ impl ComputeGraph {
         self.profitability = Some(analyzer);
     }
 
+    /// Returns true if this graph has a profitability analyzer attached.
+    pub fn has_profitability(&self) -> bool {
+        self.profitability.is_some()
+    }
+
     /// Get a node by ID.
     pub fn node(&self, id: ComputeNodeId) -> Option<&ComputeNode> {
         self.nodes.iter().find(|n| n.id == id)
