@@ -1619,12 +1619,14 @@ mod tests {
             data_size_bytes: 4096,
             produced_values: vec![],
             consumed_values: vec![],
+            dominant_op: String::new(),
             target_legality: None,
         };
 
         let graph = ComputeGraph {
             nodes: vec![node],
             edges: vec![],
+            profitability: None,
         };
 
         let recs = vec![TargetRecommendation {
@@ -1882,6 +1884,7 @@ mod tests {
                 data_size_bytes: 8,
                 produced_values: vec![],
                 consumed_values: vec![],
+                dominant_op: String::new(),
                 target_legality: None,
             },
             ComputeNode {
@@ -1893,6 +1896,7 @@ mod tests {
                 data_size_bytes: 4096,
                 produced_values: vec![],
                 consumed_values: vec![],
+                dominant_op: String::new(),
                 target_legality: None,
             },
             ComputeNode {
@@ -1904,6 +1908,7 @@ mod tests {
                 data_size_bytes: 128,
                 produced_values: vec![],
                 consumed_values: vec![],
+                dominant_op: String::new(),
                 target_legality: None,
             },
             ComputeNode {
@@ -1915,6 +1920,7 @@ mod tests {
                 data_size_bytes: 8,
                 produced_values: vec![],
                 consumed_values: vec![],
+                dominant_op: String::new(),
                 target_legality: None,
             },
         ];
@@ -1946,7 +1952,7 @@ mod tests {
             },
         ];
 
-        let graph = ComputeGraph { nodes, edges };
+        let graph = ComputeGraph { nodes, edges, profitability: None };
 
         let recs = vec![
             TargetRecommendation {
@@ -2019,6 +2025,7 @@ mod tests {
                 data_size_bytes: 4096,
                 produced_values: vec![],
                 consumed_values: vec![],
+                dominant_op: String::new(),
                 target_legality: None,
             },
             ComputeNode {
@@ -2030,6 +2037,7 @@ mod tests {
                 data_size_bytes: 16384,
                 produced_values: vec![],
                 consumed_values: vec![],
+                dominant_op: String::new(),
                 target_legality: None,
             },
             ComputeNode {
@@ -2041,6 +2049,7 @@ mod tests {
                 data_size_bytes: 8,
                 produced_values: vec![],
                 consumed_values: vec![],
+                dominant_op: String::new(),
                 target_legality: None,
             },
         ];
@@ -2048,6 +2057,7 @@ mod tests {
         let graph = ComputeGraph {
             nodes,
             edges: vec![],
+            profitability: None,
         };
 
         let recs = vec![
@@ -2124,6 +2134,7 @@ mod tests {
                 data_size_bytes: 8,
                 produced_values: vec![],
                 consumed_values: vec![],
+                dominant_op: String::new(),
                 target_legality: None,
             },
             ComputeNode {
@@ -2135,6 +2146,7 @@ mod tests {
                 data_size_bytes: 8,
                 produced_values: vec![],
                 consumed_values: vec![],
+                dominant_op: String::new(),
                 target_legality: None,
             },
         ];
@@ -2146,7 +2158,7 @@ mod tests {
             transfer_cost: TransferCost::zero(),
         }];
 
-        let graph = ComputeGraph { nodes, edges };
+        let graph = ComputeGraph { nodes, edges, profitability: None };
 
         let recs = vec![
             TargetRecommendation {
@@ -2200,6 +2212,7 @@ mod tests {
                 data_size_bytes: 8,
                 produced_values: vec![],
                 consumed_values: vec![],
+                dominant_op: String::new(),
                 target_legality: None,
             },
             ComputeNode {
@@ -2211,6 +2224,7 @@ mod tests {
                 data_size_bytes: 4096,
                 produced_values: vec![],
                 consumed_values: vec![],
+                dominant_op: String::new(),
                 target_legality: None,
             },
         ];
@@ -2222,7 +2236,7 @@ mod tests {
             transfer_cost: TransferCost::zero(),
         }];
 
-        let graph = ComputeGraph { nodes, edges };
+        let graph = ComputeGraph { nodes, edges, profitability: None };
 
         // Manually construct plan without transfer.
         let mut assignment = HashMap::new();
