@@ -828,6 +828,12 @@ impl SmtExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EvalResult {
     Bv(u64),
+    /// Wide bitvector (65-128 bits). Used for 128-bit NEON vector intermediates.
+    ///
+    /// NEON operations produce 128-bit results via `Concat`. The lane-extraction
+    /// pattern (`Extract` after `Concat`) reduces back to <= 64 bits for final
+    /// comparison. `Bv128` exists to carry the intermediate without overflow.
+    Bv128(u128),
     Bool(bool),
     /// Floating-point value stored as f64 (sufficient for FP16/FP32/FP64).
     Float(f64),
@@ -845,9 +851,21 @@ impl EvalResult {
     pub fn as_u64(self) -> u64 {
         match self {
             EvalResult::Bv(v) => v,
+            EvalResult::Bv128(v) => v as u64,
             EvalResult::Bool(b) => b as u64,
             EvalResult::Float(f) => f.to_bits(),
             EvalResult::Array { .. } => 0, // arrays don't have a scalar representation
+        }
+    }
+
+    /// Convert to u128. `Bv` values are zero-extended.
+    pub fn as_u128(self) -> u128 {
+        match self {
+            EvalResult::Bv(v) => v as u128,
+            EvalResult::Bv128(v) => v,
+            EvalResult::Bool(b) => b as u128,
+            EvalResult::Float(f) => f.to_bits() as u128,
+            EvalResult::Array { .. } => 0,
         }
     }
 
@@ -855,6 +873,7 @@ impl EvalResult {
         match self {
             EvalResult::Bool(b) => b,
             EvalResult::Bv(v) => v != 0,
+            EvalResult::Bv128(v) => v != 0,
             EvalResult::Float(f) => f != 0.0,
             EvalResult::Array { .. } => false,
         }
@@ -864,6 +883,7 @@ impl EvalResult {
         match self {
             EvalResult::Float(f) => *f,
             EvalResult::Bv(v) => *v as f64,
+            EvalResult::Bv128(v) => *v as f64,
             EvalResult::Bool(b) => if *b { 1.0 } else { 0.0 },
             EvalResult::Array { .. } => 0.0,
         }
@@ -876,6 +896,15 @@ pub fn mask(value: u64, width: u32) -> u64 {
         value
     } else {
         value & ((1u64 << width) - 1)
+    }
+}
+
+/// Mask a 128-bit value to the given bitvector width.
+fn mask128(value: u128, width: u32) -> u128 {
+    if width >= 128 {
+        value
+    } else {
+        value & ((1u128 << width) - 1)
     }
 }
 
@@ -951,19 +980,37 @@ impl SmtExpr {
                 }
             }
             SmtExpr::BvAnd { lhs, rhs, width } => {
-                let a = lhs.try_eval(env)?.as_u64();
-                let b = rhs.try_eval(env)?.as_u64();
-                Ok(EvalResult::Bv(mask(a & b, *width)))
+                if *width > 64 {
+                    let a = lhs.try_eval(env)?.as_u128();
+                    let b = rhs.try_eval(env)?.as_u128();
+                    Ok(EvalResult::Bv128(mask128(a & b, *width)))
+                } else {
+                    let a = lhs.try_eval(env)?.as_u64();
+                    let b = rhs.try_eval(env)?.as_u64();
+                    Ok(EvalResult::Bv(mask(a & b, *width)))
+                }
             }
             SmtExpr::BvOr { lhs, rhs, width } => {
-                let a = lhs.try_eval(env)?.as_u64();
-                let b = rhs.try_eval(env)?.as_u64();
-                Ok(EvalResult::Bv(mask(a | b, *width)))
+                if *width > 64 {
+                    let a = lhs.try_eval(env)?.as_u128();
+                    let b = rhs.try_eval(env)?.as_u128();
+                    Ok(EvalResult::Bv128(mask128(a | b, *width)))
+                } else {
+                    let a = lhs.try_eval(env)?.as_u64();
+                    let b = rhs.try_eval(env)?.as_u64();
+                    Ok(EvalResult::Bv(mask(a | b, *width)))
+                }
             }
             SmtExpr::BvXor { lhs, rhs, width } => {
-                let a = lhs.try_eval(env)?.as_u64();
-                let b = rhs.try_eval(env)?.as_u64();
-                Ok(EvalResult::Bv(mask(a ^ b, *width)))
+                if *width > 64 {
+                    let a = lhs.try_eval(env)?.as_u128();
+                    let b = rhs.try_eval(env)?.as_u128();
+                    Ok(EvalResult::Bv128(mask128(a ^ b, *width)))
+                } else {
+                    let a = lhs.try_eval(env)?.as_u64();
+                    let b = rhs.try_eval(env)?.as_u64();
+                    Ok(EvalResult::Bv(mask(a ^ b, *width)))
+                }
             }
             SmtExpr::BvShl { lhs, rhs, width } => {
                 let a = lhs.try_eval(env)?.as_u64();
@@ -1066,18 +1113,24 @@ impl SmtExpr {
                 }
             }
             SmtExpr::Extract { high, low, operand, width } => {
-                let v = operand.try_eval(env)?.as_u64();
-                let extracted = (v >> low) & ((1u64 << width) - 1);
+                // Use u128 for extraction to handle wide intermediates (e.g., 128-bit NEON vectors).
+                let v = operand.try_eval(env)?.as_u128();
+                let extracted = (v >> low) & mask128(u128::MAX, *width);
                 let _ = high; // used in width calculation
-                Ok(EvalResult::Bv(extracted))
+                // Result always fits in u64 since extract width <= 64 for valid NEON lanes.
+                Ok(EvalResult::Bv(extracted as u64))
             }
-            SmtExpr::Concat { hi, lo, .. } => {
-                let hi_val = hi.try_eval(env)?.as_u64();
-                let lo_val = lo.try_eval(env)?.as_u64();
+            SmtExpr::Concat { hi, lo, width } => {
+                let hi_val = hi.try_eval(env)?.as_u128();
+                let lo_val = lo.try_eval(env)?.as_u128();
                 let lo_width = lo.bv_width();
-                // Place hi bits above lo bits.
-                let result = (hi_val << lo_width) | lo_val;
-                Ok(EvalResult::Bv(result))
+                // Place hi bits above lo bits using u128 to avoid overflow.
+                let result = mask128((hi_val << lo_width) | lo_val, *width);
+                if *width <= 64 {
+                    Ok(EvalResult::Bv(result as u64))
+                } else {
+                    Ok(EvalResult::Bv128(result))
+                }
             }
             SmtExpr::ZeroExtend { operand, .. } => {
                 // Value is already stored in u64 with upper bits zero.

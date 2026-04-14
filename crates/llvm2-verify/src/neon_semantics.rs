@@ -137,7 +137,15 @@ pub fn encode_neon_bic(vn: &SmtExpr, vm: &SmtExpr) -> SmtExpr {
     // BIC = AND with complement of second operand.
     // Since we don't have a BvNot, we XOR with all-ones then AND.
     let width = vm.bv_width();
-    let all_ones = SmtExpr::bv_const(if width >= 64 { u64::MAX } else { (1u64 << width) - 1 }, width);
+    let all_ones = if width <= 64 {
+        SmtExpr::bv_const(if width >= 64 { u64::MAX } else { (1u64 << width) - 1 }, width)
+    } else {
+        // For > 64-bit widths (e.g., 128-bit NEON), build all-ones via concat.
+        let lo = SmtExpr::bv_const(u64::MAX, 64);
+        let hi_width = width - 64;
+        let hi = SmtExpr::bv_const(if hi_width >= 64 { u64::MAX } else { (1u64 << hi_width) - 1 }, hi_width);
+        hi.concat(lo)
+    };
     let not_vm = vm.clone().bvxor(all_ones);
     vn.clone().bvand(not_vm)
 }
@@ -222,8 +230,14 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // Helper: pack lanes into a vector value for testing.
-    // We can only test 64-bit total vectors (S2, H4, B8) using the u64 evaluator.
-    // 128-bit vectors (S4, H8, B16, D2) would need u128 support in the evaluator.
+    //
+    // 64-bit vectors (S2, H4, B8) pack into a single u64 and can be tested
+    // directly via `EvalResult::Bv(u64)`.
+    //
+    // 128-bit vectors (S4, H8, B16, D2) exceed the u64 evaluator range.
+    // We test them by extracting individual lanes from the result expression
+    // before evaluation -- each lane fits in u64. The helper `assert_lane`
+    // encapsulates this pattern.
     // -----------------------------------------------------------------------
 
     /// Pack two 32-bit values into a 64-bit vector (S2 arrangement).
@@ -247,6 +261,72 @@ mod tests {
             | (l2 as u64) << 16
             | (l1 as u64) << 8
             | (l0 as u64)
+    }
+
+    // -----------------------------------------------------------------------
+    // 128-bit test helpers
+    //
+    // Since EvalResult::Bv stores u64, we cannot evaluate full 128-bit vectors
+    // directly. Instead, we extract each lane from the result *symbolically*
+    // (producing a sub-64-bit expression), then evaluate that lane.
+    //
+    // This is architecturally faithful: NEON ops are defined per-lane, so
+    // verifying each lane independently is a valid correctness strategy.
+    // -----------------------------------------------------------------------
+
+    use crate::smt::lane_extract;
+
+    /// Assert that a specific lane of a 128-bit result expression evaluates
+    /// to the expected value.
+    fn assert_lane(
+        result_expr: &SmtExpr,
+        arrangement: VectorArrangement,
+        lane_idx: u32,
+        expected: u64,
+        env: &HashMap<String, u64>,
+    ) {
+        let lane_expr = lane_extract(result_expr, arrangement, lane_idx);
+        let actual = lane_expr.eval(env);
+        assert_eq!(
+            actual,
+            EvalResult::Bv(expected),
+            "lane {} mismatch: expected 0x{:X}, got {:?}",
+            lane_idx, expected, actual
+        );
+    }
+
+    /// Assert all lanes of a 128-bit result match expected values.
+    fn assert_all_lanes(
+        result_expr: &SmtExpr,
+        arrangement: VectorArrangement,
+        expected_lanes: &[u64],
+        env: &HashMap<String, u64>,
+    ) {
+        assert_eq!(
+            expected_lanes.len() as u32,
+            arrangement.lane_count(),
+            "wrong number of expected lanes"
+        );
+        for (i, &expected) in expected_lanes.iter().enumerate() {
+            assert_lane(result_expr, arrangement, i as u32, expected, env);
+        }
+    }
+
+    /// Build a 128-bit vector from two 64-bit halves (lo, hi).
+    ///
+    /// The input variables are named `{prefix}_lo` (bits [63:0]) and
+    /// `{prefix}_hi` (bits [127:64]). Returns the concatenated expression
+    /// and the environment entries to set.
+    fn var_128(prefix: &str) -> SmtExpr {
+        let lo = SmtExpr::var(format!("{}_lo", prefix), 64);
+        let hi = SmtExpr::var(format!("{}_hi", prefix), 64);
+        hi.concat(lo)
+    }
+
+    /// Insert both halves of a 128-bit variable into the environment.
+    fn set_128(env: &mut HashMap<String, u64>, prefix: &str, lo: u64, hi: u64) {
+        env.insert(format!("{}_lo", prefix), lo);
+        env.insert(format!("{}_hi", prefix), hi);
     }
 
     // =======================================================================
@@ -658,6 +738,727 @@ mod tests {
         assert_eq!(
             shifted_back.eval(&e),
             EvalResult::Bv(pack_2s(0x0234ABCD, 0x0FFFFFFF))
+        );
+    }
+
+    // =======================================================================
+    // 128-bit ADD tests (16B, 8H, 4S, 2D)
+    // =======================================================================
+
+    #[test]
+    fn test_neon_add_4s() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_add(VectorArrangement::S4, &vn, &vm);
+
+        let mut e = HashMap::new();
+        // vn = [10, 20, 30, 40] as 4x32-bit
+        // lo 64 bits: lane0=10, lane1=20 => pack_2s(10, 20)
+        // hi 64 bits: lane2=30, lane3=40 => pack_2s(30, 40)
+        set_128(&mut e, "vn", pack_2s(10, 20), pack_2s(30, 40));
+        // vm = [3, 7, 11, 13]
+        set_128(&mut e, "vm", pack_2s(3, 7), pack_2s(11, 13));
+
+        assert_all_lanes(&result, VectorArrangement::S4, &[13, 27, 41, 53], &e);
+    }
+
+    #[test]
+    fn test_neon_add_4s_wrapping() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_add(VectorArrangement::S4, &vn, &vm);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", pack_2s(0xFFFFFFFF, 0x80000000), pack_2s(1, 100));
+        set_128(&mut e, "vm", pack_2s(1, 0x80000000), pack_2s(0xFFFFFFFF, 200));
+
+        // Lane 0: 0xFFFFFFFF + 1 = 0 (wrapping)
+        // Lane 1: 0x80000000 + 0x80000000 = 0 (wrapping)
+        // Lane 2: 1 + 0xFFFFFFFF = 0 (wrapping)
+        // Lane 3: 100 + 200 = 300
+        assert_all_lanes(&result, VectorArrangement::S4, &[0, 0, 0, 300], &e);
+    }
+
+    #[test]
+    fn test_neon_add_8h() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_add(VectorArrangement::H8, &vn, &vm);
+
+        let mut e = HashMap::new();
+        // vn: lanes [1,2,3,4, 5,6,7,8] as 8x16-bit
+        set_128(&mut e, "vn", pack_4h(1, 2, 3, 4), pack_4h(5, 6, 7, 8));
+        // vm: lanes [10,20,30,40, 50,60,70,80]
+        set_128(&mut e, "vm", pack_4h(10, 20, 30, 40), pack_4h(50, 60, 70, 80));
+
+        assert_all_lanes(
+            &result,
+            VectorArrangement::H8,
+            &[11, 22, 33, 44, 55, 66, 77, 88],
+            &e,
+        );
+    }
+
+    #[test]
+    fn test_neon_add_16b() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_add(VectorArrangement::B16, &vn, &vm);
+
+        let mut e = HashMap::new();
+        set_128(
+            &mut e,
+            "vn",
+            pack_8b(1, 2, 3, 4, 5, 6, 7, 8),
+            pack_8b(9, 10, 11, 12, 13, 14, 15, 16),
+        );
+        set_128(
+            &mut e,
+            "vm",
+            pack_8b(10, 20, 30, 40, 50, 60, 70, 80),
+            pack_8b(90, 100, 110, 120, 130, 140, 150, 160),
+        );
+
+        assert_all_lanes(
+            &result,
+            VectorArrangement::B16,
+            &[11, 22, 33, 44, 55, 66, 77, 88, 99, 110, 121, 132, 143, 154, 165, 176],
+            &e,
+        );
+    }
+
+    #[test]
+    fn test_neon_add_16b_wrapping() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_add(VectorArrangement::B16, &vn, &vm);
+
+        let mut e = HashMap::new();
+        set_128(
+            &mut e,
+            "vn",
+            pack_8b(0xFF, 200, 0, 0, 0, 0, 0, 0),
+            pack_8b(0xFF, 0, 0, 0, 0, 0, 0, 0),
+        );
+        set_128(
+            &mut e,
+            "vm",
+            pack_8b(1, 100, 0, 0, 0, 0, 0, 0),
+            pack_8b(2, 0, 0, 0, 0, 0, 0, 0),
+        );
+
+        // Lane 0: 0xFF + 1 = 0x00 (wrapping)
+        // Lane 1: 200 + 100 = 300 & 0xFF = 44
+        // Lane 8: 0xFF + 2 = 0x01 (wrapping)
+        assert_lane(&result, VectorArrangement::B16, 0, 0x00, &e);
+        assert_lane(&result, VectorArrangement::B16, 1, 44, &e);
+        assert_lane(&result, VectorArrangement::B16, 8, 0x01, &e);
+    }
+
+    #[test]
+    fn test_neon_add_2d() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_add(VectorArrangement::D2, &vn, &vm);
+
+        let mut e = HashMap::new();
+        // 2D: lane0 = bits[63:0] = lo, lane1 = bits[127:64] = hi
+        set_128(&mut e, "vn", 100, 200);
+        set_128(&mut e, "vm", 30, 50);
+
+        assert_all_lanes(&result, VectorArrangement::D2, &[130, 250], &e);
+    }
+
+    // =======================================================================
+    // 128-bit SUB tests
+    // =======================================================================
+
+    #[test]
+    fn test_neon_sub_4s() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_sub(VectorArrangement::S4, &vn, &vm);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", pack_2s(100, 200), pack_2s(300, 400));
+        set_128(&mut e, "vm", pack_2s(10, 20), pack_2s(30, 40));
+
+        assert_all_lanes(&result, VectorArrangement::S4, &[90, 180, 270, 360], &e);
+    }
+
+    #[test]
+    fn test_neon_sub_8h() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_sub(VectorArrangement::H8, &vn, &vm);
+
+        let mut e = HashMap::new();
+        set_128(
+            &mut e,
+            "vn",
+            pack_4h(100, 200, 300, 400),
+            pack_4h(500, 600, 700, 800),
+        );
+        set_128(
+            &mut e,
+            "vm",
+            pack_4h(10, 20, 30, 40),
+            pack_4h(50, 60, 70, 80),
+        );
+
+        assert_all_lanes(
+            &result,
+            VectorArrangement::H8,
+            &[90, 180, 270, 360, 450, 540, 630, 720],
+            &e,
+        );
+    }
+
+    #[test]
+    fn test_neon_sub_16b() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_sub(VectorArrangement::B16, &vn, &vm);
+
+        let mut e = HashMap::new();
+        set_128(
+            &mut e,
+            "vn",
+            pack_8b(50, 100, 150, 200, 10, 20, 30, 40),
+            pack_8b(50, 100, 150, 200, 10, 20, 30, 40),
+        );
+        set_128(
+            &mut e,
+            "vm",
+            pack_8b(10, 20, 30, 40, 5, 10, 15, 20),
+            pack_8b(10, 20, 30, 40, 5, 10, 15, 20),
+        );
+
+        assert_all_lanes(
+            &result,
+            VectorArrangement::B16,
+            &[40, 80, 120, 160, 5, 10, 15, 20, 40, 80, 120, 160, 5, 10, 15, 20],
+            &e,
+        );
+    }
+
+    #[test]
+    fn test_neon_sub_2d() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_sub(VectorArrangement::D2, &vn, &vm);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", 1000, 2000);
+        set_128(&mut e, "vm", 300, 500);
+
+        assert_all_lanes(&result, VectorArrangement::D2, &[700, 1500], &e);
+    }
+
+    // =======================================================================
+    // 128-bit MUL tests (no D2 -- MUL does not support 2D)
+    // =======================================================================
+
+    #[test]
+    fn test_neon_mul_4s() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_mul(VectorArrangement::S4, &vn, &vm);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", pack_2s(6, 7), pack_2s(8, 9));
+        set_128(&mut e, "vm", pack_2s(7, 6), pack_2s(5, 4));
+
+        assert_all_lanes(&result, VectorArrangement::S4, &[42, 42, 40, 36], &e);
+    }
+
+    #[test]
+    fn test_neon_mul_8h() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_mul(VectorArrangement::H8, &vn, &vm);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", pack_4h(2, 3, 4, 5), pack_4h(6, 7, 8, 9));
+        set_128(&mut e, "vm", pack_4h(10, 10, 10, 10), pack_4h(10, 10, 10, 10));
+
+        assert_all_lanes(
+            &result,
+            VectorArrangement::H8,
+            &[20, 30, 40, 50, 60, 70, 80, 90],
+            &e,
+        );
+    }
+
+    #[test]
+    fn test_neon_mul_16b() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_mul(VectorArrangement::B16, &vn, &vm);
+
+        let mut e = HashMap::new();
+        set_128(
+            &mut e,
+            "vn",
+            pack_8b(7, 15, 3, 2, 0, 0, 0, 0),
+            pack_8b(5, 10, 4, 0, 0, 0, 0, 0),
+        );
+        set_128(
+            &mut e,
+            "vm",
+            pack_8b(6, 17, 5, 3, 0, 0, 0, 0),
+            pack_8b(8, 10, 3, 0, 0, 0, 0, 0),
+        );
+
+        // lane 0: 7*6=42, lane 1: 15*17=255, lane 2: 3*5=15, lane 3: 2*3=6
+        // lane 8: 5*8=40, lane 9: 10*10=100, lane 10: 4*3=12, lane 11: 0*0=0
+        assert_lane(&result, VectorArrangement::B16, 0, 42, &e);
+        assert_lane(&result, VectorArrangement::B16, 1, 255, &e);
+        assert_lane(&result, VectorArrangement::B16, 2, 15, &e);
+        assert_lane(&result, VectorArrangement::B16, 3, 6, &e);
+        assert_lane(&result, VectorArrangement::B16, 8, 40, &e);
+        assert_lane(&result, VectorArrangement::B16, 9, 100, &e);
+        assert_lane(&result, VectorArrangement::B16, 10, 12, &e);
+    }
+
+    #[test]
+    fn test_neon_mul_4s_wrapping() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_mul(VectorArrangement::S4, &vn, &vm);
+
+        let mut e = HashMap::new();
+        // 0x80000000 * 2 = 0x100000000 => wraps to 0x00000000
+        set_128(&mut e, "vn", pack_2s(0x80000000, 1), pack_2s(100, 0));
+        set_128(&mut e, "vm", pack_2s(2, 1), pack_2s(200, 0));
+
+        assert_lane(&result, VectorArrangement::S4, 0, 0, &e);
+        assert_lane(&result, VectorArrangement::S4, 1, 1, &e);
+        assert_lane(&result, VectorArrangement::S4, 2, 20000, &e);
+        assert_lane(&result, VectorArrangement::S4, 3, 0, &e);
+    }
+
+    // =======================================================================
+    // 128-bit NEG tests
+    // =======================================================================
+
+    #[test]
+    fn test_neon_neg_4s() {
+        let vn = var_128("vn");
+        let result = encode_neon_neg(VectorArrangement::S4, &vn);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", pack_2s(1, 0), pack_2s(100, 0xFFFFFFFF));
+
+        // neg(1) = 0xFFFFFFFF, neg(0) = 0, neg(100) = 0xFFFFFF9C, neg(0xFFFFFFFF) = 1
+        assert_all_lanes(
+            &result,
+            VectorArrangement::S4,
+            &[0xFFFFFFFF, 0, 0xFFFFFF9C, 1],
+            &e,
+        );
+    }
+
+    #[test]
+    fn test_neon_neg_8h() {
+        let vn = var_128("vn");
+        let result = encode_neon_neg(VectorArrangement::H8, &vn);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", pack_4h(1, 2, 0, 100), pack_4h(0xFFFF, 0x8000, 3, 50));
+
+        assert_all_lanes(
+            &result,
+            VectorArrangement::H8,
+            &[0xFFFF, 0xFFFE, 0, 0xFF9C, 1, 0x8000, 0xFFFD, 0xFFCE],
+            &e,
+        );
+    }
+
+    #[test]
+    fn test_neon_neg_16b() {
+        let vn = var_128("vn");
+        let result = encode_neon_neg(VectorArrangement::B16, &vn);
+
+        let mut e = HashMap::new();
+        set_128(
+            &mut e,
+            "vn",
+            pack_8b(1, 0, 0xFF, 0x80, 0, 0, 0, 0),
+            pack_8b(2, 0, 0xFE, 0x7F, 0, 0, 0, 0),
+        );
+
+        // lane 0: neg(1) = 0xFF
+        // lane 1: neg(0) = 0
+        // lane 2: neg(0xFF) = 1
+        // lane 3: neg(0x80) = 0x80
+        // lane 8: neg(2) = 0xFE
+        // lane 10: neg(0xFE) = 2
+        // lane 11: neg(0x7F) = 0x81
+        assert_lane(&result, VectorArrangement::B16, 0, 0xFF, &e);
+        assert_lane(&result, VectorArrangement::B16, 1, 0, &e);
+        assert_lane(&result, VectorArrangement::B16, 2, 1, &e);
+        assert_lane(&result, VectorArrangement::B16, 3, 0x80, &e);
+        assert_lane(&result, VectorArrangement::B16, 8, 0xFE, &e);
+        assert_lane(&result, VectorArrangement::B16, 10, 2, &e);
+        assert_lane(&result, VectorArrangement::B16, 11, 0x81, &e);
+    }
+
+    #[test]
+    fn test_neon_neg_2d() {
+        let vn = var_128("vn");
+        let result = encode_neon_neg(VectorArrangement::D2, &vn);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", 1, 0);
+
+        // neg(1) in 64-bit = 0xFFFFFFFF_FFFFFFFF
+        // neg(0) = 0
+        assert_lane(&result, VectorArrangement::D2, 0, 0xFFFFFFFF_FFFFFFFF, &e);
+        assert_lane(&result, VectorArrangement::D2, 1, 0, &e);
+    }
+
+    // =======================================================================
+    // 128-bit bitwise operation tests (AND, ORR, EOR, BIC)
+    //
+    // Bitwise ops are width-agnostic: they operate on whatever width the
+    // input SmtExpr has. For 128-bit, we construct 128-bit inputs and
+    // verify the result lane-by-lane.
+    // =======================================================================
+
+    #[test]
+    fn test_neon_and_128bit() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_and(&vn, &vm);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", 0xFF00_FF00_FF00_FF00, 0xAAAA_AAAA_AAAA_AAAA);
+        set_128(&mut e, "vm", 0x0F0F_0F0F_0F0F_0F0F, 0xFFFF_0000_FFFF_0000);
+
+        // Verify via D2 lane extraction (64-bit halves)
+        // lo half: 0xFF00_FF00_FF00_FF00 AND 0x0F0F_0F0F_0F0F_0F0F = 0x0F00_0F00_0F00_0F00
+        // hi half: 0xAAAA_AAAA_AAAA_AAAA AND 0xFFFF_0000_FFFF_0000 = 0xAAAA_0000_AAAA_0000
+        assert_lane(&result, VectorArrangement::D2, 0, 0x0F00_0F00_0F00_0F00, &e);
+        assert_lane(&result, VectorArrangement::D2, 1, 0xAAAA_0000_AAAA_0000, &e);
+    }
+
+    #[test]
+    fn test_neon_orr_128bit() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_orr(&vn, &vm);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", 0xFF00_0000_0000_0000, 0x0000_0000_0000_00FF);
+        set_128(&mut e, "vm", 0x00FF_0000_0000_0000, 0x0000_0000_0000_FF00);
+
+        assert_lane(&result, VectorArrangement::D2, 0, 0xFFFF_0000_0000_0000, &e);
+        assert_lane(&result, VectorArrangement::D2, 1, 0x0000_0000_0000_FFFF, &e);
+    }
+
+    #[test]
+    fn test_neon_eor_128bit() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_eor(&vn, &vm);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", 0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555);
+        set_128(&mut e, "vm", 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF);
+
+        assert_lane(&result, VectorArrangement::D2, 0, 0x5555_5555_5555_5555, &e);
+        assert_lane(&result, VectorArrangement::D2, 1, 0xAAAA_AAAA_AAAA_AAAA, &e);
+    }
+
+    #[test]
+    fn test_neon_bic_128bit() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+        let result = encode_neon_bic(&vn, &vm);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF);
+        set_128(&mut e, "vm", 0x0F0F_0F0F_0F0F_0F0F, 0xF0F0_F0F0_F0F0_F0F0);
+
+        // BIC = vn AND NOT(vm)
+        assert_lane(&result, VectorArrangement::D2, 0, 0xF0F0_F0F0_F0F0_F0F0, &e);
+        assert_lane(&result, VectorArrangement::D2, 1, 0x0F0F_0F0F_0F0F_0F0F, &e);
+    }
+
+    // =======================================================================
+    // 128-bit shift tests (SHL, USHR, SSHR)
+    // =======================================================================
+
+    #[test]
+    fn test_neon_shl_4s() {
+        let vn = var_128("vn");
+        let result = encode_neon_shl(VectorArrangement::S4, &vn, 4);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", pack_2s(1, 0xFF), pack_2s(0x1000, 0x80000000));
+
+        // 1 << 4 = 16, 0xFF << 4 = 0xFF0
+        // 0x1000 << 4 = 0x10000, 0x80000000 << 4 = 0 (wrapping 32-bit)
+        assert_all_lanes(
+            &result,
+            VectorArrangement::S4,
+            &[16, 0xFF0, 0x10000, 0],
+            &e,
+        );
+    }
+
+    #[test]
+    fn test_neon_shl_8h() {
+        let vn = var_128("vn");
+        let result = encode_neon_shl(VectorArrangement::H8, &vn, 1);
+
+        let mut e = HashMap::new();
+        set_128(
+            &mut e,
+            "vn",
+            pack_4h(1, 2, 3, 0x7FFF),
+            pack_4h(4, 5, 0x8000, 0xFFFF),
+        );
+
+        // Each 16-bit lane << 1
+        assert_all_lanes(
+            &result,
+            VectorArrangement::H8,
+            &[2, 4, 6, 0xFFFE, 8, 10, 0, 0xFFFE],
+            &e,
+        );
+    }
+
+    #[test]
+    fn test_neon_shl_16b() {
+        let vn = var_128("vn");
+        let result = encode_neon_shl(VectorArrangement::B16, &vn, 2);
+
+        let mut e = HashMap::new();
+        set_128(
+            &mut e,
+            "vn",
+            pack_8b(1, 63, 0, 0, 0, 0, 0, 0),
+            pack_8b(10, 0x40, 0, 0, 0, 0, 0, 0),
+        );
+
+        // 1 << 2 = 4, 63 << 2 = 252, 10 << 2 = 40, 0x40 << 2 = 0x00 (wrapping 8-bit)
+        assert_lane(&result, VectorArrangement::B16, 0, 4, &e);
+        assert_lane(&result, VectorArrangement::B16, 1, 252, &e);
+        assert_lane(&result, VectorArrangement::B16, 8, 40, &e);
+        assert_lane(&result, VectorArrangement::B16, 9, 0, &e);
+    }
+
+    #[test]
+    fn test_neon_shl_2d() {
+        let vn = var_128("vn");
+        let result = encode_neon_shl(VectorArrangement::D2, &vn, 8);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", 0xFF, 0x0100_0000_0000_0000);
+
+        // 0xFF << 8 = 0xFF00
+        // 0x0100_0000_0000_0000 << 8 = 0 (bit 56 shifted to bit 64, lost in 64-bit)
+        assert_lane(&result, VectorArrangement::D2, 0, 0xFF00, &e);
+        assert_lane(&result, VectorArrangement::D2, 1, 0, &e);
+    }
+
+    #[test]
+    fn test_neon_ushr_4s() {
+        let vn = var_128("vn");
+        let result = encode_neon_ushr(VectorArrangement::S4, &vn, 4);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", pack_2s(0x100, 0xF0000000), pack_2s(0xFFFFFFFF, 16));
+
+        assert_all_lanes(
+            &result,
+            VectorArrangement::S4,
+            &[0x10, 0x0F000000, 0x0FFFFFFF, 1],
+            &e,
+        );
+    }
+
+    #[test]
+    fn test_neon_ushr_8h() {
+        let vn = var_128("vn");
+        let result = encode_neon_ushr(VectorArrangement::H8, &vn, 8);
+
+        let mut e = HashMap::new();
+        set_128(
+            &mut e,
+            "vn",
+            pack_4h(0xFF00, 0x1234, 0, 0),
+            pack_4h(0xABCD, 0x00FF, 0, 0),
+        );
+
+        assert_lane(&result, VectorArrangement::H8, 0, 0xFF, &e);
+        assert_lane(&result, VectorArrangement::H8, 1, 0x12, &e);
+        assert_lane(&result, VectorArrangement::H8, 4, 0xAB, &e);
+        assert_lane(&result, VectorArrangement::H8, 5, 0x00, &e);
+    }
+
+    #[test]
+    fn test_neon_ushr_2d() {
+        let vn = var_128("vn");
+        let result = encode_neon_ushr(VectorArrangement::D2, &vn, 32);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", 0xDEADBEEF_12345678, 0x00000001_00000000);
+
+        // 0xDEADBEEF_12345678 >> 32 = 0xDEADBEEF
+        // 0x00000001_00000000 >> 32 = 1
+        assert_lane(&result, VectorArrangement::D2, 0, 0xDEADBEEF, &e);
+        assert_lane(&result, VectorArrangement::D2, 1, 1, &e);
+    }
+
+    #[test]
+    fn test_neon_sshr_4s() {
+        let vn = var_128("vn");
+        let result = encode_neon_sshr(VectorArrangement::S4, &vn, 4);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", pack_2s(0x80000000, 0x10), pack_2s(0xF0000000, 0x7FFFFFFF));
+
+        // 0x80000000 >>s 4 = 0xF8000000 (sign fills)
+        // 0x10 >>s 4 = 0x01
+        // 0xF0000000 >>s 4 = 0xFF000000 (sign fills)
+        // 0x7FFFFFFF >>s 4 = 0x07FFFFFF (positive, zero fills)
+        assert_all_lanes(
+            &result,
+            VectorArrangement::S4,
+            &[0xF8000000, 0x01, 0xFF000000, 0x07FFFFFF],
+            &e,
+        );
+    }
+
+    #[test]
+    fn test_neon_sshr_8h() {
+        let vn = var_128("vn");
+        let result = encode_neon_sshr(VectorArrangement::H8, &vn, 1);
+
+        let mut e = HashMap::new();
+        set_128(
+            &mut e,
+            "vn",
+            pack_4h(0x8000, 0x0002, 0, 0),
+            pack_4h(0xFFFF, 0x7FFF, 0, 0),
+        );
+
+        // 0x8000 >>s 1 = 0xC000
+        // 0x0002 >>s 1 = 0x0001
+        // 0xFFFF >>s 1 = 0xFFFF (-1 >>s 1 = -1)
+        // 0x7FFF >>s 1 = 0x3FFF
+        assert_lane(&result, VectorArrangement::H8, 0, 0xC000, &e);
+        assert_lane(&result, VectorArrangement::H8, 1, 0x0001, &e);
+        assert_lane(&result, VectorArrangement::H8, 4, 0xFFFF, &e);
+        assert_lane(&result, VectorArrangement::H8, 5, 0x3FFF, &e);
+    }
+
+    #[test]
+    fn test_neon_sshr_16b() {
+        let vn = var_128("vn");
+        let result = encode_neon_sshr(VectorArrangement::B16, &vn, 1);
+
+        let mut e = HashMap::new();
+        set_128(
+            &mut e,
+            "vn",
+            pack_8b(0x80, 0x02, 0, 0, 0, 0, 0, 0),
+            pack_8b(0xFF, 0x7F, 0, 0, 0, 0, 0, 0),
+        );
+
+        // 0x80 >>s 1 = 0xC0, 0x02 >>s 1 = 0x01
+        // 0xFF >>s 1 = 0xFF (-1 >>s 1 = -1 in 8-bit)
+        // 0x7F >>s 1 = 0x3F
+        assert_lane(&result, VectorArrangement::B16, 0, 0xC0, &e);
+        assert_lane(&result, VectorArrangement::B16, 1, 0x01, &e);
+        assert_lane(&result, VectorArrangement::B16, 8, 0xFF, &e);
+        assert_lane(&result, VectorArrangement::B16, 9, 0x3F, &e);
+    }
+
+    #[test]
+    fn test_neon_sshr_2d() {
+        let vn = var_128("vn");
+        let result = encode_neon_sshr(VectorArrangement::D2, &vn, 4);
+
+        let mut e = HashMap::new();
+        // 0x8000_0000_0000_0000 is negative in signed 64-bit
+        set_128(&mut e, "vn", 0x8000_0000_0000_0000, 0x10);
+
+        // 0x8000_0000_0000_0000 >>s 4 = 0xF800_0000_0000_0000
+        // 0x10 >>s 4 = 0x01
+        assert_lane(&result, VectorArrangement::D2, 0, 0xF800_0000_0000_0000, &e);
+        assert_lane(&result, VectorArrangement::D2, 1, 0x01, &e);
+    }
+
+    // =======================================================================
+    // 128-bit cross-checks
+    // =======================================================================
+
+    #[test]
+    fn test_add_sub_identity_4s() {
+        // (vn + vm) - vm = vn for all lane values
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+
+        let added = encode_neon_add(VectorArrangement::S4, &vn, &vm);
+        let result = encode_neon_sub(VectorArrangement::S4, &added, &vm);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", pack_2s(0xDEADBEEF, 0x12345678), pack_2s(0xCAFEBABE, 0x87654321));
+        set_128(&mut e, "vm", pack_2s(0xCAFEBABE, 0x87654321), pack_2s(0xDEADBEEF, 0x12345678));
+
+        assert_all_lanes(
+            &result,
+            VectorArrangement::S4,
+            &[0xDEADBEEF, 0x12345678, 0xCAFEBABE, 0x87654321],
+            &e,
+        );
+    }
+
+    #[test]
+    fn test_shl_ushr_roundtrip_4s() {
+        let vn = var_128("vn");
+
+        let shifted_left = encode_neon_shl(VectorArrangement::S4, &vn, 4);
+        let shifted_back = encode_neon_ushr(VectorArrangement::S4, &shifted_left, 4);
+
+        let mut e = HashMap::new();
+        set_128(
+            &mut e,
+            "vn",
+            pack_2s(0x1234ABCD, 0xFFFFFFFF),
+            pack_2s(0x0000000F, 0x12345678),
+        );
+
+        // SHL 4 then USHR 4 clears top 4 bits of each 32-bit lane
+        assert_all_lanes(
+            &shifted_back,
+            VectorArrangement::S4,
+            &[0x0234ABCD, 0x0FFFFFFF, 0x0000000F, 0x02345678],
+            &e,
+        );
+    }
+
+    #[test]
+    fn test_add_sub_identity_2d() {
+        let vn = var_128("vn");
+        let vm = var_128("vm");
+
+        let added = encode_neon_add(VectorArrangement::D2, &vn, &vm);
+        let result = encode_neon_sub(VectorArrangement::D2, &added, &vm);
+
+        let mut e = HashMap::new();
+        set_128(&mut e, "vn", 0xDEADBEEFCAFEBABE, 0x123456789ABCDEF0);
+        set_128(&mut e, "vm", 0xCAFEBABEDEADBEEF, 0x9ABCDEF012345678);
+
+        assert_all_lanes(
+            &result,
+            VectorArrangement::D2,
+            &[0xDEADBEEFCAFEBABE, 0x123456789ABCDEF0],
+            &e,
         );
     }
 }
