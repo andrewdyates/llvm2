@@ -550,6 +550,288 @@ pub fn validate_dispatch_plan(
 }
 
 // ---------------------------------------------------------------------------
+// Dispatch plan property verification
+// ---------------------------------------------------------------------------
+
+/// Report from verifying all dispatch plan properties.
+///
+/// Collects all violations rather than returning on the first error,
+/// giving a complete picture of what is wrong with a plan.
+#[derive(Debug, Clone)]
+pub struct VerificationReport {
+    /// Whether every node in the graph has CpuScalar in its legal_targets.
+    pub cpu_fallback_ok: bool,
+    /// Nodes missing CpuScalar from their legal_targets.
+    pub missing_cpu_fallback: Vec<ComputeNodeId>,
+
+    /// Whether every cross-target edge has a corresponding DataTransfer op.
+    pub data_transfers_ok: bool,
+    /// Descriptions of missing or incorrect data transfers.
+    pub data_transfer_errors: Vec<String>,
+
+    /// Whether synchronization is correct (async results synced before use).
+    pub synchronization_ok: bool,
+    /// Descriptions of synchronization violations.
+    pub synchronization_errors: Vec<String>,
+
+    /// Whether the dependency ordering in the plan matches the graph DAG.
+    pub dependency_order_ok: bool,
+    /// Descriptions of dependency ordering violations.
+    pub dependency_errors: Vec<String>,
+}
+
+impl VerificationReport {
+    /// Returns true if all properties passed verification.
+    pub fn all_ok(&self) -> bool {
+        self.cpu_fallback_ok
+            && self.data_transfers_ok
+            && self.synchronization_ok
+            && self.dependency_order_ok
+    }
+
+    /// Total number of individual violations across all properties.
+    pub fn total_violations(&self) -> usize {
+        self.missing_cpu_fallback.len()
+            + self.data_transfer_errors.len()
+            + self.synchronization_errors.len()
+            + self.dependency_errors.len()
+    }
+}
+
+impl fmt::Display for VerificationReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "VerificationReport:")?;
+        writeln!(f, "  CPU fallback: {}", if self.cpu_fallback_ok { "PASS" } else { "FAIL" })?;
+        for nid in &self.missing_cpu_fallback {
+            writeln!(f, "    - {} missing CpuScalar in legal_targets", nid)?;
+        }
+        writeln!(f, "  Data transfers: {}", if self.data_transfers_ok { "PASS" } else { "FAIL" })?;
+        for msg in &self.data_transfer_errors {
+            writeln!(f, "    - {}", msg)?;
+        }
+        writeln!(f, "  Synchronization: {}", if self.synchronization_ok { "PASS" } else { "FAIL" })?;
+        for msg in &self.synchronization_errors {
+            writeln!(f, "    - {}", msg)?;
+        }
+        writeln!(f, "  Dependency order: {}", if self.dependency_order_ok { "PASS" } else { "FAIL" })?;
+        for msg in &self.dependency_errors {
+            writeln!(f, "    - {}", msg)?;
+        }
+        Ok(())
+    }
+}
+
+/// Verify that every node in the compute graph has CpuScalar in its
+/// legal_targets (the "CPU fallback liveness" property).
+///
+/// This ensures compilation always has a valid target assignment:
+/// even if no proof annotations are present, every node can run on
+/// the CPU scalar path.
+pub fn verify_cpu_fallback(graph: &ComputeGraph, _plan: &DispatchPlan) -> bool {
+    graph.nodes.iter().all(|node| {
+        node.legal_targets.contains(&ComputeTarget::CpuScalar)
+    })
+}
+
+/// Verify that every cross-target edge in the plan has a corresponding
+/// DataTransfer operation ("data transfer completeness" property).
+///
+/// For every edge where the source and destination nodes are assigned
+/// to different targets and transfer_bytes > 0, there must be a
+/// DataTransfer op in the plan that covers that edge.
+pub fn verify_data_transfers(
+    graph: &ComputeGraph,
+    plan: &DispatchPlan,
+) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+
+    // Build set of (from, to) pairs covered by DataTransfer ops.
+    let covered: HashSet<(ComputeNodeId, ComputeNodeId)> = plan
+        .ops
+        .iter()
+        .filter_map(|op| {
+            if let DispatchOp::DataTransfer { edge_from, edge_to, .. } = op {
+                Some((*edge_from, *edge_to))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for edge in &graph.edges {
+        let src_target = plan.assignment.get(&edge.from).copied();
+        let dst_target = plan.assignment.get(&edge.to).copied();
+
+        // Skip edges where either node lacks assignment (caught by other checks).
+        let (src, dst) = match (src_target, dst_target) {
+            (Some(s), Some(d)) => (s, d),
+            _ => continue,
+        };
+
+        // Cross-target edge with data to move must have a transfer op.
+        if src != dst && edge.transfer_bytes > 0 {
+            if !covered.contains(&(edge.from, edge.to)) {
+                errors.push(format!(
+                    "Missing DataTransfer for edge {} -> {} ({} -> {}, {} bytes)",
+                    edge.from, edge.to, src, dst, edge.transfer_bytes
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// Verify that synchronization points are sufficient ("synchronization
+/// sufficiency" property).
+///
+/// Every node launched on an async target (GPU, NeuralEngine) must be
+/// synchronized before its results are consumed by a node on a different
+/// target. This walks the plan ops in order and tracks pending async
+/// launches and sync points.
+pub fn verify_synchronization(
+    graph: &ComputeGraph,
+    plan: &DispatchPlan,
+) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+
+    // Track nodes that have been launched on async targets but not yet synced.
+    let mut pending_async: HashSet<ComputeNodeId> = HashSet::new();
+    // Track which nodes have been executed (launched or fallback).
+    let mut executed: HashSet<ComputeNodeId> = HashSet::new();
+
+    for op in &plan.ops {
+        match op {
+            DispatchOp::Synchronize { node_id, .. } => {
+                pending_async.remove(node_id);
+            }
+            DispatchOp::KernelLaunch { target, node_id, .. } => {
+                // Check that all predecessors on async targets have been synced.
+                for edge in graph.incoming_edges(*node_id) {
+                    let src_target = plan.assignment.get(&edge.from).copied()
+                        .unwrap_or(ComputeTarget::CpuScalar);
+                    if is_async_target(src_target) && pending_async.contains(&edge.from) {
+                        errors.push(format!(
+                            "Node {} consumes unsynced async result from {} (target: {})",
+                            node_id, edge.from, src_target
+                        ));
+                    }
+                }
+                executed.insert(*node_id);
+                if is_async_target(*target) {
+                    pending_async.insert(*node_id);
+                }
+            }
+            DispatchOp::DataTransfer { edge_from, edge_to, .. } => {
+                // A transfer from an async node that hasn't been synced is an error.
+                let src_target = plan.assignment.get(edge_from).copied()
+                    .unwrap_or(ComputeTarget::CpuScalar);
+                if is_async_target(src_target) && pending_async.contains(edge_from) {
+                    errors.push(format!(
+                        "DataTransfer from unsynced async node {} to {} (target: {})",
+                        edge_from, edge_to, src_target
+                    ));
+                }
+            }
+            DispatchOp::CpuFallback { node_id, .. } => {
+                // Check incoming edges from async sources.
+                for edge in graph.incoming_edges(*node_id) {
+                    let src_target = plan.assignment.get(&edge.from).copied()
+                        .unwrap_or(ComputeTarget::CpuScalar);
+                    if is_async_target(src_target) && pending_async.contains(&edge.from) {
+                        errors.push(format!(
+                            "CpuFallback {} consumes unsynced async result from {} (target: {})",
+                            node_id, edge.from, src_target
+                        ));
+                    }
+                }
+                executed.insert(*node_id);
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// Verify all dispatch plan properties and return a comprehensive report.
+///
+/// This checks:
+/// 1. **CPU fallback liveness**: every node has CpuScalar in legal_targets
+/// 2. **Data transfer completeness**: every cross-target edge has a transfer op
+/// 3. **Synchronization sufficiency**: async results are synced before consumption
+/// 4. **Dependency ordering**: the plan respects the graph's data dependencies
+///
+/// Unlike [`validate_dispatch_plan`] which returns on the first error, this
+/// function collects ALL violations into a [`VerificationReport`].
+pub fn verify_dispatch_plan_properties(
+    graph: &ComputeGraph,
+    plan: &DispatchPlan,
+) -> VerificationReport {
+    // Property 1: CPU fallback liveness.
+    let missing_cpu_fallback: Vec<ComputeNodeId> = graph
+        .nodes
+        .iter()
+        .filter(|node| !node.legal_targets.contains(&ComputeTarget::CpuScalar))
+        .map(|node| node.id)
+        .collect();
+    let cpu_fallback_ok = missing_cpu_fallback.is_empty();
+
+    // Property 2: Data transfer completeness.
+    let (data_transfers_ok, data_transfer_errors) = match verify_data_transfers(graph, plan) {
+        Ok(()) => (true, Vec::new()),
+        Err(errors) => (false, errors),
+    };
+
+    // Property 3: Synchronization sufficiency.
+    let (synchronization_ok, synchronization_errors) =
+        match verify_synchronization(graph, plan) {
+            Ok(()) => (true, Vec::new()),
+            Err(errors) => (false, errors),
+        };
+
+    // Property 4: Dependency ordering.
+    let mut dependency_errors = Vec::new();
+    let mut executed: HashSet<ComputeNodeId> = HashSet::new();
+    for op in &plan.ops {
+        match op {
+            DispatchOp::KernelLaunch { node_id, .. }
+            | DispatchOp::CpuFallback { node_id, .. } => {
+                for edge in graph.incoming_edges(*node_id) {
+                    if !executed.contains(&edge.from) {
+                        dependency_errors.push(format!(
+                            "Node {} launched before predecessor {} is executed",
+                            node_id, edge.from
+                        ));
+                    }
+                }
+                executed.insert(*node_id);
+            }
+            _ => {}
+        }
+    }
+    let dependency_order_ok = dependency_errors.is_empty();
+
+    VerificationReport {
+        cpu_fallback_ok,
+        missing_cpu_fallback,
+        data_transfers_ok,
+        data_transfer_errors,
+        synchronization_ok,
+        synchronization_errors,
+        dependency_order_ok,
+        dependency_errors,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1281,5 +1563,688 @@ mod tests {
             }
             other => panic!("Expected UnknownNode, got {:?}", other),
         }
+    }
+
+    // ===================================================================
+    // Dispatch plan property verification tests
+    // ===================================================================
+
+    // -----------------------------------------------------------------------
+    // Test V1: Valid plan passes all property checks
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_valid_plan_passes_all_properties() {
+        let (graph, recs) = mixed_graph();
+        let plan = generate_dispatch_plan(&graph, &recs);
+
+        let report = verify_dispatch_plan_properties(&graph, &plan);
+        assert!(report.all_ok(), "Valid plan should pass all checks:\n{}", report);
+        assert_eq!(report.total_violations(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test V2: CPU fallback detected as missing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_cpu_fallback_missing_detected() {
+        // Build a graph where one node is missing CpuScalar from legal_targets.
+        let mut costs = HashMap::new();
+        costs.insert(ComputeTarget::Gpu, ComputeCost {
+            latency_cycles: 5,
+            throughput_ops_per_kcycle: 100_000,
+        });
+
+        let node = ComputeNode {
+            id: ComputeNodeId(0),
+            instructions: vec![],
+            costs,
+            legal_targets: vec![ComputeTarget::Gpu], // Missing CpuScalar!
+            kind: NodeKind::DataParallel,
+            data_size_bytes: 4096,
+            produced_values: vec![],
+            consumed_values: vec![],
+            target_legality: None,
+        };
+
+        let graph = ComputeGraph {
+            nodes: vec![node],
+            edges: vec![],
+        };
+
+        let recs = vec![TargetRecommendation {
+            node_id: ComputeNodeId(0),
+            recommended_target: ComputeTarget::Gpu,
+            legal_targets: vec![ComputeTarget::Gpu],
+            reason: "GPU only".to_string(),
+            parallel_reduction_legal: false,
+        }];
+
+        let plan = generate_dispatch_plan(&graph, &recs);
+
+        // verify_cpu_fallback should return false.
+        assert!(!verify_cpu_fallback(&graph, &plan));
+
+        // Full report should flag the issue.
+        let report = verify_dispatch_plan_properties(&graph, &plan);
+        assert!(!report.cpu_fallback_ok);
+        assert_eq!(report.missing_cpu_fallback.len(), 1);
+        assert_eq!(report.missing_cpu_fallback[0], ComputeNodeId(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test V3: Missing data transfer detected
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_missing_data_transfer_detected() {
+        let (graph, _recs) = gpu_graph();
+
+        // Manually construct a plan WITHOUT the required CPU->GPU transfer.
+        let mut assignment = HashMap::new();
+        assignment.insert(ComputeNodeId(0), ComputeTarget::CpuScalar);
+        assignment.insert(ComputeNodeId(1), ComputeTarget::Gpu);
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::CpuScalar,
+                    node_id: ComputeNodeId(0),
+                    estimated_cycles: 20,
+                },
+                // Missing DataTransfer here!
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(1),
+                    estimated_cycles: 5,
+                },
+            ],
+            assignment,
+            estimated_total_cycles: 25,
+        };
+
+        let result = verify_data_transfers(&graph, &plan);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("Missing DataTransfer"));
+        assert!(errors[0].contains("node_0"));
+        assert!(errors[0].contains("node_1"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test V4: Missing synchronization detected
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_missing_synchronization_detected() {
+        let (graph, _recs) = mixed_graph();
+
+        // Construct a plan where GPU node launches but there's no Sync
+        // before the CPU readback consumes GPU results.
+        let mut assignment = HashMap::new();
+        assignment.insert(ComputeNodeId(0), ComputeTarget::CpuScalar);
+        assignment.insert(ComputeNodeId(1), ComputeTarget::Gpu);
+        assignment.insert(ComputeNodeId(2), ComputeTarget::CpuScalar);
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::CpuScalar,
+                    node_id: ComputeNodeId(0),
+                    estimated_cycles: 10,
+                },
+                DispatchOp::DataTransfer {
+                    src: ComputeTarget::CpuScalar,
+                    dst: ComputeTarget::Gpu,
+                    size_bytes: 4096,
+                    cost: TransferCost::zero(),
+                    edge_from: ComputeNodeId(0),
+                    edge_to: ComputeNodeId(1),
+                },
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(1),
+                    estimated_cycles: 5,
+                },
+                // Missing Sync for GPU node 1!
+                DispatchOp::DataTransfer {
+                    src: ComputeTarget::Gpu,
+                    dst: ComputeTarget::CpuScalar,
+                    size_bytes: 64,
+                    cost: TransferCost::zero(),
+                    edge_from: ComputeNodeId(1),
+                    edge_to: ComputeNodeId(2),
+                },
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::CpuScalar,
+                    node_id: ComputeNodeId(2),
+                    estimated_cycles: 15,
+                },
+            ],
+            assignment,
+            estimated_total_cycles: 30,
+        };
+
+        let result = verify_synchronization(&graph, &plan);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(!errors.is_empty());
+        assert!(errors[0].contains("unsynced"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test V5: Scalar plan has correct verification report
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_scalar_plan_all_pass() {
+        let (graph, recs) = scalar_graph();
+        let plan = generate_dispatch_plan(&graph, &recs);
+
+        let report = verify_dispatch_plan_properties(&graph, &plan);
+        assert!(report.all_ok());
+        assert!(report.cpu_fallback_ok);
+        assert!(report.data_transfers_ok);
+        assert!(report.synchronization_ok);
+        assert!(report.dependency_order_ok);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test V6: GPU plan has correct verification report
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_gpu_plan_all_pass() {
+        let (graph, recs) = gpu_graph();
+        let plan = generate_dispatch_plan(&graph, &recs);
+
+        let report = verify_dispatch_plan_properties(&graph, &plan);
+        assert!(report.all_ok(), "GPU plan should pass all checks:\n{}", report);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test V7: ANE plan has correct verification report
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_ane_plan_all_pass() {
+        let (graph, recs) = ane_graph();
+        let plan = generate_dispatch_plan(&graph, &recs);
+
+        let report = verify_dispatch_plan_properties(&graph, &plan);
+        assert!(report.all_ok(), "ANE plan should pass all checks:\n{}", report);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test V8: Dependency ordering violation detected
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_dependency_order_violation_detected() {
+        let (graph, _recs) = gpu_graph();
+
+        // Construct a plan where node 1 launches before node 0 (wrong order).
+        let mut assignment = HashMap::new();
+        assignment.insert(ComputeNodeId(0), ComputeTarget::CpuScalar);
+        assignment.insert(ComputeNodeId(1), ComputeTarget::CpuScalar);
+
+        let plan = DispatchPlan {
+            ops: vec![
+                // Launch consumer before producer.
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::CpuScalar,
+                    node_id: ComputeNodeId(1),
+                    estimated_cycles: 5,
+                },
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::CpuScalar,
+                    node_id: ComputeNodeId(0),
+                    estimated_cycles: 20,
+                },
+            ],
+            assignment,
+            estimated_total_cycles: 25,
+        };
+
+        let report = verify_dispatch_plan_properties(&graph, &plan);
+        assert!(!report.dependency_order_ok);
+        assert!(!report.dependency_errors.is_empty());
+        assert!(report.dependency_errors[0].contains("node_1"));
+        assert!(report.dependency_errors[0].contains("node_0"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test V9: Complex mixed-target graph verified correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_complex_mixed_target_graph() {
+        // Build a 4-node diamond graph:
+        //   node 0 (CPU) -> node 1 (GPU)
+        //   node 0 (CPU) -> node 2 (NEON)
+        //   node 1 (GPU) -> node 3 (CPU)
+        //   node 2 (NEON) -> node 3 (CPU)
+        let mut cpu_costs = HashMap::new();
+        cpu_costs.insert(ComputeTarget::CpuScalar, ComputeCost {
+            latency_cycles: 10,
+            throughput_ops_per_kcycle: 1000,
+        });
+
+        let mut gpu_costs = HashMap::new();
+        gpu_costs.insert(ComputeTarget::Gpu, ComputeCost {
+            latency_cycles: 5,
+            throughput_ops_per_kcycle: 100_000,
+        });
+        gpu_costs.insert(ComputeTarget::CpuScalar, ComputeCost {
+            latency_cycles: 500,
+            throughput_ops_per_kcycle: 1000,
+        });
+
+        let mut neon_costs = HashMap::new();
+        neon_costs.insert(ComputeTarget::CpuSimd, ComputeCost {
+            latency_cycles: 8,
+            throughput_ops_per_kcycle: 4000,
+        });
+        neon_costs.insert(ComputeTarget::CpuScalar, ComputeCost {
+            latency_cycles: 30,
+            throughput_ops_per_kcycle: 1000,
+        });
+
+        let mut sink_costs = HashMap::new();
+        sink_costs.insert(ComputeTarget::CpuScalar, ComputeCost {
+            latency_cycles: 15,
+            throughput_ops_per_kcycle: 1000,
+        });
+
+        let nodes = vec![
+            ComputeNode {
+                id: ComputeNodeId(0),
+                instructions: vec![],
+                costs: cpu_costs.clone(),
+                legal_targets: vec![ComputeTarget::CpuScalar],
+                kind: NodeKind::Scalar,
+                data_size_bytes: 8,
+                produced_values: vec![],
+                consumed_values: vec![],
+                target_legality: None,
+            },
+            ComputeNode {
+                id: ComputeNodeId(1),
+                instructions: vec![],
+                costs: gpu_costs,
+                legal_targets: vec![ComputeTarget::CpuScalar, ComputeTarget::Gpu],
+                kind: NodeKind::DataParallel,
+                data_size_bytes: 4096,
+                produced_values: vec![],
+                consumed_values: vec![],
+                target_legality: None,
+            },
+            ComputeNode {
+                id: ComputeNodeId(2),
+                instructions: vec![],
+                costs: neon_costs,
+                legal_targets: vec![ComputeTarget::CpuScalar, ComputeTarget::CpuSimd],
+                kind: NodeKind::DataParallel,
+                data_size_bytes: 128,
+                produced_values: vec![],
+                consumed_values: vec![],
+                target_legality: None,
+            },
+            ComputeNode {
+                id: ComputeNodeId(3),
+                instructions: vec![],
+                costs: sink_costs,
+                legal_targets: vec![ComputeTarget::CpuScalar],
+                kind: NodeKind::Scalar,
+                data_size_bytes: 8,
+                produced_values: vec![],
+                consumed_values: vec![],
+                target_legality: None,
+            },
+        ];
+
+        let edges = vec![
+            DataEdge {
+                from: ComputeNodeId(0),
+                to: ComputeNodeId(1),
+                transfer_bytes: 4096,
+                transfer_cost: TransferCost::zero(),
+            },
+            DataEdge {
+                from: ComputeNodeId(0),
+                to: ComputeNodeId(2),
+                transfer_bytes: 128,
+                transfer_cost: TransferCost::zero(),
+            },
+            DataEdge {
+                from: ComputeNodeId(1),
+                to: ComputeNodeId(3),
+                transfer_bytes: 64,
+                transfer_cost: TransferCost::zero(),
+            },
+            DataEdge {
+                from: ComputeNodeId(2),
+                to: ComputeNodeId(3),
+                transfer_bytes: 32,
+                transfer_cost: TransferCost::zero(),
+            },
+        ];
+
+        let graph = ComputeGraph { nodes, edges };
+
+        let recs = vec![
+            TargetRecommendation {
+                node_id: ComputeNodeId(0),
+                recommended_target: ComputeTarget::CpuScalar,
+                legal_targets: vec![ComputeTarget::CpuScalar],
+                reason: "source".to_string(),
+                parallel_reduction_legal: false,
+            },
+            TargetRecommendation {
+                node_id: ComputeNodeId(1),
+                recommended_target: ComputeTarget::Gpu,
+                legal_targets: vec![ComputeTarget::CpuScalar, ComputeTarget::Gpu],
+                reason: "GPU compute".to_string(),
+                parallel_reduction_legal: true,
+            },
+            TargetRecommendation {
+                node_id: ComputeNodeId(2),
+                recommended_target: ComputeTarget::CpuSimd,
+                legal_targets: vec![ComputeTarget::CpuScalar, ComputeTarget::CpuSimd],
+                reason: "NEON vectorize".to_string(),
+                parallel_reduction_legal: false,
+            },
+            TargetRecommendation {
+                node_id: ComputeNodeId(3),
+                recommended_target: ComputeTarget::CpuScalar,
+                legal_targets: vec![ComputeTarget::CpuScalar],
+                reason: "sink".to_string(),
+                parallel_reduction_legal: false,
+            },
+        ];
+
+        let plan = generate_dispatch_plan(&graph, &recs);
+
+        // All properties should pass for generated plan.
+        let report = verify_dispatch_plan_properties(&graph, &plan);
+        assert!(report.all_ok(), "Diamond graph plan should pass:\n{}", report);
+
+        // Verify that GPU sync occurs before node 3.
+        assert!(validate_dispatch_plan(&graph, &plan).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test V10: Empty graph passes all verifications
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_empty_graph_all_pass() {
+        let graph = ComputeGraph::new();
+        let plan = generate_dispatch_plan(&graph, &[]);
+
+        let report = verify_dispatch_plan_properties(&graph, &plan);
+        assert!(report.all_ok());
+        assert_eq!(report.total_violations(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test V11: Multiple CPU fallback violations reported
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_multiple_cpu_fallback_violations() {
+        let nodes = vec![
+            ComputeNode {
+                id: ComputeNodeId(0),
+                instructions: vec![],
+                costs: HashMap::new(),
+                legal_targets: vec![ComputeTarget::Gpu], // Missing CpuScalar!
+                kind: NodeKind::DataParallel,
+                data_size_bytes: 4096,
+                produced_values: vec![],
+                consumed_values: vec![],
+                target_legality: None,
+            },
+            ComputeNode {
+                id: ComputeNodeId(1),
+                instructions: vec![],
+                costs: HashMap::new(),
+                legal_targets: vec![ComputeTarget::NeuralEngine], // Missing CpuScalar!
+                kind: NodeKind::MatrixHeavy,
+                data_size_bytes: 16384,
+                produced_values: vec![],
+                consumed_values: vec![],
+                target_legality: None,
+            },
+            ComputeNode {
+                id: ComputeNodeId(2),
+                instructions: vec![],
+                costs: HashMap::new(),
+                legal_targets: vec![ComputeTarget::CpuScalar], // OK
+                kind: NodeKind::Scalar,
+                data_size_bytes: 8,
+                produced_values: vec![],
+                consumed_values: vec![],
+                target_legality: None,
+            },
+        ];
+
+        let graph = ComputeGraph {
+            nodes,
+            edges: vec![],
+        };
+
+        let recs = vec![
+            TargetRecommendation {
+                node_id: ComputeNodeId(0),
+                recommended_target: ComputeTarget::Gpu,
+                legal_targets: vec![ComputeTarget::Gpu],
+                reason: "gpu".to_string(),
+                parallel_reduction_legal: false,
+            },
+            TargetRecommendation {
+                node_id: ComputeNodeId(1),
+                recommended_target: ComputeTarget::NeuralEngine,
+                legal_targets: vec![ComputeTarget::NeuralEngine],
+                reason: "ane".to_string(),
+                parallel_reduction_legal: false,
+            },
+            TargetRecommendation {
+                node_id: ComputeNodeId(2),
+                recommended_target: ComputeTarget::CpuScalar,
+                legal_targets: vec![ComputeTarget::CpuScalar],
+                reason: "cpu".to_string(),
+                parallel_reduction_legal: false,
+            },
+        ];
+
+        let plan = generate_dispatch_plan(&graph, &recs);
+        let report = verify_dispatch_plan_properties(&graph, &plan);
+
+        assert!(!report.cpu_fallback_ok);
+        assert_eq!(report.missing_cpu_fallback.len(), 2);
+        assert!(report.missing_cpu_fallback.contains(&ComputeNodeId(0)));
+        assert!(report.missing_cpu_fallback.contains(&ComputeNodeId(1)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test V12: VerificationReport display format
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verification_report_display() {
+        let (graph, recs) = mixed_graph();
+        let plan = generate_dispatch_plan(&graph, &recs);
+
+        let report = verify_dispatch_plan_properties(&graph, &plan);
+        let display = format!("{}", report);
+        assert!(display.contains("VerificationReport"));
+        assert!(display.contains("CPU fallback: PASS"));
+        assert!(display.contains("Data transfers: PASS"));
+        assert!(display.contains("Synchronization: PASS"));
+        assert!(display.contains("Dependency order: PASS"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test V13: verify_data_transfers passes for same-target edges
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_data_transfers_same_target_no_transfer_needed() {
+        // Two CPU nodes with an edge -- no transfer needed.
+        let mut costs = HashMap::new();
+        costs.insert(ComputeTarget::CpuScalar, ComputeCost {
+            latency_cycles: 10,
+            throughput_ops_per_kcycle: 1000,
+        });
+
+        let nodes = vec![
+            ComputeNode {
+                id: ComputeNodeId(0),
+                instructions: vec![],
+                costs: costs.clone(),
+                legal_targets: vec![ComputeTarget::CpuScalar],
+                kind: NodeKind::Scalar,
+                data_size_bytes: 8,
+                produced_values: vec![],
+                consumed_values: vec![],
+                target_legality: None,
+            },
+            ComputeNode {
+                id: ComputeNodeId(1),
+                instructions: vec![],
+                costs,
+                legal_targets: vec![ComputeTarget::CpuScalar],
+                kind: NodeKind::Scalar,
+                data_size_bytes: 8,
+                produced_values: vec![],
+                consumed_values: vec![],
+                target_legality: None,
+            },
+        ];
+
+        let edges = vec![DataEdge {
+            from: ComputeNodeId(0),
+            to: ComputeNodeId(1),
+            transfer_bytes: 64,
+            transfer_cost: TransferCost::zero(),
+        }];
+
+        let graph = ComputeGraph { nodes, edges };
+
+        let recs = vec![
+            TargetRecommendation {
+                node_id: ComputeNodeId(0),
+                recommended_target: ComputeTarget::CpuScalar,
+                legal_targets: vec![ComputeTarget::CpuScalar],
+                reason: "cpu".to_string(),
+                parallel_reduction_legal: false,
+            },
+            TargetRecommendation {
+                node_id: ComputeNodeId(1),
+                recommended_target: ComputeTarget::CpuScalar,
+                legal_targets: vec![ComputeTarget::CpuScalar],
+                reason: "cpu".to_string(),
+                parallel_reduction_legal: false,
+            },
+        ];
+
+        let plan = generate_dispatch_plan(&graph, &recs);
+        assert!(verify_data_transfers(&graph, &plan).is_ok());
+        assert_eq!(plan.count_transfers(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test V14: Comprehensive report captures multiple failure categories
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_report_captures_multiple_failures() {
+        // Build a graph with a GPU-only node (missing CPU fallback)
+        // and construct a plan with missing transfer and missing sync.
+        let mut gpu_costs = HashMap::new();
+        gpu_costs.insert(ComputeTarget::Gpu, ComputeCost {
+            latency_cycles: 5,
+            throughput_ops_per_kcycle: 100_000,
+        });
+
+        let mut cpu_costs = HashMap::new();
+        cpu_costs.insert(ComputeTarget::CpuScalar, ComputeCost {
+            latency_cycles: 10,
+            throughput_ops_per_kcycle: 1000,
+        });
+
+        let nodes = vec![
+            ComputeNode {
+                id: ComputeNodeId(0),
+                instructions: vec![],
+                costs: cpu_costs,
+                legal_targets: vec![ComputeTarget::CpuScalar],
+                kind: NodeKind::Scalar,
+                data_size_bytes: 8,
+                produced_values: vec![],
+                consumed_values: vec![],
+                target_legality: None,
+            },
+            ComputeNode {
+                id: ComputeNodeId(1),
+                instructions: vec![],
+                costs: gpu_costs,
+                legal_targets: vec![ComputeTarget::Gpu], // Missing CpuScalar!
+                kind: NodeKind::DataParallel,
+                data_size_bytes: 4096,
+                produced_values: vec![],
+                consumed_values: vec![],
+                target_legality: None,
+            },
+        ];
+
+        let edges = vec![DataEdge {
+            from: ComputeNodeId(0),
+            to: ComputeNodeId(1),
+            transfer_bytes: 4096,
+            transfer_cost: TransferCost::zero(),
+        }];
+
+        let graph = ComputeGraph { nodes, edges };
+
+        // Manually construct plan without transfer.
+        let mut assignment = HashMap::new();
+        assignment.insert(ComputeNodeId(0), ComputeTarget::CpuScalar);
+        assignment.insert(ComputeNodeId(1), ComputeTarget::Gpu);
+
+        let plan = DispatchPlan {
+            ops: vec![
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::CpuScalar,
+                    node_id: ComputeNodeId(0),
+                    estimated_cycles: 10,
+                },
+                // Missing DataTransfer!
+                DispatchOp::KernelLaunch {
+                    target: ComputeTarget::Gpu,
+                    node_id: ComputeNodeId(1),
+                    estimated_cycles: 5,
+                },
+            ],
+            assignment,
+            estimated_total_cycles: 15,
+        };
+
+        let report = verify_dispatch_plan_properties(&graph, &plan);
+        assert!(!report.all_ok());
+
+        // CPU fallback violation.
+        assert!(!report.cpu_fallback_ok);
+        assert_eq!(report.missing_cpu_fallback.len(), 1);
+
+        // Data transfer violation.
+        assert!(!report.data_transfers_ok);
+        assert!(!report.data_transfer_errors.is_empty());
+
+        // Total violations should be at least 2.
+        assert!(report.total_violations() >= 2);
     }
 }
