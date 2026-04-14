@@ -20,19 +20,56 @@
 //! verify            -- High-level verification interface
 //! ```
 //!
-//! # Verification modes
+//! # Verification strength levels
 //!
-//! 1. **Mock verification** (default): evaluates proof obligations using
-//!    concrete Rust arithmetic (exhaustive for small widths, random sampling
-//!    for 32/64-bit). No external solver needed.
+//! Each proof obligation is verified at one of three strength levels
+//! (see [`verify::VerificationStrength`] for full details):
 //!
-//! 2. **z4/z3 CLI verification** (always available via [`z4_bridge`]): serializes
-//!    proof obligations to SMT-LIB2 and pipes to a z3/z4 subprocess for formal
-//!    guarantees. Requires z3 or z4 binary in PATH.
+//! | Level | Bit-width | Strategy | Guarantee |
+//! |-------|-----------|----------|-----------|
+//! | **Exhaustive** | <= 8 (with <= 2 inputs) | All 2^(w*n) input combinations | Complete for that width |
+//! | **Statistical** | > 8 (32-bit, 64-bit) | Edge cases + 100K random samples | Probabilistic, not formal |
+//! | **Formal** | Any | SMT solver (z4/z3) | Complete mathematical proof |
 //!
-//! 3. **z4 native API verification** (feature-gated via `z4` feature): uses the
-//!    z4 crate's Rust API for in-process SMT solving. No subprocess overhead.
-//!    Enable with: `cargo test -p llvm2-verify --features z4`
+//! ## Current status
+//!
+//! The default verification mode uses **mock evaluation** via
+//! [`lowering_proof::verify_by_evaluation`]:
+//! - 8-bit proofs run **exhaustive** verification (all 65,536 input pairs tested)
+//! - 32/64-bit proofs run **statistical** verification (36 edge-case combos +
+//!   100,000 random samples per proof)
+//!
+//! The 32/64-bit statistical verification provides high confidence but is
+//! **not a formal proof**. Structured or adversarial bugs could theoretically
+//! hide in the untested ~2^64 input space.
+//!
+//! ## Path to formal verification (z4)
+//!
+//! 1. **Current** -- Mock evaluation (this module): fast, catches regressions,
+//!    exhaustive for 8-bit, statistical for 32/64-bit.
+//! 2. **Available** -- z4/z3 CLI via [`z4_bridge`]: serialize proof obligations
+//!    to SMT-LIB2 format with [`lowering_proof::ProofObligation::to_smt2`],
+//!    pipe to an external z3/z4 solver for complete formal proofs.
+//! 3. **Future** -- z4 native API (feature-gated `z4`): in-process SMT solving
+//!    with no subprocess overhead. When this becomes the default, mock evaluation
+//!    will serve as a fast pre-check before the formal proof.
+//!
+//! ## Configuring sample count
+//!
+//! The number of random samples for statistical verification is configurable
+//! via [`lowering_proof::VerificationConfig`]:
+//!
+//! ```rust
+//! use llvm2_verify::lowering_proof::{
+//!     proof_iadd_i32, verify_by_evaluation_with_config, VerificationConfig,
+//! };
+//! use llvm2_verify::verify::VerificationResult;
+//!
+//! let config = VerificationConfig::with_sample_count(500_000);
+//! let obligation = proof_iadd_i32();
+//! let result = verify_by_evaluation_with_config(&obligation, &config);
+//! assert!(matches!(result, VerificationResult::Valid));
+//! ```
 //!
 //! # Example
 //!
@@ -71,8 +108,9 @@ pub mod unified_synthesis;
 pub mod neon_lowering_proofs;
 pub mod ane_precision_proofs;
 
-pub use verify::{VerificationResult, VerificationReport, ProofResult, Verifier};
-pub use lowering_proof::{ProofObligation, verify_by_evaluation};
+pub use verify::{VerificationResult, VerificationReport, ProofResult, Verifier, VerificationStrength};
+pub use lowering_proof::{ProofObligation, verify_by_evaluation, verify_by_evaluation_with_config,
+    VerificationConfig, DEFAULT_SAMPLE_COUNT, EXHAUSTIVE_WIDTH_THRESHOLD};
 pub use smt::{SmtError, SmtExpr, SmtSort};
 pub use z4_bridge::{Z4Config, Z4Result, verify_with_z4};
 pub use cegis::{CegisLoop, CegisResult, ConcreteInput};
