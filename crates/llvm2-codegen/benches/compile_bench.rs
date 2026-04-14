@@ -412,6 +412,7 @@ fn bench_complexity(complexity: Complexity, opt_level: OptLevel) -> BenchResult 
     let config = PipelineConfig {
         opt_level,
         emit_debug: false,
+        ..Default::default()
     };
 
     // Warmup

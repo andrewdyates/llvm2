@@ -80,6 +80,13 @@ use llvm2_ir::operand::MachOperand as IrOperand;
 use llvm2_ir::regs::{PReg, VReg};
 use llvm2_ir::types::BlockId;
 
+use llvm2_lower::compute_graph::ComputeGraph;
+use llvm2_lower::dispatch::{
+    DispatchPlan, VerificationReport,
+    generate_dispatch_plan, verify_dispatch_plan_properties,
+};
+use llvm2_lower::TargetRecommendation;
+
 // ---------------------------------------------------------------------------
 // Pipeline errors
 // ---------------------------------------------------------------------------
@@ -99,6 +106,12 @@ pub enum PipelineError {
     Relaxation(#[from] crate::relax::RelaxError),
     #[error("invalid operand in regalloc adapter: {0}")]
     InvalidOperand(String),
+    #[error("dispatch verification failed ({violations} violations): {summary}")]
+    DispatchVerificationFailed {
+        violations: usize,
+        summary: String,
+        report: VerificationReport,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +127,17 @@ pub enum OptLevel {
     O3,
 }
 
+/// Policy for handling dispatch verification failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchVerifyMode {
+    /// Do not verify dispatch plans (skip verification entirely).
+    Off,
+    /// Verify dispatch plans. On failure, fall back to a CPU-only plan.
+    FallbackOnFailure,
+    /// Verify dispatch plans. On failure, return an error.
+    ErrorOnFailure,
+}
+
 /// Pipeline configuration.
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
@@ -121,6 +145,13 @@ pub struct PipelineConfig {
     pub opt_level: OptLevel,
     /// Whether to emit debug info (placeholder for future).
     pub emit_debug: bool,
+    /// Dispatch plan verification mode.
+    ///
+    /// When set to [`DispatchVerifyMode::FallbackOnFailure`], any dispatch plan
+    /// that fails property verification is replaced with a CPU-only plan. When
+    /// set to [`DispatchVerifyMode::ErrorOnFailure`], verification failures
+    /// produce a [`PipelineError::DispatchVerificationFailed`].
+    pub verify_dispatch: DispatchVerifyMode,
 }
 
 impl Default for PipelineConfig {
@@ -128,6 +159,7 @@ impl Default for PipelineConfig {
         Self {
             opt_level: OptLevel::O2,
             emit_debug: false,
+            verify_dispatch: DispatchVerifyMode::FallbackOnFailure,
         }
     }
 }
@@ -785,6 +817,112 @@ impl Pipeline {
         writer.write()
     }
 
+    // --- Dispatch verification ---
+
+    /// Verify a dispatch plan against a compute graph, applying the configured
+    /// [`DispatchVerifyMode`] policy.
+    ///
+    /// Returns:
+    /// - `Ok(plan)` if verification passes or is disabled
+    /// - `Ok(cpu_only_plan)` if verification fails under
+    ///   [`DispatchVerifyMode::FallbackOnFailure`]
+    /// - `Err(DispatchVerificationFailed)` if verification fails under
+    ///   [`DispatchVerifyMode::ErrorOnFailure`]
+    pub fn verify_dispatch_plan(
+        &self,
+        graph: &ComputeGraph,
+        plan: DispatchPlan,
+        recommendations: &[TargetRecommendation],
+    ) -> Result<DispatchPlan, PipelineError> {
+        match self.config.verify_dispatch {
+            DispatchVerifyMode::Off => Ok(plan),
+            DispatchVerifyMode::FallbackOnFailure => {
+                let report = verify_dispatch_plan_properties(graph, &plan);
+                if report.all_ok() {
+                    Ok(plan)
+                } else {
+                    // Fall back to a CPU-only plan.
+                    Ok(generate_cpu_only_plan(graph, recommendations))
+                }
+            }
+            DispatchVerifyMode::ErrorOnFailure => {
+                let report = verify_dispatch_plan_properties(graph, &plan);
+                if report.all_ok() {
+                    Ok(plan)
+                } else {
+                    let violations = report.total_violations();
+                    let summary = format!("{}", report);
+                    Err(PipelineError::DispatchVerificationFailed {
+                        violations,
+                        summary,
+                        report,
+                    })
+                }
+            }
+        }
+    }
+
+    /// Generate a dispatch plan, verify it, and return the verified (or
+    /// fallback) plan. This is the primary integration point for dispatch
+    /// verification in the compilation pipeline.
+    ///
+    /// Combines plan generation with verification in a single call.
+    pub fn generate_and_verify_dispatch(
+        &self,
+        graph: &ComputeGraph,
+        recommendations: &[TargetRecommendation],
+    ) -> Result<DispatchPlan, PipelineError> {
+        let plan = generate_dispatch_plan(graph, recommendations);
+        self.verify_dispatch_plan(graph, plan, recommendations)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CPU-only dispatch plan fallback
+// ---------------------------------------------------------------------------
+
+/// Generate a CPU-only dispatch plan as a safe fallback.
+///
+/// When dispatch verification fails, this function generates a conservative
+/// plan that runs every node on `CpuScalar`. No data transfers or
+/// synchronizations are needed because all execution stays on the CPU.
+pub fn generate_cpu_only_plan(
+    graph: &ComputeGraph,
+    _recommendations: &[TargetRecommendation],
+) -> DispatchPlan {
+    use llvm2_lower::dispatch::DispatchOp;
+    use llvm2_lower::target_analysis::ComputeTarget;
+
+    let mut assignment = HashMap::new();
+    let mut ops = Vec::new();
+    let mut total_cycles: u64 = 0;
+
+    // Walk nodes in ID order. Since all nodes are on the same target
+    // (CpuScalar), no transfers or syncs are needed.
+    let mut node_ids: Vec<_> = graph.nodes.iter().map(|n| n.id).collect();
+    node_ids.sort_by_key(|id| id.0);
+
+    for node_id in &node_ids {
+        assignment.insert(*node_id, ComputeTarget::CpuScalar);
+
+        let node = graph.node(*node_id);
+        let estimated_cycles = node
+            .and_then(|n| n.costs.get(&ComputeTarget::CpuScalar))
+            .map(|c| c.latency_cycles)
+            .unwrap_or(1);
+
+        ops.push(DispatchOp::CpuFallback {
+            node_id: *node_id,
+            reason: "dispatch verification fallback".to_string(),
+        });
+        total_cycles = total_cycles.saturating_add(estimated_cycles);
+    }
+
+    DispatchPlan {
+        ops,
+        assignment,
+        estimated_total_cycles: total_cycles,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -801,6 +939,7 @@ pub fn compile_to_object(
     let config = PipelineConfig {
         opt_level,
         emit_debug: false,
+        verify_dispatch: DispatchVerifyMode::FallbackOnFailure,
     };
     let pipeline = Pipeline::new(config);
     pipeline.compile_function(input)
@@ -840,4 +979,422 @@ pub fn build_add_test_function() -> IrMachFunction {
     func.append_inst(entry, ret_id);
 
     func
+}
+
+// ---------------------------------------------------------------------------
+// Tests — dispatch verification integration
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod dispatch_verification_tests {
+    use super::*;
+    use llvm2_lower::compute_graph::{
+        ComputeCost, ComputeNode, ComputeNodeId, DataEdge, NodeKind, TransferCost,
+    };
+    use llvm2_lower::target_analysis::ComputeTarget;
+
+    // -----------------------------------------------------------------------
+    // Test helpers
+    // -----------------------------------------------------------------------
+
+    /// Build a ComputeGraph from nodes and edges (avoids pub(crate) field issues).
+    fn make_graph(nodes: Vec<ComputeNode>, edges: Vec<DataEdge>) -> ComputeGraph {
+        let mut graph = ComputeGraph::new();
+        graph.nodes = nodes;
+        graph.edges = edges;
+        graph
+    }
+
+    /// Build a simple single-node scalar graph.
+    fn scalar_graph() -> (ComputeGraph, Vec<TargetRecommendation>) {
+        let mut costs = HashMap::new();
+        costs.insert(ComputeTarget::CpuScalar, ComputeCost {
+            latency_cycles: 10,
+            throughput_ops_per_kcycle: 1000,
+        });
+
+        let node = ComputeNode {
+            id: ComputeNodeId(0),
+            instructions: vec![],
+            costs,
+            legal_targets: vec![ComputeTarget::CpuScalar],
+            kind: NodeKind::Scalar,
+            data_size_bytes: 8,
+            produced_values: vec![],
+            consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
+            target_legality: None,
+        };
+
+        let graph = make_graph(vec![node], vec![]);
+
+        let recs = vec![TargetRecommendation {
+            node_id: ComputeNodeId(0),
+            recommended_target: ComputeTarget::CpuScalar,
+            legal_targets: vec![ComputeTarget::CpuScalar],
+            reason: "scalar op".to_string(),
+            parallel_reduction_legal: false,
+        }];
+
+        (graph, recs)
+    }
+
+    /// Build a two-node GPU graph: CPU producer -> GPU consumer.
+    fn gpu_graph() -> (ComputeGraph, Vec<TargetRecommendation>) {
+        let mut cpu_costs = HashMap::new();
+        cpu_costs.insert(ComputeTarget::CpuScalar, ComputeCost {
+            latency_cycles: 20,
+            throughput_ops_per_kcycle: 1000,
+        });
+
+        let mut gpu_costs = HashMap::new();
+        gpu_costs.insert(ComputeTarget::Gpu, ComputeCost {
+            latency_cycles: 5,
+            throughput_ops_per_kcycle: 100_000,
+        });
+        gpu_costs.insert(ComputeTarget::CpuScalar, ComputeCost {
+            latency_cycles: 500,
+            throughput_ops_per_kcycle: 1000,
+        });
+
+        let producer = ComputeNode {
+            id: ComputeNodeId(0),
+            instructions: vec![],
+            costs: cpu_costs,
+            legal_targets: vec![ComputeTarget::CpuScalar],
+            kind: NodeKind::Scalar,
+            data_size_bytes: 8,
+            produced_values: vec![],
+            consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
+            target_legality: None,
+        };
+
+        let consumer = ComputeNode {
+            id: ComputeNodeId(1),
+            instructions: vec![],
+            costs: gpu_costs,
+            legal_targets: vec![ComputeTarget::CpuScalar, ComputeTarget::Gpu],
+            kind: NodeKind::DataParallel,
+            data_size_bytes: 4096,
+            produced_values: vec![],
+            consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
+            target_legality: None,
+        };
+
+        let edge = DataEdge {
+            from: ComputeNodeId(0),
+            to: ComputeNodeId(1),
+            transfer_bytes: 4096,
+            transfer_cost: TransferCost::zero(),
+        };
+
+        let graph = make_graph(vec![producer, consumer], vec![edge]);
+
+        let recs = vec![
+            TargetRecommendation {
+                node_id: ComputeNodeId(0),
+                recommended_target: ComputeTarget::CpuScalar,
+                legal_targets: vec![ComputeTarget::CpuScalar],
+                reason: "scalar input".to_string(),
+                parallel_reduction_legal: false,
+            },
+            TargetRecommendation {
+                node_id: ComputeNodeId(1),
+                recommended_target: ComputeTarget::Gpu,
+                legal_targets: vec![ComputeTarget::CpuScalar, ComputeTarget::Gpu],
+                reason: "data-parallel on GPU".to_string(),
+                parallel_reduction_legal: true,
+            },
+        ];
+
+        (graph, recs)
+    }
+
+    /// Build a graph with a GPU-only node (missing CpuScalar from legal_targets).
+    fn bad_fallback_graph() -> (ComputeGraph, Vec<TargetRecommendation>) {
+        let mut gpu_costs = HashMap::new();
+        gpu_costs.insert(ComputeTarget::Gpu, ComputeCost {
+            latency_cycles: 5,
+            throughput_ops_per_kcycle: 100_000,
+        });
+
+        let node = ComputeNode {
+            id: ComputeNodeId(0),
+            instructions: vec![],
+            costs: gpu_costs,
+            legal_targets: vec![ComputeTarget::Gpu], // Missing CpuScalar!
+            kind: NodeKind::DataParallel,
+            data_size_bytes: 4096,
+            produced_values: vec![],
+            consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
+            target_legality: None,
+        };
+
+        let graph = make_graph(vec![node], vec![]);
+
+        let recs = vec![TargetRecommendation {
+            node_id: ComputeNodeId(0),
+            recommended_target: ComputeTarget::Gpu,
+            legal_targets: vec![ComputeTarget::Gpu],
+            reason: "GPU only".to_string(),
+            parallel_reduction_legal: false,
+        }];
+
+        (graph, recs)
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1: Valid plan passes verification in all modes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_valid_plan_passes_all_modes() {
+        let (graph, recs) = scalar_graph();
+
+        for mode in [
+            DispatchVerifyMode::Off,
+            DispatchVerifyMode::FallbackOnFailure,
+            DispatchVerifyMode::ErrorOnFailure,
+        ] {
+            let pipeline = Pipeline::new(PipelineConfig {
+                verify_dispatch: mode,
+                ..Default::default()
+            });
+
+            let result = pipeline.generate_and_verify_dispatch(&graph, &recs);
+            assert!(result.is_ok(), "mode {:?} should accept a valid plan", mode);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2: Off mode skips verification entirely
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_off_mode_skips_verification() {
+        let (graph, recs) = bad_fallback_graph();
+
+        let pipeline = Pipeline::new(PipelineConfig {
+            verify_dispatch: DispatchVerifyMode::Off,
+            ..Default::default()
+        });
+
+        // Even a plan with issues should pass when verification is off.
+        let result = pipeline.generate_and_verify_dispatch(&graph, &recs);
+        assert!(result.is_ok(), "Off mode should skip verification");
+
+        // The plan should be the original (GPU launch, not CPU fallback).
+        let plan = result.unwrap();
+        let has_gpu_launch = plan.ops.iter().any(|op| {
+            matches!(op, llvm2_lower::dispatch::DispatchOp::KernelLaunch {
+                target: ComputeTarget::Gpu, ..
+            })
+        });
+        assert!(has_gpu_launch, "Off mode should preserve original GPU plan");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3: FallbackOnFailure mode produces CPU-only plan on bad graph
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fallback_mode_produces_cpu_plan_on_failure() {
+        let (graph, recs) = bad_fallback_graph();
+
+        let pipeline = Pipeline::new(PipelineConfig {
+            verify_dispatch: DispatchVerifyMode::FallbackOnFailure,
+            ..Default::default()
+        });
+
+        let result = pipeline.generate_and_verify_dispatch(&graph, &recs);
+        assert!(result.is_ok(), "FallbackOnFailure should not error");
+
+        let plan = result.unwrap();
+        // The fallback plan should contain only CpuFallback ops.
+        assert_eq!(plan.count_fallbacks(), 1, "should have 1 CPU fallback");
+        assert_eq!(plan.count_launches(), 0, "no kernel launches in fallback");
+        assert_eq!(plan.count_transfers(), 0, "no transfers in fallback");
+        assert_eq!(plan.count_syncs(), 0, "no syncs in fallback");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4: ErrorOnFailure mode returns error on bad graph
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_error_mode_returns_error_on_failure() {
+        let (graph, recs) = bad_fallback_graph();
+
+        let pipeline = Pipeline::new(PipelineConfig {
+            verify_dispatch: DispatchVerifyMode::ErrorOnFailure,
+            ..Default::default()
+        });
+
+        let result = pipeline.generate_and_verify_dispatch(&graph, &recs);
+        assert!(result.is_err(), "ErrorOnFailure should return error");
+
+        match result.unwrap_err() {
+            PipelineError::DispatchVerificationFailed { violations, summary, report } => {
+                assert!(violations > 0, "should report violations");
+                assert!(!summary.is_empty(), "should have summary text");
+                assert!(!report.cpu_fallback_ok, "should flag CPU fallback issue");
+            }
+            other => panic!("Expected DispatchVerificationFailed, got: {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5: GPU graph produces valid plan that passes verification
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gpu_graph_passes_verification() {
+        let (graph, recs) = gpu_graph();
+
+        let pipeline = Pipeline::new(PipelineConfig {
+            verify_dispatch: DispatchVerifyMode::ErrorOnFailure,
+            ..Default::default()
+        });
+
+        let result = pipeline.generate_and_verify_dispatch(&graph, &recs);
+        assert!(result.is_ok(), "GPU graph should produce a valid plan");
+
+        let plan = result.unwrap();
+        assert!(plan.count_launches() >= 2, "should have CPU + GPU launches");
+        assert!(plan.count_transfers() >= 1, "should have at least one transfer");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6: generate_cpu_only_plan produces all-CPU plan
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_generate_cpu_only_plan() {
+        let (graph, recs) = gpu_graph();
+        let plan = generate_cpu_only_plan(&graph, &recs);
+
+        assert_eq!(plan.ops.len(), 2, "one fallback per node");
+        assert_eq!(plan.count_fallbacks(), 2, "all ops should be CpuFallback");
+        assert_eq!(plan.count_launches(), 0, "no kernel launches");
+        assert_eq!(plan.count_transfers(), 0, "no transfers");
+        assert_eq!(plan.count_syncs(), 0, "no syncs");
+
+        // All assignments should be CpuScalar.
+        for (_, target) in &plan.assignment {
+            assert_eq!(*target, ComputeTarget::CpuScalar);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7: CPU-only plan has correct estimated cycles
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cpu_only_plan_estimated_cycles() {
+        let (graph, recs) = gpu_graph();
+        let plan = generate_cpu_only_plan(&graph, &recs);
+
+        // Node 0: CPU cost 20 cycles, Node 1: CPU cost 500 cycles.
+        assert_eq!(plan.estimated_total_cycles, 520,
+            "CPU-only plan should sum CPU costs: 20 + 500 = 520");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: verify_dispatch_plan with explicit plan validates correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_dispatch_plan_explicit() {
+        let (graph, recs) = gpu_graph();
+        let plan = generate_dispatch_plan(&graph, &recs);
+
+        let pipeline = Pipeline::new(PipelineConfig {
+            verify_dispatch: DispatchVerifyMode::ErrorOnFailure,
+            ..Default::default()
+        });
+
+        let result = pipeline.verify_dispatch_plan(&graph, plan, &recs);
+        assert!(result.is_ok(), "Explicitly generated plan should pass");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: Empty graph produces valid empty plan in all modes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_empty_graph_all_modes() {
+        let graph = ComputeGraph::new();
+        let recs = vec![];
+
+        for mode in [
+            DispatchVerifyMode::Off,
+            DispatchVerifyMode::FallbackOnFailure,
+            DispatchVerifyMode::ErrorOnFailure,
+        ] {
+            let pipeline = Pipeline::new(PipelineConfig {
+                verify_dispatch: mode,
+                ..Default::default()
+            });
+
+            let result = pipeline.generate_and_verify_dispatch(&graph, &recs);
+            assert!(result.is_ok(), "Empty graph should pass in mode {:?}", mode);
+            let plan = result.unwrap();
+            assert!(plan.is_empty(), "Empty graph should produce empty plan");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10: Default config uses FallbackOnFailure
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_default_config_uses_fallback_mode() {
+        let config = PipelineConfig::default();
+        assert_eq!(
+            config.verify_dispatch,
+            DispatchVerifyMode::FallbackOnFailure,
+            "Default should be FallbackOnFailure"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11: CPU-only fallback plan passes verification itself
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cpu_only_fallback_passes_verification() {
+        let (graph, recs) = gpu_graph();
+        let cpu_plan = generate_cpu_only_plan(&graph, &recs);
+
+        let report = verify_dispatch_plan_properties(&graph, &cpu_plan);
+        assert!(report.all_ok(),
+            "CPU-only fallback plan should pass all verification properties:\n{}",
+            report);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12: DispatchVerificationFailed error has meaningful Display
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dispatch_verification_error_display() {
+        let (graph, recs) = bad_fallback_graph();
+
+        let pipeline = Pipeline::new(PipelineConfig {
+            verify_dispatch: DispatchVerifyMode::ErrorOnFailure,
+            ..Default::default()
+        });
+
+        let err = pipeline.generate_and_verify_dispatch(&graph, &recs).unwrap_err();
+        let display = format!("{}", err);
+        assert!(display.contains("dispatch verification failed"),
+            "Error display should contain 'dispatch verification failed', got: {}",
+            display);
+        assert!(display.contains("violation"),
+            "Error display should contain 'violation', got: {}",
+            display);
+    }
 }

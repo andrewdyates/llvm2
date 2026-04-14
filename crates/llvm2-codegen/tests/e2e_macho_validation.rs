@@ -284,6 +284,7 @@ fn compile_tmir_function(
     let config = PipelineConfig {
         opt_level,
         emit_debug: false,
+        ..Default::default()
     };
     let pipeline = Pipeline::new(config);
     let obj_bytes = pipeline

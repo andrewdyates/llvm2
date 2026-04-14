@@ -118,6 +118,7 @@ fn test_pipeline_add_function_to_macho() {
     let pipeline = Pipeline::new(PipelineConfig {
         opt_level: OptLevel::O0,
         emit_debug: false,
+        ..Default::default()
     });
 
     let obj_bytes = pipeline.encode_and_emit(&mut func).expect("pipeline should succeed");
@@ -140,6 +141,7 @@ fn test_pipeline_add_function_write_and_verify() {
     let pipeline = Pipeline::new(PipelineConfig {
         opt_level: OptLevel::O0,
         emit_debug: false,
+        ..Default::default()
     });
 
     let obj_bytes = pipeline.encode_and_emit(&mut func).expect("pipeline should succeed");
@@ -275,6 +277,7 @@ fn test_pipeline_nop_function() {
     let pipeline = Pipeline::new(PipelineConfig {
         opt_level: OptLevel::O0,
         emit_debug: false,
+        ..Default::default()
     });
 
     let obj_bytes = pipeline.encode_and_emit(&mut func).expect("pipeline should succeed");
@@ -326,6 +329,7 @@ fn test_compact_unwind_section_emitted() {
     let pipeline = Pipeline::new(PipelineConfig {
         opt_level: OptLevel::O0,
         emit_debug: false,
+        ..Default::default()
     });
 
     let obj_bytes = pipeline.encode_and_emit(&mut func).expect("pipeline should succeed");
@@ -373,6 +377,7 @@ fn test_compact_unwind_nop_function() {
     let pipeline = Pipeline::new(PipelineConfig {
         opt_level: OptLevel::O0,
         emit_debug: false,
+        ..Default::default()
     });
 
     let obj_bytes = pipeline.encode_and_emit(&mut func).expect("pipeline should succeed");
@@ -392,6 +397,7 @@ fn test_compact_unwind_otool_verification() {
     let pipeline = Pipeline::new(PipelineConfig {
         opt_level: OptLevel::O0,
         emit_debug: false,
+        ..Default::default()
     });
 
     let obj_bytes = pipeline.encode_and_emit(&mut func).expect("pipeline should succeed");
@@ -498,6 +504,7 @@ fn test_full_pipeline_produces_valid_object() {
     let pipeline = Pipeline::new(PipelineConfig {
         opt_level: OptLevel::O0,
         emit_debug: false,
+        ..Default::default()
     });
 
     let result = pipeline.compile_ir_function(&mut func);
