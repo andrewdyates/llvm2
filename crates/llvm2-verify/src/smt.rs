@@ -1307,7 +1307,13 @@ impl fmt::Display for SmtExpr {
                 write!(f, "(store {} {} {})", array, index, value)
             }
             SmtExpr::ConstArray { index_sort, value } => {
-                write!(f, "((as const {}) {})", index_sort, value)
+                // SMT-LIB2: ((as const (Array idx_sort elem_sort)) value)
+                let elem_sort = value.sort();
+                let array_sort = SmtSort::Array(
+                    Box::new(index_sort.clone()),
+                    Box::new(elem_sort),
+                );
+                write!(f, "((as const {}) {})", array_sort, value)
             }
             // Floating-point operations
             SmtExpr::FPConst { bits, eb, sb } => {
@@ -1877,13 +1883,13 @@ mod tests {
         let sel = SmtExpr::select(arr.clone(), SmtExpr::bv_const(1, 32));
         assert_eq!(
             format!("{}", sel),
-            "(select ((as const (_ BitVec 32)) (_ bv0 32)) (_ bv1 32))"
+            "(select ((as const (Array (_ BitVec 32) (_ BitVec 32))) (_ bv0 32)) (_ bv1 32))"
         );
 
         let st = SmtExpr::store(arr, SmtExpr::bv_const(1, 32), SmtExpr::bv_const(42, 32));
         assert_eq!(
             format!("{}", st),
-            "(store ((as const (_ BitVec 32)) (_ bv0 32)) (_ bv1 32) (_ bv42 32))"
+            "(store ((as const (Array (_ BitVec 32) (_ BitVec 32))) (_ bv0 32)) (_ bv1 32) (_ bv42 32))"
         );
     }
 

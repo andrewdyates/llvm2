@@ -40,7 +40,7 @@
 //! [`SmtExpr`]: crate::smt::SmtExpr
 
 use crate::lowering_proof::ProofObligation;
-use crate::smt::{SmtExpr, RoundingMode};
+use crate::smt::{SmtExpr, SmtSort, RoundingMode};
 #[cfg(feature = "z4")]
 use std::collections::HashMap;
 use std::fmt;
@@ -252,6 +252,17 @@ pub fn rounding_mode_to_smt2(rm: &RoundingMode) -> &'static str {
     }
 }
 
+/// Serialize an SmtSort to SMT-LIB2 sort syntax.
+///
+/// Examples:
+/// - `SmtSort::BitVec(32)` -> `(_ BitVec 32)`
+/// - `SmtSort::Bool` -> `Bool`
+/// - `SmtSort::Array(BitVec(64), BitVec(8))` -> `(Array (_ BitVec 64) (_ BitVec 8))`
+pub fn sort_to_smt2(sort: &SmtSort) -> String {
+    // SmtSort::Display already emits valid SMT-LIB2 sort syntax.
+    format!("{}", sort)
+}
+
 /// Generate a complete SMT-LIB2 query for a proof obligation.
 ///
 /// This extends `ProofObligation::to_smt2()` with:
@@ -260,6 +271,26 @@ pub fn rounding_mode_to_smt2(rm: &RoundingMode) -> &'static str {
 /// - `(get-model)` after `(check-sat)` for counterexample extraction
 /// - Proper `(get-value ...)` queries for each input variable
 pub fn generate_smt2_query(obligation: &ProofObligation, config: &Z4Config) -> String {
+    generate_smt2_query_with_arrays(obligation, config, &[])
+}
+
+/// Generate a complete SMT-LIB2 query with additional array-sorted variable declarations.
+///
+/// Extends [`generate_smt2_query`] with declarations for non-bitvector symbolic
+/// variables (arrays, FP-sorted constants, etc.). This is needed for memory model
+/// proofs where memory is a symbolic `Array(BitVec64, BitVec8)` variable.
+///
+/// # Arguments
+///
+/// * `obligation` -- the proof obligation (bitvector inputs are declared from `inputs`)
+/// * `config` -- solver configuration
+/// * `extra_decls` -- additional variable declarations with arbitrary sorts,
+///   emitted as `(declare-const name sort)` in the SMT-LIB2 output
+pub fn generate_smt2_query_with_arrays(
+    obligation: &ProofObligation,
+    config: &Z4Config,
+    extra_decls: &[(String, SmtSort)],
+) -> String {
     let mut lines = Vec::new();
 
     // Logic declaration -- infer from the formula content.
@@ -276,11 +307,19 @@ pub fn generate_smt2_query(obligation: &ProofObligation, config: &Z4Config) -> S
         lines.push("(set-option :produce-models true)".to_string());
     }
 
-    // Declare symbolic inputs
+    // Declare symbolic inputs (bitvector-sorted)
     for (name, width) in &obligation.inputs {
         lines.push(format!(
             "(declare-const {} (_ BitVec {}))",
             name, width
+        ));
+    }
+
+    // Declare additional non-bitvector inputs (arrays, FP, etc.)
+    for (name, sort) in extra_decls {
+        lines.push(format!(
+            "(declare-const {} {})",
+            name, sort_to_smt2(sort)
         ));
     }
 
@@ -290,7 +329,9 @@ pub fn generate_smt2_query(obligation: &ProofObligation, config: &Z4Config) -> S
     // Check satisfiability
     lines.push("(check-sat)".to_string());
 
-    // If SAT, get the model for counterexample extraction
+    // If SAT, get the model for counterexample extraction.
+    // Only request values for bitvector inputs (array model extraction
+    // requires a different approach -- not yet supported).
     if config.produce_models && !obligation.inputs.is_empty() {
         let var_list: String = obligation
             .inputs
@@ -1187,5 +1228,188 @@ mod tests {
     fn test_rounding_mode_smt2() {
         assert_eq!(rounding_mode_to_smt2(&RoundingMode::RNE), "RNE");
         assert_eq!(rounding_mode_to_smt2(&RoundingMode::RTZ), "RTZ");
+    }
+
+    // -----------------------------------------------------------------------
+    // Sort serialization tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sort_to_smt2_bitvec() {
+        assert_eq!(sort_to_smt2(&SmtSort::BitVec(32)), "(_ BitVec 32)");
+        assert_eq!(sort_to_smt2(&SmtSort::BitVec(64)), "(_ BitVec 64)");
+        assert_eq!(sort_to_smt2(&SmtSort::BitVec(8)), "(_ BitVec 8)");
+    }
+
+    #[test]
+    fn test_sort_to_smt2_bool() {
+        assert_eq!(sort_to_smt2(&SmtSort::Bool), "Bool");
+    }
+
+    #[test]
+    fn test_sort_to_smt2_array() {
+        let mem_sort = SmtSort::bv_array(64, 8);
+        assert_eq!(sort_to_smt2(&mem_sort), "(Array (_ BitVec 64) (_ BitVec 8))");
+    }
+
+    #[test]
+    fn test_sort_to_smt2_fp() {
+        assert_eq!(sort_to_smt2(&SmtSort::fp32()), "(_ FloatingPoint 8 24)");
+        assert_eq!(sort_to_smt2(&SmtSort::fp64()), "(_ FloatingPoint 11 53)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Array theory SMT-LIB2 serialization tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_array_select_serialization() {
+        // (select array index) serialized via SmtExpr::Display
+        let arr = SmtExpr::const_array(SmtSort::BitVec(64), SmtExpr::bv_const(0, 8));
+        let idx = SmtExpr::var("addr", 64);
+        let sel = SmtExpr::select(arr, idx);
+        let serialized = format!("{}", sel);
+        assert_eq!(
+            serialized,
+            "(select ((as const (Array (_ BitVec 64) (_ BitVec 8))) (_ bv0 8)) addr)"
+        );
+    }
+
+    #[test]
+    fn test_array_store_serialization() {
+        // (store array index value) serialized via SmtExpr::Display
+        let arr = SmtExpr::const_array(SmtSort::BitVec(64), SmtExpr::bv_const(0, 8));
+        let idx = SmtExpr::var("addr", 64);
+        let val = SmtExpr::var("byte", 8);
+        let st = SmtExpr::store(arr, idx, val);
+        let serialized = format!("{}", st);
+        assert_eq!(
+            serialized,
+            "(store ((as const (Array (_ BitVec 64) (_ BitVec 8))) (_ bv0 8)) addr byte)"
+        );
+    }
+
+    #[test]
+    fn test_array_const_array_serialization() {
+        // ((as const (Array (_ BitVec 64) (_ BitVec 8))) (_ bv0 8))
+        let arr = SmtExpr::const_array(SmtSort::BitVec(64), SmtExpr::bv_const(0, 8));
+        let serialized = format!("{}", arr);
+        assert_eq!(
+            serialized,
+            "((as const (Array (_ BitVec 64) (_ BitVec 8))) (_ bv0 8))"
+        );
+    }
+
+    #[test]
+    fn test_array_nested_store_select() {
+        // store at addr, then select at same addr: should produce nested expression
+        let arr = SmtExpr::const_array(SmtSort::BitVec(64), SmtExpr::bv_const(0, 8));
+        let addr = SmtExpr::var("a", 64);
+        let val = SmtExpr::bv_const(42, 8);
+        let stored = SmtExpr::store(arr, addr.clone(), val);
+        let loaded = SmtExpr::select(stored, addr);
+        let serialized = format!("{}", loaded);
+        assert!(serialized.contains("(select (store"));
+        assert!(serialized.contains("(store ((as const (Array (_ BitVec 64) (_ BitVec 8))) (_ bv0 8)) a (_ bv42 8))"));
+    }
+
+    #[test]
+    fn test_generate_smt2_query_with_array_ops() {
+        // A proof obligation that involves array operations should get QF_ABV logic
+        let mem = SmtExpr::const_array(SmtSort::BitVec(64), SmtExpr::var("d", 8));
+        let addr = SmtExpr::var("a", 64);
+        let val = SmtExpr::var("v", 8);
+
+        // tmir side: store then select at same address
+        let mem_after = SmtExpr::store(mem.clone(), addr.clone(), val.clone());
+        let tmir_result = SmtExpr::select(mem_after, addr.clone());
+
+        // aarch64 side: should equal the stored value
+        let aarch64_result = val.clone();
+
+        let obligation = ProofObligation {
+            name: "store_load_roundtrip".to_string(),
+            tmir_expr: tmir_result,
+            aarch64_expr: aarch64_result,
+            inputs: vec![
+                ("a".to_string(), 64),
+                ("v".to_string(), 8),
+                ("d".to_string(), 8),
+            ],
+            preconditions: vec![],
+        };
+
+        let config = Z4Config::default();
+        let smt2 = generate_smt2_query(&obligation, &config);
+
+        // Must use QF_ABV logic (arrays + bitvectors)
+        assert!(smt2.contains("(set-logic QF_ABV)"), "Expected QF_ABV logic, got: {}", smt2);
+        // Must declare all bitvector inputs
+        assert!(smt2.contains("(declare-const a (_ BitVec 64))"));
+        assert!(smt2.contains("(declare-const v (_ BitVec 8))"));
+        assert!(smt2.contains("(declare-const d (_ BitVec 8))"));
+        // Must contain array operations in the assertion
+        assert!(smt2.contains("select"));
+        assert!(smt2.contains("store"));
+        assert!(smt2.contains("(check-sat)"));
+    }
+
+    #[test]
+    fn test_generate_smt2_query_with_extra_array_decls() {
+        // Test the enhanced query generator with explicit array declarations
+        let mem_var = SmtExpr::var("mem", 64); // placeholder -- in real usage this would be array
+        let addr = SmtExpr::var("a", 64);
+
+        let obligation = ProofObligation {
+            name: "test_array_decl".to_string(),
+            tmir_expr: addr.clone(),
+            aarch64_expr: addr,
+            inputs: vec![("a".to_string(), 64)],
+            preconditions: vec![],
+        };
+
+        let config = Z4Config::default();
+        let extra_decls = vec![
+            ("mem".to_string(), SmtSort::bv_array(64, 8)),
+        ];
+        let smt2 = generate_smt2_query_with_arrays(&obligation, &config, &extra_decls);
+
+        // Must declare the array variable with correct sort
+        assert!(
+            smt2.contains("(declare-const mem (Array (_ BitVec 64) (_ BitVec 8)))"),
+            "Missing array declaration in: {}",
+            smt2,
+        );
+        // Must still declare BV inputs
+        assert!(smt2.contains("(declare-const a (_ BitVec 64))"));
+    }
+
+    #[test]
+    fn test_memory_proof_smt2_serialization() {
+        // End-to-end test: generate SMT-LIB2 for a store-load roundtrip from memory_proofs
+        let obligation = crate::memory_proofs::proof_roundtrip_i8();
+        let config = Z4Config::default();
+        let smt2 = generate_smt2_query(&obligation, &config);
+
+        // Memory proofs use array operations, so logic should be QF_ABV
+        assert!(smt2.contains("(set-logic QF_ABV)"), "Expected QF_ABV for memory proof, got: {}", smt2);
+        // Must contain array operations (select, store, as const)
+        assert!(smt2.contains("select"), "Missing select in: {}", smt2);
+        assert!(smt2.contains("store"), "Missing store in: {}", smt2);
+        assert!(smt2.contains("as const"), "Missing as const in: {}", smt2);
+    }
+
+    #[test]
+    fn test_cli_verify_memory_roundtrip_i8() {
+        // Integration test: verify store-load roundtrip with z3 CLI
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return; // No solver available, skip test
+        }
+
+        let obligation = crate::memory_proofs::proof_roundtrip_i8();
+        let config = Z4Config::default();
+        let result = verify_with_cli(&obligation, &config);
+        assert_eq!(result, Z4Result::Verified, "Store-load roundtrip I8 should be verified");
     }
 }
