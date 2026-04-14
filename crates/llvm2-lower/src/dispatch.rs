@@ -579,10 +579,12 @@ mod tests {
             data_size_bytes: 8,
             produced_values: vec![],
             consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
             target_legality: None,
         };
 
         let graph = ComputeGraph {
+            profitability: None,
             nodes: vec![node],
             edges: vec![],
         };
@@ -619,10 +621,12 @@ mod tests {
             data_size_bytes: 128,
             produced_values: vec![],
             consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
             target_legality: None,
         };
 
         let graph = ComputeGraph {
+            profitability: None,
             nodes: vec![node],
             edges: vec![],
         };
@@ -665,6 +669,7 @@ mod tests {
             data_size_bytes: 8,
             produced_values: vec![],
             consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
             target_legality: None,
         };
 
@@ -677,6 +682,7 @@ mod tests {
             data_size_bytes: 4096,
             produced_values: vec![],
             consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
             target_legality: None,
         };
 
@@ -688,6 +694,7 @@ mod tests {
         };
 
         let graph = ComputeGraph {
+            profitability: None,
             nodes: vec![producer, consumer],
             edges: vec![edge],
         };
@@ -739,6 +746,7 @@ mod tests {
             data_size_bytes: 8,
             produced_values: vec![],
             consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
             target_legality: None,
         };
 
@@ -751,6 +759,7 @@ mod tests {
             data_size_bytes: 16384,
             produced_values: vec![],
             consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
             target_legality: None,
         };
 
@@ -762,6 +771,7 @@ mod tests {
         };
 
         let graph = ComputeGraph {
+            profitability: None,
             nodes: vec![producer, consumer],
             edges: vec![edge],
         };
@@ -819,6 +829,7 @@ mod tests {
             data_size_bytes: 8,
             produced_values: vec![],
             consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
             target_legality: None,
         };
 
@@ -831,6 +842,7 @@ mod tests {
             data_size_bytes: 4096,
             produced_values: vec![],
             consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
             target_legality: None,
         };
 
@@ -843,6 +855,7 @@ mod tests {
             data_size_bytes: 64,
             produced_values: vec![],
             consumed_values: vec![],
+            dominant_op: "ADD".to_string(),
             target_legality: None,
         };
 
@@ -862,6 +875,7 @@ mod tests {
         ];
 
         let graph = ComputeGraph {
+            profitability: None,
             nodes: vec![node0, node1, node2],
             edges,
         };
