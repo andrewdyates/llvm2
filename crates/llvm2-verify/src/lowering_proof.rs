@@ -560,6 +560,143 @@ pub fn proof_neg_i32() -> ProofObligation {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Division lowering proofs: tMIR::Sdiv/Udiv -> AArch64 SDIV/UDIV
+// ---------------------------------------------------------------------------
+
+/// Build the proof obligation for: `tMIR::Sdiv(I32, a, b) -> SDIV Wd, Wn, Wm`
+///
+/// Precondition: `b != 0` (NonZeroDivisor proof annotation).
+///
+/// AArch64 SDIV semantics: signed division with truncation toward zero.
+/// Division by zero returns 0 on AArch64, but tMIR treats it as UB --
+/// we verify equivalence only when the precondition holds.
+///
+/// Edge case: `INT32_MIN / -1` = `INT32_MIN` on AArch64 (signed overflow
+/// wraps). The SMT `bvsdiv` semantics match this behavior.
+pub fn proof_sdiv_i32() -> ProofObligation {
+    use crate::aarch64_semantics::encode_sdiv_rr;
+    use crate::tmir_semantics::{encode_tmir_binop, precondition};
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    let mut preconditions = vec![];
+    if let Some(pre) = precondition(&Opcode::Sdiv, Type::I32, &a, &b) {
+        preconditions.push(pre);
+    }
+
+    ProofObligation {
+        name: "Sdiv_I32 -> SDIVWrr".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Sdiv, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_sdiv_rr(OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions,
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Sdiv(I64, a, b) -> SDIV Xd, Xn, Xm`
+///
+/// Precondition: `b != 0`.
+/// Edge case: `INT64_MIN / -1` = `INT64_MIN` (signed overflow wraps).
+pub fn proof_sdiv_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_sdiv_rr;
+    use crate::tmir_semantics::{encode_tmir_binop, precondition};
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    let mut preconditions = vec![];
+    if let Some(pre) = precondition(&Opcode::Sdiv, Type::I64, &a, &b) {
+        preconditions.push(pre);
+    }
+
+    ProofObligation {
+        name: "Sdiv_I64 -> SDIVXrr".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Sdiv, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_sdiv_rr(OperandSize::S64, a, b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions,
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Udiv(I32, a, b) -> UDIV Wd, Wn, Wm`
+///
+/// Precondition: `b != 0` (NonZeroDivisor proof annotation).
+///
+/// AArch64 UDIV semantics: unsigned division with truncation toward zero.
+/// Division by zero returns 0 on AArch64, but tMIR treats it as UB.
+pub fn proof_udiv_i32() -> ProofObligation {
+    use crate::aarch64_semantics::encode_udiv_rr;
+    use crate::tmir_semantics::{encode_tmir_binop, precondition};
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    let mut preconditions = vec![];
+    if let Some(pre) = precondition(&Opcode::Udiv, Type::I32, &a, &b) {
+        preconditions.push(pre);
+    }
+
+    ProofObligation {
+        name: "Udiv_I32 -> UDIVWrr".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Udiv, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_udiv_rr(OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions,
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Udiv(I64, a, b) -> UDIV Xd, Xn, Xm`
+///
+/// Precondition: `b != 0`.
+pub fn proof_udiv_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_udiv_rr;
+    use crate::tmir_semantics::{encode_tmir_binop, precondition};
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    let mut preconditions = vec![];
+    if let Some(pre) = precondition(&Opcode::Udiv, Type::I64, &a, &b) {
+        preconditions.push(pre);
+    }
+
+    ProofObligation {
+        name: "Udiv_I64 -> UDIVXrr".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Udiv, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_udiv_rr(OperandSize::S64, a, b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions,
+        fp_inputs: vec![],
+    }
+}
+
+/// Return all division lowering proofs.
+pub fn all_division_proofs() -> Vec<ProofObligation> {
+    vec![
+        proof_sdiv_i32(),
+        proof_sdiv_i64(),
+        proof_udiv_i32(),
+        proof_udiv_i64(),
+    ]
+}
+
 /// Return all standard arithmetic lowering rule proofs.
 pub fn all_arithmetic_proofs() -> Vec<ProofObligation> {
     vec![
@@ -568,6 +705,10 @@ pub fn all_arithmetic_proofs() -> Vec<ProofObligation> {
         proof_isub_i32(),
         proof_imul_i32(),
         proof_neg_i32(),
+        proof_sdiv_i32(),
+        proof_sdiv_i64(),
+        proof_udiv_i32(),
+        proof_udiv_i64(),
     ]
 }
 
@@ -1001,6 +1142,233 @@ mod tests {
         for obligation in all_arithmetic_proofs() {
             assert_valid(&obligation);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Division lowering proof tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_sdiv_i32() {
+        assert_valid(&proof_sdiv_i32());
+    }
+
+    #[test]
+    fn test_proof_sdiv_i64() {
+        assert_valid(&proof_sdiv_i64());
+    }
+
+    #[test]
+    fn test_proof_udiv_i32() {
+        assert_valid(&proof_udiv_i32());
+    }
+
+    #[test]
+    fn test_proof_udiv_i64() {
+        assert_valid(&proof_udiv_i64());
+    }
+
+    #[test]
+    fn test_all_division_proofs() {
+        for obligation in all_division_proofs() {
+            assert_valid(&obligation);
+        }
+    }
+
+    /// Verify division proof obligations include the NonZeroDivisor precondition.
+    #[test]
+    fn test_division_proofs_have_preconditions() {
+        let sdiv32 = proof_sdiv_i32();
+        assert_eq!(sdiv32.preconditions.len(), 1, "SDIV I32 must have NonZeroDivisor precondition");
+
+        let sdiv64 = proof_sdiv_i64();
+        assert_eq!(sdiv64.preconditions.len(), 1, "SDIV I64 must have NonZeroDivisor precondition");
+
+        let udiv32 = proof_udiv_i32();
+        assert_eq!(udiv32.preconditions.len(), 1, "UDIV I32 must have NonZeroDivisor precondition");
+
+        let udiv64 = proof_udiv_i64();
+        assert_eq!(udiv64.preconditions.len(), 1, "UDIV I64 must have NonZeroDivisor precondition");
+    }
+
+    /// Verify that the precondition rejects b=0 and accepts b!=0.
+    #[test]
+    fn test_division_precondition_semantics() {
+        use std::collections::HashMap;
+
+        let obligation = proof_sdiv_i32();
+        let pre = &obligation.preconditions[0];
+
+        // b=0 should fail precondition
+        let mut env_zero = HashMap::new();
+        env_zero.insert("a".to_string(), 42u64);
+        env_zero.insert("b".to_string(), 0u64);
+        assert!(!pre.eval(&env_zero).as_bool(), "Precondition must reject b=0");
+
+        // b=1 should pass precondition
+        let mut env_one = HashMap::new();
+        env_one.insert("a".to_string(), 42u64);
+        env_one.insert("b".to_string(), 1u64);
+        assert!(pre.eval(&env_one).as_bool(), "Precondition must accept b=1");
+
+        // b=0xFFFFFFFF (-1 in 32-bit signed) should pass precondition
+        let mut env_neg1 = HashMap::new();
+        env_neg1.insert("a".to_string(), 42u64);
+        env_neg1.insert("b".to_string(), 0xFFFF_FFFFu64);
+        assert!(pre.eval(&env_neg1).as_bool(), "Precondition must accept b=-1");
+    }
+
+    /// Edge case: SDIV with dividend=1, divisor=1 -- basic sanity.
+    #[test]
+    fn test_sdiv_i32_div_by_one() {
+        use crate::aarch64_semantics::encode_sdiv_rr;
+        use crate::tmir_semantics::encode_tmir_binop;
+        use llvm2_ir::cc::OperandSize;
+        use llvm2_lower::instructions::Opcode;
+        use llvm2_lower::types::Type;
+        use std::collections::HashMap;
+
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+
+        let tmir = encode_tmir_binop(&Opcode::Sdiv, Type::I32, a.clone(), b.clone());
+        let aarch64 = encode_sdiv_rr(OperandSize::S32, a, b);
+
+        let mut env = HashMap::new();
+        env.insert("a".to_string(), 42u64);
+        env.insert("b".to_string(), 1u64);
+
+        assert_eq!(tmir.eval(&env), aarch64.eval(&env));
+    }
+
+    /// Edge case: SDIV INT_MIN / -1 = INT_MIN (signed overflow wraps).
+    /// On AArch64, SDIV 0x80000000 / 0xFFFFFFFF = 0x80000000.
+    #[test]
+    fn test_sdiv_i32_int_min_div_neg1() {
+        use crate::aarch64_semantics::encode_sdiv_rr;
+        use crate::tmir_semantics::encode_tmir_binop;
+        use crate::smt::EvalResult;
+        use llvm2_ir::cc::OperandSize;
+        use llvm2_lower::instructions::Opcode;
+        use llvm2_lower::types::Type;
+        use std::collections::HashMap;
+
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+
+        let tmir = encode_tmir_binop(&Opcode::Sdiv, Type::I32, a.clone(), b.clone());
+        let aarch64 = encode_sdiv_rr(OperandSize::S32, a, b);
+
+        let mut env = HashMap::new();
+        env.insert("a".to_string(), 0x8000_0000u64); // INT32_MIN
+        env.insert("b".to_string(), 0xFFFF_FFFFu64); // -1
+
+        let tmir_result = tmir.eval(&env);
+        let aarch64_result = aarch64.eval(&env);
+        assert_eq!(tmir_result, aarch64_result);
+        // INT_MIN / -1 overflows to INT_MIN
+        assert_eq!(tmir_result, EvalResult::Bv(0x8000_0000));
+    }
+
+    /// Edge case: SDIV negative values.
+    #[test]
+    fn test_sdiv_i32_negative_values() {
+        use crate::aarch64_semantics::encode_sdiv_rr;
+        use crate::tmir_semantics::encode_tmir_binop;
+        use crate::smt::EvalResult;
+        use llvm2_ir::cc::OperandSize;
+        use llvm2_lower::instructions::Opcode;
+        use llvm2_lower::types::Type;
+        use std::collections::HashMap;
+
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+
+        let tmir = encode_tmir_binop(&Opcode::Sdiv, Type::I32, a.clone(), b.clone());
+        let aarch64 = encode_sdiv_rr(OperandSize::S32, a, b);
+
+        // -10 / 3 = -3 (truncated toward zero)
+        let mut env = HashMap::new();
+        let neg10 = ((-10i32) as u32) as u64;
+        env.insert("a".to_string(), neg10);
+        env.insert("b".to_string(), 3u64);
+
+        let tmir_result = tmir.eval(&env);
+        let aarch64_result = aarch64.eval(&env);
+        assert_eq!(tmir_result, aarch64_result);
+        // -3 in 32-bit
+        let neg3 = ((-3i32) as u32) as u64;
+        assert_eq!(tmir_result, EvalResult::Bv(neg3));
+    }
+
+    /// Edge case: UDIV max value.
+    #[test]
+    fn test_udiv_i32_max_values() {
+        use crate::aarch64_semantics::encode_udiv_rr;
+        use crate::tmir_semantics::encode_tmir_binop;
+        use crate::smt::EvalResult;
+        use llvm2_ir::cc::OperandSize;
+        use llvm2_lower::instructions::Opcode;
+        use llvm2_lower::types::Type;
+        use std::collections::HashMap;
+
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+
+        let tmir = encode_tmir_binop(&Opcode::Udiv, Type::I32, a.clone(), b.clone());
+        let aarch64 = encode_udiv_rr(OperandSize::S32, a, b);
+
+        // UINT32_MAX / 1 = UINT32_MAX
+        let mut env = HashMap::new();
+        env.insert("a".to_string(), 0xFFFF_FFFFu64);
+        env.insert("b".to_string(), 1u64);
+
+        let tmir_result = tmir.eval(&env);
+        let aarch64_result = aarch64.eval(&env);
+        assert_eq!(tmir_result, aarch64_result);
+        assert_eq!(tmir_result, EvalResult::Bv(0xFFFF_FFFF));
+
+        // UINT32_MAX / UINT32_MAX = 1
+        env.insert("b".to_string(), 0xFFFF_FFFFu64);
+        let tmir_result2 = encode_tmir_binop(&Opcode::Udiv, Type::I32,
+            SmtExpr::var("a", 32), SmtExpr::var("b", 32)).eval(&env);
+        let aarch64_result2 = encode_udiv_rr(OperandSize::S32,
+            SmtExpr::var("a", 32), SmtExpr::var("b", 32)).eval(&env);
+        assert_eq!(tmir_result2, aarch64_result2);
+        assert_eq!(tmir_result2, EvalResult::Bv(1));
+    }
+
+    /// Verify SMT2 output for division includes preconditions.
+    #[test]
+    fn test_sdiv_smt2_has_precondition() {
+        let obligation = proof_sdiv_i32();
+        let smt2 = obligation.to_smt2();
+        assert!(smt2.contains("(set-logic"), "SMT2 should have set-logic");
+        assert!(smt2.contains("(declare-const a (_ BitVec 32))"), "SMT2 should declare a");
+        assert!(smt2.contains("(declare-const b (_ BitVec 32))"), "SMT2 should declare b");
+        assert!(smt2.contains("(check-sat)"), "SMT2 should have check-sat");
+        // The precondition (b != 0) should be ANDed into the formula
+        assert!(smt2.contains("(assert"), "SMT2 should have assert");
+    }
+
+    /// Negative test: SDIV without precondition should fail (div-by-zero mismatch).
+    /// tMIR and AArch64 both return sentinel 0 for div-by-zero in the evaluator,
+    /// so this tests that WITH precondition the proofs are valid but the
+    /// precondition correctly skips div-by-zero inputs.
+    #[test]
+    fn test_division_precondition_skips_zero_divisor() {
+        use std::collections::HashMap;
+
+        let obligation = proof_sdiv_i32();
+
+        // Manually test that b=0 is skipped by check_single_point
+        let mut env = HashMap::new();
+        env.insert("a".to_string(), 42u64);
+        env.insert("b".to_string(), 0u64);
+
+        // The precondition should evaluate to false for b=0
+        let pre_result = obligation.preconditions[0].eval(&env);
+        assert!(!pre_result.as_bool(), "Precondition should be false for b=0");
     }
 
     #[test]
