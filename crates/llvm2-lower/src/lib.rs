@@ -15,6 +15,7 @@ pub mod function;
 pub mod abi;
 pub mod isel;
 pub mod adapter;
+pub mod target_analysis;
 
 pub use types::Type;
 pub use function::Function;
@@ -24,3 +25,4 @@ pub use adapter::{
     translate_module, translate_function, translate_type, extract_proofs,
     AdapterError, Proof, ProofContext,
 };
+pub use target_analysis::{ComputeTarget, ProofAnalyzer, TargetLegality};
