@@ -57,6 +57,14 @@ pub enum SmtError {
     #[error("bv_width called on Bool-sorted expression")]
     BoolHasNoWidth,
 
+    /// ConstArray index sort must be a bitvector sort.
+    #[error("ConstArray index sort must be BitVec, got: {0}")]
+    InvalidArrayIndexSort(String),
+
+    /// Store/Select operation on a non-array expression.
+    #[error("expected array sort, got: {0}")]
+    NotAnArraySort(String),
+
     /// Variable not found during concrete evaluation.
     #[error("variable '{0}' not found in evaluation environment")]
     UndefinedVariable(String),
@@ -334,6 +342,39 @@ pub enum SmtExpr {
 }
 
 // ---------------------------------------------------------------------------
+// Array sort validation helper
+// ---------------------------------------------------------------------------
+
+/// Validate that an expression has an Array sort, when statically determinable.
+///
+/// Expressions whose sort is statically known to be non-Array (e.g., `BvConst`,
+/// `BoolConst`, comparison results) cause an error. Expressions whose sort
+/// cannot be cheaply determined at construction time (e.g., `Var`, `Ite`) are
+/// allowed through — runtime validation occurs in `try_eval`.
+fn validate_array_sort(expr: &SmtExpr) -> Result<(), SmtError> {
+    match expr {
+        // Known array-sorted expressions: always OK.
+        SmtExpr::ConstArray { .. } | SmtExpr::Store { .. } => Ok(()),
+        // Expressions whose sort is ambiguous at construction time: allow.
+        // Var, Select (returns element sort), Ite, UF — we can't cheaply
+        // determine array sort without recursion, so defer to eval.
+        SmtExpr::Var { .. }
+        | SmtExpr::Ite { .. }
+        | SmtExpr::Select { .. }
+        | SmtExpr::UF { .. } => Ok(()),
+        // Everything else is statically known to NOT be array-sorted.
+        other => {
+            let sort = other.sort();
+            if matches!(sort, SmtSort::Array(_, _)) {
+                Ok(())
+            } else {
+                Err(SmtError::NotAnArraySort(format!("{}", sort)))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SmtExpr constructors (ergonomic builder API)
 // ---------------------------------------------------------------------------
 
@@ -536,28 +577,72 @@ impl SmtExpr {
     // -- Array constructors --
 
     /// `(select array index)` -- read from array.
+    ///
+    /// Validates that `array` has an `Array` sort when statically determinable
+    /// (i.e., for `ConstArray` and `Store` expressions). For `Var` expressions
+    /// whose sort cannot be determined at construction time, validation is
+    /// deferred to evaluation via [`try_eval`].
     pub fn select(array: Self, index: Self) -> Self {
-        SmtExpr::Select {
+        Self::try_select(array, index)
+            .expect("select: first argument must have Array sort; use try_select() for fallible construction")
+    }
+
+    /// Fallible `(select array index)`.
+    ///
+    /// Returns `Err(SmtError::NotAnArraySort)` if the array expression's sort
+    /// is statically known to not be an Array sort.
+    pub fn try_select(array: Self, index: Self) -> Result<Self, SmtError> {
+        validate_array_sort(&array)?;
+        Ok(SmtExpr::Select {
             array: Box::new(array),
             index: Box::new(index),
-        }
+        })
     }
 
     /// `(store array index value)` -- write to array.
+    ///
+    /// Validates that `array` has an `Array` sort when statically determinable.
     pub fn store(array: Self, index: Self, value: Self) -> Self {
-        SmtExpr::Store {
+        Self::try_store(array, index, value)
+            .expect("store: first argument must have Array sort; use try_store() for fallible construction")
+    }
+
+    /// Fallible `(store array index value)`.
+    ///
+    /// Returns `Err(SmtError::NotAnArraySort)` if the array expression's sort
+    /// is statically known to not be an Array sort.
+    pub fn try_store(array: Self, index: Self, value: Self) -> Result<Self, SmtError> {
+        validate_array_sort(&array)?;
+        Ok(SmtExpr::Store {
             array: Box::new(array),
             index: Box::new(index),
             value: Box::new(value),
-        }
+        })
     }
 
     /// `((as const ...) value)` -- constant array filled with `value`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index_sort` is not `SmtSort::BitVec`. Use [`try_const_array`]
+    /// for fallible construction.
     pub fn const_array(index_sort: SmtSort, value: Self) -> Self {
-        SmtExpr::ConstArray {
+        Self::try_const_array(index_sort, value)
+            .expect("const_array: index_sort must be BitVec; use try_const_array() for fallible construction")
+    }
+
+    /// Fallible `((as const ...) value)` -- constant array filled with `value`.
+    ///
+    /// Returns `Err(SmtError::InvalidArrayIndexSort)` if `index_sort` is not
+    /// `SmtSort::BitVec`.
+    pub fn try_const_array(index_sort: SmtSort, value: Self) -> Result<Self, SmtError> {
+        if !matches!(index_sort, SmtSort::BitVec(_)) {
+            return Err(SmtError::InvalidArrayIndexSort(format!("{}", index_sort)));
+        }
+        Ok(SmtExpr::ConstArray {
             index_sort,
             value: Box::new(value),
-        }
+        })
     }
 
     // -- Floating-point constructors --
@@ -2061,5 +2146,155 @@ mod tests {
         // UF with args
         let uf = SmtExpr::uf("f", vec![SmtExpr::var("x", 32)], SmtSort::BitVec(32));
         assert_eq!(uf.free_vars(), vec!["x".to_string()]);
+    }
+
+    // -----------------------------------------------------------------------
+    // ConstArray index sort validation tests (#167)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_const_array_bv_index_sort_ok() {
+        // Valid: BitVec index sort should succeed.
+        let result = SmtExpr::try_const_array(SmtSort::BitVec(32), SmtExpr::bv_const(0, 64));
+        assert!(result.is_ok());
+        let arr = result.unwrap();
+        assert_eq!(
+            arr.sort(),
+            SmtSort::Array(Box::new(SmtSort::BitVec(32)), Box::new(SmtSort::BitVec(64)))
+        );
+    }
+
+    #[test]
+    fn test_const_array_bool_index_sort_rejected() {
+        // Invalid: Bool index sort should fail.
+        let result = SmtExpr::try_const_array(SmtSort::Bool, SmtExpr::bv_const(0, 32));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SmtError::InvalidArrayIndexSort(msg) => {
+                assert!(msg.contains("Bool"), "error should mention Bool sort: {}", msg);
+            }
+            other => panic!("expected InvalidArrayIndexSort, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_const_array_array_index_sort_rejected() {
+        // Invalid: Array index sort should fail.
+        let nested_sort = SmtSort::Array(
+            Box::new(SmtSort::BitVec(8)),
+            Box::new(SmtSort::BitVec(8)),
+        );
+        let result = SmtExpr::try_const_array(nested_sort, SmtExpr::bv_const(0, 32));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SmtError::InvalidArrayIndexSort(msg) => {
+                assert!(msg.contains("Array"), "error should mention Array sort: {}", msg);
+            }
+            other => panic!("expected InvalidArrayIndexSort, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_const_array_fp_index_sort_rejected() {
+        // Invalid: FloatingPoint index sort should fail.
+        let result = SmtExpr::try_const_array(SmtSort::fp32(), SmtExpr::bv_const(0, 32));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SmtError::InvalidArrayIndexSort(msg) => {
+                assert!(msg.contains("FloatingPoint"), "error should mention FP sort: {}", msg);
+            }
+            other => panic!("expected InvalidArrayIndexSort, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "index_sort must be BitVec")]
+    fn test_const_array_panics_on_bool_index() {
+        // The non-try version should panic.
+        let _ = SmtExpr::const_array(SmtSort::Bool, SmtExpr::bv_const(0, 32));
+    }
+
+    // -----------------------------------------------------------------------
+    // Select/Store sort validation tests (#167)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_select_on_array_ok() {
+        // Valid: selecting from a ConstArray.
+        let arr = SmtExpr::const_array(SmtSort::BitVec(8), SmtExpr::bv_const(42, 32));
+        let result = SmtExpr::try_select(arr, SmtExpr::bv_const(0, 8));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_store_on_array_ok() {
+        // Valid: storing to a ConstArray.
+        let arr = SmtExpr::const_array(SmtSort::BitVec(8), SmtExpr::bv_const(0, 32));
+        let result = SmtExpr::try_store(arr, SmtExpr::bv_const(1, 8), SmtExpr::bv_const(99, 32));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_select_on_non_array_rejected() {
+        // Invalid: selecting from a BvConst should fail.
+        let result = SmtExpr::try_select(SmtExpr::bv_const(0, 32), SmtExpr::bv_const(0, 8));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SmtError::NotAnArraySort(msg) => {
+                assert!(msg.contains("BitVec"), "error should mention sort: {}", msg);
+            }
+            other => panic!("expected NotAnArraySort, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_store_on_non_array_rejected() {
+        // Invalid: storing to a BoolConst should fail.
+        let result = SmtExpr::try_store(
+            SmtExpr::bool_const(true),
+            SmtExpr::bv_const(0, 8),
+            SmtExpr::bv_const(42, 32),
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SmtError::NotAnArraySort(msg) => {
+                assert!(msg.contains("Bool"), "error should mention sort: {}", msg);
+            }
+            other => panic!("expected NotAnArraySort, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "must have Array sort")]
+    fn test_select_panics_on_non_array() {
+        let _ = SmtExpr::select(SmtExpr::bv_const(0, 32), SmtExpr::bv_const(0, 8));
+    }
+
+    #[test]
+    #[should_panic(expected = "must have Array sort")]
+    fn test_store_panics_on_non_array() {
+        let _ = SmtExpr::store(
+            SmtExpr::bv_const(0, 32),
+            SmtExpr::bv_const(0, 8),
+            SmtExpr::bv_const(42, 32),
+        );
+    }
+
+    #[test]
+    fn test_select_on_var_allowed() {
+        // Var sort can't be statically determined as Array, but we defer
+        // validation to eval time for flexibility.
+        let result = SmtExpr::try_select(SmtExpr::var("mem", 64), SmtExpr::bv_const(0, 8));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_store_then_select_well_typed() {
+        // Full roundtrip: const_array -> store -> select with matching types.
+        let arr = SmtExpr::const_array(SmtSort::BitVec(8), SmtExpr::bv_const(0, 32));
+        let arr = SmtExpr::store(arr, SmtExpr::bv_const(7, 8), SmtExpr::bv_const(255, 32));
+        let sel = SmtExpr::select(arr, SmtExpr::bv_const(7, 8));
+        let result = sel.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bv(255));
     }
 }
