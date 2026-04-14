@@ -63,6 +63,7 @@ pub mod z4_bridge;
 pub mod synthesis;
 pub mod cegis;
 pub mod rule_discovery;
+pub mod neon_semantics;
 
 pub use verify::{VerificationResult, Verifier};
 pub use lowering_proof::{ProofObligation, verify_by_evaluation};

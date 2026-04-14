@@ -182,8 +182,14 @@ impl RuleProposal {
             }
             SmtExpr::BvNeg { operand, .. }
             | SmtExpr::Not { operand }
-            | SmtExpr::Extract { operand, .. } => {
+            | SmtExpr::Extract { operand, .. }
+            | SmtExpr::ZeroExtend { operand, .. }
+            | SmtExpr::SignExtend { operand, .. } => {
                 Self::find_var_width_in_expr(operand, target)
+            }
+            SmtExpr::Concat { hi, lo, .. } => {
+                Self::find_var_width_in_expr(hi, target)
+                    .or_else(|| Self::find_var_width_in_expr(lo, target))
             }
             SmtExpr::Ite { cond, then_expr, else_expr } => {
                 Self::find_var_width_in_expr(cond, target)
@@ -641,7 +647,12 @@ fn estimate_expr_cost(expr: &SmtExpr) -> i32 {
         SmtExpr::BvNeg { operand, .. } | SmtExpr::Not { operand } => {
             1 + estimate_expr_cost(operand)
         }
-        SmtExpr::Extract { operand, .. } => 1 + estimate_expr_cost(operand),
+        SmtExpr::Extract { operand, .. }
+        | SmtExpr::ZeroExtend { operand, .. }
+        | SmtExpr::SignExtend { operand, .. } => 1 + estimate_expr_cost(operand),
+        SmtExpr::Concat { hi, lo, .. } => {
+            1 + estimate_expr_cost(hi) + estimate_expr_cost(lo)
+        }
         SmtExpr::Ite { cond, then_expr, else_expr } => {
             1 + estimate_expr_cost(cond)
                 + estimate_expr_cost(then_expr)

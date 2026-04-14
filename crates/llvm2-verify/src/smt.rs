@@ -193,6 +193,25 @@ pub enum SmtExpr {
 
     /// `bvashr(lhs, rhs)` -- arithmetic shift right.
     BvAshr { lhs: Box<SmtExpr>, rhs: Box<SmtExpr>, width: u32 },
+
+    /// `concat(hi, lo)` -- bitvector concatenation.
+    ///
+    /// Produces a bitvector of width `hi.width + lo.width` where the high bits
+    /// come from `hi` and the low bits come from `lo`.
+    /// SMT-LIB2: `(concat hi lo)`.
+    Concat { hi: Box<SmtExpr>, lo: Box<SmtExpr>, width: u32 },
+
+    /// `zero_extend(operand, extra_bits)` -- zero-extend by `extra_bits` bits.
+    ///
+    /// Produces a bitvector of width `operand.width + extra_bits`.
+    /// SMT-LIB2: `((_ zero_extend extra_bits) operand)`.
+    ZeroExtend { operand: Box<SmtExpr>, extra_bits: u32, width: u32 },
+
+    /// `sign_extend(operand, extra_bits)` -- sign-extend by `extra_bits` bits.
+    ///
+    /// Produces a bitvector of width `operand.width + extra_bits`.
+    /// SMT-LIB2: `((_ sign_extend extra_bits) operand)`.
+    SignExtend { operand: Box<SmtExpr>, extra_bits: u32, width: u32 },
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +394,26 @@ impl SmtExpr {
         }
     }
 
+    /// `concat(hi, lo)` -- bitvector concatenation.
+    ///
+    /// The result has width `hi.width + lo.width`, with `hi` in the upper bits.
+    pub fn concat(self, lo: Self) -> Self {
+        let w = self.bv_width() + lo.bv_width();
+        SmtExpr::Concat { hi: Box::new(self), lo: Box::new(lo), width: w }
+    }
+
+    /// `zero_extend(extra_bits)` -- zero-extend this bitvector.
+    pub fn zero_ext(self, extra_bits: u32) -> Self {
+        let w = self.bv_width() + extra_bits;
+        SmtExpr::ZeroExtend { operand: Box::new(self), extra_bits, width: w }
+    }
+
+    /// `sign_extend(extra_bits)` -- sign-extend this bitvector.
+    pub fn sign_ext(self, extra_bits: u32) -> Self {
+        let w = self.bv_width() + extra_bits;
+        SmtExpr::SignExtend { operand: Box::new(self), extra_bits, width: w }
+    }
+
     /// Return the bitvector width of this expression, or an error for Bool-sorted expressions.
     pub fn try_bv_width(&self) -> Result<u32, SmtError> {
         match self {
@@ -393,6 +432,9 @@ impl SmtExpr {
             SmtExpr::BvShl { width, .. } => Ok(*width),
             SmtExpr::BvLshr { width, .. } => Ok(*width),
             SmtExpr::BvAshr { width, .. } => Ok(*width),
+            SmtExpr::Concat { width, .. } => Ok(*width),
+            SmtExpr::ZeroExtend { width, .. } => Ok(*width),
+            SmtExpr::SignExtend { width, .. } => Ok(*width),
             SmtExpr::Ite { then_expr, .. } => then_expr.try_bv_width(),
             SmtExpr::BoolConst(_)
             | SmtExpr::Eq { .. }
@@ -481,8 +523,14 @@ impl SmtExpr {
             }
             SmtExpr::BvNeg { operand, .. }
             | SmtExpr::Not { operand }
-            | SmtExpr::Extract { operand, .. } => {
+            | SmtExpr::Extract { operand, .. }
+            | SmtExpr::ZeroExtend { operand, .. }
+            | SmtExpr::SignExtend { operand, .. } => {
                 operand.collect_vars(vars);
+            }
+            SmtExpr::Concat { hi, lo, .. } => {
+                hi.collect_vars(vars);
+                lo.collect_vars(vars);
             }
             SmtExpr::Ite { cond, then_expr, else_expr } => {
                 cond.collect_vars(vars);
@@ -721,6 +769,25 @@ impl SmtExpr {
                 let _ = high; // used in width calculation
                 Ok(EvalResult::Bv(extracted))
             }
+            SmtExpr::Concat { hi, lo, .. } => {
+                let hi_val = hi.try_eval(env)?.as_u64();
+                let lo_val = lo.try_eval(env)?.as_u64();
+                let lo_width = lo.bv_width();
+                // Place hi bits above lo bits.
+                let result = (hi_val << lo_width) | lo_val;
+                Ok(EvalResult::Bv(result))
+            }
+            SmtExpr::ZeroExtend { operand, .. } => {
+                // Value is already stored in u64 with upper bits zero.
+                let v = operand.try_eval(env)?.as_u64();
+                Ok(EvalResult::Bv(v))
+            }
+            SmtExpr::SignExtend { operand, extra_bits, width } => {
+                let v = operand.try_eval(env)?.as_u64();
+                let src_width = *width - *extra_bits;
+                let extended = sign_extend(v, src_width) as u64;
+                Ok(EvalResult::Bv(mask(extended, *width)))
+            }
         }
     }
 
@@ -779,8 +846,206 @@ impl fmt::Display for SmtExpr {
             SmtExpr::Extract { high, low, operand, .. } => {
                 write!(f, "((_ extract {} {}) {})", high, low, operand)
             }
+            SmtExpr::Concat { hi, lo, .. } => {
+                write!(f, "(concat {} {})", hi, lo)
+            }
+            SmtExpr::ZeroExtend { operand, extra_bits, .. } => {
+                write!(f, "((_ zero_extend {}) {})", extra_bits, operand)
+            }
+            SmtExpr::SignExtend { operand, extra_bits, .. } => {
+                write!(f, "((_ sign_extend {}) {})", extra_bits, operand)
+            }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// NEON / SIMD lane helpers
+// ---------------------------------------------------------------------------
+
+/// NEON vector arrangement: describes element size and lane count.
+///
+/// ARM DDI 0487: "The arrangement specifier determines the size of elements
+/// and the number of lanes in the vector register."
+///
+/// Naming convention follows ARM assembly syntax:
+/// - `8B` = 8 lanes of 8-bit bytes (64-bit, lower half of V register)
+/// - `16B` = 16 lanes of 8-bit bytes (128-bit, full V register)
+/// - `4H` = 4 lanes of 16-bit halfwords (64-bit)
+/// - `8H` = 8 lanes of 16-bit halfwords (128-bit)
+/// - `2S` = 2 lanes of 32-bit words (64-bit)
+/// - `4S` = 4 lanes of 32-bit words (128-bit)
+/// - `2D` = 2 lanes of 64-bit doublewords (128-bit)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VectorArrangement {
+    B8,  // 8 x 8-bit (64-bit total)
+    B16, // 16 x 8-bit (128-bit total)
+    H4,  // 4 x 16-bit (64-bit total)
+    H8,  // 8 x 16-bit (128-bit total)
+    S2,  // 2 x 32-bit (64-bit total)
+    S4,  // 4 x 32-bit (128-bit total)
+    D2,  // 2 x 64-bit (128-bit total)
+}
+
+impl VectorArrangement {
+    /// Number of lanes in this arrangement.
+    pub fn lane_count(self) -> u32 {
+        match self {
+            VectorArrangement::B8 => 8,
+            VectorArrangement::B16 => 16,
+            VectorArrangement::H4 => 4,
+            VectorArrangement::H8 => 8,
+            VectorArrangement::S2 => 2,
+            VectorArrangement::S4 => 4,
+            VectorArrangement::D2 => 2,
+        }
+    }
+
+    /// Bit-width of each lane element.
+    pub fn lane_bits(self) -> u32 {
+        match self {
+            VectorArrangement::B8 | VectorArrangement::B16 => 8,
+            VectorArrangement::H4 | VectorArrangement::H8 => 16,
+            VectorArrangement::S2 | VectorArrangement::S4 => 32,
+            VectorArrangement::D2 => 64,
+        }
+    }
+
+    /// Total bit-width of the vector (64 or 128).
+    pub fn total_bits(self) -> u32 {
+        self.lane_count() * self.lane_bits()
+    }
+}
+
+/// Extract lane `idx` from a vector expression.
+///
+/// Returns `expr[hi:lo]` where `lo = idx * lane_bits` and `hi = lo + lane_bits - 1`.
+///
+/// # Panics
+///
+/// Panics if `idx >= arrangement.lane_count()`.
+pub fn lane_extract(expr: &SmtExpr, arrangement: VectorArrangement, idx: u32) -> SmtExpr {
+    assert!(idx < arrangement.lane_count(), "lane index out of bounds");
+    let lane_bits = arrangement.lane_bits();
+    let lo = idx * lane_bits;
+    let hi = lo + lane_bits - 1;
+    expr.clone().extract(hi, lo)
+}
+
+/// Build a vector from individual lane expressions by concatenating them.
+///
+/// `lanes[0]` is the least-significant lane (lane 0), `lanes[last]` is the
+/// most-significant lane. Each lane expression must have width `arrangement.lane_bits()`.
+///
+/// # Panics
+///
+/// Panics if `lanes.len() != arrangement.lane_count()`.
+pub fn concat_lanes(lanes: &[SmtExpr], arrangement: VectorArrangement) -> SmtExpr {
+    assert_eq!(
+        lanes.len() as u32,
+        arrangement.lane_count(),
+        "wrong number of lanes for arrangement"
+    );
+    // Build from lane 0 (LSB) upward: concat(lane[n-1], concat(lane[n-2], ... concat(lane[1], lane[0])))
+    let mut result = lanes[0].clone();
+    for lane in &lanes[1..] {
+        // Each `concat` places the new lane in the higher bits.
+        result = lane.clone().concat(result);
+    }
+    result
+}
+
+/// Insert a lane value into a vector, returning the modified vector.
+///
+/// Decomposes the vector into lanes, replaces lane `idx` with `new_lane`,
+/// and reassembles. This is the symbolic equivalent of `INS Vd.T[idx], Vn.T[0]`.
+///
+/// # Panics
+///
+/// Panics if `idx >= arrangement.lane_count()`.
+pub fn lane_insert(
+    vec: &SmtExpr,
+    arrangement: VectorArrangement,
+    idx: u32,
+    new_lane: SmtExpr,
+) -> SmtExpr {
+    assert!(idx < arrangement.lane_count(), "lane index out of bounds");
+    let n = arrangement.lane_count();
+    let lanes: Vec<SmtExpr> = (0..n)
+        .map(|i| {
+            if i == idx {
+                new_lane.clone()
+            } else {
+                lane_extract(vec, arrangement, i)
+            }
+        })
+        .collect();
+    concat_lanes(&lanes, arrangement)
+}
+
+/// Apply a binary operation lane-wise to two vector expressions.
+///
+/// For each lane `i`, extracts the lane from both operands, applies `op`, and
+/// reassembles the result. This is the core pattern for NEON integer SIMD ops.
+pub fn map_lanes_binary<F>(
+    lhs: &SmtExpr,
+    rhs: &SmtExpr,
+    arrangement: VectorArrangement,
+    op: F,
+) -> SmtExpr
+where
+    F: Fn(SmtExpr, SmtExpr) -> SmtExpr,
+{
+    let n = arrangement.lane_count();
+    let lanes: Vec<SmtExpr> = (0..n)
+        .map(|i| {
+            let a = lane_extract(lhs, arrangement, i);
+            let b = lane_extract(rhs, arrangement, i);
+            op(a, b)
+        })
+        .collect();
+    concat_lanes(&lanes, arrangement)
+}
+
+/// Apply a unary operation lane-wise to a vector expression.
+pub fn map_lanes_unary<F>(
+    operand: &SmtExpr,
+    arrangement: VectorArrangement,
+    op: F,
+) -> SmtExpr
+where
+    F: Fn(SmtExpr) -> SmtExpr,
+{
+    let n = arrangement.lane_count();
+    let lanes: Vec<SmtExpr> = (0..n)
+        .map(|i| {
+            let a = lane_extract(operand, arrangement, i);
+            op(a)
+        })
+        .collect();
+    concat_lanes(&lanes, arrangement)
+}
+
+/// Apply a binary operation where the second operand is a constant (e.g., shift immediate).
+pub fn map_lanes_binary_imm<F>(
+    lhs: &SmtExpr,
+    imm: u64,
+    arrangement: VectorArrangement,
+    op: F,
+) -> SmtExpr
+where
+    F: Fn(SmtExpr, SmtExpr) -> SmtExpr,
+{
+    let lane_bits = arrangement.lane_bits();
+    let n = arrangement.lane_count();
+    let lanes: Vec<SmtExpr> = (0..n)
+        .map(|i| {
+            let a = lane_extract(lhs, arrangement, i);
+            let b = SmtExpr::bv_const(imm, lane_bits);
+            op(a, b)
+        })
+        .collect();
+    concat_lanes(&lanes, arrangement)
 }
 
 // ---------------------------------------------------------------------------
@@ -890,5 +1155,120 @@ mod tests {
         assert_eq!(mask(0xFF, 8), 0xFF);
         assert_eq!(mask(0x1FF, 8), 0xFF);
         assert_eq!(mask(0xFFFF_FFFF_FFFF_FFFF, 32), 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn test_concat_basic() {
+        // concat(0xAB : 8bit, 0xCD : 8bit) = 0xABCD : 16bit
+        let hi = SmtExpr::bv_const(0xAB, 8);
+        let lo = SmtExpr::bv_const(0xCD, 8);
+        let expr = hi.concat(lo);
+        assert_eq!(expr.bv_width(), 16);
+        let result = expr.eval(&env(&[]));
+        assert_eq!(result, EvalResult::Bv(0xABCD));
+    }
+
+    #[test]
+    fn test_concat_32bit() {
+        // concat(0xDEAD : 16bit, 0xBEEF : 16bit) = 0xDEADBEEF : 32bit
+        let hi = SmtExpr::bv_const(0xDEAD, 16);
+        let lo = SmtExpr::bv_const(0xBEEF, 16);
+        let expr = hi.concat(lo);
+        assert_eq!(expr.bv_width(), 32);
+        let result = expr.eval(&env(&[]));
+        assert_eq!(result, EvalResult::Bv(0xDEAD_BEEF));
+    }
+
+    #[test]
+    fn test_zero_extend() {
+        // zero_extend(0xFF : 8bit, 8) = 0x00FF : 16bit
+        let a = SmtExpr::bv_const(0xFF, 8);
+        let expr = a.zero_ext(8);
+        assert_eq!(expr.bv_width(), 16);
+        let result = expr.eval(&env(&[]));
+        assert_eq!(result, EvalResult::Bv(0xFF));
+    }
+
+    #[test]
+    fn test_sign_extend_expr() {
+        // sign_extend(0xFF : 8bit, 8) = 0xFFFF : 16bit (since 0xFF is -1 in 8-bit)
+        let a = SmtExpr::bv_const(0xFF, 8);
+        let expr = a.sign_ext(8);
+        assert_eq!(expr.bv_width(), 16);
+        let result = expr.eval(&env(&[]));
+        assert_eq!(result, EvalResult::Bv(0xFFFF));
+    }
+
+    #[test]
+    fn test_sign_extend_positive() {
+        // sign_extend(0x7F : 8bit, 8) = 0x007F : 16bit (positive stays positive)
+        let a = SmtExpr::bv_const(0x7F, 8);
+        let expr = a.sign_ext(8);
+        assert_eq!(expr.bv_width(), 16);
+        let result = expr.eval(&env(&[]));
+        assert_eq!(result, EvalResult::Bv(0x7F));
+    }
+
+    #[test]
+    fn test_extract_then_concat_roundtrip() {
+        // Extract two 8-bit lanes from a 16-bit value, then concat back.
+        let v = SmtExpr::var("v", 16);
+        let lo = v.clone().extract(7, 0);   // bits [7:0]
+        let hi = v.clone().extract(15, 8);  // bits [15:8]
+        let reassembled = hi.concat(lo);
+        // For v = 0xABCD: lo=0xCD, hi=0xAB, concat=0xABCD
+        let result = reassembled.eval(&env(&[("v", 0xABCD)]));
+        assert_eq!(result, EvalResult::Bv(0xABCD));
+    }
+
+    #[test]
+    fn test_lane_extract_2s() {
+        // 64-bit vector with 2 x 32-bit lanes: [0x12345678, 0xAABBCCDD]
+        // Lane 0 (bits [31:0]) = 0xAABBCCDD, Lane 1 (bits [63:32]) = 0x12345678
+        let v = SmtExpr::var("v", 64);
+        let lane0 = lane_extract(&v, VectorArrangement::S2, 0);
+        let lane1 = lane_extract(&v, VectorArrangement::S2, 1);
+        let val = 0x12345678_AABBCCDD_u64;
+        let e = env(&[("v", val)]);
+        assert_eq!(lane0.eval(&e), EvalResult::Bv(0xAABBCCDD));
+        assert_eq!(lane1.eval(&e), EvalResult::Bv(0x12345678));
+    }
+
+    #[test]
+    fn test_concat_lanes_roundtrip() {
+        // Decompose a 64-bit value as 2 x 32-bit lanes (S2), then reassemble.
+        let v64 = SmtExpr::var("v64", 64);
+        let l0 = lane_extract(&v64, VectorArrangement::S2, 0);
+        let l1 = lane_extract(&v64, VectorArrangement::S2, 1);
+        let reassembled = concat_lanes(&[l0, l1], VectorArrangement::S2);
+        let val = 0xDEAD_BEEF_CAFE_BABEu64;
+        let result = reassembled.eval(&env(&[("v64", val)]));
+        assert_eq!(result, EvalResult::Bv(val));
+    }
+
+    #[test]
+    fn test_map_lanes_binary_add_s2() {
+        // Two 64-bit vectors, each with 2 x 32-bit lanes.
+        // a = [0x00000001, 0x00000002], b = [0x00000003, 0x00000004]
+        // Result: [(1+3), (2+4)] = [0x00000004, 0x00000006]
+        let a = SmtExpr::var("a", 64);
+        let b = SmtExpr::var("b", 64);
+        let result = map_lanes_binary(&a, &b, VectorArrangement::S2, |x, y| x.bvadd(y));
+        // a: lane0=0x00000002, lane1=0x00000001 (little-endian bit layout)
+        // Encoding: 0x00000001_00000002
+        let a_val = (1u64 << 32) | 2;
+        let b_val = (3u64 << 32) | 4;
+        let e = env(&[("a", a_val), ("b", b_val)]);
+        let r = result.eval(&e);
+        // Expected: lane0=2+4=6, lane1=1+3=4 => (4 << 32) | 6
+        assert_eq!(r, EvalResult::Bv((4u64 << 32) | 6));
+    }
+
+    #[test]
+    fn test_concat_display() {
+        let hi = SmtExpr::var("hi", 8);
+        let lo = SmtExpr::var("lo", 8);
+        let expr = hi.concat(lo);
+        assert_eq!(format!("{}", expr), "(concat hi lo)");
     }
 }
