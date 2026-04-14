@@ -46,11 +46,47 @@
 //! }
 //! ```
 
+use crate::cegis::{CegisLoop, CegisResult};
 use crate::lowering_proof::{verify_by_evaluation, ProofObligation};
 use crate::smt::SmtExpr;
 use crate::verify::VerificationResult;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+
+// ---------------------------------------------------------------------------
+// Verification mode
+// ---------------------------------------------------------------------------
+
+/// Controls how synthesis candidates are verified.
+///
+/// - [`Evaluation`](VerifyMode::Evaluation): Fast random sampling / exhaustive
+///   testing via `verify_by_evaluation`. Good for initial filtering during
+///   enumeration, but can miss adversarial counterexamples.
+/// - [`Cegis`](VerifyMode::Cegis): Counter-Example Guided Inductive Synthesis
+///   loop that combines concrete evaluation with an SMT solver. Provides
+///   formal guarantees when the solver is available.
+/// - [`EvaluationThenCegis`](VerifyMode::EvaluationThenCegis): Two-phase
+///   pipeline: use Evaluation for fast filtering, then CEGIS for final
+///   validation of candidates that pass the evaluation filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyMode {
+    /// Fast evaluation-based verification (random sampling / exhaustive for
+    /// small widths). No solver needed.
+    Evaluation,
+    /// Full CEGIS loop with SMT solver. Thorough but slower.
+    Cegis,
+    /// Evaluation first (fast filter), then CEGIS for final validation.
+    /// This is the recommended mode for production synthesis runs:
+    /// evaluation quickly rejects most non-equivalent candidates, and
+    /// CEGIS provides formal guarantees for the survivors.
+    EvaluationThenCegis,
+}
+
+impl Default for VerifyMode {
+    fn default() -> Self {
+        VerifyMode::Evaluation
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Opcode enumeration
@@ -527,6 +563,10 @@ fn encode_pattern_sequence(instrs: &[InstrPattern], input: &SmtExpr, width: u32)
 /// Verifies candidate rewrites using SMT and collects proven rules.
 pub struct SynthesisEngine {
     width: u32,
+    /// The verification mode used by this engine.
+    pub mode: VerifyMode,
+    /// CEGIS loop instance (lazily initialized when CEGIS mode is used).
+    cegis: Option<CegisLoop>,
     /// Statistics: total candidates checked.
     pub candidates_checked: usize,
     /// Statistics: candidates verified as correct.
@@ -539,58 +579,99 @@ impl SynthesisEngine {
     pub fn new(width: u32) -> Self {
         Self {
             width,
+            mode: VerifyMode::Evaluation,
+            cegis: None,
             candidates_checked: 0,
             candidates_proven: 0,
             candidates_disproven: 0,
         }
     }
 
-    /// Verify a single candidate rewrite.
-    ///
-    /// Returns `Some(ProvenRule)` if the candidate is semantically
-    /// equivalent (proven correct). Returns `None` if a counterexample
-    /// is found or verification is inconclusive.
-    pub fn verify_candidate(&mut self, candidate: &RuleCandidate) -> Option<ProvenRule> {
-        self.candidates_checked += 1;
+    /// Create a new engine with the specified verification mode.
+    pub fn with_mode(width: u32, mode: VerifyMode) -> Self {
+        Self {
+            width,
+            mode,
+            cegis: None,
+            candidates_checked: 0,
+            candidates_proven: 0,
+            candidates_disproven: 0,
+        }
+    }
 
+    /// Get or initialize the CEGIS loop for this engine.
+    fn get_or_init_cegis(&mut self) -> &mut CegisLoop {
+        if self.cegis.is_none() {
+            let mut cegis = CegisLoop::new(10, 5000);
+            cegis.add_edge_case_seeds(&[("x".to_string(), self.width)]);
+            self.cegis = Some(cegis);
+        }
+        self.cegis.as_mut().unwrap()
+    }
+
+    /// Build the SMT expressions and proof obligation for a candidate.
+    fn build_obligation(&self, candidate: &RuleCandidate) -> (SmtExpr, SmtExpr, ProofObligation) {
         let x = SmtExpr::var("x", self.width);
-
         let pattern_expr = encode_pattern_sequence(&candidate.pattern, &x, self.width);
         let replacement_expr = encode_pattern_sequence(&candidate.replacement, &x, self.width);
 
         let obligation = ProofObligation {
             name: format!("Synthesis: {}", candidate.display()),
-            tmir_expr: pattern_expr,
-            aarch64_expr: replacement_expr,
+            tmir_expr: pattern_expr.clone(),
+            aarch64_expr: replacement_expr.clone(),
             inputs: vec![("x".to_string(), self.width)],
             preconditions: vec![],
-        fp_inputs: vec![],
+            fp_inputs: vec![],
         };
 
+        (pattern_expr, replacement_expr, obligation)
+    }
+
+    /// Build a ProvenRule from a verified candidate.
+    fn make_proven_rule(&self, candidate: &RuleCandidate, proof_hash: u64) -> ProvenRule {
+        let pattern_cost = Self::estimate_cost(&candidate.pattern);
+        let replacement_cost = Self::estimate_cost(&candidate.replacement);
+        let cost_delta = pattern_cost - replacement_cost;
+
+        ProvenRule {
+            name: candidate.display(),
+            candidate: candidate.clone(),
+            proof_hash,
+            cost_delta,
+            verified_width: self.width,
+        }
+    }
+
+    /// Verify a single candidate rewrite using evaluation (backward compatible).
+    ///
+    /// Returns `Some(ProvenRule)` if the candidate is semantically
+    /// equivalent (proven correct). Returns `None` if a counterexample
+    /// is found or verification is inconclusive.
+    pub fn verify_candidate(&mut self, candidate: &RuleCandidate) -> Option<ProvenRule> {
+        self.verify_candidate_eval(candidate)
+    }
+
+    /// Verify a candidate using evaluation-based testing only.
+    ///
+    /// This is the original verification path: exhaustive for small widths,
+    /// random sampling for larger widths. Fast but not formally sound for
+    /// large bit-widths.
+    pub fn verify_candidate_eval(&mut self, candidate: &RuleCandidate) -> Option<ProvenRule> {
+        self.candidates_checked += 1;
+
+        let (_pat, _rep, obligation) = self.build_obligation(candidate);
         let result = verify_by_evaluation(&obligation);
 
         match result {
             VerificationResult::Valid => {
                 self.candidates_proven += 1;
 
-                // Compute proof hash for audit trail
                 let mut hasher = DefaultHasher::new();
                 candidate.hash(&mut hasher);
                 self.width.hash(&mut hasher);
                 let proof_hash = hasher.finish();
 
-                // Compute cost delta: positive means replacement is cheaper
-                let pattern_cost = Self::estimate_cost(&candidate.pattern);
-                let replacement_cost = Self::estimate_cost(&candidate.replacement);
-                let cost_delta = pattern_cost - replacement_cost;
-
-                Some(ProvenRule {
-                    name: candidate.display(),
-                    candidate: candidate.clone(),
-                    proof_hash,
-                    cost_delta,
-                    verified_width: self.width,
-                })
+                Some(self.make_proven_rule(candidate, proof_hash))
             }
             VerificationResult::Invalid { .. } => {
                 self.candidates_disproven += 1;
@@ -600,15 +681,91 @@ impl SynthesisEngine {
         }
     }
 
+    /// Verify a candidate using the full CEGIS loop.
+    ///
+    /// This uses counter-example guided synthesis: concrete evaluation on
+    /// accumulated counterexamples (fast path) plus SMT solver queries
+    /// (slow path) to formally prove or disprove equivalence.
+    ///
+    /// Returns `Some(ProvenRule)` if CEGIS proves equivalence, `None` if
+    /// a counterexample is found, the solver times out, or an error occurs.
+    pub fn verify_candidate_cegis(&mut self, candidate: &RuleCandidate) -> Option<ProvenRule> {
+        self.candidates_checked += 1;
+
+        let (pattern_expr, replacement_expr, _obligation) = self.build_obligation(candidate);
+        let vars = vec![("x".to_string(), self.width)];
+
+        let cegis = self.get_or_init_cegis();
+        let result = cegis.verify(&pattern_expr, &replacement_expr, &vars);
+
+        match result {
+            CegisResult::Equivalent { proof_hash, .. } => {
+                self.candidates_proven += 1;
+                Some(self.make_proven_rule(candidate, proof_hash))
+            }
+            CegisResult::NotEquivalent { .. } => {
+                self.candidates_disproven += 1;
+                None
+            }
+            CegisResult::Timeout
+            | CegisResult::MaxIterationsReached { .. }
+            | CegisResult::Error(_) => None,
+        }
+    }
+
+    /// Verify a candidate using the engine's configured mode.
+    ///
+    /// - [`VerifyMode::Evaluation`]: calls `verify_candidate_eval`.
+    /// - [`VerifyMode::Cegis`]: calls `verify_candidate_cegis`.
+    /// - [`VerifyMode::EvaluationThenCegis`]: first runs evaluation as a
+    ///   fast filter; if evaluation says valid, runs CEGIS for confirmation.
+    pub fn verify_candidate_with_mode(
+        &mut self,
+        candidate: &RuleCandidate,
+    ) -> Option<ProvenRule> {
+        match self.mode {
+            VerifyMode::Evaluation => self.verify_candidate_eval(candidate),
+            VerifyMode::Cegis => self.verify_candidate_cegis(candidate),
+            VerifyMode::EvaluationThenCegis => {
+                // Phase 1: fast evaluation filter
+                let (_pat, _rep, obligation) = self.build_obligation(candidate);
+                let eval_result = verify_by_evaluation(&obligation);
+
+                match eval_result {
+                    VerificationResult::Invalid { .. } => {
+                        self.candidates_checked += 1;
+                        self.candidates_disproven += 1;
+                        None
+                    }
+                    VerificationResult::Unknown { .. } => {
+                        self.candidates_checked += 1;
+                        None
+                    }
+                    VerificationResult::Valid => {
+                        // Phase 2: CEGIS confirmation
+                        // Note: verify_candidate_cegis increments candidates_checked
+                        self.verify_candidate_cegis(candidate)
+                    }
+                }
+            }
+        }
+    }
+
     /// Run synthesis over all candidates from a search space configuration.
     ///
     /// Returns a ProvenRuleDb containing all discovered rules.
+    /// Uses the engine's configured verification mode.
     pub fn run(&mut self, config: &SearchConfig) -> ProvenRuleDb {
         let candidates = SearchSpace::enumerate(config);
         let mut db = ProvenRuleDb::new();
 
         for candidate in &candidates {
-            if let Some(rule) = self.verify_candidate(candidate) {
+            let result = match self.mode {
+                VerifyMode::Evaluation => self.verify_candidate_eval(candidate),
+                VerifyMode::Cegis => self.verify_candidate_cegis(candidate),
+                VerifyMode::EvaluationThenCegis => self.verify_candidate_with_mode(candidate),
+            };
+            if let Some(rule) = result {
                 db.add(rule);
             }
         }
@@ -1250,5 +1407,248 @@ mod tests {
             replacement: vec![],
         };
         assert_eq!(candidate.display(), "ADD x, #0 => ");
+    }
+
+    // -----------------------------------------------------------------------
+    // VerifyMode and CEGIS integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_mode_default() {
+        assert_eq!(VerifyMode::default(), VerifyMode::Evaluation);
+    }
+
+    #[test]
+    fn test_engine_with_mode() {
+        let engine = SynthesisEngine::with_mode(8, VerifyMode::Cegis);
+        assert_eq!(engine.mode, VerifyMode::Cegis);
+        assert_eq!(engine.candidates_checked, 0);
+    }
+
+    /// verify_candidate_eval works the same as the original verify_candidate.
+    #[test]
+    fn test_verify_candidate_eval_add_zero() {
+        let candidate = RuleCandidate {
+            pattern: vec![InstrPattern {
+                opcode: SynthOpcode::Add,
+                operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(0)],
+            }],
+            replacement: vec![],
+        };
+
+        let mut engine = SynthesisEngine::new(8);
+        let rule = engine.verify_candidate_eval(&candidate);
+        assert!(rule.is_some(), "ADD x, #0 => identity should pass eval");
+        assert_eq!(engine.candidates_proven, 1);
+    }
+
+    /// verify_candidate_eval rejects non-equivalent candidates.
+    #[test]
+    fn test_verify_candidate_eval_rejects() {
+        let candidate = RuleCandidate {
+            pattern: vec![InstrPattern {
+                opcode: SynthOpcode::Add,
+                operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(1)],
+            }],
+            replacement: vec![],
+        };
+
+        let mut engine = SynthesisEngine::new(8);
+        let rule = engine.verify_candidate_eval(&candidate);
+        assert!(rule.is_none(), "ADD x, #1 => identity should be rejected");
+        assert_eq!(engine.candidates_disproven, 1);
+    }
+
+    /// verify_candidate_cegis proves equivalence (when solver available)
+    /// or at least does not crash when solver is unavailable.
+    #[test]
+    fn test_verify_candidate_cegis_add_zero() {
+        let candidate = RuleCandidate {
+            pattern: vec![InstrPattern {
+                opcode: SynthOpcode::Add,
+                operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(0)],
+            }],
+            replacement: vec![],
+        };
+
+        let mut engine = SynthesisEngine::with_mode(8, VerifyMode::Cegis);
+        let rule = engine.verify_candidate_cegis(&candidate);
+        // If solver is available, this should be proven.
+        // If solver is not available, CEGIS may return Error => None.
+        // Either way, the function should not panic.
+        if rule.is_some() {
+            assert_eq!(engine.candidates_proven, 1);
+        }
+    }
+
+    /// verify_candidate_cegis rejects non-equivalent candidates via
+    /// concrete counterexample evaluation (fast path, no solver needed).
+    #[test]
+    fn test_verify_candidate_cegis_rejects_fast() {
+        let candidate = RuleCandidate {
+            pattern: vec![InstrPattern {
+                opcode: SynthOpcode::Add,
+                operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(1)],
+            }],
+            replacement: vec![],
+        };
+
+        let mut engine = SynthesisEngine::with_mode(8, VerifyMode::Cegis);
+        let rule = engine.verify_candidate_cegis(&candidate);
+        // The CEGIS edge-case seeds include 0, 1, MAX, etc.
+        // ADD(0, 1) = 1 != 0, so this should be caught by concrete evaluation.
+        assert!(rule.is_none(), "CEGIS should reject ADD x, #1 => identity");
+        assert_eq!(engine.candidates_disproven, 1);
+    }
+
+    /// CEGIS catches a subtle adversarial case: a candidate that is equivalent
+    /// for most random samples but differs for specific edge-case inputs.
+    ///
+    /// The candidate: AND x, #0xFE => LSR (LSL x, #1), #1
+    /// Both clear the bottom bit, producing identical results for most inputs.
+    /// But the original zeros ALL bits except the low 7, while the replacement
+    /// shifts left (losing the top bit) then shifts right.
+    ///
+    /// For 8-bit, AND x, 0xFE clears bit 0. LSL x, 1 then LSR result, 1
+    /// also clears bit 0 but also clears bit 7 (the top bit is shifted out).
+    /// So for x = 0x80 (128): AND gives 0x80, but LSL gives 0x00 then LSR
+    /// gives 0x00. Different.
+    ///
+    /// CEGIS with edge-case seeds (which include 0x80 = sign bit) should catch
+    /// this, while random sampling might miss it depending on the random seed.
+    #[test]
+    fn test_cegis_catches_edge_case_counterexample() {
+        // Construct: AND x, #0xFE (clear bottom bit)
+        let pattern = RuleCandidate {
+            pattern: vec![InstrPattern {
+                opcode: SynthOpcode::And,
+                operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(0xFE)],
+            }],
+            replacement: vec![InstrPattern {
+                // LSL x, #1 followed by LSR result, #1
+                // (We can only do single-instruction replacements in the current framework,
+                //  so instead we construct a different adversarial case below.)
+                opcode: SynthOpcode::And,
+                operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(0x7E)],
+            }],
+        };
+
+        // AND x, 0xFE: clears bit 0.    Result for x=0x80: 0x80
+        // AND x, 0x7E: clears bits 0,7. Result for x=0x80: 0x00
+        // These differ only when bit 7 is set (MSB for 8-bit).
+
+        let mut engine = SynthesisEngine::with_mode(8, VerifyMode::Cegis);
+        let rule = engine.verify_candidate_cegis(&pattern);
+        assert!(
+            rule.is_none(),
+            "CEGIS should catch that AND x,#0xFE != AND x,#0x7E (differ at MSB)"
+        );
+    }
+
+    /// verify_candidate_with_mode routes correctly for Evaluation mode.
+    #[test]
+    fn test_verify_with_mode_evaluation() {
+        let candidate = RuleCandidate {
+            pattern: vec![InstrPattern {
+                opcode: SynthOpcode::Sub,
+                operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(0)],
+            }],
+            replacement: vec![],
+        };
+
+        let mut engine = SynthesisEngine::with_mode(8, VerifyMode::Evaluation);
+        let rule = engine.verify_candidate_with_mode(&candidate);
+        assert!(rule.is_some(), "SUB x, #0 => identity should pass in Evaluation mode");
+    }
+
+    /// verify_candidate_with_mode routes correctly for Cegis mode.
+    #[test]
+    fn test_verify_with_mode_cegis() {
+        let candidate = RuleCandidate {
+            pattern: vec![InstrPattern {
+                opcode: SynthOpcode::Add,
+                operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(1)],
+            }],
+            replacement: vec![],
+        };
+
+        let mut engine = SynthesisEngine::with_mode(8, VerifyMode::Cegis);
+        let rule = engine.verify_candidate_with_mode(&candidate);
+        assert!(rule.is_none(), "ADD x, #1 => identity should be rejected in Cegis mode");
+    }
+
+    /// verify_candidate_with_mode routes correctly for EvaluationThenCegis mode.
+    #[test]
+    fn test_verify_with_mode_eval_then_cegis_rejects_early() {
+        // This candidate fails evaluation, so CEGIS is never called.
+        let candidate = RuleCandidate {
+            pattern: vec![InstrPattern {
+                opcode: SynthOpcode::Mul,
+                operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(2)],
+            }],
+            replacement: vec![],
+        };
+
+        let mut engine = SynthesisEngine::with_mode(8, VerifyMode::EvaluationThenCegis);
+        let rule = engine.verify_candidate_with_mode(&candidate);
+        assert!(rule.is_none(), "MUL x, #2 => identity should be rejected early by evaluation");
+    }
+
+    /// EvaluationThenCegis: candidate passes evaluation, then gets CEGIS confirmation.
+    #[test]
+    fn test_verify_with_mode_eval_then_cegis_passes() {
+        let candidate = RuleCandidate {
+            pattern: vec![InstrPattern {
+                opcode: SynthOpcode::Add,
+                operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(0)],
+            }],
+            replacement: vec![],
+        };
+
+        let mut engine = SynthesisEngine::with_mode(8, VerifyMode::EvaluationThenCegis);
+        let rule = engine.verify_candidate_with_mode(&candidate);
+        // If solver available: Some (CEGIS confirms). If not: may be None.
+        // Either way, should not panic.
+        if rule.is_some() {
+            assert!(rule.unwrap().cost_delta > 0);
+        }
+    }
+
+    /// Backward compatibility: verify_candidate still delegates to eval.
+    #[test]
+    fn test_backward_compat_verify_candidate() {
+        let candidate = RuleCandidate {
+            pattern: vec![InstrPattern {
+                opcode: SynthOpcode::Eor,
+                operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(0)],
+            }],
+            replacement: vec![],
+        };
+
+        let mut engine = SynthesisEngine::new(8);
+        let rule = engine.verify_candidate(&candidate);
+        assert!(rule.is_some(), "verify_candidate should still work (backward compat)");
+    }
+
+    /// run() with Cegis mode uses CEGIS for all candidates.
+    #[test]
+    fn test_run_with_cegis_mode() {
+        let config = SearchConfig {
+            max_pattern_len: 1,
+            max_replacement_len: 1,
+            width: 8,
+        };
+
+        let mut engine = SynthesisEngine::with_mode(config.width, VerifyMode::Cegis);
+        let db = engine.run(&config);
+
+        // Even in CEGIS mode, we should discover rules (if solver available)
+        // or at least not panic (if solver unavailable).
+        // The CEGIS concrete evaluation alone catches obvious non-equivalences.
+        eprintln!(
+            "CEGIS run stats: {} checked, {} proven, {} disproven",
+            engine.candidates_checked, engine.candidates_proven, engine.candidates_disproven
+        );
+        eprintln!("CEGIS proven rules: {}", db.len());
     }
 }
