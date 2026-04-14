@@ -2148,4 +2148,144 @@ mod tests {
         let direct = encoding::encode_load_store_ui(0b01, 0, 0b00, 3, 1, 0);
         assert_eq!(enc, direct, "STRH W0, [X1, #6] = {enc:#010X}");
     }
+
+    // =========================================================================
+    // Immediate shift encoding tests — verified against system assembler
+    // (xcrun as -arch arm64) ground truth. Fixes #134.
+    //
+    // LslRI/LsrRI/AsrRI are encoded via UBFM/SBFM bitfield instructions:
+    //   LSL Rd, Rn, #shift  = UBFM Rd, Rn, #(-shift MOD regsize), #(regsize-1-shift)
+    //   LSR Rd, Rn, #shift  = UBFM Rd, Rn, #shift, #(regsize-1)
+    //   ASR Rd, Rn, #shift  = SBFM Rd, Rn, #shift, #(regsize-1)
+    // =========================================================================
+
+    #[test]
+    fn test_lsl_ri_64bit_ground_truth() {
+        // LSL X0, X1, #2 — verified: 0xD37EF420 (xcrun as)
+        // = UBFM X0, X1, #62, #61
+        let inst = mk(AArch64Opcode::LslRI, vec![preg(X0), preg(X1), imm(2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xD37EF420, "LSL X0, X1, #2 = {enc:#010X}");
+        // Must NOT be NOP
+        assert_ne!(enc, NOP, "LSL X0, X1, #2 must not emit NOP");
+    }
+
+    #[test]
+    fn test_lsr_ri_64bit_ground_truth() {
+        // LSR X0, X1, #2 — verified: 0xD342FC20 (xcrun as)
+        // = UBFM X0, X1, #2, #63
+        let inst = mk(AArch64Opcode::LsrRI, vec![preg(X0), preg(X1), imm(2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0xD342FC20, "LSR X0, X1, #2 = {enc:#010X}");
+        assert_ne!(enc, NOP, "LSR X0, X1, #2 must not emit NOP");
+    }
+
+    #[test]
+    fn test_asr_ri_64bit_ground_truth() {
+        // ASR X0, X1, #2 — verified: 0x9342FC20 (xcrun as)
+        // = SBFM X0, X1, #2, #63
+        let inst = mk(AArch64Opcode::AsrRI, vec![preg(X0), preg(X1), imm(2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x9342FC20, "ASR X0, X1, #2 = {enc:#010X}");
+        assert_ne!(enc, NOP, "ASR X0, X1, #2 must not emit NOP");
+    }
+
+    #[test]
+    fn test_lsl_ri_32bit_ground_truth() {
+        // LSL W0, W1, #3 — verified: 0x531D7020 (xcrun as)
+        // = UBFM W0, W1, #29, #28
+        let inst = mk(AArch64Opcode::LslRI, vec![preg(W0), preg(W1), imm(3)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x531D7020, "LSL W0, W1, #3 = {enc:#010X}");
+        assert_ne!(enc, NOP, "LSL W0, W1, #3 must not emit NOP");
+        assert_eq!(enc >> 31, 0, "LSL W0 must have sf=0");
+        assert_eq!((enc >> 22) & 1, 0, "LSL W0 must have N=0 for 32-bit");
+    }
+
+    #[test]
+    fn test_lsr_ri_32bit_ground_truth() {
+        // LSR W0, W1, #3 — verified: 0x53037C20 (xcrun as)
+        // = UBFM W0, W1, #3, #31
+        let inst = mk(AArch64Opcode::LsrRI, vec![preg(W0), preg(W1), imm(3)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x53037C20, "LSR W0, W1, #3 = {enc:#010X}");
+        assert_ne!(enc, NOP, "LSR W0, W1, #3 must not emit NOP");
+        assert_eq!(enc >> 31, 0, "LSR W0 must have sf=0");
+    }
+
+    #[test]
+    fn test_asr_ri_32bit_ground_truth() {
+        // ASR W0, W1, #3 — verified: 0x13037C20 (xcrun as)
+        // = SBFM W0, W1, #3, #31
+        let inst = mk(AArch64Opcode::AsrRI, vec![preg(W0), preg(W1), imm(3)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x13037C20, "ASR W0, W1, #3 = {enc:#010X}");
+        assert_ne!(enc, NOP, "ASR W0, W1, #3 must not emit NOP");
+        assert_eq!(enc >> 31, 0, "ASR W0 must have sf=0");
+    }
+
+    #[test]
+    fn test_lsl_ri_ubfm_field_decomposition_64bit() {
+        // Verify UBFM field placement for LSL X0, X1, #2
+        let inst = mk(AArch64Opcode::LslRI, vec![preg(X0), preg(X1), imm(2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!((enc >> 31) & 1, 1, "sf=1 for 64-bit");
+        assert_eq!((enc >> 29) & 0b11, 0b10, "opc=10 for UBFM");
+        assert_eq!((enc >> 23) & 0b111111, 0b100110, "fixed bits");
+        assert_eq!((enc >> 22) & 1, 1, "N=1 for 64-bit");
+        assert_eq!((enc >> 16) & 0x3F, 62, "immr=(-2 MOD 64)=62");
+        assert_eq!((enc >> 10) & 0x3F, 61, "imms=(63-2)=61");
+        assert_eq!((enc >> 5) & 0x1F, 1, "Rn=X1");
+        assert_eq!(enc & 0x1F, 0, "Rd=X0");
+    }
+
+    #[test]
+    fn test_lsr_ri_ubfm_field_decomposition_64bit() {
+        // Verify UBFM field placement for LSR X0, X1, #2
+        let inst = mk(AArch64Opcode::LsrRI, vec![preg(X0), preg(X1), imm(2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!((enc >> 31) & 1, 1, "sf=1 for 64-bit");
+        assert_eq!((enc >> 29) & 0b11, 0b10, "opc=10 for UBFM");
+        assert_eq!((enc >> 22) & 1, 1, "N=1 for 64-bit");
+        assert_eq!((enc >> 16) & 0x3F, 2, "immr=shift=2");
+        assert_eq!((enc >> 10) & 0x3F, 63, "imms=63 for 64-bit");
+        assert_eq!((enc >> 5) & 0x1F, 1, "Rn=X1");
+        assert_eq!(enc & 0x1F, 0, "Rd=X0");
+    }
+
+    #[test]
+    fn test_asr_ri_sbfm_field_decomposition_64bit() {
+        // Verify SBFM field placement for ASR X0, X1, #2
+        let inst = mk(AArch64Opcode::AsrRI, vec![preg(X0), preg(X1), imm(2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!((enc >> 31) & 1, 1, "sf=1 for 64-bit");
+        assert_eq!((enc >> 29) & 0b11, 0b00, "opc=00 for SBFM");
+        assert_eq!((enc >> 22) & 1, 1, "N=1 for 64-bit");
+        assert_eq!((enc >> 16) & 0x3F, 2, "immr=shift=2");
+        assert_eq!((enc >> 10) & 0x3F, 63, "imms=63 for 64-bit");
+        assert_eq!((enc >> 5) & 0x1F, 1, "Rn=X1");
+        assert_eq!(enc & 0x1F, 0, "Rd=X0");
+    }
+
+    #[test]
+    fn test_shift_ri_boundary_values() {
+        // LSL X0, X1, #0 (no shift) — should still encode as UBFM, not NOP
+        let inst = mk(AArch64Opcode::LslRI, vec![preg(X0), preg(X1), imm(0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_ne!(enc, NOP, "LSL X0, X1, #0 must not emit NOP");
+
+        // LSL X0, X1, #63 (max shift for 64-bit)
+        let inst = mk(AArch64Opcode::LslRI, vec![preg(X0), preg(X1), imm(63)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_ne!(enc, NOP, "LSL X0, X1, #63 must not emit NOP");
+        assert_eq!((enc >> 16) & 0x3F, 1, "immr=(-63 MOD 64)=1");
+        assert_eq!((enc >> 10) & 0x3F, 0, "imms=(63-63)=0");
+
+        // LSR X0, X1, #63 (max shift)
+        let inst = mk(AArch64Opcode::LsrRI, vec![preg(X0), preg(X1), imm(63)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_ne!(enc, NOP, "LSR X0, X1, #63 must not emit NOP");
+        assert_eq!((enc >> 16) & 0x3F, 63, "immr=63");
+        assert_eq!((enc >> 10) & 0x3F, 63, "imms=63");
+    }
 }
