@@ -514,6 +514,466 @@ fn align_up(value: i64, align: i64) -> i64 {
     (value + align - 1) & !(align - 1)
 }
 
+// ===========================================================================
+// Exception Handling / Stack Unwinding ABI
+// ===========================================================================
+//
+// Reference: Apple Mach-O compact_unwind_encoding.h
+// Reference: DWARF 5 spec, Section 6.4 (Call Frame Information)
+// Reference: ~/llvm-project-ref/llvm/lib/Target/AArch64/MCTargetDesc/AArch64AsmBackend.cpp
+//            (generateCompactUnwindEncoding, line 576)
+
+// ---------------------------------------------------------------------------
+// UnwindInfo — callee-saved register locations relative to frame pointer
+// ---------------------------------------------------------------------------
+
+/// Describes where callee-saved registers are stored relative to the
+/// frame pointer, for stack unwinding purposes.
+///
+/// This is the ABI-level representation of unwind information. It captures
+/// the register save locations and frame shape that the unwinder needs to
+/// reconstruct the caller's register state.
+///
+/// On AArch64 Darwin, FP (X29) and LR (X30) are always saved as the first
+/// pair at the top of the callee-saved area. Additional callee-saved registers
+/// are stored at decreasing offsets below FP.
+///
+/// # Example layout
+///
+/// ```text
+///     [FP + 0]   → saved X29 (FP)
+///     [FP + 8]   → saved X30 (LR)
+///     [FP - 8]   → saved X20
+///     [FP - 16]  → saved X19
+///     [FP - 24]  → saved V9  (D9, lower 64 bits)
+///     [FP - 32]  → saved V8  (D8, lower 64 bits)
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnwindInfo {
+    /// Callee-saved register save locations, in save order.
+    /// Each entry records a register and its offset from the frame pointer.
+    pub saved_registers: Vec<SavedRegister>,
+
+    /// Total size of the stack frame in bytes (16-byte aligned).
+    pub frame_size: u32,
+
+    /// Whether the function uses a frame pointer (X29).
+    /// Always true on Apple AArch64.
+    pub has_frame_pointer: bool,
+
+    /// Whether the function is a leaf (makes no calls).
+    /// Leaf functions may use a simplified unwind encoding.
+    pub is_leaf: bool,
+
+    /// Whether the function has dynamic stack allocation (alloca).
+    /// Dynamic frames cannot use compact unwind encoding and require
+    /// full DWARF CFI fallback.
+    pub has_dynamic_alloc: bool,
+
+    /// Personality function symbol name, if any.
+    /// Used for C++ exception handling (__gxx_personality_v0),
+    /// Rust panics (__rust_eh_personality), etc.
+    pub personality: Option<String>,
+
+    /// Whether a Language-Specific Data Area (LSDA) is present.
+    /// The LSDA contains landing pad and type info tables for
+    /// exception dispatch.
+    pub has_lsda: bool,
+}
+
+/// A single callee-saved register and its save location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavedRegister {
+    /// The physical register that was saved.
+    pub reg: PReg,
+    /// Offset from the frame pointer (FP / X29) where this register is stored.
+    /// Negative values indicate positions below FP (the normal case for
+    /// callee-saved registers other than FP/LR).
+    pub fp_offset: i32,
+    /// Whether this is a floating-point / SIMD register (V-reg / D-reg).
+    pub is_fpr: bool,
+}
+
+impl UnwindInfo {
+    /// Create unwind info for a leaf function with no callee-saved registers
+    /// beyond FP/LR (the minimal Apple AArch64 frame).
+    ///
+    /// This is the common case for simple leaf functions.
+    pub fn leaf_frame() -> Self {
+        Self {
+            saved_registers: vec![
+                SavedRegister { reg: gpr::FP, fp_offset: 0, is_fpr: false },
+                SavedRegister { reg: gpr::LR, fp_offset: 8, is_fpr: false },
+            ],
+            frame_size: 16,
+            has_frame_pointer: true,
+            is_leaf: true,
+            has_dynamic_alloc: false,
+            personality: None,
+            has_lsda: false,
+        }
+    }
+
+    /// Create unwind info for a standard frame with the given callee-saved
+    /// registers (in addition to the mandatory FP/LR pair).
+    ///
+    /// Registers are laid out in pairs below FP at decreasing offsets.
+    /// The `additional_pairs` parameter lists register pairs in save order
+    /// (each pair is `(reg1, reg2, is_fpr)`).
+    pub fn standard_frame(
+        additional_pairs: &[(PReg, PReg, bool)],
+        frame_size: u32,
+        is_leaf: bool,
+    ) -> Self {
+        let mut saved = Vec::with_capacity(2 + additional_pairs.len() * 2);
+
+        // FP/LR always at the top.
+        saved.push(SavedRegister { reg: gpr::FP, fp_offset: 0, is_fpr: false });
+        saved.push(SavedRegister { reg: gpr::LR, fp_offset: 8, is_fpr: false });
+
+        // Additional callee-saved pairs at decreasing offsets.
+        for (i, &(reg1, reg2, is_fpr)) in additional_pairs.iter().enumerate() {
+            let base_offset = -((i as i32 + 1) * 16);
+            saved.push(SavedRegister { reg: reg1, fp_offset: base_offset + 8, is_fpr });
+            saved.push(SavedRegister { reg: reg2, fp_offset: base_offset, is_fpr });
+        }
+
+        Self {
+            saved_registers: saved,
+            frame_size,
+            has_frame_pointer: true,
+            is_leaf,
+            has_dynamic_alloc: false,
+            personality: None,
+            has_lsda: false,
+        }
+    }
+
+    /// Returns the number of callee-saved register pairs (including FP/LR).
+    pub fn num_saved_pairs(&self) -> usize {
+        // FP/LR is 1 pair, additional registers come in pairs of 2.
+        (self.saved_registers.len() + 1) / 2
+    }
+
+    /// Returns only the GPR save entries (non-FPR).
+    pub fn saved_gprs(&self) -> Vec<&SavedRegister> {
+        self.saved_registers.iter().filter(|r| !r.is_fpr).collect()
+    }
+
+    /// Returns only the FPR/SIMD save entries.
+    pub fn saved_fprs(&self) -> Vec<&SavedRegister> {
+        self.saved_registers.iter().filter(|r| r.is_fpr).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CompactUnwindEntry — ABI-level compact unwind encoding
+// ---------------------------------------------------------------------------
+
+// Darwin compact unwind mode constants (ABI-level, matching Apple spec).
+// These mirror the constants in llvm2-codegen/frame.rs but are defined
+// here so that the ABI module is self-contained.
+
+/// Standard frame-pointer-based unwind mode.
+const COMPACT_MODE_FRAME: u32 = 0x0400_0000;
+/// Frameless leaf function unwind mode.
+#[allow(dead_code)] // Defined for API completeness; will be used for frameless function support.
+const COMPACT_MODE_FRAMELESS: u32 = 0x0200_0000;
+/// Fallback to full DWARF FDE.
+const COMPACT_MODE_DWARF: u32 = 0x0300_0000;
+
+/// Compact unwind register-pair flags for GPRs.
+const COMPACT_X19_X20: u32 = 0x0000_0001;
+const COMPACT_X21_X22: u32 = 0x0000_0002;
+const COMPACT_X23_X24: u32 = 0x0000_0004;
+const COMPACT_X25_X26: u32 = 0x0000_0008;
+const COMPACT_X27_X28: u32 = 0x0000_0010;
+
+/// Compact unwind register-pair flags for FPRs (D-regs).
+const COMPACT_D8_D9: u32 = 0x0000_0100;
+const COMPACT_D10_D11: u32 = 0x0000_0200;
+const COMPACT_D12_D13: u32 = 0x0000_0400;
+const COMPACT_D14_D15: u32 = 0x0000_0800;
+
+/// A compact unwind table entry for one function.
+///
+/// This is the ABI-level representation of what goes into the
+/// `__LD,__compact_unwind` Mach-O section. Each function gets one
+/// 32-byte entry that tells the unwinder how to restore the caller's
+/// register state.
+///
+/// # Compact encoding format (ARM64)
+///
+/// ```text
+/// Bits 27-24: mode (0x04=FRAME, 0x02=FRAMELESS, 0x03=DWARF)
+/// Bits  4- 0: GPR pair flags (X19/X20 through X27/X28)
+/// Bits 11- 8: FPR pair flags (D8/D9 through D14/D15)
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactUnwindEntry {
+    /// The 32-bit compact unwind encoding.
+    pub encoding: u32,
+    /// Start offset of the function (will be relocated in the object file).
+    pub function_start: u64,
+    /// Length of the function in bytes.
+    pub function_length: u32,
+    /// Personality function pointer (0 if no exception handling).
+    pub personality: u64,
+    /// Language-Specific Data Area pointer (0 if no LSDA).
+    pub lsda: u64,
+}
+
+impl CompactUnwindEntry {
+    /// Returns true if this entry requires DWARF CFI fallback.
+    pub fn needs_dwarf_fallback(&self) -> bool {
+        (self.encoding & 0x0F00_0000) == COMPACT_MODE_DWARF
+    }
+
+    /// Returns the mode portion of the encoding.
+    pub fn mode(&self) -> u32 {
+        self.encoding & 0x0F00_0000
+    }
+}
+
+/// Generate a compact unwind entry from `UnwindInfo` and function metadata.
+///
+/// Encodes the frame shape as a 32-bit compact unwind encoding per the
+/// Apple arm64 format. Falls back to `COMPACT_MODE_DWARF` when the frame
+/// cannot be described by compact unwind (frameless, dynamic alloc, etc.).
+///
+/// # Arguments
+///
+/// * `info` — Unwind info describing callee-saved register locations.
+/// * `function_start` — Start address of the function (virtual, relocated later).
+/// * `function_length` — Length of the function in bytes.
+pub fn generate_compact_unwind(
+    info: &UnwindInfo,
+    function_start: u64,
+    function_length: u32,
+) -> CompactUnwindEntry {
+    // Dynamic alloc or no frame pointer => DWARF fallback.
+    if info.has_dynamic_alloc || !info.has_frame_pointer {
+        return CompactUnwindEntry {
+            encoding: COMPACT_MODE_DWARF,
+            function_start,
+            function_length,
+            personality: 0,
+            lsda: 0,
+        };
+    }
+
+    let mut encoding = COMPACT_MODE_FRAME;
+
+    // Scan saved registers for known callee-saved pairs.
+    // We look at pairs of saved GPR/FPR registers and set the corresponding
+    // compact unwind flags.
+    let gprs: Vec<&SavedRegister> = info.saved_registers.iter()
+        .filter(|r| !r.is_fpr)
+        .collect();
+
+    // Check for each known GPR pair.
+    let has_reg_pair = |r1_enc: u16, r2_enc: u16| -> bool {
+        gprs.iter().any(|r| r.reg.encoding() == r1_enc)
+            && gprs.iter().any(|r| r.reg.encoding() == r2_enc)
+    };
+
+    if has_reg_pair(19, 20) { encoding |= COMPACT_X19_X20; }
+    if has_reg_pair(21, 22) { encoding |= COMPACT_X21_X22; }
+    if has_reg_pair(23, 24) { encoding |= COMPACT_X23_X24; }
+    if has_reg_pair(25, 26) { encoding |= COMPACT_X25_X26; }
+    if has_reg_pair(27, 28) { encoding |= COMPACT_X27_X28; }
+
+    // FPR pairs: V8-V15 (encoding 72-79 in our unified PReg scheme).
+    let fprs: Vec<&SavedRegister> = info.saved_registers.iter()
+        .filter(|r| r.is_fpr)
+        .collect();
+
+    let has_fpr_pair = |r1_enc: u16, r2_enc: u16| -> bool {
+        fprs.iter().any(|r| r.reg.encoding() == r1_enc)
+            && fprs.iter().any(|r| r.reg.encoding() == r2_enc)
+    };
+
+    if has_fpr_pair(72, 73) { encoding |= COMPACT_D8_D9; }    // V8/V9
+    if has_fpr_pair(74, 75) { encoding |= COMPACT_D10_D11; }  // V10/V11
+    if has_fpr_pair(76, 77) { encoding |= COMPACT_D12_D13; }  // V12/V13
+    if has_fpr_pair(78, 79) { encoding |= COMPACT_D14_D15; }  // V14/V15
+
+    CompactUnwindEntry {
+        encoding,
+        function_start,
+        function_length,
+        personality: 0,
+        lsda: 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DwarfCfiOp — DWARF Call Frame Information operations
+// ---------------------------------------------------------------------------
+
+/// A DWARF CFI (Call Frame Information) operation.
+///
+/// These operations describe how the unwinder should interpret the stack
+/// frame at each point in the function's code. They are emitted as part
+/// of an FDE (Frame Description Entry) in the `__TEXT,__eh_frame` section.
+///
+/// Used as a fallback when compact unwind encoding is insufficient
+/// (e.g., dynamic stack allocation, unusual frame layouts).
+///
+/// Reference: DWARF 5 spec, Section 6.4.2 (CFA Definition Instructions)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DwarfCfiOp {
+    /// DW_CFA_def_cfa: Define the CFA (Canonical Frame Address) as
+    /// `register + offset`. This is the base address from which all
+    /// register save locations are computed.
+    ///
+    /// Initially, CFA = SP + 0 (before the prologue).
+    /// After `STP X29, X30, [SP, #-N]!`, CFA = SP + N.
+    /// After `MOV X29, SP`, CFA = FP + N.
+    DefCfa {
+        /// DWARF register number for the CFA base.
+        /// 31 = SP, 29 = FP (X29).
+        register: u16,
+        /// Unsigned offset added to the register value.
+        offset: u32,
+    },
+
+    /// DW_CFA_offset: Register is saved at `CFA - (factored_offset * data_align_factor)`.
+    ///
+    /// For AArch64, `data_align_factor = -8`, so a factored offset of 2
+    /// means the register is at `CFA - 16`.
+    Offset {
+        /// DWARF register number of the saved register.
+        /// GPR: X0-X30 = 0-30, SP = 31.
+        /// FPR: D0-D31 = 64-95.
+        register: u16,
+        /// Factored offset (multiplied by data_align_factor to get byte offset).
+        factored_offset: u32,
+    },
+
+    /// DW_CFA_register: Register's value is found in another register.
+    ///
+    /// Used when a register is moved rather than spilled to the stack
+    /// (e.g., `MOV X19, X0` in a custom calling convention).
+    Register {
+        /// DWARF register number of the register being described.
+        register: u16,
+        /// DWARF register number where the value is stored.
+        value_register: u16,
+    },
+
+    /// DW_CFA_restore: Register is restored to its initial (CIE) state.
+    ///
+    /// Used in the epilogue to indicate that a previously-saved register
+    /// is back to its caller-provided value.
+    Restore {
+        /// DWARF register number of the restored register.
+        register: u16,
+    },
+}
+
+/// AArch64 data alignment factor for DWARF CFI.
+/// Stack grows downward in 8-byte increments.
+const DWARF_DATA_ALIGN_FACTOR: i32 = -8;
+
+/// DWARF register number for SP (stack pointer) on AArch64.
+const DWARF_REG_SP: u16 = 31;
+/// DWARF register number for FP (frame pointer / X29) on AArch64.
+const DWARF_REG_FP: u16 = 29;
+/// DWARF register number for LR (link register / X30) on AArch64.
+const DWARF_REG_LR: u16 = 30;
+
+/// Generate DWARF CFI operations from `UnwindInfo`.
+///
+/// Produces the sequence of CFI operations that describe the function's
+/// frame setup. These are used when compact unwind encoding is insufficient
+/// (the compact unwind entry uses `UNWIND_ARM64_MODE_DWARF`).
+///
+/// # Prologue CFI sequence
+///
+/// 1. After `STP X29, X30, [SP, #-N]!`:
+///    - `DefCfa { SP, N }` — CFA moves up by N
+///    - `Offset { FP, 2 }` — FP saved at CFA-16
+///    - `Offset { LR, 1 }` — LR saved at CFA-8
+///
+/// 2. After `MOV X29, SP`:
+///    - `DefCfa { FP, N }` — CFA now based on FP
+///
+/// 3. For each callee-saved register:
+///    - `Offset { reg, factored_offset }` — register saved at CFA - offset
+pub fn generate_dwarf_cfi(info: &UnwindInfo) -> Vec<DwarfCfiOp> {
+    let mut ops = Vec::new();
+
+    if !info.has_frame_pointer {
+        // Frameless: just define CFA = SP + frame_size.
+        ops.push(DwarfCfiOp::DefCfa {
+            register: DWARF_REG_SP,
+            offset: info.frame_size,
+        });
+        return ops;
+    }
+
+    // Step 1: After STP X29, X30, [SP, #-callee_saved_area]!
+    // CFA = SP + callee_saved_area
+    let callee_saved_area = info.num_saved_pairs() as u32 * 16;
+    ops.push(DwarfCfiOp::DefCfa {
+        register: DWARF_REG_SP,
+        offset: callee_saved_area,
+    });
+
+    // FP saved at CFA - 16: factored offset = 16 / 8 = 2
+    ops.push(DwarfCfiOp::Offset {
+        register: DWARF_REG_FP,
+        factored_offset: 2,
+    });
+
+    // LR saved at CFA - 8: factored offset = 8 / 8 = 1
+    ops.push(DwarfCfiOp::Offset {
+        register: DWARF_REG_LR,
+        factored_offset: 1,
+    });
+
+    // Step 2: After MOV X29, SP — CFA now based on FP
+    ops.push(DwarfCfiOp::DefCfa {
+        register: DWARF_REG_FP,
+        offset: callee_saved_area,
+    });
+
+    // Step 3: Each callee-saved register (skip FP and LR, already handled)
+    for saved in &info.saved_registers {
+        // Skip FP (encoding 29) and LR (encoding 30) — already described above.
+        let enc = saved.reg.encoding();
+        if !saved.is_fpr && (enc == 29 || enc == 30) {
+            continue;
+        }
+
+        // DWARF register number.
+        let dwarf_reg = if saved.is_fpr {
+            // V-registers: our encoding V0=64..V31=95, DWARF D0=64..D31=95
+            enc as u16
+        } else {
+            // X-registers: encoding 0-31, DWARF 0-31
+            enc as u16
+        };
+
+        // Compute factored offset from CFA.
+        // saved.fp_offset is relative to FP.
+        // CFA = FP + callee_saved_area.
+        // Register is at FP + saved.fp_offset = CFA - callee_saved_area + saved.fp_offset.
+        // Byte offset from CFA = callee_saved_area - saved.fp_offset (note: fp_offset is negative for callee-saves below FP).
+        // Factored offset = byte_offset / abs(data_align_factor).
+        let byte_offset_from_cfa = callee_saved_area as i32 - saved.fp_offset;
+        let factored = byte_offset_from_cfa / (-DWARF_DATA_ALIGN_FACTOR);
+
+        ops.push(DwarfCfiOp::Offset {
+            register: dwarf_reg,
+            factored_offset: factored as u32,
+        });
+    }
+
+    ops
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1219,5 +1679,357 @@ mod tests {
         let locs = AppleAArch64ABI::classify_params(&[Type::F32]);
         assert_eq!(locs.len(), 1);
         assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    // ===================================================================
+    // Exception Handling / Stack Unwinding ABI tests
+    // ===================================================================
+
+    // --- UnwindInfo construction tests ---
+
+    #[test]
+    fn unwind_leaf_frame_has_fp_lr() {
+        let info = UnwindInfo::leaf_frame();
+        assert_eq!(info.saved_registers.len(), 2);
+        assert_eq!(info.saved_registers[0].reg, gpr::FP);
+        assert_eq!(info.saved_registers[0].fp_offset, 0);
+        assert_eq!(info.saved_registers[1].reg, gpr::LR);
+        assert_eq!(info.saved_registers[1].fp_offset, 8);
+        assert_eq!(info.frame_size, 16);
+        assert!(info.has_frame_pointer);
+        assert!(info.is_leaf);
+        assert!(!info.has_dynamic_alloc);
+        assert!(info.personality.is_none());
+        assert!(!info.has_lsda);
+    }
+
+    #[test]
+    fn unwind_leaf_frame_num_pairs() {
+        let info = UnwindInfo::leaf_frame();
+        assert_eq!(info.num_saved_pairs(), 1); // FP/LR = 1 pair
+    }
+
+    #[test]
+    fn unwind_standard_frame_with_gpr_pair() {
+        // Frame with FP/LR + X19/X20 pair.
+        let info = UnwindInfo::standard_frame(
+            &[(gpr::X19, gpr::X20, false)],
+            32,
+            false,
+        );
+        assert_eq!(info.saved_registers.len(), 4);
+        assert_eq!(info.frame_size, 32);
+        assert!(!info.is_leaf);
+        assert_eq!(info.num_saved_pairs(), 2); // FP/LR + X19/X20
+    }
+
+    #[test]
+    fn unwind_standard_frame_register_offsets() {
+        // FP/LR + X19/X20: X19 at FP-8, X20 at FP-16.
+        let info = UnwindInfo::standard_frame(
+            &[(gpr::X19, gpr::X20, false)],
+            32,
+            true,
+        );
+        // FP at offset 0
+        assert_eq!(info.saved_registers[0].fp_offset, 0);
+        // LR at offset 8
+        assert_eq!(info.saved_registers[1].fp_offset, 8);
+        // X19 at offset -16 + 8 = -8
+        assert_eq!(info.saved_registers[2].fp_offset, -8);
+        // X20 at offset -16
+        assert_eq!(info.saved_registers[3].fp_offset, -16);
+    }
+
+    #[test]
+    fn unwind_standard_frame_multiple_pairs() {
+        // FP/LR + X19/X20 + X21/X22 + V8/V9.
+        let info = UnwindInfo::standard_frame(
+            &[
+                (gpr::X19, gpr::X20, false),
+                (gpr::X21, gpr::X22, false),
+                (gpr::V8, gpr::V9, true),
+            ],
+            64,
+            false,
+        );
+        assert_eq!(info.saved_registers.len(), 8); // 2 + 2 + 2 + 2
+        assert_eq!(info.num_saved_pairs(), 4);
+        assert_eq!(info.frame_size, 64);
+    }
+
+    #[test]
+    fn unwind_info_saved_gprs_filter() {
+        let info = UnwindInfo::standard_frame(
+            &[
+                (gpr::X19, gpr::X20, false),
+                (gpr::V8, gpr::V9, true),
+            ],
+            48,
+            false,
+        );
+        let gprs = info.saved_gprs();
+        let fprs = info.saved_fprs();
+        // GPRs: FP, LR, X19, X20 = 4
+        assert_eq!(gprs.len(), 4);
+        // FPRs: V8, V9 = 2
+        assert_eq!(fprs.len(), 2);
+    }
+
+    // --- CompactUnwindEntry generation tests ---
+
+    #[test]
+    fn compact_unwind_leaf_frame() {
+        let info = UnwindInfo::leaf_frame();
+        let entry = generate_compact_unwind(&info, 0x1000, 64);
+
+        assert_eq!(entry.encoding, COMPACT_MODE_FRAME);
+        assert_eq!(entry.function_start, 0x1000);
+        assert_eq!(entry.function_length, 64);
+        assert_eq!(entry.personality, 0);
+        assert_eq!(entry.lsda, 0);
+        assert!(!entry.needs_dwarf_fallback());
+    }
+
+    #[test]
+    fn compact_unwind_with_x19_x20() {
+        let info = UnwindInfo::standard_frame(
+            &[(gpr::X19, gpr::X20, false)],
+            32,
+            false,
+        );
+        let entry = generate_compact_unwind(&info, 0, 128);
+
+        assert_eq!(entry.encoding, COMPACT_MODE_FRAME | COMPACT_X19_X20);
+        assert!(!entry.needs_dwarf_fallback());
+    }
+
+    #[test]
+    fn compact_unwind_with_all_gpr_pairs() {
+        let info = UnwindInfo::standard_frame(
+            &[
+                (gpr::X19, gpr::X20, false),
+                (gpr::X21, gpr::X22, false),
+                (gpr::X23, gpr::X24, false),
+                (gpr::X25, gpr::X26, false),
+                (gpr::X27, gpr::X28, false),
+            ],
+            96,
+            false,
+        );
+        let entry = generate_compact_unwind(&info, 0, 256);
+
+        let expected = COMPACT_MODE_FRAME
+            | COMPACT_X19_X20
+            | COMPACT_X21_X22
+            | COMPACT_X23_X24
+            | COMPACT_X25_X26
+            | COMPACT_X27_X28;
+        assert_eq!(entry.encoding, expected);
+    }
+
+    #[test]
+    fn compact_unwind_with_fpr_pairs() {
+        let info = UnwindInfo::standard_frame(
+            &[
+                (gpr::V8, gpr::V9, true),
+                (gpr::V10, gpr::V11, true),
+            ],
+            48,
+            false,
+        );
+        let entry = generate_compact_unwind(&info, 0, 96);
+
+        let expected = COMPACT_MODE_FRAME | COMPACT_D8_D9 | COMPACT_D10_D11;
+        assert_eq!(entry.encoding, expected);
+    }
+
+    #[test]
+    fn compact_unwind_mixed_gpr_fpr() {
+        let info = UnwindInfo::standard_frame(
+            &[
+                (gpr::X19, gpr::X20, false),
+                (gpr::V8, gpr::V9, true),
+                (gpr::V14, gpr::V15, true),
+            ],
+            64,
+            false,
+        );
+        let entry = generate_compact_unwind(&info, 0, 128);
+
+        let expected = COMPACT_MODE_FRAME
+            | COMPACT_X19_X20
+            | COMPACT_D8_D9
+            | COMPACT_D14_D15;
+        assert_eq!(entry.encoding, expected);
+    }
+
+    #[test]
+    fn compact_unwind_dynamic_alloc_falls_back_to_dwarf() {
+        let mut info = UnwindInfo::leaf_frame();
+        info.has_dynamic_alloc = true;
+        let entry = generate_compact_unwind(&info, 0, 32);
+
+        assert!(entry.needs_dwarf_fallback());
+        assert_eq!(entry.mode(), COMPACT_MODE_DWARF);
+    }
+
+    #[test]
+    fn compact_unwind_no_frame_pointer_falls_back_to_dwarf() {
+        let mut info = UnwindInfo::leaf_frame();
+        info.has_frame_pointer = false;
+        let entry = generate_compact_unwind(&info, 0, 32);
+
+        assert!(entry.needs_dwarf_fallback());
+    }
+
+    // --- DwarfCfiOp generation tests ---
+
+    #[test]
+    fn dwarf_cfi_leaf_frame_basic_sequence() {
+        let info = UnwindInfo::leaf_frame();
+        let ops = generate_dwarf_cfi(&info);
+
+        // Should have: DefCfa(SP, 16), Offset(FP, 2), Offset(LR, 1), DefCfa(FP, 16)
+        assert_eq!(ops.len(), 4);
+
+        // First: DefCfa SP, 16
+        assert_eq!(ops[0], DwarfCfiOp::DefCfa {
+            register: DWARF_REG_SP,
+            offset: 16,
+        });
+
+        // FP saved at CFA-16 (factored: 2)
+        assert_eq!(ops[1], DwarfCfiOp::Offset {
+            register: DWARF_REG_FP,
+            factored_offset: 2,
+        });
+
+        // LR saved at CFA-8 (factored: 1)
+        assert_eq!(ops[2], DwarfCfiOp::Offset {
+            register: DWARF_REG_LR,
+            factored_offset: 1,
+        });
+
+        // DefCfa FP, 16
+        assert_eq!(ops[3], DwarfCfiOp::DefCfa {
+            register: DWARF_REG_FP,
+            offset: 16,
+        });
+    }
+
+    #[test]
+    fn dwarf_cfi_with_callee_saves() {
+        let info = UnwindInfo::standard_frame(
+            &[(gpr::X19, gpr::X20, false)],
+            32,
+            false,
+        );
+        let ops = generate_dwarf_cfi(&info);
+
+        // 4 base ops + 2 callee-save ops (X19, X20)
+        assert_eq!(ops.len(), 6);
+
+        // First DefCfa should use callee_saved_area = 2 pairs * 16 = 32
+        assert_eq!(ops[0], DwarfCfiOp::DefCfa {
+            register: DWARF_REG_SP,
+            offset: 32,
+        });
+
+        // After FP/LR offsets and DefCfa(FP), we get X19 and X20 offsets.
+        // X19 at FP-8: CFA offset = 32 - (-8) = 40, factored = 40/8 = 5
+        assert_eq!(ops[4], DwarfCfiOp::Offset {
+            register: 19,
+            factored_offset: 5,
+        });
+
+        // X20 at FP-16: CFA offset = 32 - (-16) = 48, factored = 48/8 = 6
+        assert_eq!(ops[5], DwarfCfiOp::Offset {
+            register: 20,
+            factored_offset: 6,
+        });
+    }
+
+    #[test]
+    fn dwarf_cfi_with_fpr_saves() {
+        let info = UnwindInfo::standard_frame(
+            &[(gpr::V8, gpr::V9, true)],
+            32,
+            false,
+        );
+        let ops = generate_dwarf_cfi(&info);
+
+        // 4 base ops + 2 FPR ops
+        assert_eq!(ops.len(), 6);
+
+        // V8 (encoding 72, DWARF 72) at FP-8
+        assert_eq!(ops[4], DwarfCfiOp::Offset {
+            register: 72,
+            factored_offset: 5, // (32 - (-8)) / 8 = 5
+        });
+
+        // V9 (encoding 73, DWARF 73) at FP-16
+        assert_eq!(ops[5], DwarfCfiOp::Offset {
+            register: 73,
+            factored_offset: 6, // (32 - (-16)) / 8 = 6
+        });
+    }
+
+    #[test]
+    fn dwarf_cfi_frameless_function() {
+        let info = UnwindInfo {
+            saved_registers: vec![],
+            frame_size: 32,
+            has_frame_pointer: false,
+            is_leaf: true,
+            has_dynamic_alloc: false,
+            personality: None,
+            has_lsda: false,
+        };
+        let ops = generate_dwarf_cfi(&info);
+
+        // Frameless: just DefCfa SP, frame_size
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0], DwarfCfiOp::DefCfa {
+            register: DWARF_REG_SP,
+            offset: 32,
+        });
+    }
+
+    #[test]
+    fn dwarf_cfi_op_variants_constructible() {
+        // Verify all DwarfCfiOp variants can be constructed and compared.
+        let def_cfa = DwarfCfiOp::DefCfa { register: 31, offset: 16 };
+        let offset = DwarfCfiOp::Offset { register: 29, factored_offset: 2 };
+        let reg = DwarfCfiOp::Register { register: 19, value_register: 0 };
+        let restore = DwarfCfiOp::Restore { register: 19 };
+
+        assert_ne!(def_cfa, offset);
+        assert_ne!(reg, restore);
+        assert_eq!(def_cfa.clone(), def_cfa);
+    }
+
+    // --- UnwindInfo with personality/LSDA ---
+
+    #[test]
+    fn unwind_info_with_personality() {
+        let mut info = UnwindInfo::leaf_frame();
+        info.personality = Some("__gxx_personality_v0".to_string());
+        info.has_lsda = true;
+        assert!(info.personality.is_some());
+        assert!(info.has_lsda);
+    }
+
+    #[test]
+    fn compact_unwind_entry_mode_extraction() {
+        let entry = CompactUnwindEntry {
+            encoding: COMPACT_MODE_FRAME | COMPACT_X19_X20 | COMPACT_D8_D9,
+            function_start: 0,
+            function_length: 64,
+            personality: 0,
+            lsda: 0,
+        };
+        assert_eq!(entry.mode(), COMPACT_MODE_FRAME);
+        assert!(!entry.needs_dwarf_fallback());
     }
 }
