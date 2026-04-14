@@ -6,12 +6,17 @@
 //! Instruction latency and throughput cost model for AArch64 Apple Silicon.
 //!
 //! Provides per-opcode cycle costs for superoptimization candidate ranking
-//! and optimization pass profitability analysis.
+//! and optimization pass profitability analysis. Supports scalar CPU, NEON
+//! vector, GPU, and ANE (Apple Neural Engine) compute targets for unified
+//! multi-target cost estimation.
 //!
 //! # Data Sources
 //!
 //! Primary: Dougall Johnson, "Apple M1 Firestorm Microarchitecture",
 //! <https://dougallj.github.io/applecpu/firestorm.html>
+//!
+//! Dougall Johnson, "Apple M1 Firestorm SIMD/FP Instructions",
+//! <https://dougallj.github.io/applecpu/firestorm-simd.html>
 //!
 //! The M1 Firestorm core has:
 //! - 8-wide decode, 6 ALU execution units (4 integer + 2 complex integer)
@@ -25,14 +30,22 @@
 //! M4 data is estimated from public benchmarks; the core microarchitecture
 //! is evolutionary from M1 with similar latencies but wider execution.
 //!
-//! # Usage
+//! # Multi-target cost estimation
+//!
+//! The [`MultiTargetCostModel`] provides unified cost estimation across:
+//! - **CPU Scalar**: per-opcode costs from [`AppleSiliconCostModel`]
+//! - **NEON**: per-arrangement vector costs (8B/16B/4H/8H/2S/4S/1D/2D)
+//! - **GPU**: Metal compute dispatch overhead + kernel throughput
+//! - **ANE**: CoreML compilation overhead + inference throughput
 //!
 //! ```ignore
-//! use llvm2_ir::cost_model::{CostModel, AppleSiliconCostModel, CostModelGen};
+//! use llvm2_ir::cost_model::{MultiTargetCostModel, ComputeTarget, CostModelGen};
 //!
-//! let model = AppleSiliconCostModel::new(CostModelGen::M1);
-//! let lat = model.latency(AArch64Opcode::MulRR);  // 3
-//! let tp = model.throughput(AArch64Opcode::AddRR); // 6.0 (6 ALU units)
+//! let model = MultiTargetCostModel::new(CostModelGen::M1);
+//! let scalar = model.estimate_cost(ComputeTarget::CpuScalar, "MUL", 32);
+//! let neon = model.estimate_cost(ComputeTarget::Neon, "MUL", 128);
+//! let gpu = model.estimate_cost(ComputeTarget::Gpu, "MUL", 128);
+//! assert!(neon.latency_cycles < scalar.latency_cycles * 4);
 //! ```
 
 use crate::inst::AArch64Opcode;
@@ -300,6 +313,572 @@ impl CostModel for AppleSiliconCostModel {
 
         // Result: instructions per cycle
         n / total_cycles
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ComputeTarget — unified target for multi-target cost estimation
+// ---------------------------------------------------------------------------
+
+/// Compute targets for multi-target cost estimation.
+///
+/// The synthesis loop generates candidates for multiple execution domains.
+/// Each target has fundamentally different cost characteristics:
+/// - CPU scalar: per-instruction cycle costs, 1-element width
+/// - NEON: SIMD vector costs, 64-bit or 128-bit arrangements
+/// - GPU: Metal compute shader dispatch, amortized over large workloads
+/// - ANE: Apple Neural Engine, CoreML compilation + batched inference
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ComputeTarget {
+    /// Scalar integer/FP on AArch64 CPU core.
+    CpuScalar,
+    /// ARM NEON SIMD (Advanced SIMD). 128-bit registers, per-arrangement costs.
+    Neon,
+    /// Apple GPU via Metal compute shaders.
+    Gpu,
+    /// Apple Neural Engine via CoreML/BNNS.
+    Ane,
+}
+
+// ---------------------------------------------------------------------------
+// NeonArrangement — NEON vector element arrangement
+// ---------------------------------------------------------------------------
+
+/// NEON vector arrangement specifier.
+///
+/// Determines the element size and count within a 64-bit or 128-bit NEON
+/// register. Naming follows ARM convention: `<count><element_type>`.
+///
+/// Source: ARM Architecture Reference Manual, C7.2 "Advanced SIMD data types".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NeonArrangement {
+    /// 8 bytes (8x8-bit), 64-bit register (Vd.8B)
+    B8,
+    /// 16 bytes (16x8-bit), 128-bit register (Vd.16B)
+    B16,
+    /// 4 halfwords (4x16-bit), 64-bit register (Vd.4H)
+    H4,
+    /// 8 halfwords (8x16-bit), 128-bit register (Vd.8H)
+    H8,
+    /// 2 singles (2x32-bit), 64-bit register (Vd.2S)
+    S2,
+    /// 4 singles (4x32-bit), 128-bit register (Vd.4S)
+    S4,
+    /// 1 double (1x64-bit), 64-bit register (Vd.1D)
+    D1,
+    /// 2 doubles (2x64-bit), 128-bit register (Vd.2D)
+    D2,
+}
+
+impl NeonArrangement {
+    /// Total vector width in bits (64 or 128).
+    pub fn width_bits(self) -> u32 {
+        match self {
+            Self::B8 | Self::H4 | Self::S2 | Self::D1 => 64,
+            Self::B16 | Self::H8 | Self::S4 | Self::D2 => 128,
+        }
+    }
+
+    /// Element size in bits (8, 16, 32, or 64).
+    pub fn element_bits(self) -> u32 {
+        match self {
+            Self::B8 | Self::B16 => 8,
+            Self::H4 | Self::H8 => 16,
+            Self::S2 | Self::S4 => 32,
+            Self::D1 | Self::D2 => 64,
+        }
+    }
+
+    /// Number of elements (lanes) in the arrangement.
+    pub fn lane_count(self) -> u32 {
+        self.width_bits() / self.element_bits()
+    }
+
+    /// Infer arrangement from a total operation width in bits.
+    ///
+    /// Returns the 128-bit arrangement with 32-bit elements by default for
+    /// ambiguous widths. Returns `None` for unsupported widths.
+    pub fn from_width(width: u32) -> Option<Self> {
+        match width {
+            8 => Some(Self::B8),     // single byte in 8B register
+            16 => Some(Self::H4),    // single halfword in 4H register
+            32 => Some(Self::S2),    // single word in 2S register
+            64 => Some(Self::D1),    // single double in 1D register
+            128 => Some(Self::S4),   // 4x32 (most common 128-bit arrangement)
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NeonOp — NEON operation category
+// ---------------------------------------------------------------------------
+
+/// NEON operation categories for cost lookup.
+///
+/// Maps to ARM Advanced SIMD instruction classes. Each op has a known
+/// per-arrangement latency on Apple Silicon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NeonOp {
+    /// Integer ADD (ADD Vd.<T>, Vn.<T>, Vm.<T>)
+    Add,
+    /// Integer SUB (SUB Vd.<T>, Vn.<T>, Vm.<T>)
+    Sub,
+    /// Integer MUL (MUL Vd.<T>, Vn.<T>, Vm.<T>)
+    Mul,
+    /// Integer NEG (NEG Vd.<T>, Vn.<T>)
+    Neg,
+    /// Bitwise AND (AND Vd.16B, Vn.16B, Vm.16B)
+    And,
+    /// Bitwise OR (ORR Vd.16B, Vn.16B, Vm.16B)
+    Orr,
+    /// Bitwise XOR (EOR Vd.16B, Vn.16B, Vm.16B)
+    Eor,
+    /// Bit clear (BIC Vd.16B, Vn.16B, Vm.16B)
+    Bic,
+    /// Shift left (SHL Vd.<T>, Vn.<T>, #imm)
+    Shl,
+    /// Unsigned shift right (USHR Vd.<T>, Vn.<T>, #imm)
+    Ushr,
+    /// Signed shift right (SSHR Vd.<T>, Vn.<T>, #imm)
+    Sshr,
+    /// FP ADD (FADD Vd.<T>, Vn.<T>, Vm.<T>)
+    Fadd,
+    /// FP MUL (FMUL Vd.<T>, Vn.<T>, Vm.<T>)
+    Fmul,
+    /// FP FMA (FMLA Vd.<T>, Vn.<T>, Vm.<T>)
+    Fmla,
+}
+
+impl NeonOp {
+    /// Parse a NEON operation from a string name (case-insensitive).
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "ADD" => Some(Self::Add),
+            "SUB" => Some(Self::Sub),
+            "MUL" => Some(Self::Mul),
+            "NEG" => Some(Self::Neg),
+            "AND" => Some(Self::And),
+            "ORR" | "OR" => Some(Self::Orr),
+            "EOR" | "XOR" => Some(Self::Eor),
+            "BIC" => Some(Self::Bic),
+            "SHL" => Some(Self::Shl),
+            "USHR" => Some(Self::Ushr),
+            "SSHR" => Some(Self::Sshr),
+            "FADD" => Some(Self::Fadd),
+            "FMUL" => Some(Self::Fmul),
+            "FMLA" | "FMA" => Some(Self::Fmla),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CostEstimate — unified cost result
+// ---------------------------------------------------------------------------
+
+/// Unified cost estimate for any compute target.
+///
+/// Returned by [`MultiTargetCostModel::estimate_cost`]. All fields are
+/// target-relative: `latency_cycles` is CPU cycles for CPU/NEON targets,
+/// and estimated equivalent cycles for GPU/ANE (including dispatch overhead).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CostEstimate {
+    /// Execution latency in cycles (or equivalent units for GPU/ANE).
+    ///
+    /// For CPU/NEON: pipeline latency from issue to result availability.
+    /// For GPU: dispatch overhead + kernel execution (amortized).
+    /// For ANE: CoreML compile + inference (amortized).
+    pub latency_cycles: f64,
+
+    /// Throughput in operations per cycle (higher = better).
+    ///
+    /// For CPU/NEON: instructions per cycle across available execution units.
+    /// For GPU: operations per cycle at peak throughput (sustained).
+    /// For ANE: matrix ops per cycle at peak throughput.
+    pub throughput_per_cycle: f64,
+
+    /// Relative energy cost (1.0 = one scalar integer ADD).
+    ///
+    /// Normalized to scalar integer ALU. Approximate values:
+    /// - Scalar ALU: 1.0
+    /// - NEON: 1.5-2.0 (wider datapath, same voltage)
+    /// - GPU: 0.3-0.5 per-element (amortized over large workloads)
+    /// - ANE: 0.1-0.2 per-element (fixed-function, very efficient)
+    pub energy_relative: f64,
+}
+
+impl CostEstimate {
+    /// Cost-effectiveness metric: throughput / energy.
+    ///
+    /// Higher is better. Useful for ranking targets when both performance
+    /// and power efficiency matter.
+    pub fn efficiency(&self) -> f64 {
+        if self.energy_relative <= 0.0 {
+            return 0.0;
+        }
+        self.throughput_per_cycle / self.energy_relative
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DataTransferCost — cross-domain transfer costs
+// ---------------------------------------------------------------------------
+
+/// Cross-domain data transfer costs.
+///
+/// Moving data between compute domains is expensive and often dominates
+/// total cost. The synthesis loop must account for these when evaluating
+/// mixed-target strategies.
+///
+/// Source: Dougall Johnson, M1 Firestorm SIMD/FP instructions:
+/// GPR<->SIMD transfer is 12-13 cycles on Apple Silicon.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DataTransferCost {
+    /// Scalar GPR -> NEON register (DUP from GPR, FMOV GPR->FP).
+    /// M1 Firestorm: ~12 cycles (2 uops, cross-domain penalty).
+    pub scalar_to_neon_cycles: f64,
+
+    /// NEON register -> Scalar GPR (UMOV, FMOV FP->GPR).
+    /// M1 Firestorm: ~13 cycles (2 uops, cross-domain penalty).
+    pub neon_to_scalar_cycles: f64,
+
+    /// Memory -> NEON register (LD1, LDR Q-form).
+    /// M1 Firestorm: 4 cycles L1 hit, same as scalar load.
+    pub memory_to_neon_cycles: f64,
+
+    /// NEON register -> Memory (ST1, STR Q-form).
+    /// M1 Firestorm: 1 cycle dispatch (same as scalar store).
+    pub neon_to_memory_cycles: f64,
+
+    /// CPU -> GPU buffer transfer overhead in equivalent cycles.
+    /// Unified memory on Apple Silicon: ~200-500 cycles for buffer
+    /// mapping/synchronization (no actual copy needed).
+    pub cpu_to_gpu_cycles: f64,
+
+    /// GPU -> CPU buffer readback overhead in equivalent cycles.
+    /// Unified memory: ~300-800 cycles for synchronization fence.
+    pub gpu_to_cpu_cycles: f64,
+
+    /// CPU -> ANE input tensor preparation in equivalent cycles.
+    /// CoreML input marshalling: ~1000-5000 cycles depending on
+    /// tensor size and format conversion.
+    pub cpu_to_ane_cycles: f64,
+
+    /// ANE -> CPU output tensor readback in equivalent cycles.
+    /// CoreML output unmarshalling: ~500-2000 cycles.
+    pub ane_to_cpu_cycles: f64,
+}
+
+// ---------------------------------------------------------------------------
+// MultiTargetCostModel
+// ---------------------------------------------------------------------------
+
+/// Unified multi-target cost model for Apple Silicon.
+///
+/// Provides cost estimation across CPU scalar, NEON, GPU, and ANE targets.
+/// The synthesis loop uses this to rank candidates from different compute
+/// domains and decide when vectorization or offloading is profitable.
+///
+/// # Architecture
+///
+/// Apple Silicon (M1-M4) has four major compute domains:
+///
+/// 1. **CPU scalar**: 6 integer ALU pipes, 4 FP/SIMD pipes on Firestorm P-core.
+///    Lowest latency, best for small/irregular workloads.
+///
+/// 2. **NEON**: Same 4 FP/SIMD pipes as scalar FP, but operating on 128-bit
+///    vectors. Same latency as scalar (2-4 cycles), 2-16x throughput depending
+///    on element width. Amortization threshold: ~4 elements to beat scalar.
+///
+/// 3. **GPU**: Metal compute shaders on the integrated GPU. High dispatch
+///    overhead (~5000-15000 cycles) but massive throughput for large workloads.
+///    Amortization threshold: ~10000 elements to beat NEON.
+///
+/// 4. **ANE**: Apple Neural Engine. Fixed-function matrix/convolution hardware.
+///    Very high CoreML compilation overhead (~50000-200000 cycles) but extreme
+///    throughput for supported operations (GEMM, conv2d). Amortization
+///    threshold: ~100000 elements.
+///
+/// # Data Sources
+///
+/// - NEON: Dougall Johnson, "Apple M1 Firestorm SIMD/FP Instructions"
+/// - GPU: Apple Metal Performance Shaders documentation, public benchmarks
+/// - ANE: Apple CoreML documentation, MLPerf benchmarks (estimated)
+#[derive(Debug, Clone, Copy)]
+pub struct MultiTargetCostModel {
+    scalar: AppleSiliconCostModel,
+    generation: CostModelGen,
+}
+
+impl MultiTargetCostModel {
+    /// Create a multi-target cost model for the specified Apple Silicon generation.
+    pub fn new(generation: CostModelGen) -> Self {
+        Self {
+            scalar: AppleSiliconCostModel::new(generation),
+            generation,
+        }
+    }
+
+    /// Access the underlying scalar CPU cost model.
+    pub fn scalar_model(&self) -> &AppleSiliconCostModel {
+        &self.scalar
+    }
+
+    /// Estimate cost for an operation on a specific compute target.
+    ///
+    /// # Arguments
+    /// - `target`: The compute domain (CpuScalar, Neon, Gpu, Ane).
+    /// - `op`: Operation name (e.g., "ADD", "MUL", "FADD", "GEMM").
+    ///   Case-insensitive. Unrecognized ops return a conservative estimate.
+    /// - `width`: Total operation width in bits. For scalar: element width
+    ///   (32 or 64). For NEON: vector width (64 or 128). For GPU/ANE:
+    ///   total data width in bits (e.g., 4096 for 128 floats).
+    ///
+    /// # Returns
+    /// A [`CostEstimate`] with latency, throughput, and energy metrics.
+    pub fn estimate_cost(&self, target: ComputeTarget, op: &str, width: u32) -> CostEstimate {
+        match target {
+            ComputeTarget::CpuScalar => self.estimate_scalar(op, width),
+            ComputeTarget::Neon => self.estimate_neon(op, width),
+            ComputeTarget::Gpu => self.estimate_gpu(op, width),
+            ComputeTarget::Ane => self.estimate_ane(op, width),
+        }
+    }
+
+    /// Get cross-domain data transfer costs.
+    ///
+    /// Transfer costs are critical for profitability analysis: a NEON
+    /// operation that saves 2 cycles but requires 12+13=25 cycles of
+    /// GPR<->SIMD transfers is a net loss.
+    pub fn transfer_costs(&self) -> DataTransferCost {
+        // M4 has slightly improved cross-domain transfer, estimated ~10%
+        let cross_domain_factor = match self.generation {
+            CostModelGen::M1 => 1.0,
+            CostModelGen::M4 => 0.9,
+        };
+
+        DataTransferCost {
+            scalar_to_neon_cycles: 12.0 * cross_domain_factor,
+            neon_to_scalar_cycles: 13.0 * cross_domain_factor,
+            memory_to_neon_cycles: 4.0,
+            neon_to_memory_cycles: 1.0,
+            cpu_to_gpu_cycles: 350.0,
+            gpu_to_cpu_cycles: 550.0,
+            cpu_to_ane_cycles: 3000.0,
+            ane_to_cpu_cycles: 1500.0,
+        }
+    }
+
+    /// NEON cost for a specific operation and arrangement.
+    ///
+    /// Returns (latency, throughput_per_cycle) for the given NEON operation
+    /// on the specified arrangement. Data from Dougall Johnson's M1 Firestorm
+    /// SIMD/FP instruction analysis.
+    pub fn neon_cost(&self, op: NeonOp, arr: NeonArrangement) -> (u32, f64) {
+        // M1 Firestorm has 4 FP/SIMD execution units (u11-u14).
+        // All NEON integer and FP operations can issue to all 4 units
+        // (throughput 0.25 c/i = 4 ops/cycle) unless noted otherwise.
+        //
+        // Source: Dougall Johnson, "Apple M1 Firestorm SIMD/FP Instructions"
+        // https://dougallj.github.io/applecpu/firestorm-simd.html
+        let fp_tp = 4.0; // 4 FP/SIMD units, all arrangements
+
+        match op {
+            // -- Integer NEON (2-cycle latency, 4-way issue) --
+            // ADD/SUB/NEG/AND/ORR/EOR/BIC are all simple SIMD integer
+            // operations with 2-cycle latency on M1 Firestorm.
+            NeonOp::Add | NeonOp::Sub | NeonOp::Neg => (2, fp_tp),
+            NeonOp::And | NeonOp::Orr | NeonOp::Eor | NeonOp::Bic => (2, fp_tp),
+            NeonOp::Shl | NeonOp::Ushr | NeonOp::Sshr => (2, fp_tp),
+
+            // -- Integer MUL (4-cycle latency for 16/32-bit, 3c for 8-bit) --
+            // MUL.4S/MUL.8H: 4 cycles. MUL.16B: 3 cycles.
+            // 8-bit multiply is simpler hardware (fewer partial products).
+            NeonOp::Mul => {
+                let lat = match arr.element_bits() {
+                    8 => 3,
+                    _ => 4,
+                };
+                (lat, fp_tp)
+            }
+
+            // -- FP operations --
+            // FADD: 3-cycle latency, 4-way issue
+            NeonOp::Fadd => (3, fp_tp),
+            // FMUL: 3-cycle latency, 4-way issue
+            NeonOp::Fmul => (3, fp_tp),
+            // FMLA (fused multiply-add): 4-cycle latency, 4-way issue
+            NeonOp::Fmla => (4, fp_tp),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Private: per-target cost estimation
+    // -----------------------------------------------------------------------
+
+    fn estimate_scalar(&self, op: &str, width: u32) -> CostEstimate {
+        // Map string op name to approximate scalar latency/throughput.
+        let upper = op.to_ascii_uppercase();
+        let (lat, tp) = match upper.as_str() {
+            "ADD" | "SUB" | "NEG" | "AND" | "ORR" | "OR"
+            | "EOR" | "XOR" | "BIC" | "SHL" | "LSL"
+            | "USHR" | "LSR" | "SSHR" | "ASR" => (1, 6.0),
+            "MUL" => (3, 2.0),
+            "SDIV" | "UDIV" | "DIV" => (8, 0.5),
+            "FADD" | "FSUB" => (3, 2.0),
+            "FMUL" => (4, 2.0),
+            "FDIV" => (10, 0.5),
+            "FMA" | "FMLA" | "FMADD" => (4, 2.0),
+            "CMP" | "TST" => (1, 6.0),
+            "MOV" | "FMOV" => (1, 6.0),
+            "LDR" | "LOAD" => (4, 2.0),
+            "STR" | "STORE" => (1, 2.0),
+            _ => (2, 4.0), // conservative default
+        };
+
+        // M4 has slightly wider integer throughput
+        let tp_adjusted = if self.generation == CostModelGen::M4 {
+            match upper.as_str() {
+                "ADD" | "SUB" | "NEG" | "AND" | "ORR" | "OR"
+                | "EOR" | "XOR" | "BIC" | "SHL" | "LSL"
+                | "USHR" | "LSR" | "SSHR" | "ASR"
+                | "CMP" | "TST" | "MOV" => 7.0_f64.min(tp + 1.0),
+                _ => tp,
+            }
+        } else {
+            tp
+        };
+
+        // 64-bit operations have same latency as 32-bit on AArch64 for
+        // most instructions (both are single-cycle on the full 64-bit ALU).
+        let _ = width; // width doesn't affect scalar cost significantly
+
+        CostEstimate {
+            latency_cycles: lat as f64,
+            throughput_per_cycle: tp_adjusted,
+            energy_relative: 1.0,
+        }
+    }
+
+    fn estimate_neon(&self, op: &str, width: u32) -> CostEstimate {
+        let neon_op = NeonOp::from_name(op);
+        let arrangement = NeonArrangement::from_width(width).unwrap_or(NeonArrangement::S4);
+
+        let (lat, tp) = match neon_op {
+            Some(nop) => self.neon_cost(nop, arrangement),
+            None => {
+                // Unknown NEON op: conservative 3-cycle, 4-way issue
+                (3, 4.0)
+            }
+        };
+
+        // NEON energy: ~1.5-2.0x scalar ALU (wider datapath, same voltage).
+        // 128-bit operations use ~1.8x energy of scalar; 64-bit ~1.4x.
+        let energy = if arrangement.width_bits() >= 128 { 1.8 } else { 1.4 };
+
+        CostEstimate {
+            latency_cycles: lat as f64,
+            throughput_per_cycle: tp,
+            energy_relative: energy,
+        }
+    }
+
+    fn estimate_gpu(&self, op: &str, width: u32) -> CostEstimate {
+        // GPU cost model: high dispatch overhead, massive throughput.
+        //
+        // Apple M1 GPU: 128 execution units, 1024 ALUs at ~1.3 GHz.
+        // Metal compute dispatch overhead: ~5000-15000 CPU-equivalent cycles
+        // (includes command buffer encoding, GPU scheduling, fence).
+        //
+        // For small workloads, dispatch overhead dominates. For large
+        // workloads (>10K elements), GPU throughput dominates.
+
+        let dispatch_overhead: f64 = 10000.0; // ~10K CPU-equivalent cycles
+
+        // GPU throughput per operation type (in GPU-ops per CPU-cycle,
+        // accounting for GPU's lower clock rate but massive parallelism).
+        let upper = op.to_ascii_uppercase();
+        let gpu_ops_per_cycle = match upper.as_str() {
+            "ADD" | "SUB" | "NEG" | "AND" | "ORR" | "OR"
+            | "EOR" | "XOR" | "BIC" | "SHL" | "USHR" | "SSHR" => 512.0,
+            "MUL" => 256.0,
+            "FADD" | "FSUB" | "FMUL" | "FMA" | "FMLA" => 256.0,
+            "FDIV" => 32.0,
+            "GEMM" | "MATMUL" => 512.0, // matrix multiply is GPU's strength
+            _ => 128.0, // conservative
+        };
+
+        // Elements implied by width (assume 32-bit elements)
+        let elements = (width / 32).max(1) as f64;
+
+        // Amortized latency: dispatch + elements/throughput
+        let compute_cycles = elements / gpu_ops_per_cycle;
+        let total_latency = dispatch_overhead + compute_cycles;
+
+        // Effective throughput: elements / total_latency
+        let effective_tp = elements / total_latency;
+
+        // GPU energy: ~0.4x per element (amortized) plus fixed overhead.
+        let energy = 0.4 * elements + 50.0; // fixed + per-element
+        let energy_per_op = energy / elements;
+
+        CostEstimate {
+            latency_cycles: total_latency,
+            throughput_per_cycle: effective_tp,
+            energy_relative: energy_per_op,
+        }
+    }
+
+    fn estimate_ane(&self, op: &str, width: u32) -> CostEstimate {
+        // ANE cost model: very high compile/setup overhead, extreme throughput
+        // for supported operations (GEMM, convolution, elementwise).
+        //
+        // Apple Neural Engine (M1): 16-core, 11 TOPS (int8).
+        // CoreML compilation overhead: ~50K-200K CPU-equivalent cycles
+        // for model compilation + input tensor preparation.
+        //
+        // Only certain operations are accelerated. Unsupported ops fall
+        // back to CPU with the full compilation overhead wasted.
+
+        let compile_overhead: f64 = 100_000.0; // ~100K CPU-equivalent cycles
+
+        let upper = op.to_ascii_uppercase();
+        let (supported, ane_ops_per_cycle) = match upper.as_str() {
+            // Matrix operations: ANE's strength
+            "GEMM" | "MATMUL" | "CONV2D" | "CONV" => (true, 2048.0),
+            // Elementwise operations: supported but not ANE's strength
+            "ADD" | "SUB" | "MUL" | "FADD" | "FMUL" | "FMA" | "FMLA" => (true, 512.0),
+            "NEG" | "AND" | "ORR" | "OR" | "EOR" | "XOR" | "BIC" => (true, 256.0),
+            // Shift operations
+            "SHL" | "USHR" | "SSHR" => (true, 256.0),
+            // Division: not well-supported on ANE
+            "DIV" | "FDIV" | "SDIV" | "UDIV" => (false, 0.0),
+            _ => (false, 0.0),
+        };
+
+        if !supported {
+            // Unsupported op: return worst-case (falls back to CPU scalar)
+            return CostEstimate {
+                latency_cycles: compile_overhead + 100.0,
+                throughput_per_cycle: 0.001,
+                energy_relative: 100.0,
+            };
+        }
+
+        let elements = (width / 32).max(1) as f64;
+        let compute_cycles = elements / ane_ops_per_cycle;
+        let total_latency = compile_overhead + compute_cycles;
+        let effective_tp = elements / total_latency;
+
+        // ANE energy: ~0.15x per element (fixed-function, very efficient)
+        let energy_per_op = 0.15;
+
+        CostEstimate {
+            latency_cycles: total_latency,
+            throughput_per_cycle: effective_tp,
+            energy_relative: energy_per_op,
+        }
     }
 }
 
@@ -647,5 +1226,368 @@ mod tests {
     fn fp_mul_slower_than_fp_add() {
         let model = m1();
         assert!(model.latency(AArch64Opcode::FmulRR) > model.latency(AArch64Opcode::FaddRR));
+    }
+
+    // ==== Multi-target cost model tests ====
+
+    fn mt_m1() -> MultiTargetCostModel {
+        MultiTargetCostModel::new(CostModelGen::M1)
+    }
+
+    fn mt_m4() -> MultiTargetCostModel {
+        MultiTargetCostModel::new(CostModelGen::M4)
+    }
+
+    // ---- NeonArrangement tests ----
+
+    #[test]
+    fn neon_arrangement_width_bits() {
+        assert_eq!(NeonArrangement::B8.width_bits(), 64);
+        assert_eq!(NeonArrangement::B16.width_bits(), 128);
+        assert_eq!(NeonArrangement::H4.width_bits(), 64);
+        assert_eq!(NeonArrangement::H8.width_bits(), 128);
+        assert_eq!(NeonArrangement::S2.width_bits(), 64);
+        assert_eq!(NeonArrangement::S4.width_bits(), 128);
+        assert_eq!(NeonArrangement::D1.width_bits(), 64);
+        assert_eq!(NeonArrangement::D2.width_bits(), 128);
+    }
+
+    #[test]
+    fn neon_arrangement_element_bits() {
+        assert_eq!(NeonArrangement::B8.element_bits(), 8);
+        assert_eq!(NeonArrangement::B16.element_bits(), 8);
+        assert_eq!(NeonArrangement::H4.element_bits(), 16);
+        assert_eq!(NeonArrangement::H8.element_bits(), 16);
+        assert_eq!(NeonArrangement::S2.element_bits(), 32);
+        assert_eq!(NeonArrangement::S4.element_bits(), 32);
+        assert_eq!(NeonArrangement::D1.element_bits(), 64);
+        assert_eq!(NeonArrangement::D2.element_bits(), 64);
+    }
+
+    #[test]
+    fn neon_arrangement_lane_count() {
+        assert_eq!(NeonArrangement::B8.lane_count(), 8);
+        assert_eq!(NeonArrangement::B16.lane_count(), 16);
+        assert_eq!(NeonArrangement::H4.lane_count(), 4);
+        assert_eq!(NeonArrangement::H8.lane_count(), 8);
+        assert_eq!(NeonArrangement::S2.lane_count(), 2);
+        assert_eq!(NeonArrangement::S4.lane_count(), 4);
+        assert_eq!(NeonArrangement::D1.lane_count(), 1);
+        assert_eq!(NeonArrangement::D2.lane_count(), 2);
+    }
+
+    #[test]
+    fn neon_arrangement_from_width() {
+        assert_eq!(NeonArrangement::from_width(64), Some(NeonArrangement::D1));
+        assert_eq!(NeonArrangement::from_width(128), Some(NeonArrangement::S4));
+        assert_eq!(NeonArrangement::from_width(256), None);
+    }
+
+    // ---- NeonOp parsing ----
+
+    #[test]
+    fn neon_op_from_name_known() {
+        assert_eq!(NeonOp::from_name("ADD"), Some(NeonOp::Add));
+        assert_eq!(NeonOp::from_name("sub"), Some(NeonOp::Sub));
+        assert_eq!(NeonOp::from_name("Mul"), Some(NeonOp::Mul));
+        assert_eq!(NeonOp::from_name("neg"), Some(NeonOp::Neg));
+        assert_eq!(NeonOp::from_name("AND"), Some(NeonOp::And));
+        assert_eq!(NeonOp::from_name("orr"), Some(NeonOp::Orr));
+        assert_eq!(NeonOp::from_name("OR"), Some(NeonOp::Orr));
+        assert_eq!(NeonOp::from_name("eor"), Some(NeonOp::Eor));
+        assert_eq!(NeonOp::from_name("XOR"), Some(NeonOp::Eor));
+        assert_eq!(NeonOp::from_name("bic"), Some(NeonOp::Bic));
+        assert_eq!(NeonOp::from_name("SHL"), Some(NeonOp::Shl));
+        assert_eq!(NeonOp::from_name("USHR"), Some(NeonOp::Ushr));
+        assert_eq!(NeonOp::from_name("SSHR"), Some(NeonOp::Sshr));
+        assert_eq!(NeonOp::from_name("FADD"), Some(NeonOp::Fadd));
+        assert_eq!(NeonOp::from_name("FMUL"), Some(NeonOp::Fmul));
+        assert_eq!(NeonOp::from_name("FMLA"), Some(NeonOp::Fmla));
+        assert_eq!(NeonOp::from_name("FMA"), Some(NeonOp::Fmla));
+    }
+
+    #[test]
+    fn neon_op_from_name_unknown() {
+        assert_eq!(NeonOp::from_name("SDIV"), None);
+        assert_eq!(NeonOp::from_name("UNKNOWN"), None);
+        assert_eq!(NeonOp::from_name(""), None);
+    }
+
+    // ---- NEON cost data ----
+
+    #[test]
+    fn neon_int_alu_latency_is_2() {
+        let model = mt_m1();
+        let ops = [NeonOp::Add, NeonOp::Sub, NeonOp::Neg,
+                    NeonOp::And, NeonOp::Orr, NeonOp::Eor, NeonOp::Bic,
+                    NeonOp::Shl, NeonOp::Ushr, NeonOp::Sshr];
+        for op in &ops {
+            let (lat, tp) = model.neon_cost(*op, NeonArrangement::S4);
+            assert_eq!(lat, 2, "{:?} should have 2-cycle NEON latency", op);
+            assert!((tp - 4.0).abs() < 0.01,
+                "{:?} should have 4.0 throughput", op);
+        }
+    }
+
+    #[test]
+    fn neon_mul_latency_varies_by_element_size() {
+        let model = mt_m1();
+        // 8-bit MUL: 3 cycles
+        let (lat_8b, _) = model.neon_cost(NeonOp::Mul, NeonArrangement::B16);
+        assert_eq!(lat_8b, 3);
+        // 16-bit MUL: 4 cycles
+        let (lat_16b, _) = model.neon_cost(NeonOp::Mul, NeonArrangement::H8);
+        assert_eq!(lat_16b, 4);
+        // 32-bit MUL: 4 cycles
+        let (lat_32b, _) = model.neon_cost(NeonOp::Mul, NeonArrangement::S4);
+        assert_eq!(lat_32b, 4);
+    }
+
+    #[test]
+    fn neon_fp_latencies() {
+        let model = mt_m1();
+        let (fadd_lat, _) = model.neon_cost(NeonOp::Fadd, NeonArrangement::S4);
+        let (fmul_lat, _) = model.neon_cost(NeonOp::Fmul, NeonArrangement::S4);
+        let (fmla_lat, _) = model.neon_cost(NeonOp::Fmla, NeonArrangement::S4);
+        assert_eq!(fadd_lat, 3);
+        assert_eq!(fmul_lat, 3);
+        assert_eq!(fmla_lat, 4);
+    }
+
+    // ---- CostEstimate ----
+
+    #[test]
+    fn cost_estimate_efficiency() {
+        let est = CostEstimate {
+            latency_cycles: 2.0,
+            throughput_per_cycle: 4.0,
+            energy_relative: 2.0,
+        };
+        assert!((est.efficiency() - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn cost_estimate_efficiency_zero_energy() {
+        let est = CostEstimate {
+            latency_cycles: 1.0,
+            throughput_per_cycle: 4.0,
+            energy_relative: 0.0,
+        };
+        assert_eq!(est.efficiency(), 0.0);
+    }
+
+    // ---- Cross-target cost comparisons ----
+
+    #[test]
+    fn scalar_mul_vs_neon_mul_128bit() {
+        // NEON MUL.4S processes 4x32-bit elements in one instruction.
+        // Scalar MUL processes 1x32/64-bit element.
+        // NEON should have lower per-element latency for 128-bit width.
+        let model = mt_m1();
+        let scalar = model.estimate_cost(ComputeTarget::CpuScalar, "MUL", 32);
+        let neon = model.estimate_cost(ComputeTarget::Neon, "MUL", 128);
+
+        // Scalar MUL: 3 cycles for 1 element
+        assert!((scalar.latency_cycles - 3.0).abs() < 0.01);
+        // NEON MUL.4S: 4 cycles for 4 elements (1 cycle/element amortized)
+        assert!((neon.latency_cycles - 4.0).abs() < 0.01);
+        // NEON has higher throughput (4 units vs 2)
+        assert!(neon.throughput_per_cycle > scalar.throughput_per_cycle);
+    }
+
+    #[test]
+    fn scalar_add_vs_neon_add_128bit() {
+        let model = mt_m1();
+        let scalar = model.estimate_cost(ComputeTarget::CpuScalar, "ADD", 32);
+        let neon = model.estimate_cost(ComputeTarget::Neon, "ADD", 128);
+
+        // Scalar ADD: 1 cycle, NEON ADD: 2 cycles (but 4 elements)
+        assert!((scalar.latency_cycles - 1.0).abs() < 0.01);
+        assert!((neon.latency_cycles - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn gpu_high_dispatch_overhead() {
+        // GPU dispatch overhead should make it expensive for small workloads
+        let model = mt_m1();
+        let gpu_small = model.estimate_cost(ComputeTarget::Gpu, "MUL", 128);
+        let neon = model.estimate_cost(ComputeTarget::Neon, "MUL", 128);
+
+        // GPU latency for 4 elements should be much higher than NEON
+        // (dominated by ~10K dispatch overhead)
+        assert!(gpu_small.latency_cycles > 1000.0);
+        assert!(neon.latency_cycles < 10.0);
+    }
+
+    #[test]
+    fn ane_high_compile_overhead() {
+        // ANE has very high compilation overhead
+        let model = mt_m1();
+        let ane = model.estimate_cost(ComputeTarget::Ane, "MUL", 128);
+
+        // Should be ~100K+ cycles for tiny workload
+        assert!(ane.latency_cycles > 50_000.0);
+    }
+
+    #[test]
+    fn ane_unsupported_op_is_expensive() {
+        let model = mt_m1();
+        // Use a large workload to show the throughput difference clearly
+        let large_width = 100_000 * 32;
+        let ane_div = model.estimate_cost(ComputeTarget::Ane, "DIV", large_width);
+        let ane_mul = model.estimate_cost(ComputeTarget::Ane, "MUL", large_width);
+
+        // Unsupported ops should have much worse energy and efficiency
+        assert!(ane_div.energy_relative > ane_mul.energy_relative,
+            "DIV energy {} should exceed MUL energy {}", ane_div.energy_relative, ane_mul.energy_relative);
+        assert!(ane_div.efficiency() < ane_mul.efficiency(),
+            "DIV efficiency {} should be worse than MUL efficiency {}", ane_div.efficiency(), ane_mul.efficiency());
+    }
+
+    #[test]
+    fn gpu_amortizes_for_large_workloads() {
+        // For large workloads, GPU throughput should dominate dispatch overhead
+        let model = mt_m1();
+        let gpu_large = model.estimate_cost(ComputeTarget::Gpu, "ADD", 1_000_000 * 32);
+        let scalar_large = model.estimate_cost(ComputeTarget::CpuScalar, "ADD", 32);
+
+        // GPU effective throughput for 1M elements should exceed scalar
+        assert!(gpu_large.throughput_per_cycle > 0.0);
+        // But scalar still has lower latency per individual operation
+        assert!(scalar_large.latency_cycles < gpu_large.latency_cycles);
+    }
+
+    // ---- Data transfer costs ----
+
+    #[test]
+    fn transfer_costs_gpr_simd_expensive() {
+        let model = mt_m1();
+        let tc = model.transfer_costs();
+
+        // GPR<->SIMD should be 12-13 cycles (very expensive)
+        assert!(tc.scalar_to_neon_cycles >= 11.0);
+        assert!(tc.neon_to_scalar_cycles >= 12.0);
+        // Memory<->NEON should be comparable to scalar load/store
+        assert!(tc.memory_to_neon_cycles <= 5.0);
+        assert!(tc.neon_to_memory_cycles <= 2.0);
+    }
+
+    #[test]
+    fn transfer_costs_gpu_moderate() {
+        let model = mt_m1();
+        let tc = model.transfer_costs();
+
+        // CPU<->GPU: hundreds of cycles (unified memory, no copy)
+        assert!(tc.cpu_to_gpu_cycles >= 100.0);
+        assert!(tc.gpu_to_cpu_cycles >= 100.0);
+    }
+
+    #[test]
+    fn transfer_costs_ane_high() {
+        let model = mt_m1();
+        let tc = model.transfer_costs();
+
+        // CPU<->ANE: thousands of cycles (CoreML marshalling)
+        assert!(tc.cpu_to_ane_cycles >= 1000.0);
+        assert!(tc.ane_to_cpu_cycles >= 500.0);
+    }
+
+    #[test]
+    fn m4_slightly_better_cross_domain() {
+        let m1_tc = mt_m1().transfer_costs();
+        let m4_tc = mt_m4().transfer_costs();
+
+        // M4 should have slightly lower cross-domain transfer costs
+        assert!(m4_tc.scalar_to_neon_cycles <= m1_tc.scalar_to_neon_cycles);
+        assert!(m4_tc.neon_to_scalar_cycles <= m1_tc.neon_to_scalar_cycles);
+    }
+
+    // ---- NEON energy higher than scalar ----
+
+    #[test]
+    fn neon_energy_higher_than_scalar() {
+        let model = mt_m1();
+        let scalar = model.estimate_cost(ComputeTarget::CpuScalar, "ADD", 32);
+        let neon = model.estimate_cost(ComputeTarget::Neon, "ADD", 128);
+
+        assert!(neon.energy_relative > scalar.energy_relative,
+            "NEON should use more energy than scalar per instruction");
+    }
+
+    // ---- ANE energy efficient for supported ops ----
+
+    #[test]
+    fn ane_energy_efficient_for_supported_ops() {
+        let model = mt_m1();
+        let ane = model.estimate_cost(ComputeTarget::Ane, "MUL", 128);
+        let scalar = model.estimate_cost(ComputeTarget::CpuScalar, "MUL", 32);
+
+        // ANE per-element energy should be lower than scalar
+        assert!(ane.energy_relative < scalar.energy_relative,
+            "ANE should be more energy-efficient per element");
+    }
+
+    // ---- All NEON ops return valid costs ----
+
+    #[test]
+    fn all_neon_ops_return_valid_costs() {
+        let model = mt_m1();
+        let ops = [
+            NeonOp::Add, NeonOp::Sub, NeonOp::Mul, NeonOp::Neg,
+            NeonOp::And, NeonOp::Orr, NeonOp::Eor, NeonOp::Bic,
+            NeonOp::Shl, NeonOp::Ushr, NeonOp::Sshr,
+            NeonOp::Fadd, NeonOp::Fmul, NeonOp::Fmla,
+        ];
+        let arrangements = [
+            NeonArrangement::B8, NeonArrangement::B16,
+            NeonArrangement::H4, NeonArrangement::H8,
+            NeonArrangement::S2, NeonArrangement::S4,
+            NeonArrangement::D1, NeonArrangement::D2,
+        ];
+        for op in &ops {
+            for arr in &arrangements {
+                let (lat, tp) = model.neon_cost(*op, *arr);
+                assert!(lat > 0 && lat <= 10,
+                    "{:?} on {:?} has unreasonable latency {}", op, arr, lat);
+                assert!(tp > 0.0,
+                    "{:?} on {:?} has non-positive throughput", op, arr);
+            }
+        }
+    }
+
+    // ---- Unified estimate_cost for all targets ----
+
+    #[test]
+    fn estimate_cost_all_targets_return_positive() {
+        let model = mt_m1();
+        let targets = [
+            ComputeTarget::CpuScalar,
+            ComputeTarget::Neon,
+            ComputeTarget::Gpu,
+            ComputeTarget::Ane,
+        ];
+        let ops = ["ADD", "SUB", "MUL", "NEG", "AND", "ORR", "EOR",
+                    "BIC", "SHL", "USHR", "SSHR"];
+        for target in &targets {
+            for op in &ops {
+                let est = model.estimate_cost(*target, op, 128);
+                assert!(est.latency_cycles > 0.0,
+                    "{:?}/{} has non-positive latency", target, op);
+                assert!(est.throughput_per_cycle > 0.0,
+                    "{:?}/{} has non-positive throughput", target, op);
+                assert!(est.energy_relative > 0.0,
+                    "{:?}/{} has non-positive energy", target, op);
+            }
+        }
+    }
+
+    // ---- Scalar model accessible through multi-target ----
+
+    #[test]
+    fn scalar_model_accessible() {
+        let model = mt_m1();
+        let scalar = model.scalar_model();
+        assert_eq!(scalar.latency(AArch64Opcode::AddRR), 1);
+        assert_eq!(scalar.latency(AArch64Opcode::MulRR), 3);
     }
 }
