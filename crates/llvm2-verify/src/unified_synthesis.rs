@@ -31,6 +31,9 @@ use crate::cegis::{CegisLoop, CegisResult};
 use crate::neon_semantics;
 use crate::smt::{SmtExpr, VectorArrangement};
 use crate::synthesis::{SearchConfig, SynthOpcode};
+use llvm2_ir::cost_model::{
+    ComputeTarget, CostModelGen, MultiTargetCostModel, ProfitabilityAnalyzer,
+};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -844,6 +847,24 @@ fn full_target_preference(target: FullTarget) -> u32 {
     }
 }
 
+/// Extract an operation name from a synthesis rule name for cost model lookup.
+///
+/// Rule names follow patterns like "ADD x, #1", "NEON_MUL.S2 v, v", "identity".
+/// This function extracts the base operation name (e.g., "ADD", "MUL", "MOV")
+/// so the cost model can look up the correct latency/throughput values.
+fn rule_op_name(name: &str) -> String {
+    // Handle "identity" -> maps to MOV (zero-cost move)
+    if name == "identity" || name.contains("identity") {
+        return "MOV".to_string();
+    }
+    // Strip NEON_ prefix if present
+    let stripped = name.strip_prefix("NEON_").unwrap_or(name);
+    // Take the first word (the opcode), strip arrangement suffixes like ".S2"
+    let first_word = stripped.split_whitespace().next().unwrap_or("ADD");
+    let op = first_word.split('.').next().unwrap_or(first_word);
+    op.to_ascii_uppercase()
+}
+
 // ---------------------------------------------------------------------------
 // SynthesisResult — per-target best candidate with cost estimate
 // ---------------------------------------------------------------------------
@@ -1068,6 +1089,9 @@ pub struct SynthesisEngineConfig {
     pub element_width: u32,
     /// Number of elements (for GPU/ANE cost amortization).
     pub element_count: u32,
+    /// Apple Silicon generation for cost model estimation.
+    /// Controls latency/throughput values used in candidate ranking.
+    pub cost_model_gen: CostModelGen,
 }
 
 impl Default for SynthesisEngineConfig {
@@ -1081,6 +1105,7 @@ impl Default for SynthesisEngineConfig {
             op_hint: String::new(),
             element_width: 32,
             element_count: 1,
+            cost_model_gen: CostModelGen::M1,
         }
     }
 }
@@ -1107,6 +1132,14 @@ pub struct UnifiedSynthesisEngine {
     cegis_loop: UnifiedCegisLoop,
     /// Engine configuration.
     config: SynthesisEngineConfig,
+    /// Multi-target cost model from llvm2-ir for candidate ranking.
+    /// Replaces ad-hoc cost estimation with the unified cost model that
+    /// covers CPU scalar, NEON, GPU, and ANE targets.
+    cost_model: MultiTargetCostModel,
+    /// Profitability analyzer for gating GPU/ANE candidate generation.
+    /// Uses threshold-based analysis to exclude targets where dispatch
+    /// overhead would exceed the compute benefit.
+    profitability: ProfitabilityAnalyzer,
 }
 
 impl UnifiedSynthesisEngine {
@@ -1117,7 +1150,14 @@ impl UnifiedSynthesisEngine {
             config.timeout_ms,
             config.cegis_config.clone(),
         );
-        Self { cegis_loop, config }
+        let cost_model = MultiTargetCostModel::new(config.cost_model_gen);
+        let profitability = ProfitabilityAnalyzer::new(config.cost_model_gen);
+        Self {
+            cegis_loop,
+            config,
+            cost_model,
+            profitability,
+        }
     }
 
     /// Create with default configuration.
@@ -1133,6 +1173,16 @@ impl UnifiedSynthesisEngine {
             element_count,
             ..Default::default()
         })
+    }
+
+    /// Access the multi-target cost model.
+    pub fn cost_model(&self) -> &MultiTargetCostModel {
+        &self.cost_model
+    }
+
+    /// Access the profitability analyzer.
+    pub fn profitability_analyzer(&self) -> &ProfitabilityAnalyzer {
+        &self.profitability
     }
 
     /// Search for the best implementation across all targets.
@@ -1164,7 +1214,10 @@ impl UnifiedSynthesisEngine {
         total_evaluated += self.cegis_loop.stats_candidates_evaluated;
         total_proven += self.cegis_loop.stats_candidates_proven;
 
-        // Group proven rules by target, keep best per target
+        // Group proven rules by target, keep best per target.
+        // Use the MultiTargetCostModel for cost estimation instead of ad-hoc
+        // synthesis cost values. The cost model provides latency_cycles which
+        // accounts for Apple Silicon pipeline characteristics.
         let mut best_by_synth_target: HashMap<String, UnifiedProvenRule> = HashMap::new();
 
         for rule in &proven_rules {
@@ -1179,9 +1232,21 @@ impl UnifiedSynthesisEngine {
                 .or_insert_with(|| rule.clone());
         }
 
-        // Add scalar result
+        // Add scalar result using cost model estimate
         let scalar_rule = best_by_synth_target.get("scalar").cloned();
-        let scalar_cost = scalar_rule.as_ref().map(|r| r.cost as f64).unwrap_or(f64::MAX);
+        let scalar_cost = if let Some(ref rule) = scalar_rule {
+            // Use cost model to get proper latency estimate for this op.
+            // Map rule name back to an op hint for cost model lookup.
+            let op_name = rule_op_name(&rule.name);
+            let est = self.cost_model.estimate_cost(
+                ComputeTarget::CpuScalar,
+                &op_name,
+                width,
+            );
+            est.latency_cycles
+        } else {
+            f64::MAX
+        };
         per_target.push(TargetSynthesisResult {
             target: FullTarget::Scalar,
             description: scalar_rule.as_ref()
@@ -1191,70 +1256,118 @@ impl UnifiedSynthesisEngine {
             cost_estimate: scalar_cost,
         });
 
-        // Add NEON results (best per arrangement)
+        // Add NEON results (best per arrangement) using cost model
         for (_key, rule) in &best_by_synth_target {
             if let SynthTarget::Neon(arr) = rule.target {
+                let op_name = rule_op_name(&rule.name);
+                let neon_width = arr.lane_count() * arr.lane_bits();
+                let est = self.cost_model.estimate_cost(
+                    ComputeTarget::Neon,
+                    &op_name,
+                    neon_width,
+                );
                 per_target.push(TargetSynthesisResult {
                     target: FullTarget::Neon(arr),
                     description: rule.name.clone(),
                     rule: Some(rule.clone()),
-                    cost_estimate: rule.cost as f64,
+                    cost_estimate: est.latency_cycles,
                 });
             }
         }
 
         // ------------------------------------------------------------------
         // Phase 2: GPU candidates (cost-estimated, not verified)
+        // Gate with ProfitabilityAnalyzer: skip GPU if data size is below
+        // the profitability threshold for this operation category.
         // ------------------------------------------------------------------
         if self.config.include_gpu && !self.config.op_hint.is_empty() {
-            let gpu_candidates = generate_gpu_candidates(
-                spec,
+            let data_size_bytes = (self.config.element_width as u64
+                * self.config.element_count as u64)
+                / 8;
+            let is_profitable = self.profitability.is_gpu_profitable(
                 &self.config.op_hint,
-                self.config.element_width,
-                self.config.element_count,
+                data_size_bytes,
+                self.config.element_count as u64,
             );
-            total_evaluated += gpu_candidates.len() as u64;
 
-            if let Some((name, _op, cost)) = gpu_candidates
-                .iter()
-                .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
-            {
-                per_target.push(TargetSynthesisResult {
-                    target: FullTarget::Gpu,
-                    description: name.clone(),
-                    rule: None, // GPU candidates are not SMT-verified
-                    cost_estimate: *cost,
-                });
+            if is_profitable {
+                let gpu_candidates = generate_gpu_candidates(
+                    spec,
+                    &self.config.op_hint,
+                    self.config.element_width,
+                    self.config.element_count,
+                );
+                total_evaluated += gpu_candidates.len() as u64;
+
+                if let Some((name, _op, _ad_hoc_cost)) = gpu_candidates
+                    .iter()
+                    .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+                {
+                    // Use the real cost model instead of the ad-hoc cost
+                    let width_bits = self.config.element_width * self.config.element_count;
+                    let est = self.cost_model.estimate_cost(
+                        ComputeTarget::Gpu,
+                        &self.config.op_hint,
+                        width_bits.max(32),
+                    );
+                    per_target.push(TargetSynthesisResult {
+                        target: FullTarget::Gpu,
+                        description: name.clone(),
+                        rule: None, // GPU candidates are not SMT-verified
+                        cost_estimate: est.latency_cycles,
+                    });
+                }
             }
         }
 
         // ------------------------------------------------------------------
         // Phase 3: ANE candidates (cost-estimated, not verified)
+        // Gate with ProfitabilityAnalyzer: skip ANE if data size is below
+        // the profitability threshold for this operation category.
         // ------------------------------------------------------------------
         if self.config.include_ane && !self.config.op_hint.is_empty() {
-            let ane_candidates = generate_ane_candidates(
-                spec,
+            let data_size_bytes = (self.config.element_width as u64
+                * self.config.element_count as u64)
+                / 8;
+            let tensor_shape = &[self.config.element_count as u64];
+            let is_profitable = self.profitability.is_ane_profitable(
                 &self.config.op_hint,
-                self.config.element_width,
-                self.config.element_count,
+                data_size_bytes,
+                tensor_shape,
             );
-            total_evaluated += ane_candidates.len() as u64;
 
-            if let Some((name, _op, cost)) = ane_candidates
-                .iter()
-                .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
-            {
-                per_target.push(TargetSynthesisResult {
-                    target: FullTarget::Ane,
-                    description: name.clone(),
-                    rule: None, // ANE candidates are not SMT-verified
-                    cost_estimate: *cost,
-                });
+            if is_profitable {
+                let ane_candidates = generate_ane_candidates(
+                    spec,
+                    &self.config.op_hint,
+                    self.config.element_width,
+                    self.config.element_count,
+                );
+                total_evaluated += ane_candidates.len() as u64;
+
+                if let Some((name, _op, _ad_hoc_cost)) = ane_candidates
+                    .iter()
+                    .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+                {
+                    // Use the real cost model instead of the ad-hoc cost
+                    let width_bits = self.config.element_width * self.config.element_count;
+                    let est = self.cost_model.estimate_cost(
+                        ComputeTarget::Ane,
+                        &self.config.op_hint,
+                        width_bits.max(32),
+                    );
+                    per_target.push(TargetSynthesisResult {
+                        target: FullTarget::Ane,
+                        description: name.clone(),
+                        rule: None, // ANE candidates are not SMT-verified
+                        cost_estimate: est.latency_cycles,
+                    });
+                }
             }
         }
 
         // ------------------------------------------------------------------
-        // Phase 4: Rank by cost
+        // Phase 4: Rank by cost (using cost model estimates)
         // ------------------------------------------------------------------
         per_target.sort_by(|a, b| {
             a.cost_estimate
@@ -1989,8 +2102,10 @@ mod tests {
 
     #[test]
     fn test_engine_gpu_candidate_generation_for_map_ops() {
-        // Engine should generate GPU candidates when op_hint is set.
-        let mut engine = UnifiedSynthesisEngine::for_op("MUL", 32, 1000);
+        // Engine should generate GPU candidates when op_hint is set and
+        // element count exceeds the profitability threshold (4096 for
+        // elementwise ops per GpuThresholds::default()).
+        let mut engine = UnifiedSynthesisEngine::for_op("MUL", 32, 10000);
         let source = SmtExpr::var("x", 8).bvmul(SmtExpr::bv_const(2, 8));
         let result = engine.synthesize(&source, "x", 8);
 
@@ -2002,7 +2117,7 @@ mod tests {
 
         assert!(
             !gpu_results.is_empty(),
-            "Should have GPU target in results when op_hint is set"
+            "Should have GPU target in results when element count exceeds threshold"
         );
 
         // GPU candidates should not have SMT-verified rules
@@ -2024,8 +2139,10 @@ mod tests {
 
     #[test]
     fn test_engine_ane_candidate_generation_for_matrix_ops() {
-        // Engine should generate ANE candidates for supported ops.
-        let mut engine = UnifiedSynthesisEngine::for_op("ADD", 32, 100);
+        // Engine should generate ANE candidates for supported ops when
+        // element count exceeds the profitability threshold (65536 for
+        // elementwise ops per AneThresholds::default()).
+        let mut engine = UnifiedSynthesisEngine::for_op("ADD", 32, 100000);
         let source = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(0, 8));
         let result = engine.synthesize(&source, "x", 8);
 
@@ -2037,7 +2154,7 @@ mod tests {
 
         assert!(
             !ane_results.is_empty(),
-            "Should have ANE target in results for supported ops"
+            "Should have ANE target in results when element count exceeds threshold"
         );
 
         // ANE candidates should not have SMT-verified rules
@@ -2049,6 +2166,7 @@ mod tests {
         }
 
         // ANE cost should include compile overhead (~100000)
+        // Cost comes from the real MultiTargetCostModel now
         assert!(
             ane_results[0].cost_estimate > 50_000.0,
             "ANE cost should include compile overhead, got {}",
@@ -2057,9 +2175,10 @@ mod tests {
     }
 
     #[test]
-    fn test_engine_gpu_cost_includes_dispatch_overhead() {
-        // GPU dispatch overhead (~10000 cycles) should make it expensive
-        // for small element counts.
+    fn test_engine_gpu_excluded_below_profitability_threshold() {
+        // GPU dispatch has ~10K cycle overhead. For small element counts
+        // (below GpuThresholds::elementwise_min_elements = 4096),
+        // the ProfitabilityAnalyzer should gate GPU candidates.
         let mut engine = UnifiedSynthesisEngine::for_op("ADD", 32, 1);
         let source = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(0, 8));
         let result = engine.synthesize(&source, "x", 8);
@@ -2070,13 +2189,10 @@ mod tests {
             .filter(|r| r.target == FullTarget::Gpu)
             .collect();
 
-        if !gpu_results.is_empty() {
-            assert!(
-                gpu_results[0].cost_estimate > 5000.0,
-                "GPU cost for 1 element should include dispatch overhead, got {}",
-                gpu_results[0].cost_estimate
-            );
-        }
+        assert!(
+            gpu_results.is_empty(),
+            "GPU should be excluded for 1 element (below profitability threshold)"
+        );
     }
 
     #[test]
@@ -2156,11 +2272,13 @@ mod tests {
     #[test]
     fn test_engine_synthesize_for_op_convenience() {
         // Test the convenience method synthesize_for_op.
+        // Use element_count=10000 to exceed GPU profitability threshold (4096).
         let mut engine = UnifiedSynthesisEngine::with_defaults();
         let source = SmtExpr::var("x", 8).bvmul(SmtExpr::bv_const(2, 8));
-        let result = engine.synthesize_for_op(&source, "x", 8, "MUL", 16);
+        let result = engine.synthesize_for_op(&source, "x", 8, "MUL", 10000);
 
-        // Should have generated GPU candidates since op_hint was set
+        // Should have generated GPU candidates since op_hint is set and
+        // element count exceeds the GPU profitability threshold
         let gpu_count = result
             .per_target
             .iter()
@@ -2170,7 +2288,7 @@ mod tests {
 
         // Config should be updated
         assert_eq!(engine.config().op_hint, "MUL");
-        assert_eq!(engine.config().element_count, 16);
+        assert_eq!(engine.config().element_count, 10000);
     }
 
     #[test]
@@ -2265,6 +2383,191 @@ mod tests {
         assert!(
             candidates.is_empty(),
             "DIV should not generate ANE candidates (unsupported)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Cost model integration tests (#149)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_engine_uses_cost_model_for_scalar_ranking() {
+        // The engine should use MultiTargetCostModel for scalar cost estimates
+        // instead of the ad-hoc synthesis cost values.
+        use llvm2_ir::cost_model::{ComputeTarget, CostModelGen, MultiTargetCostModel};
+
+        let engine = UnifiedSynthesisEngine::with_defaults();
+        let cm = engine.cost_model();
+
+        // MUL should be more expensive than ADD in the cost model
+        let add_cost = cm.estimate_cost(ComputeTarget::CpuScalar, "ADD", 32);
+        let mul_cost = cm.estimate_cost(ComputeTarget::CpuScalar, "MUL", 32);
+        assert!(
+            mul_cost.latency_cycles > add_cost.latency_cycles,
+            "MUL ({}) should cost more than ADD ({}) in the cost model",
+            mul_cost.latency_cycles,
+            add_cost.latency_cycles,
+        );
+    }
+
+    #[test]
+    fn test_engine_cost_model_ranking_matches_synthesis_output() {
+        // Verify that synthesis results are sorted by cost model estimates.
+        // With a large element count, GPU should be included but ranked
+        // according to the cost model, not ad-hoc values.
+        let mut engine = UnifiedSynthesisEngine::for_op("ADD", 32, 10000);
+        let source = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(0, 8));
+        let result = engine.synthesize(&source, "x", 8);
+
+        // Results should be sorted by cost_estimate (ascending)
+        for i in 1..result.per_target.len() {
+            let prev = &result.per_target[i - 1];
+            let curr = &result.per_target[i];
+            assert!(
+                curr.cost_estimate >= prev.cost_estimate
+                    || (curr.cost_estimate == prev.cost_estimate
+                        && full_target_preference(curr.target)
+                            >= full_target_preference(prev.target)),
+                "Results not sorted by cost model: {} ({:.1}) should be >= {} ({:.1})",
+                prev.description,
+                prev.cost_estimate,
+                curr.description,
+                curr.cost_estimate,
+            );
+        }
+    }
+
+    #[test]
+    fn test_engine_profitability_gates_gpu_for_small_workloads() {
+        // For small element counts, GPU should not appear in results
+        // because ProfitabilityAnalyzer gates it below 4096 elements.
+        let mut engine = UnifiedSynthesisEngine::for_op("ADD", 32, 100);
+        let source = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(0, 8));
+        let result = engine.synthesize(&source, "x", 8);
+
+        let gpu_count = result
+            .per_target
+            .iter()
+            .filter(|r| r.target == FullTarget::Gpu)
+            .count();
+        assert_eq!(
+            gpu_count, 0,
+            "GPU should be excluded for 100 elements (below 4096 threshold)"
+        );
+    }
+
+    #[test]
+    fn test_engine_profitability_gates_ane_for_small_workloads() {
+        // For small element counts, ANE should not appear in results
+        // because ProfitabilityAnalyzer gates it below 65536 elements.
+        let mut engine = UnifiedSynthesisEngine::for_op("ADD", 32, 1000);
+        let source = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(0, 8));
+        let result = engine.synthesize(&source, "x", 8);
+
+        let ane_count = result
+            .per_target
+            .iter()
+            .filter(|r| r.target == FullTarget::Ane)
+            .count();
+        assert_eq!(
+            ane_count, 0,
+            "ANE should be excluded for 1000 elements (below 65536 threshold)"
+        );
+    }
+
+    #[test]
+    fn test_engine_custom_cost_model_gen_changes_results() {
+        // Using M4 vs M1 cost model gen should produce different cost estimates
+        // because M4 has wider integer throughput.
+        use llvm2_ir::cost_model::CostModelGen;
+
+        let config_m1 = SynthesisEngineConfig {
+            cost_model_gen: CostModelGen::M1,
+            include_gpu: false,
+            include_ane: false,
+            ..Default::default()
+        };
+        let config_m4 = SynthesisEngineConfig {
+            cost_model_gen: CostModelGen::M4,
+            include_gpu: false,
+            include_ane: false,
+            ..Default::default()
+        };
+
+        let engine_m1 = UnifiedSynthesisEngine::new(config_m1);
+        let engine_m4 = UnifiedSynthesisEngine::new(config_m4);
+
+        // M1 and M4 should use different cost model instances
+        let m1_add = engine_m1
+            .cost_model()
+            .estimate_cost(ComputeTarget::CpuScalar, "ADD", 32);
+        let m4_add = engine_m4
+            .cost_model()
+            .estimate_cost(ComputeTarget::CpuScalar, "ADD", 32);
+
+        // M4 has wider integer throughput (7 vs 6 IPC for ALU ops)
+        assert!(
+            m4_add.throughput_per_cycle > m1_add.throughput_per_cycle,
+            "M4 should have higher ADD throughput ({}) than M1 ({})",
+            m4_add.throughput_per_cycle,
+            m1_add.throughput_per_cycle,
+        );
+    }
+
+    #[test]
+    fn test_engine_exposes_cost_model_and_profitability() {
+        // Verify accessor methods for cost model and profitability analyzer.
+        let engine = UnifiedSynthesisEngine::with_defaults();
+
+        // cost_model() should return a usable reference
+        let _est = engine
+            .cost_model()
+            .estimate_cost(ComputeTarget::CpuScalar, "ADD", 32);
+
+        // profitability_analyzer() should return a usable reference
+        let profitable = engine
+            .profitability_analyzer()
+            .is_gpu_profitable("ADD", 1_000_000, 100_000);
+        assert!(
+            profitable,
+            "GPU should be profitable for 100K elements of ADD"
+        );
+    }
+
+    #[test]
+    fn test_rule_op_name_extraction() {
+        // Test the helper that maps rule names to cost model operation names.
+        assert_eq!(rule_op_name("identity"), "MOV");
+        assert_eq!(rule_op_name("ADD x, #1"), "ADD");
+        assert_eq!(rule_op_name("MUL x, x"), "MUL");
+        assert_eq!(rule_op_name("SUB x, #0"), "SUB");
+        assert_eq!(rule_op_name("NEON_ADD.S2 v, v"), "ADD");
+        assert_eq!(rule_op_name("NEON_MUL.S4 v, v"), "MUL");
+        assert_eq!(rule_op_name("NEON identity (S2)"), "MOV");
+        assert_eq!(rule_op_name("NEG x"), "NEG");
+        assert_eq!(rule_op_name("EOR x, x"), "EOR");
+    }
+
+    #[test]
+    fn test_engine_ane_excluded_for_unsupported_ops() {
+        // ANE should not generate candidates for bitwise ops (unsupported
+        // on the Neural Engine) even with large element counts.
+        // The ProfitabilityAnalyzer's is_ane_profitable checks both
+        // target_legality and threshold checks.
+        let mut engine = UnifiedSynthesisEngine::for_op("SHL", 32, 100000);
+        let source = SmtExpr::var("x", 8).bvshl(SmtExpr::bv_const(1, 8));
+        let result = engine.synthesize(&source, "x", 8);
+
+        let ane_count = result
+            .per_target
+            .iter()
+            .filter(|r| r.target == FullTarget::Ane)
+            .count();
+        // SHL is a bitwise/shift op that the ProfitabilityAnalyzer classifies
+        // as BitwiseLogic, which returns false for is_ane_profitable
+        assert_eq!(
+            ane_count, 0,
+            "ANE should be excluded for SHL (BitwiseLogic category is unprofitable on ANE)"
         );
     }
 }
