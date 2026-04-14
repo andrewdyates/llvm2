@@ -1087,15 +1087,11 @@ impl InstructionSelector {
                 }
                 ArgLocation::Stack { offset, size: _ } => {
                     // STR to [SP + offset]
-                    let opc = if Self::is_32bit(&ty) {
-                        AArch64Opcode::StrRI
-                    } else {
-                        AArch64Opcode::StrRI
-                    };
+                    // AArch64 StrRI handles all widths; register class determines size.
                     self.func.push_inst(
                         block,
                         ISelInst::new(
-                            opc,
+                            AArch64Opcode::StrRI,
                             vec![src, ISelOperand::PReg(SP), ISelOperand::Imm(*offset)],
                         ),
                     );
@@ -1384,15 +1380,11 @@ impl InstructionSelector {
                     );
                 }
                 ArgLocation::Stack { offset, size: _ } => {
-                    let opc = if Self::is_32bit(&ty) {
-                        AArch64Opcode::StrRI
-                    } else {
-                        AArch64Opcode::StrRI
-                    };
+                    // AArch64 StrRI handles all widths; register class determines size.
                     self.func.push_inst(
                         block,
                         ISelInst::new(
-                            opc,
+                            AArch64Opcode::StrRI,
                             vec![src, ISelOperand::PReg(SP), ISelOperand::Imm(*offset)],
                         ),
                     );
@@ -5884,7 +5876,7 @@ mod tests {
 
         // Variadic args should be STR to stack
         let str_sp: Vec<_> = insts.iter().filter(|i| {
-            matches!(i.opcode, AArch64Opcode::StrRI | AArch64Opcode::StrRI)
+            matches!(i.opcode, AArch64Opcode::StrRI)
                 && i.operands.get(1) == Some(&ISelOperand::PReg(SP))
         }).collect();
         assert_eq!(str_sp.len(), 2, "Two variadic args should be stored to stack");
@@ -6018,8 +6010,8 @@ mod tests {
         // No stack stores (no varargs)
         let str_sp = mblock.insts.iter().any(|i| {
             i.operands.get(1) == Some(&ISelOperand::PReg(SP))
-                && matches!(i.opcode, AArch64Opcode::StrRI | AArch64Opcode::StrRI
-                    | AArch64Opcode::StrRI | AArch64Opcode::StrRI)
+                && matches!(i.opcode, AArch64Opcode::StrRI | AArch64Opcode::StrbRI
+                    | AArch64Opcode::StrhRI | AArch64Opcode::StpRI)
         });
         assert!(!str_sp, "No stack stores when no varargs passed");
     }
