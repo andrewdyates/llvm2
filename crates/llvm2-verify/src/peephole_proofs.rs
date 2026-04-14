@@ -302,6 +302,181 @@ pub fn proof_sub_zero_identity_w32() -> ProofObligation {
 }
 
 // ---------------------------------------------------------------------------
+// 8-bit exhaustive variants (all 256 input combinations)
+// ---------------------------------------------------------------------------
+
+/// Proof: `ADD Bd, Bn, #0` is equivalent to `MOV Bd, Bn` (8-bit exhaustive).
+///
+/// Theorem: forall xn : BV8 . xn + 0 == xn
+///
+/// Verified exhaustively over all 256 input values.
+pub fn proof_add_zero_identity_i8() -> ProofObligation {
+    let width = 8;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: ADD Bd, Bn, #0 ≡ MOV Bd, Bn (8-bit exhaustive)".to_string(),
+        tmir_expr: encode_add_ri(xn.clone(), 0, width),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: `SUB Bd, Bn, #0` is equivalent to `MOV Bd, Bn` (8-bit exhaustive).
+///
+/// Theorem: forall xn : BV8 . xn - 0 == xn
+///
+/// Verified exhaustively over all 256 input values.
+pub fn proof_sub_zero_identity_i8() -> ProofObligation {
+    let width = 8;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: SUB Bd, Bn, #0 ≡ MOV Bd, Bn (8-bit exhaustive)".to_string(),
+        tmir_expr: encode_sub_ri(xn.clone(), 0, width),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: `MUL Bd, Bn, #1` is equivalent to `MOV Bd, Bn` (8-bit exhaustive).
+///
+/// Theorem: forall xn : BV8 . xn * 1 == xn
+///
+/// Verified exhaustively over all 256 input values.
+pub fn proof_mul_one_identity_i8() -> ProofObligation {
+    let width = 8;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: MUL Bd, Bn, #1 ≡ MOV Bd, Bn (8-bit exhaustive)".to_string(),
+        tmir_expr: encode_mul_ri(xn.clone(), 1, width),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: `LSL Bd, Bn, #0` is equivalent to `MOV Bd, Bn` (8-bit exhaustive).
+///
+/// Theorem: forall xn : BV8 . xn << 0 == xn
+///
+/// Verified exhaustively over all 256 input values.
+pub fn proof_lsl_zero_identity_i8() -> ProofObligation {
+    let width = 8;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: LSL Bd, Bn, #0 ≡ MOV Bd, Bn (8-bit exhaustive)".to_string(),
+        tmir_expr: encode_lsl_ri(xn.clone(), 0, width),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: `LSR Bd, Bn, #0` is equivalent to `MOV Bd, Bn` (8-bit exhaustive).
+///
+/// Theorem: forall xn : BV8 . xn >>_l 0 == xn
+///
+/// Verified exhaustively over all 256 input values.
+pub fn proof_lsr_zero_identity_i8() -> ProofObligation {
+    let width = 8;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: LSR Bd, Bn, #0 ≡ MOV Bd, Bn (8-bit exhaustive)".to_string(),
+        tmir_expr: encode_lsr_ri(xn.clone(), 0, width),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: `ASR Bd, Bn, #0` is equivalent to `MOV Bd, Bn` (8-bit exhaustive).
+///
+/// Theorem: forall xn : BV8 . xn >>_a 0 == xn
+///
+/// Verified exhaustively over all 256 input values.
+pub fn proof_asr_zero_identity_i8() -> ProofObligation {
+    let width = 8;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: ASR Bd, Bn, #0 ≡ MOV Bd, Bn (8-bit exhaustive)".to_string(),
+        tmir_expr: encode_asr_ri(xn.clone(), 0, width),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: `ORR Bd, Bn, Bn` is equivalent to `MOV Bd, Bn` (8-bit exhaustive).
+///
+/// Theorem: forall xn : BV8 . xn | xn == xn
+///
+/// Verified exhaustively over all 256 input values.
+pub fn proof_orr_self_identity_i8() -> ProofObligation {
+    let width = 8;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: ORR Bd, Bn, Bn ≡ MOV Bd, Bn (8-bit exhaustive)".to_string(),
+        tmir_expr: encode_orr_rr(xn.clone(), xn.clone()),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: `AND Bd, Bn, Bn` is equivalent to `MOV Bd, Bn` (8-bit exhaustive).
+///
+/// Theorem: forall xn : BV8 . xn & xn == xn
+///
+/// Verified exhaustively over all 256 input values.
+pub fn proof_and_self_identity_i8() -> ProofObligation {
+    let width = 8;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: AND Bd, Bn, Bn ≡ MOV Bd, Bn (8-bit exhaustive)".to_string(),
+        tmir_expr: encode_and_rr(xn.clone(), xn.clone()),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: `EOR Bd, Bn, #0` is equivalent to `MOV Bd, Bn` (8-bit exhaustive).
+///
+/// Theorem: forall xn : BV8 . xn ^ 0 == xn
+///
+/// Verified exhaustively over all 256 input values.
+pub fn proof_eor_zero_identity_i8() -> ProofObligation {
+    let width = 8;
+    let xn = SmtExpr::var("xn", width);
+
+    ProofObligation {
+        name: "Peephole: EOR Bd, Bn, #0 ≡ MOV Bd, Bn (8-bit exhaustive)".to_string(),
+        tmir_expr: encode_eor_ri(xn.clone(), 0, width),
+        aarch64_expr: encode_mov(xn),
+        inputs: vec![("xn".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Aggregate accessors
 // ---------------------------------------------------------------------------
 
@@ -325,6 +500,33 @@ pub fn all_peephole_proofs_with_32bit() -> Vec<ProofObligation> {
     let mut proofs = all_peephole_proofs();
     proofs.push(proof_add_zero_identity_w32());
     proofs.push(proof_sub_zero_identity_w32());
+    proofs
+}
+
+/// Return all 9 peephole identity proofs at 8-bit width (exhaustive verification).
+///
+/// Each proof is verified exhaustively over all 256 input values, making
+/// these true proofs (not statistical samples) for 8-bit semantics.
+pub fn all_peephole_proofs_i8() -> Vec<ProofObligation> {
+    vec![
+        proof_add_zero_identity_i8(),
+        proof_sub_zero_identity_i8(),
+        proof_mul_one_identity_i8(),
+        proof_lsl_zero_identity_i8(),
+        proof_lsr_zero_identity_i8(),
+        proof_asr_zero_identity_i8(),
+        proof_orr_self_identity_i8(),
+        proof_and_self_identity_i8(),
+        proof_eor_zero_identity_i8(),
+    ]
+}
+
+/// Return all peephole proofs across all widths (64-bit, 32-bit, and 8-bit).
+///
+/// Total: 9 (64-bit) + 2 (32-bit) + 9 (8-bit) = 20 proofs.
+pub fn all_peephole_proofs_all_widths() -> Vec<ProofObligation> {
+    let mut proofs = all_peephole_proofs_with_32bit();
+    proofs.extend(all_peephole_proofs_i8());
     proofs
 }
 
@@ -419,7 +621,56 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Aggregate test
+    // 8-bit exhaustive variant tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_add_zero_identity_i8() {
+        assert_valid(&proof_add_zero_identity_i8());
+    }
+
+    #[test]
+    fn test_proof_sub_zero_identity_i8() {
+        assert_valid(&proof_sub_zero_identity_i8());
+    }
+
+    #[test]
+    fn test_proof_mul_one_identity_i8() {
+        assert_valid(&proof_mul_one_identity_i8());
+    }
+
+    #[test]
+    fn test_proof_lsl_zero_identity_i8() {
+        assert_valid(&proof_lsl_zero_identity_i8());
+    }
+
+    #[test]
+    fn test_proof_lsr_zero_identity_i8() {
+        assert_valid(&proof_lsr_zero_identity_i8());
+    }
+
+    #[test]
+    fn test_proof_asr_zero_identity_i8() {
+        assert_valid(&proof_asr_zero_identity_i8());
+    }
+
+    #[test]
+    fn test_proof_orr_self_identity_i8() {
+        assert_valid(&proof_orr_self_identity_i8());
+    }
+
+    #[test]
+    fn test_proof_and_self_identity_i8() {
+        assert_valid(&proof_and_self_identity_i8());
+    }
+
+    #[test]
+    fn test_proof_eor_zero_identity_i8() {
+        assert_valid(&proof_eor_zero_identity_i8());
+    }
+
+    // -----------------------------------------------------------------------
+    // Aggregate tests
     // -----------------------------------------------------------------------
 
     #[test]
@@ -432,6 +683,20 @@ mod tests {
     #[test]
     fn test_all_peephole_proofs_with_32bit() {
         for obligation in all_peephole_proofs_with_32bit() {
+            assert_valid(&obligation);
+        }
+    }
+
+    #[test]
+    fn test_all_peephole_proofs_i8() {
+        for obligation in all_peephole_proofs_i8() {
+            assert_valid(&obligation);
+        }
+    }
+
+    #[test]
+    fn test_all_peephole_proofs_all_widths() {
+        for obligation in all_peephole_proofs_all_widths() {
             assert_valid(&obligation);
         }
     }
