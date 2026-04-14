@@ -969,6 +969,473 @@ impl MultiTargetCostModel {
 }
 
 // ---------------------------------------------------------------------------
+// Precision — data element precision for target legality decisions
+// ---------------------------------------------------------------------------
+
+/// Data element precision for target legality and profitability analysis.
+///
+/// Different compute targets support different precisions. ANE is limited to
+/// FP16/INT8 (BF16 on M4+), while CPU and GPU support all precisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Precision {
+    FP16,
+    FP32,
+    FP64,
+    BF16,
+    INT8,
+    INT16,
+    INT32,
+    INT64,
+}
+
+// ---------------------------------------------------------------------------
+// GpuThresholds — minimum data sizes for profitable GPU dispatch
+// ---------------------------------------------------------------------------
+
+/// GPU profitability thresholds for Apple Silicon.
+///
+/// Below these thresholds, NEON is faster than GPU dispatch.
+/// Values derived from: dispatch overhead ~10K cycles, NEON 4-way FP/SIMD,
+/// GPU 256-512 ALU ops/cycle, transfer overhead ~10K cycles round-trip.
+///
+/// Source: designs/2026-04-14-profitability-thresholds.md
+#[derive(Debug, Clone, Copy)]
+pub struct GpuThresholds {
+    /// Minimum elements for element-wise operations (add, mul, etc.)
+    /// Below this: use NEON. Above: GPU is profitable.
+    pub elementwise_min_elements: u64,
+    /// Minimum total FLOP count for GEMM dispatch.
+    /// GEMM FLOPS = 2*M*N*K. Below this: use NEON FMA loop.
+    pub gemm_min_flops: u64,
+    /// Minimum elements for reduction operations.
+    /// GPU parallel reduce has high overhead; NEON horizontal adds are fast.
+    pub reduction_min_elements: u64,
+    /// Minimum data size in bytes for ANY GPU dispatch.
+    /// Absolute floor below which GPU overhead can never be amortized.
+    pub absolute_min_bytes: u64,
+    /// GPU dispatch overhead in cycles (command buffer + scheduling + fence).
+    pub dispatch_overhead_cycles: u64,
+    /// GPU round-trip transfer overhead in cycles (for unified memory).
+    pub transfer_overhead_cycles: u64,
+}
+
+impl Default for GpuThresholds {
+    fn default() -> Self {
+        Self {
+            elementwise_min_elements: 4096,
+            gemm_min_flops: 32768,
+            reduction_min_elements: 8192,
+            absolute_min_bytes: 4096,
+            dispatch_overhead_cycles: 10000,
+            transfer_overhead_cycles: 10000,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AneThresholds — minimum data sizes for profitable ANE dispatch
+// ---------------------------------------------------------------------------
+
+/// ANE profitability thresholds for Apple Silicon.
+///
+/// ANE has very high dispatch overhead (CoreML compilation) but extreme
+/// throughput for supported operations. Only profitable for large workloads.
+///
+/// Source: designs/2026-04-14-profitability-thresholds.md
+#[derive(Debug, Clone, Copy)]
+pub struct AneThresholds {
+    /// Minimum FLOP count for standalone GEMM.
+    pub gemm_min_flops: u64,
+    /// Minimum FLOP count for fused Conv-BN-ReLU patterns.
+    /// Lower than standalone because fusion amortizes overhead.
+    pub fused_conv_min_flops: u64,
+    /// Minimum elements for standalone element-wise operations.
+    /// Very high: ANE dispatch overhead makes small element-wise unprofitable.
+    pub elementwise_min_elements: u64,
+    /// Minimum elements for reduction operations.
+    pub reduction_min_elements: u64,
+    /// Minimum data size in bytes for ANY ANE dispatch.
+    pub absolute_min_bytes: u64,
+    /// ANE dispatch overhead in cycles (CoreML compile + model load).
+    pub dispatch_overhead_cycles: u64,
+    /// ANE round-trip transfer overhead in cycles.
+    pub transfer_overhead_cycles: u64,
+    /// Minimum batch size for ANE profitability (batch=1 often slower than GPU).
+    pub min_batch_size: u32,
+}
+
+impl Default for AneThresholds {
+    fn default() -> Self {
+        Self {
+            gemm_min_flops: 131072,
+            fused_conv_min_flops: 65536,
+            elementwise_min_elements: 65536,
+            reduction_min_elements: 32768,
+            absolute_min_bytes: 32768,
+            dispatch_overhead_cycles: 100000,
+            transfer_overhead_cycles: 100000,
+            min_batch_size: 4,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OperationCategory — classify operations for threshold selection
+// ---------------------------------------------------------------------------
+
+/// Operation category for profitability threshold selection.
+///
+/// Different operation categories have different crossover points where
+/// accelerator dispatch becomes profitable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OperationCategory {
+    /// Element-wise arithmetic (add, sub, mul, div, neg).
+    Elementwise,
+    /// General matrix multiply (GEMM, matmul, batched_matmul).
+    Gemm,
+    /// Convolution operations (conv1d, conv2d, depthwise, transposed).
+    Convolution,
+    /// Reduction operations (sum, mean, max, min).
+    Reduction,
+    /// Activation functions (relu, sigmoid, tanh, gelu, silu).
+    Activation,
+    /// Normalization (batch_norm, layer_norm, group_norm).
+    Normalization,
+    /// Bitwise/logical operations (and, or, xor, bic, shifts).
+    BitwiseLogic,
+    /// Other or unrecognized operations.
+    Other,
+}
+
+// ---------------------------------------------------------------------------
+// ProfitabilityAnalyzer — combines legality, thresholds, and cost model
+// ---------------------------------------------------------------------------
+
+/// Profitability analyzer that combines legality, thresholds, and cost model.
+///
+/// Sits between the ProofAnalyzer (which determines what is LEGAL from a
+/// verification perspective) and the cost model (which determines what is
+/// CHEAPEST). This analyzer filters out legal-but-unprofitable targets and
+/// checks hardware-level operation support.
+///
+/// Source: designs/2026-04-14-profitability-thresholds.md
+pub struct ProfitabilityAnalyzer {
+    gpu_thresholds: GpuThresholds,
+    ane_thresholds: AneThresholds,
+    cost_model: MultiTargetCostModel,
+}
+
+impl ProfitabilityAnalyzer {
+    /// Create a new profitability analyzer for the given Apple Silicon generation.
+    pub fn new(generation: CostModelGen) -> Self {
+        Self {
+            gpu_thresholds: GpuThresholds::default(),
+            ane_thresholds: AneThresholds::default(),
+            cost_model: MultiTargetCostModel::new(generation),
+        }
+    }
+
+    /// Create a profitability analyzer with custom thresholds.
+    pub fn with_thresholds(
+        generation: CostModelGen,
+        gpu: GpuThresholds,
+        ane: AneThresholds,
+    ) -> Self {
+        Self {
+            gpu_thresholds: gpu,
+            ane_thresholds: ane,
+            cost_model: MultiTargetCostModel::new(generation),
+        }
+    }
+
+    /// Classify an operation string into an [`OperationCategory`].
+    pub fn classify_op(&self, op: &str) -> OperationCategory {
+        let upper = op.to_ascii_uppercase();
+        match upper.as_str() {
+            // Elementwise arithmetic
+            "ADD" | "SUB" | "MUL" | "DIV" | "NEG"
+            | "FADD" | "FSUB" | "FMUL" | "FDIV" | "FMA" | "FMLA" | "FMADD"
+            | "FNEG" => OperationCategory::Elementwise,
+
+            // GEMM / matrix multiply
+            "GEMM" | "MATMUL" | "BATCHED_MATMUL" => OperationCategory::Gemm,
+
+            // Convolution
+            "CONV1D" | "CONV2D" | "DEPTHWISE_CONV2D" | "TRANSPOSED_CONV2D"
+            | "CONV" => OperationCategory::Convolution,
+
+            // Reduction
+            "REDUCE_SUM" | "REDUCE_MEAN" | "REDUCE_MAX" | "REDUCE_MIN"
+            | "SUM" | "MEAN" | "REDUCE" => OperationCategory::Reduction,
+
+            // Activation functions
+            "RELU" | "LEAKY_RELU" | "SIGMOID" | "TANH" | "GELU" | "SILU"
+            => OperationCategory::Activation,
+
+            // Normalization
+            "BATCH_NORM" | "LAYER_NORM" | "GROUP_NORM"
+            => OperationCategory::Normalization,
+
+            // Bitwise / logical
+            "AND" | "OR" | "ORR" | "XOR" | "EOR" | "BIC" | "ORN"
+            | "SHL" | "LSL" | "USHR" | "LSR" | "SSHR" | "ASR"
+            | "NOT" => OperationCategory::BitwiseLogic,
+
+            // Integer division (scalar-only in practice)
+            "SDIV" | "UDIV" => OperationCategory::Other,
+
+            _ => OperationCategory::Other,
+        }
+    }
+
+    /// Check whether a compute target supports the given operation.
+    ///
+    /// This is a hardware-level legality check, independent of proof-based
+    /// legality (which is handled by ProofAnalyzer).
+    ///
+    /// - CPU Scalar: supports all operations (universal fallback).
+    /// - NEON: no integer division, no 64-bit integer MUL.
+    /// - GPU: supports all standard arithmetic/matrix operations.
+    /// - ANE: restricted to tensor operations (GEMM, conv, activations,
+    ///   elementwise tensor ops, normalization, reductions, data movement).
+    ///   Does NOT support bitwise/logical ops or general integer arithmetic.
+    pub fn target_legality(&self, op: &str, target: ComputeTarget) -> bool {
+        let upper = op.to_ascii_uppercase();
+        match target {
+            ComputeTarget::CpuScalar => true,
+            ComputeTarget::Neon => {
+                // NEON does not support integer division
+                !matches!(
+                    upper.as_str(),
+                    "SDIV" | "UDIV" | "DIV"
+                )
+            }
+            ComputeTarget::Gpu => {
+                // GPU supports all standard arithmetic and matrix ops via
+                // Metal compute shaders. Only truly illegal operations are
+                // things requiring recursion or dynamic allocation, which
+                // we don't model at the operation level.
+                true
+            }
+            ComputeTarget::Ane => {
+                // ANE: fixed-function tensor operations only.
+                matches!(
+                    upper.as_str(),
+                    "GEMM" | "MATMUL" | "BATCHED_MATMUL"
+                    | "CONV1D" | "CONV2D" | "DEPTHWISE_CONV2D" | "TRANSPOSED_CONV2D"
+                    | "MAXPOOL" | "AVGPOOL" | "GLOBAL_AVGPOOL" | "GLOBAL_MAXPOOL"
+                    | "BATCH_NORM" | "LAYER_NORM" | "GROUP_NORM"
+                    | "RELU" | "LEAKY_RELU" | "SIGMOID" | "TANH" | "GELU" | "SILU"
+                    | "ADD" | "SUB" | "MUL" | "DIV"
+                    | "FADD" | "FSUB" | "FMUL" | "FDIV"
+                    | "FMA" | "FMLA" | "FMADD"
+                    | "REDUCE_SUM" | "REDUCE_MEAN" | "REDUCE_MAX" | "REDUCE_MIN"
+                    | "RESHAPE" | "TRANSPOSE" | "PERMUTE" | "CONCAT" | "SPLIT"
+                    | "ATTENTION" | "SCALED_DOT_PRODUCT_ATTENTION"
+                )
+            }
+        }
+    }
+
+    /// Check whether GPU dispatch is profitable for the given operation and data size.
+    ///
+    /// Returns `true` if the data size exceeds the GPU profitability threshold
+    /// for the operation category. GPU dispatch has ~10K cycles of overhead,
+    /// so small workloads are better served by NEON.
+    pub fn is_gpu_profitable(
+        &self,
+        op: &str,
+        data_size_bytes: u64,
+        element_count: u64,
+    ) -> bool {
+        // Absolute minimum data size floor
+        if data_size_bytes < self.gpu_thresholds.absolute_min_bytes {
+            return false;
+        }
+
+        let category = self.classify_op(op);
+        match category {
+            OperationCategory::Elementwise | OperationCategory::Activation => {
+                element_count >= self.gpu_thresholds.elementwise_min_elements
+            }
+            OperationCategory::Gemm => {
+                // For GEMM, we check FLOP count rather than element count.
+                // Approximate: flops ~ element_count (caller should pass 2*M*N*K).
+                element_count >= self.gpu_thresholds.gemm_min_flops
+            }
+            OperationCategory::Convolution => {
+                // Convolution thresholds similar to GEMM
+                element_count >= self.gpu_thresholds.gemm_min_flops
+            }
+            OperationCategory::Reduction => {
+                element_count >= self.gpu_thresholds.reduction_min_elements
+            }
+            OperationCategory::Normalization => {
+                element_count >= self.gpu_thresholds.elementwise_min_elements
+            }
+            OperationCategory::BitwiseLogic => {
+                // Bitwise ops are very cheap on CPU; GPU rarely profitable
+                element_count >= self.gpu_thresholds.elementwise_min_elements * 4
+            }
+            OperationCategory::Other => false,
+        }
+    }
+
+    /// Check whether ANE dispatch is profitable for the given operation and tensor shape.
+    ///
+    /// The `tensor_shape` slice represents the tensor dimensions (e.g., [batch, channels, H, W]).
+    /// ANE requires large workloads due to ~100K cycle CoreML compilation overhead.
+    pub fn is_ane_profitable(
+        &self,
+        op: &str,
+        data_size_bytes: u64,
+        tensor_shape: &[u64],
+    ) -> bool {
+        // Absolute minimum data size floor
+        if data_size_bytes < self.ane_thresholds.absolute_min_bytes {
+            return false;
+        }
+
+        // ANE operation must be legal first
+        if !self.target_legality(op, ComputeTarget::Ane) {
+            return false;
+        }
+
+        // Compute total element count from tensor shape
+        let total_elements: u64 = tensor_shape.iter().product();
+        if total_elements == 0 {
+            return false;
+        }
+
+        let category = self.classify_op(op);
+        match category {
+            OperationCategory::Gemm => {
+                // For GEMM, compute FLOP estimate from shape.
+                // Shape [M, N] -> FLOPs = 2*M*N (simplified; real GEMM is 2*M*N*K).
+                // If shape has 2 dims, treat as M*N matrix; FLOPs ~ 2*M*N.
+                let flops = if tensor_shape.len() >= 2 {
+                    2 * tensor_shape.iter().product::<u64>()
+                } else {
+                    2 * total_elements
+                };
+                flops >= self.ane_thresholds.gemm_min_flops
+            }
+            OperationCategory::Convolution | OperationCategory::Normalization => {
+                // Fused conv patterns have lower thresholds
+                total_elements >= self.ane_thresholds.fused_conv_min_flops
+            }
+            OperationCategory::Elementwise
+            | OperationCategory::Activation => {
+                total_elements >= self.ane_thresholds.elementwise_min_elements
+            }
+            OperationCategory::Reduction => {
+                total_elements >= self.ane_thresholds.reduction_min_elements
+            }
+            OperationCategory::BitwiseLogic => {
+                // ANE doesn't support bitwise operations
+                false
+            }
+            OperationCategory::Other => false,
+        }
+    }
+
+    /// Recommend dispatch targets for an operation, ranked by estimated cost.
+    ///
+    /// Checks legality and profitability for each target, then estimates
+    /// cost and returns candidates sorted cheapest-first. CPU scalar is
+    /// always included as a fallback.
+    ///
+    /// # Arguments
+    /// - `op`: Operation name (case-insensitive).
+    /// - `data_size_bytes`: Total data size in bytes.
+    /// - `tensor_shape`: Tensor dimensions (e.g., [batch, C, H, W]). Pass
+    ///   `&[element_count]` for flat arrays.
+    ///
+    /// # Returns
+    /// A vector of `(ComputeTarget, CostEstimate)` pairs sorted by
+    /// `latency_cycles` (cheapest first). Always contains at least CpuScalar.
+    pub fn recommend_dispatch(
+        &self,
+        op: &str,
+        data_size_bytes: u64,
+        tensor_shape: &[u64],
+    ) -> Vec<(ComputeTarget, CostEstimate)> {
+        let total_elements: u64 = tensor_shape.iter().product();
+        // Width in bits for the cost model: total data in bits.
+        // Use 32-bit elements as default assumption for GPU/ANE width param.
+        let width_bits = (data_size_bytes * 8) as u32;
+
+        let mut candidates: Vec<(ComputeTarget, CostEstimate)> = Vec::new();
+
+        // CPU Scalar: always legal, always included
+        let scalar_est = self.cost_model.estimate_cost(
+            ComputeTarget::CpuScalar,
+            op,
+            32, // per-element width
+        );
+        // Scale scalar cost by element count for total cost comparison
+        let scalar_total = CostEstimate {
+            latency_cycles: scalar_est.latency_cycles * total_elements.max(1) as f64,
+            throughput_per_cycle: scalar_est.throughput_per_cycle,
+            energy_relative: scalar_est.energy_relative,
+        };
+        candidates.push((ComputeTarget::CpuScalar, scalar_total));
+
+        // NEON: check legality
+        if self.target_legality(op, ComputeTarget::Neon) && total_elements > 1 {
+            let neon_est = self.cost_model.estimate_cost(
+                ComputeTarget::Neon,
+                op,
+                128, // 4S arrangement
+            );
+            let tc = self.cost_model.transfer_costs();
+            let lanes = 4.0_f64; // 4S arrangement
+            let vectors_needed = (total_elements as f64 / lanes).ceil();
+            let transfer = vectors_needed * (tc.memory_to_neon_cycles + tc.neon_to_memory_cycles);
+            let neon_total = CostEstimate {
+                latency_cycles: neon_est.latency_cycles * total_elements.max(1) as f64 + transfer,
+                throughput_per_cycle: neon_est.throughput_per_cycle,
+                energy_relative: neon_est.energy_relative,
+            };
+            candidates.push((ComputeTarget::Neon, neon_total));
+        }
+
+        // GPU: check legality + profitability
+        if self.target_legality(op, ComputeTarget::Gpu)
+            && self.is_gpu_profitable(op, data_size_bytes, total_elements)
+        {
+            let gpu_est = self.cost_model.estimate_cost(
+                ComputeTarget::Gpu,
+                op,
+                width_bits.max(32),
+            );
+            candidates.push((ComputeTarget::Gpu, gpu_est));
+        }
+
+        // ANE: check legality + profitability
+        if self.target_legality(op, ComputeTarget::Ane)
+            && self.is_ane_profitable(op, data_size_bytes, tensor_shape)
+        {
+            let ane_est = self.cost_model.estimate_cost(
+                ComputeTarget::Ane,
+                op,
+                width_bits.max(32),
+            );
+            candidates.push((ComputeTarget::Ane, ane_est));
+        }
+
+        // Sort by latency (cheapest first)
+        candidates.sort_by(|a, b| {
+            a.1.latency_cycles
+                .partial_cmp(&b.1.latency_cycles)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        candidates
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1853,5 +2320,340 @@ mod tests {
         let target = model.recommend_target("ADD", 8, 256);
         assert_eq!(target, ComputeTarget::Neon,
             "NEON should be recommended for 256x 8-bit ADD");
+    }
+
+    // ==== Profitability threshold tests (issue #171) ====
+
+    fn pa_m1() -> ProfitabilityAnalyzer {
+        ProfitabilityAnalyzer::new(CostModelGen::M1)
+    }
+
+    // ---- GPU profitability ----
+
+    #[test]
+    fn gpu_profitable_large_data() {
+        let pa = pa_m1();
+        // 8192 elements * 4 bytes = 32768 bytes > 4096 threshold
+        assert!(
+            pa.is_gpu_profitable("ADD", 32768, 8192),
+            "GPU should be profitable for 8192 elements of ADD"
+        );
+    }
+
+    #[test]
+    fn gpu_not_profitable_small_data() {
+        let pa = pa_m1();
+        // 100 elements * 4 bytes = 400 bytes < 4096 threshold
+        assert!(
+            !pa.is_gpu_profitable("ADD", 400, 100),
+            "GPU should NOT be profitable for 100 elements of ADD"
+        );
+    }
+
+    #[test]
+    fn gpu_not_profitable_256_elements() {
+        let pa = pa_m1();
+        // 256 elements < 4096 elementwise threshold even if bytes > absolute_min
+        assert!(
+            !pa.is_gpu_profitable("ADD", 4096, 256),
+            "GPU should NOT be profitable for 256 elements of ADD (below 4096 threshold)"
+        );
+    }
+
+    #[test]
+    fn gpu_profitable_gemm_large_flops() {
+        let pa = pa_m1();
+        // GEMM with 32768+ flops -> profitable
+        assert!(
+            pa.is_gpu_profitable("GEMM", 65536, 32768),
+            "GPU should be profitable for GEMM with 32768 flops"
+        );
+    }
+
+    // ---- ANE profitability ----
+
+    #[test]
+    fn ane_profitable_large_gemm() {
+        let pa = pa_m1();
+        // GEMM with shape [128, 128] -> 2*128*128 = 32768 flops... but threshold
+        // is 131072. Need larger shape: [256, 256] -> 2*65536 = 131072
+        assert!(
+            pa.is_ane_profitable("GEMM", 131072, &[256, 256]),
+            "ANE should be profitable for GEMM [256, 256]"
+        );
+    }
+
+    #[test]
+    fn ane_not_profitable_small_gemm() {
+        let pa = pa_m1();
+        // GEMM with shape [8, 8] -> 2*64 = 128 flops << 131072 threshold
+        assert!(
+            !pa.is_ane_profitable("GEMM", 128, &[8, 8]),
+            "ANE should NOT be profitable for GEMM [8, 8]"
+        );
+    }
+
+    #[test]
+    fn ane_not_profitable_medium_gemm() {
+        let pa = pa_m1();
+        // GEMM [64, 64] -> 2*4096 = 8192 flops < 131072
+        assert!(
+            !pa.is_ane_profitable("GEMM", 16384, &[64, 64]),
+            "ANE should NOT be profitable for GEMM [64, 64]"
+        );
+    }
+
+    // ---- Target legality ----
+
+    #[test]
+    fn ane_not_legal_bitwise() {
+        let pa = pa_m1();
+        assert!(
+            !pa.target_legality("AND", ComputeTarget::Ane),
+            "ANE should NOT support AND (bitwise op)"
+        );
+        assert!(
+            !pa.target_legality("ORR", ComputeTarget::Ane),
+            "ANE should NOT support ORR (bitwise op)"
+        );
+        assert!(
+            !pa.target_legality("EOR", ComputeTarget::Ane),
+            "ANE should NOT support EOR (bitwise op)"
+        );
+        assert!(
+            !pa.target_legality("SHL", ComputeTarget::Ane),
+            "ANE should NOT support SHL (bitwise op)"
+        );
+    }
+
+    #[test]
+    fn ane_legal_matmul() {
+        let pa = pa_m1();
+        assert!(
+            pa.target_legality("MATMUL", ComputeTarget::Ane),
+            "ANE should support MATMUL"
+        );
+        assert!(
+            pa.target_legality("GEMM", ComputeTarget::Ane),
+            "ANE should support GEMM"
+        );
+        assert!(
+            pa.target_legality("CONV2D", ComputeTarget::Ane),
+            "ANE should support CONV2D"
+        );
+    }
+
+    #[test]
+    fn ane_legal_tensor_elementwise() {
+        let pa = pa_m1();
+        // ANE supports tensor-tensor elementwise (ADD, SUB, MUL, DIV)
+        assert!(pa.target_legality("ADD", ComputeTarget::Ane));
+        assert!(pa.target_legality("MUL", ComputeTarget::Ane));
+        assert!(pa.target_legality("RELU", ComputeTarget::Ane));
+        assert!(pa.target_legality("SIGMOID", ComputeTarget::Ane));
+    }
+
+    #[test]
+    fn gpu_legal_all_arithmetic() {
+        let pa = pa_m1();
+        for op in &["ADD", "MUL", "FADD", "FMUL", "GEMM", "SDIV", "AND", "SHL"] {
+            assert!(
+                pa.target_legality(op, ComputeTarget::Gpu),
+                "GPU should support {}", op
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_always_legal() {
+        let pa = pa_m1();
+        for op in &["ADD", "MUL", "SDIV", "GEMM", "AND", "UNKNOWN_OP", "FMLA"] {
+            assert!(
+                pa.target_legality(op, ComputeTarget::CpuScalar),
+                "CPU Scalar should support {}", op
+            );
+        }
+    }
+
+    #[test]
+    fn neon_not_legal_div() {
+        let pa = pa_m1();
+        assert!(
+            !pa.target_legality("SDIV", ComputeTarget::Neon),
+            "NEON should NOT support SDIV"
+        );
+        assert!(
+            !pa.target_legality("UDIV", ComputeTarget::Neon),
+            "NEON should NOT support UDIV"
+        );
+        assert!(
+            !pa.target_legality("DIV", ComputeTarget::Neon),
+            "NEON should NOT support DIV"
+        );
+    }
+
+    #[test]
+    fn neon_legal_add() {
+        let pa = pa_m1();
+        assert!(
+            pa.target_legality("ADD", ComputeTarget::Neon),
+            "NEON should support ADD"
+        );
+        assert!(
+            pa.target_legality("MUL", ComputeTarget::Neon),
+            "NEON should support MUL"
+        );
+        assert!(
+            pa.target_legality("FADD", ComputeTarget::Neon),
+            "NEON should support FADD"
+        );
+    }
+
+    // ---- Dispatch recommendations ----
+
+    #[test]
+    fn dispatch_recommendation_ordering() {
+        let pa = pa_m1();
+        // Large GEMM: 512x512 = 262144 elements, data = 1MB+
+        let recs = pa.recommend_dispatch("GEMM", 1048576, &[512, 512]);
+        assert!(!recs.is_empty(), "Should have at least one recommendation");
+
+        // Verify sorted by latency (cheapest first)
+        for w in recs.windows(2) {
+            assert!(
+                w[0].1.latency_cycles <= w[1].1.latency_cycles,
+                "Recommendations should be sorted by cost: {} <= {}",
+                w[0].1.latency_cycles,
+                w[1].1.latency_cycles,
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_includes_cpu_fallback() {
+        let pa = pa_m1();
+        // Even for a small op, CPU should always be in the results
+        let recs = pa.recommend_dispatch("ADD", 16, &[4]);
+        assert!(
+            recs.iter().any(|(t, _)| *t == ComputeTarget::CpuScalar),
+            "CpuScalar should always be in dispatch recommendations"
+        );
+    }
+
+    #[test]
+    fn dispatch_small_data_cpu_only() {
+        let pa = pa_m1();
+        // Very small data: only CPU/NEON should appear (no GPU/ANE)
+        let recs = pa.recommend_dispatch("ADD", 32, &[8]);
+        let targets: Vec<ComputeTarget> = recs.iter().map(|(t, _)| *t).collect();
+        assert!(targets.contains(&ComputeTarget::CpuScalar));
+        assert!(
+            !targets.contains(&ComputeTarget::Gpu),
+            "GPU should not appear for 8-element ADD"
+        );
+        assert!(
+            !targets.contains(&ComputeTarget::Ane),
+            "ANE should not appear for 8-element ADD"
+        );
+    }
+
+    #[test]
+    fn dispatch_large_elementwise_includes_gpu() {
+        let pa = pa_m1();
+        // 10000 elements * 4 bytes = 40000 bytes, element_count = 10000 > 4096
+        let recs = pa.recommend_dispatch("ADD", 40000, &[10000]);
+        let targets: Vec<ComputeTarget> = recs.iter().map(|(t, _)| *t).collect();
+        assert!(
+            targets.contains(&ComputeTarget::Gpu),
+            "GPU should appear for 10000-element ADD, got targets: {:?}",
+            targets
+        );
+    }
+
+    // ---- Operation classification ----
+
+    #[test]
+    fn classify_op_elementwise() {
+        let pa = pa_m1();
+        assert_eq!(pa.classify_op("ADD"), OperationCategory::Elementwise);
+        assert_eq!(pa.classify_op("SUB"), OperationCategory::Elementwise);
+        assert_eq!(pa.classify_op("MUL"), OperationCategory::Elementwise);
+        assert_eq!(pa.classify_op("FADD"), OperationCategory::Elementwise);
+        assert_eq!(pa.classify_op("add"), OperationCategory::Elementwise);
+    }
+
+    #[test]
+    fn classify_op_gemm() {
+        let pa = pa_m1();
+        assert_eq!(pa.classify_op("GEMM"), OperationCategory::Gemm);
+        assert_eq!(pa.classify_op("MATMUL"), OperationCategory::Gemm);
+        assert_eq!(pa.classify_op("gemm"), OperationCategory::Gemm);
+    }
+
+    #[test]
+    fn classify_op_convolution() {
+        let pa = pa_m1();
+        assert_eq!(pa.classify_op("CONV2D"), OperationCategory::Convolution);
+        assert_eq!(pa.classify_op("DEPTHWISE_CONV2D"), OperationCategory::Convolution);
+    }
+
+    #[test]
+    fn classify_op_reduction() {
+        let pa = pa_m1();
+        assert_eq!(pa.classify_op("REDUCE_SUM"), OperationCategory::Reduction);
+        assert_eq!(pa.classify_op("REDUCE_MAX"), OperationCategory::Reduction);
+    }
+
+    #[test]
+    fn classify_op_bitwise() {
+        let pa = pa_m1();
+        assert_eq!(pa.classify_op("AND"), OperationCategory::BitwiseLogic);
+        assert_eq!(pa.classify_op("ORR"), OperationCategory::BitwiseLogic);
+        assert_eq!(pa.classify_op("SHL"), OperationCategory::BitwiseLogic);
+    }
+
+    // ---- GpuThresholds / AneThresholds defaults ----
+
+    #[test]
+    fn gpu_thresholds_defaults() {
+        let t = GpuThresholds::default();
+        assert_eq!(t.elementwise_min_elements, 4096);
+        assert_eq!(t.gemm_min_flops, 32768);
+        assert_eq!(t.reduction_min_elements, 8192);
+        assert_eq!(t.absolute_min_bytes, 4096);
+        assert_eq!(t.dispatch_overhead_cycles, 10000);
+        assert_eq!(t.transfer_overhead_cycles, 10000);
+    }
+
+    #[test]
+    fn ane_thresholds_defaults() {
+        let t = AneThresholds::default();
+        assert_eq!(t.gemm_min_flops, 131072);
+        assert_eq!(t.fused_conv_min_flops, 65536);
+        assert_eq!(t.elementwise_min_elements, 65536);
+        assert_eq!(t.reduction_min_elements, 32768);
+        assert_eq!(t.absolute_min_bytes, 32768);
+        assert_eq!(t.dispatch_overhead_cycles, 100000);
+        assert_eq!(t.transfer_overhead_cycles, 100000);
+        assert_eq!(t.min_batch_size, 4);
+    }
+
+    // ---- Precision enum ----
+
+    #[test]
+    fn precision_variants_distinct() {
+        let precisions = [
+            Precision::FP16, Precision::FP32, Precision::FP64, Precision::BF16,
+            Precision::INT8, Precision::INT16, Precision::INT32, Precision::INT64,
+        ];
+        for (i, p) in precisions.iter().enumerate() {
+            for (j, q) in precisions.iter().enumerate() {
+                if i == j {
+                    assert_eq!(p, q);
+                } else {
+                    assert_ne!(p, q);
+                }
+            }
+        }
     }
 }
