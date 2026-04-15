@@ -145,6 +145,7 @@ impl TryFrom<Type> for SmtSort {
             Type::Struct(_) => Err(SmtError::UnsupportedType(
                 "struct type verification not yet supported".to_string(),
             )),
+            Type::V128 => Ok(SmtSort::BitVec(128)),
             Type::Array(elem_ty, count) => {
                 let elem_sort = SmtSort::try_from(*elem_ty)?;
                 // Index sort: bitvector wide enough to address `count` elements.

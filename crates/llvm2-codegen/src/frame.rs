@@ -603,6 +603,366 @@ fn compute_slot_offsets(func: &MachFunction, layout: &FrameLayout) -> Vec<i32> {
 }
 
 // ---------------------------------------------------------------------------
+// Frame index elimination — enhanced pass
+// ---------------------------------------------------------------------------
+
+/// AArch64 LDR/STR unsigned immediate offset upper bound (conservative).
+/// The real limit depends on access size (4095 * scale), but we use the
+/// unscaled upper bound for simplicity.
+const AARCH64_MAX_IMM_OFFSET: i64 = 4095;
+
+/// AArch64 LDR/STR signed immediate offset lower bound (LDUR/STUR range).
+const AARCH64_MIN_IMM_OFFSET: i64 = -256;
+
+/// AArch64 scratch register for offset materialization.
+/// X16 (IP0) is reserved by the ABI as an intra-procedure-call scratch register
+/// and is safe to clobber between instructions.
+use llvm2_ir::regs::X16;
+
+/// Check whether an offset exceeds the AArch64 immediate encoding range
+/// for load/store instructions.
+///
+/// Conservative range: -256 <= offset <= 4095.
+/// Offsets outside this range require materialization in a scratch register.
+#[inline]
+pub fn is_large_offset(offset: i64) -> bool {
+    offset < AARCH64_MIN_IMM_OFFSET || offset > AARCH64_MAX_IMM_OFFSET
+}
+
+/// Statistics from a frame index elimination pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EliminationStats {
+    /// Number of FrameIndex/StackSlot operands replaced.
+    pub eliminated_count: u32,
+    /// Number of large offsets that required scratch register materialization.
+    pub large_offset_count: u32,
+}
+
+/// Enhanced frame index elimination pass.
+///
+/// Resolves all `FrameIndex` and `StackSlot` operands in a function to
+/// concrete memory operands (FP+offset or SP+offset), handling large
+/// offsets that exceed AArch64 immediate encoding range.
+///
+/// # Large offset handling
+///
+/// When an offset exceeds the encodable immediate range (-256..4095),
+/// the eliminator inserts instructions to materialize the offset in X16 (IP0):
+///
+/// ```asm
+/// movz  x16, #offset_lo             ; lower 16 bits
+/// movk  x16, #offset_hi, lsl #16    ; upper 16 bits (if needed)
+/// add   x16, fp, x16                ; compute absolute address
+/// ; then use [x16, #0] as the memory operand
+/// ```
+pub struct FrameIndexEliminator<'a> {
+    /// The computed frame layout.
+    layout: &'a FrameLayout,
+    /// Precomputed FP-relative offset for each stack slot (indexed by slot number).
+    slot_offsets: Vec<i32>,
+}
+
+impl<'a> FrameIndexEliminator<'a> {
+    /// Create a new eliminator for the given layout and function.
+    pub fn new(layout: &'a FrameLayout, func: &MachFunction) -> Self {
+        let slot_offsets = compute_slot_offsets(func, layout);
+        Self { layout, slot_offsets }
+    }
+
+    /// Resolve a stack slot index to (base_register, offset).
+    ///
+    /// Spill/local slots use FP-relative addressing when the frame pointer
+    /// is available (always on Apple AArch64). The returned offset is signed.
+    pub fn resolve_slot_operand(&self, slot_idx: usize) -> (PReg, i64) {
+        if slot_idx < self.slot_offsets.len() {
+            let fp_offset = self.slot_offsets[slot_idx] as i64;
+            if self.layout.uses_frame_pointer {
+                (X29, fp_offset)
+            } else {
+                // SP-relative: FP offset + callee_saved_area + sp_adjustment
+                let sp_offset = fp_offset + self.layout.sp_adjustment() as i64;
+                (SP, sp_offset)
+            }
+        } else {
+            // Out-of-range slot index — treat as outgoing arg area (SP-relative).
+            // This shouldn't happen in well-formed IR but we handle it defensively.
+            (SP, 0)
+        }
+    }
+
+    /// Run the frame index elimination pass over the function.
+    ///
+    /// Replaces all `FrameIndex` and `StackSlot` operands with concrete
+    /// `MemOp` operands. For large offsets, inserts scratch register
+    /// materialization instructions.
+    ///
+    /// Returns statistics about the elimination.
+    pub fn run(&self, func: &mut MachFunction) -> EliminationStats {
+        let mut stats = EliminationStats::default();
+
+        // Early exit: if no stack slots, no frame indices can exist.
+        if func.stack_slots.is_empty() && !self.has_frame_operands(func) {
+            return stats;
+        }
+
+        // Process each block. We must rebuild block instruction lists when
+        // large offsets require inserting materialization instructions.
+        let num_blocks = func.blocks.len();
+        for block_idx in 0..num_blocks {
+            let block_insts = std::mem::take(&mut func.blocks[block_idx].insts);
+            let mut new_insts = Vec::with_capacity(block_insts.len());
+            let mut block_modified = false;
+
+            for &inst_id in &block_insts {
+                // Check if this instruction has any frame-related operands.
+                let mut has_frame_op = false;
+                let mut needs_large_offset = false;
+
+                for operand in &func.insts[inst_id.0 as usize].operands {
+                    match operand {
+                        MachOperand::FrameIndex(fi) => {
+                            has_frame_op = true;
+                            let slot_idx = fi.0 as usize;
+                            let (_, offset) = self.resolve_slot_operand(slot_idx);
+                            if is_large_offset(offset) {
+                                needs_large_offset = true;
+                            }
+                        }
+                        MachOperand::StackSlot(ss) => {
+                            has_frame_op = true;
+                            let slot_idx = ss.0 as usize;
+                            let (_, offset) = self.resolve_slot_operand(slot_idx);
+                            if is_large_offset(offset) {
+                                needs_large_offset = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if !has_frame_op {
+                    new_insts.push(inst_id);
+                    continue;
+                }
+
+                if needs_large_offset {
+                    // Insert materialization instructions before the original.
+                    // We need to find the frame operand, compute its offset,
+                    // materialize it in X16, then rewrite the operand.
+                    let mat_insts = self.materialize_and_rewrite(func, inst_id, &mut stats);
+                    for mat_id in mat_insts {
+                        new_insts.push(mat_id);
+                    }
+                    block_modified = true;
+                } else {
+                    // Small offset — just rewrite operands in place.
+                    self.rewrite_operands_small(func, inst_id, &mut stats);
+                    new_insts.push(inst_id);
+                }
+            }
+
+            if block_modified || new_insts.len() != block_insts.len() {
+                func.blocks[block_idx].insts = new_insts;
+            } else {
+                // Restore the original inst list (operands were modified in place).
+                func.blocks[block_idx].insts = new_insts;
+            }
+        }
+
+        stats
+    }
+
+    /// Check if any instruction has FrameIndex or StackSlot operands.
+    fn has_frame_operands(&self, func: &MachFunction) -> bool {
+        func.insts.iter().any(|inst| {
+            inst.operands.iter().any(|op| {
+                matches!(op, MachOperand::FrameIndex(_) | MachOperand::StackSlot(_))
+            })
+        })
+    }
+
+    /// Rewrite small-offset frame operands in place (no new instructions needed).
+    fn rewrite_operands_small(
+        &self,
+        func: &mut MachFunction,
+        inst_id: llvm2_ir::types::InstId,
+        stats: &mut EliminationStats,
+    ) {
+        let inst = &mut func.insts[inst_id.0 as usize];
+        for operand in &mut inst.operands {
+            match operand {
+                MachOperand::FrameIndex(fi) => {
+                    let slot_idx = fi.0 as usize;
+                    let (base, offset) = self.resolve_slot_operand(slot_idx);
+                    *operand = MachOperand::MemOp { base, offset };
+                    stats.eliminated_count += 1;
+                }
+                MachOperand::StackSlot(ss) => {
+                    let slot_idx = ss.0 as usize;
+                    let (base, offset) = self.resolve_slot_operand(slot_idx);
+                    *operand = MachOperand::MemOp { base, offset };
+                    stats.eliminated_count += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Handle a large-offset frame index: materialize offset in X16, then
+    /// rewrite the operand. Returns the list of InstIds that replace the
+    /// original instruction (materialization + original with rewritten operand).
+    fn materialize_and_rewrite(
+        &self,
+        func: &mut MachFunction,
+        inst_id: llvm2_ir::types::InstId,
+        stats: &mut EliminationStats,
+    ) -> Vec<llvm2_ir::types::InstId> {
+        let mut result = Vec::with_capacity(4);
+
+        // Find the first frame operand to determine offset and base.
+        // (In practice there's usually only one frame operand per instruction.)
+        let (base_reg, offset) = {
+            let inst = &func.insts[inst_id.0 as usize];
+            let mut found = None;
+            for operand in &inst.operands {
+                match operand {
+                    MachOperand::FrameIndex(fi) => {
+                        found = Some(self.resolve_slot_operand(fi.0 as usize));
+                        break;
+                    }
+                    MachOperand::StackSlot(ss) => {
+                        found = Some(self.resolve_slot_operand(ss.0 as usize));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            found.unwrap_or((SP, 0))
+        };
+
+        // Materialize the offset in X16.
+        // For negative offsets, we use MOVN + optional MOVK.
+        // For positive offsets, we use MOVZ + optional MOVK.
+        let abs_offset = if offset < 0 { (-offset) as u64 } else { offset as u64 };
+
+        if offset >= 0 {
+            let lo16 = (abs_offset & 0xFFFF) as i64;
+            // MOVZ X16, #lo16
+            let movz = MachInst::new(
+                AArch64Opcode::Movz,
+                vec![MachOperand::PReg(X16), MachOperand::Imm(lo16)],
+            );
+            let movz_id = func.push_inst(movz);
+            result.push(movz_id);
+
+            if abs_offset > 0xFFFF {
+                let hi16 = ((abs_offset >> 16) & 0xFFFF) as i64;
+                // MOVK X16, #hi16, LSL #16
+                // We encode the shift amount as a second immediate.
+                let movk = MachInst::new(
+                    AArch64Opcode::Movk,
+                    vec![
+                        MachOperand::PReg(X16),
+                        MachOperand::Imm(hi16),
+                        MachOperand::Imm(16), // shift amount
+                    ],
+                );
+                let movk_id = func.push_inst(movk);
+                result.push(movk_id);
+            }
+        } else {
+            // Negative offset: MOVN X16, #(~lo16) then adjust.
+            // Use MOVZ with the absolute value and then SUB instead of MOVN
+            // for simplicity and clarity.
+            let lo16 = (abs_offset & 0xFFFF) as i64;
+            let movz = MachInst::new(
+                AArch64Opcode::Movz,
+                vec![MachOperand::PReg(X16), MachOperand::Imm(lo16)],
+            );
+            let movz_id = func.push_inst(movz);
+            result.push(movz_id);
+
+            if abs_offset > 0xFFFF {
+                let hi16 = ((abs_offset >> 16) & 0xFFFF) as i64;
+                let movk = MachInst::new(
+                    AArch64Opcode::Movk,
+                    vec![
+                        MachOperand::PReg(X16),
+                        MachOperand::Imm(hi16),
+                        MachOperand::Imm(16),
+                    ],
+                );
+                let movk_id = func.push_inst(movk);
+                result.push(movk_id);
+            }
+
+            // SUB X16, base_reg, X16  (base - abs_offset = base + offset)
+            let sub = MachInst::new(
+                AArch64Opcode::SubRR,
+                vec![
+                    MachOperand::PReg(X16),
+                    if base_reg == SP {
+                        MachOperand::Special(SpecialReg::SP)
+                    } else {
+                        MachOperand::PReg(base_reg)
+                    },
+                    MachOperand::PReg(X16),
+                ],
+            );
+            let sub_id = func.push_inst(sub);
+            result.push(sub_id);
+
+            // Rewrite operands to use [X16, #0].
+            let inst = &mut func.insts[inst_id.0 as usize];
+            for operand in &mut inst.operands {
+                match operand {
+                    MachOperand::FrameIndex(_) | MachOperand::StackSlot(_) => {
+                        *operand = MachOperand::MemOp { base: X16, offset: 0 };
+                        stats.eliminated_count += 1;
+                        stats.large_offset_count += 1;
+                    }
+                    _ => {}
+                }
+            }
+            result.push(inst_id);
+            return result;
+        }
+
+        // Positive offset: ADD X16, base_reg, X16
+        let add = MachInst::new(
+            AArch64Opcode::AddRR,
+            vec![
+                MachOperand::PReg(X16),
+                if base_reg == SP {
+                    MachOperand::Special(SpecialReg::SP)
+                } else {
+                    MachOperand::PReg(base_reg)
+                },
+                MachOperand::PReg(X16),
+            ],
+        );
+        let add_id = func.push_inst(add);
+        result.push(add_id);
+
+        // Rewrite frame operands to [X16, #0].
+        let inst = &mut func.insts[inst_id.0 as usize];
+        for operand in &mut inst.operands {
+            match operand {
+                MachOperand::FrameIndex(_) | MachOperand::StackSlot(_) => {
+                    *operand = MachOperand::MemOp { base: X16, offset: 0 };
+                    stats.eliminated_count += 1;
+                    stats.large_offset_count += 1;
+                }
+                _ => {}
+            }
+        }
+        result.push(inst_id);
+
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Compact unwind encoding
 // ---------------------------------------------------------------------------
 
@@ -1583,5 +1943,344 @@ mod tests {
         let cu = encode_compact_unwind(&layout);
         assert_eq!(cu.encoding, UNWIND_ARM64_MODE_DWARF,
             "Early DWARF fallback on unrecognized pair");
+    }
+
+    // =======================================================================
+    // FrameIndexEliminator tests
+    // =======================================================================
+
+    #[test]
+    fn test_fie_simple_frame() {
+        // Simple function with a few stack slots and FrameIndex operands.
+        let mut func = make_func("fie_simple", vec![
+            MachInst::new(
+                AArch64Opcode::LdrRI,
+                vec![
+                    MachOperand::PReg(PReg::new(0)),
+                    MachOperand::FrameIndex(FrameIdx(0)),
+                ],
+            ),
+            MachInst::new(
+                AArch64Opcode::StrRI,
+                vec![
+                    MachOperand::PReg(PReg::new(1)),
+                    MachOperand::FrameIndex(FrameIdx(1)),
+                ],
+            ),
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        func.alloc_stack_slot(StackSlot::new(8, 8));
+        func.alloc_stack_slot(StackSlot::new(8, 8));
+
+        let layout = compute_frame_layout(&func, 0, false);
+        let fie = FrameIndexEliminator::new(&layout, &func);
+        let stats = fie.run(&mut func);
+
+        // Both FrameIndex operands should be eliminated.
+        assert_eq!(stats.eliminated_count, 2);
+        assert_eq!(stats.large_offset_count, 0);
+
+        // Verify operands are now MemOp with FP (X29) as base.
+        match &func.insts[0].operands[1] {
+            MachOperand::MemOp { base, offset } => {
+                assert_eq!(*base, X29);
+                assert!(*offset < 0, "FP offset should be negative, got {}", offset);
+            }
+            other => panic!("Expected MemOp, got {:?}", other),
+        }
+        match &func.insts[1].operands[1] {
+            MachOperand::MemOp { base, offset } => {
+                assert_eq!(*base, X29);
+                assert!(*offset < 0, "FP offset should be negative, got {}", offset);
+            }
+            other => panic!("Expected MemOp, got {:?}", other),
+        }
+
+        // Offsets should be distinct (different slots).
+        let off0 = match &func.insts[0].operands[1] {
+            MachOperand::MemOp { offset, .. } => *offset,
+            _ => unreachable!(),
+        };
+        let off1 = match &func.insts[1].operands[1] {
+            MachOperand::MemOp { offset, .. } => *offset,
+            _ => unreachable!(),
+        };
+        assert_ne!(off0, off1, "Different slots must have different offsets");
+    }
+
+    #[test]
+    fn test_fie_large_frame() {
+        // Function with many stack slots so that offsets exceed 4096.
+        // Create a function with a very large stack frame.
+        let mut func = make_func("fie_large", vec![
+            MachInst::new(
+                AArch64Opcode::LdrRI,
+                vec![
+                    MachOperand::PReg(PReg::new(0)),
+                    MachOperand::FrameIndex(FrameIdx(0)),
+                ],
+            ),
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        // Allocate one very large slot to push offset beyond 4096.
+        func.alloc_stack_slot(StackSlot::new(8192, 16));
+
+        let layout = compute_frame_layout(&func, 0, false);
+        let fie = FrameIndexEliminator::new(&layout, &func);
+        let stats = fie.run(&mut func);
+
+        assert_eq!(stats.eliminated_count, 1);
+        assert_eq!(stats.large_offset_count, 1);
+
+        // The block should now have more instructions (materialization + original + ret).
+        let block_insts = &func.blocks[0].insts;
+        assert!(
+            block_insts.len() > 2,
+            "Expected materialization instructions, got {} insts",
+            block_insts.len()
+        );
+
+        // First instruction(s) should be MOVZ/ADD for offset materialization.
+        let first_inst = func.inst(block_insts[0]);
+        assert_eq!(
+            first_inst.opcode,
+            AArch64Opcode::Movz,
+            "Expected MOVZ for large offset materialization"
+        );
+
+        // The rewritten instruction should use X16 as base with offset 0.
+        // Find the LdrRI instruction in the block.
+        let ldr_inst_id = block_insts.iter().find(|&&id| {
+            func.inst(id).opcode == AArch64Opcode::LdrRI
+        });
+        assert!(ldr_inst_id.is_some(), "LdrRI should still be in the block");
+        let ldr_inst = func.inst(*ldr_inst_id.unwrap());
+        match &ldr_inst.operands[1] {
+            MachOperand::MemOp { base, offset } => {
+                assert_eq!(*base, X16, "Large offset should use X16 scratch register");
+                assert_eq!(*offset, 0, "After materialization, offset should be 0");
+            }
+            other => panic!("Expected MemOp with X16, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_fie_mixed_slots() {
+        // Function with slots of different sizes and alignments.
+        let mut func = make_func("fie_mixed", vec![
+            MachInst::new(
+                AArch64Opcode::LdrRI,
+                vec![MachOperand::PReg(PReg::new(0)), MachOperand::FrameIndex(FrameIdx(0))],
+            ),
+            MachInst::new(
+                AArch64Opcode::LdrRI,
+                vec![MachOperand::PReg(PReg::new(1)), MachOperand::FrameIndex(FrameIdx(1))],
+            ),
+            MachInst::new(
+                AArch64Opcode::LdrRI,
+                vec![MachOperand::PReg(PReg::new(2)), MachOperand::FrameIndex(FrameIdx(2))],
+            ),
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        func.alloc_stack_slot(StackSlot::new(16, 16)); // 16-byte aligned local
+        func.alloc_stack_slot(StackSlot::new(8, 8));   // 8-byte spill
+        func.alloc_stack_slot(StackSlot::new(1, 1));   // 1-byte local
+
+        let layout = compute_frame_layout(&func, 0, false);
+        let fie = FrameIndexEliminator::new(&layout, &func);
+        let stats = fie.run(&mut func);
+
+        assert_eq!(stats.eliminated_count, 3);
+
+        // All operands should be MemOp now.
+        let offsets: Vec<i64> = (0..3)
+            .map(|i| match &func.insts[i].operands[1] {
+                MachOperand::MemOp { base, offset } => {
+                    assert_eq!(*base, X29);
+                    *offset
+                }
+                other => panic!("Slot {} not eliminated: {:?}", i, other),
+            })
+            .collect();
+
+        // Each subsequent slot should be at a lower (more negative) offset.
+        assert!(offsets[0] > offsets[1], "slot 0 > slot 1: {} > {}", offsets[0], offsets[1]);
+        assert!(offsets[1] > offsets[2], "slot 1 > slot 2: {} > {}", offsets[1], offsets[2]);
+    }
+
+    #[test]
+    fn test_fie_outgoing_arg_area() {
+        // Non-leaf function with outgoing arg area and stack slots.
+        let mut func = make_func("fie_args", vec![
+            MachInst::new(AArch64Opcode::Bl, vec![MachOperand::Imm(0)]),
+            MachInst::new(
+                AArch64Opcode::LdrRI,
+                vec![MachOperand::PReg(PReg::new(0)), MachOperand::FrameIndex(FrameIdx(0))],
+            ),
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        func.alloc_stack_slot(StackSlot::new(8, 8));
+
+        let layout = compute_frame_layout(&func, 32, false);
+        assert!(!layout.is_leaf);
+        assert_eq!(layout.outgoing_arg_area_size, 32);
+
+        let fie = FrameIndexEliminator::new(&layout, &func);
+        let stats = fie.run(&mut func);
+
+        assert_eq!(stats.eliminated_count, 1);
+        // Spill slot should use FP-relative addressing.
+        match &func.insts[1].operands[1] {
+            MachOperand::MemOp { base, .. } => {
+                assert_eq!(*base, X29, "Spill slot should use FP-relative addressing");
+            }
+            other => panic!("Expected MemOp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_fie_fp_vs_sp_relative() {
+        // Test that when uses_frame_pointer is true, we get FP-relative addressing.
+        let mut func = make_func("fie_fp", vec![
+            MachInst::new(
+                AArch64Opcode::LdrRI,
+                vec![MachOperand::PReg(PReg::new(0)), MachOperand::FrameIndex(FrameIdx(0))],
+            ),
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        func.alloc_stack_slot(StackSlot::new(8, 8));
+
+        // Standard layout (uses_frame_pointer = true on Apple AArch64).
+        let layout = compute_frame_layout(&func, 0, false);
+        assert!(layout.uses_frame_pointer);
+
+        let fie = FrameIndexEliminator::new(&layout, &func);
+        let (base, _offset) = fie.resolve_slot_operand(0);
+        assert_eq!(base, X29, "With FP, should use FP-relative");
+
+        // Test SP-relative by creating a layout with uses_frame_pointer=false.
+        let sp_layout = FrameLayout {
+            uses_frame_pointer: false,
+            ..layout.clone()
+        };
+        let fie_sp = FrameIndexEliminator::new(&sp_layout, &func);
+        let (base_sp, _offset_sp) = fie_sp.resolve_slot_operand(0);
+        assert_eq!(base_sp, SP, "Without FP, should use SP-relative");
+    }
+
+    #[test]
+    fn test_fie_stats_tracking() {
+        // Verify stats are correctly tracked.
+        let mut func = make_func("fie_stats", vec![
+            MachInst::new(
+                AArch64Opcode::LdrRI,
+                vec![MachOperand::PReg(PReg::new(0)), MachOperand::FrameIndex(FrameIdx(0))],
+            ),
+            MachInst::new(
+                AArch64Opcode::StrRI,
+                vec![MachOperand::PReg(PReg::new(1)), MachOperand::FrameIndex(FrameIdx(0))],
+            ),
+            MachInst::new(
+                AArch64Opcode::LdrRI,
+                vec![MachOperand::PReg(PReg::new(2)), MachOperand::FrameIndex(FrameIdx(1))],
+            ),
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        func.alloc_stack_slot(StackSlot::new(8, 8));
+        func.alloc_stack_slot(StackSlot::new(4, 4));
+
+        let layout = compute_frame_layout(&func, 0, false);
+        let fie = FrameIndexEliminator::new(&layout, &func);
+        let stats = fie.run(&mut func);
+
+        assert_eq!(stats.eliminated_count, 3, "Should eliminate 3 frame indices");
+        assert_eq!(stats.large_offset_count, 0, "No large offsets expected");
+    }
+
+    #[test]
+    fn test_fie_no_frame_indices() {
+        // Function with no frame index operands — should be a no-op.
+        let mut func = make_func("fie_noop", vec![
+            MachInst::new(
+                AArch64Opcode::AddRR,
+                vec![
+                    MachOperand::PReg(PReg::new(0)),
+                    MachOperand::PReg(PReg::new(1)),
+                    MachOperand::PReg(PReg::new(2)),
+                ],
+            ),
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+
+        let layout = compute_frame_layout(&func, 0, false);
+        let fie = FrameIndexEliminator::new(&layout, &func);
+        let stats = fie.run(&mut func);
+
+        assert_eq!(stats.eliminated_count, 0);
+        assert_eq!(stats.large_offset_count, 0);
+        assert_eq!(func.blocks[0].insts.len(), 2, "Block should be unchanged");
+    }
+
+    #[test]
+    fn test_is_large_offset() {
+        // Boundary cases for AArch64 immediate range.
+        assert!(!is_large_offset(0));
+        assert!(!is_large_offset(100));
+        assert!(!is_large_offset(4095));
+        assert!(is_large_offset(4096));
+        assert!(is_large_offset(10000));
+        assert!(!is_large_offset(-1));
+        assert!(!is_large_offset(-256));
+        assert!(is_large_offset(-257));
+        assert!(is_large_offset(-1000));
+        assert!(is_large_offset(i64::MAX));
+        assert!(is_large_offset(i64::MIN));
+    }
+
+    #[test]
+    fn test_fie_resolve_slot_operand() {
+        // Directly test resolve_slot_operand for correctness.
+        let mut func = make_func("fie_resolve", vec![
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+        func.alloc_stack_slot(StackSlot::new(8, 8));
+        func.alloc_stack_slot(StackSlot::new(16, 16));
+
+        let layout = compute_frame_layout(&func, 0, false);
+        let fie = FrameIndexEliminator::new(&layout, &func);
+
+        let (base0, off0) = fie.resolve_slot_operand(0);
+        let (base1, off1) = fie.resolve_slot_operand(1);
+
+        assert_eq!(base0, X29);
+        assert_eq!(base1, X29);
+        // Both offsets should be negative (below FP).
+        assert!(off0 < 0, "slot 0 offset should be negative: {}", off0);
+        assert!(off1 < 0, "slot 1 offset should be negative: {}", off1);
+        // Slot 1 should be at a lower offset than slot 0.
+        assert!(off0 > off1, "slot 0 ({}) should be above slot 1 ({})", off0, off1);
+    }
+
+    #[test]
+    fn test_fie_out_of_range_slot() {
+        // Test defensive handling of out-of-range slot index.
+        let func = make_func("fie_oob", vec![
+            MachInst::new(AArch64Opcode::Ret, vec![]),
+        ]);
+
+        let layout = compute_frame_layout(&func, 0, false);
+        let fie = FrameIndexEliminator::new(&layout, &func);
+
+        // No slots allocated, so index 0 is out of range.
+        let (base, offset) = fie.resolve_slot_operand(0);
+        assert_eq!(base, SP, "Out-of-range slot should default to SP");
+        assert_eq!(offset, 0, "Out-of-range slot should default to offset 0");
+    }
+
+    #[test]
+    fn test_fie_elimination_stats_default() {
+        let stats = EliminationStats::default();
+        assert_eq!(stats.eliminated_count, 0);
+        assert_eq!(stats.large_offset_count, 0);
     }
 }

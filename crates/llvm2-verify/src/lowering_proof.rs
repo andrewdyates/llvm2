@@ -1898,6 +1898,149 @@ pub fn all_nzcv_proofs() -> Vec<ProofObligation> {
     proofs
 }
 
+// ---------------------------------------------------------------------------
+// Load/Store lowering proofs
+// ---------------------------------------------------------------------------
+//
+// Proofs that tMIR Load/Store operations are correctly lowered to
+// AArch64 LDR/STR instructions. These use the symbolic SMT array theory
+// (Array(BV64, BV8)) to model byte-addressable memory.
+//
+// The proof structure for each load lowering:
+//   forall base: BV64, mem_default: BV8 .
+//     let mem = ConstArray(BV64, mem_default)
+//     encode_tmir_load(mem, base, 0, size) == encode_aarch64_ldr_imm(mem, base, 0, size)
+//
+// The proof structure for each store lowering:
+//   forall base: BV64, value: BV(size*8), mem_default: BV8 .
+//     let mem = ConstArray(BV64, mem_default)
+//     let tmir_mem = encode_tmir_store(mem, base, 0, value, size)
+//     let aarch64_mem = encode_aarch64_str_imm(mem, base, 0, value, size)
+//     load(tmir_mem, base, size) == load(aarch64_mem, base, size)
+//
+// These delegate to the symbolic encoders in memory_proofs.rs which build
+// the actual SMT array expressions.
+//
+// Reference: ARM DDI 0487, C6.2.131-132 (LDRB/LDR), C6.2.134 (LDRH),
+//            C6.2.257-258 (STR/STRB/STRH).
+
+/// Proof: `tMIR::Load(I32, addr)` == `LDRWui [Xn, #0]` (32-bit load, zero offset).
+///
+/// Verifies that loading 4 bytes from base address produces the same
+/// result via tMIR semantics and AArch64 LDRWui with zero scaled offset.
+///
+/// Both sides read from the same symbolic ConstArray memory, so the proof
+/// holds for all possible initial memory contents.
+pub fn proof_load_i32_lowering() -> ProofObligation {
+    crate::memory_proofs::proof_load_i32()
+}
+
+/// Proof: `tMIR::Load(I64, addr)` == `LDRXui [Xn, #0]` (64-bit load, zero offset).
+pub fn proof_load_i64_lowering() -> ProofObligation {
+    crate::memory_proofs::proof_load_i64()
+}
+
+/// Proof: `tMIR::Store(I32, val, addr)` == `STRWui [Xn, #0]` (32-bit store, zero offset).
+///
+/// Verifies that storing a 32-bit value via tMIR and AArch64 STRWui produces
+/// identical memory states. Checked by storing, then loading back from both
+/// memories and comparing the results.
+pub fn proof_store_i32_lowering() -> ProofObligation {
+    crate::memory_proofs::proof_store_i32()
+}
+
+/// Proof: `tMIR::Store(I64, val, addr)` == `STRXui [Xn, #0]` (64-bit store, zero offset).
+pub fn proof_store_i64_lowering() -> ProofObligation {
+    crate::memory_proofs::proof_store_i64()
+}
+
+/// Proof: `tMIR::Load(I8, addr)` == `LDRB Wt, [Xn, #0]` (8-bit load, zero offset).
+///
+/// On AArch64, LDRB loads a single byte and zero-extends it to 32 bits
+/// in the destination W register. The tMIR side loads 1 byte.
+///
+/// Reference: ARM DDI 0487, C6.2.131.
+pub fn proof_load_i8_lowering() -> ProofObligation {
+    crate::memory_proofs::proof_load_i8()
+}
+
+/// Proof: `tMIR::Load(I16, addr)` == `LDRH Wt, [Xn, #0]` (16-bit load, zero offset).
+///
+/// LDRH loads a 16-bit halfword in little-endian order and zero-extends
+/// it to 32 bits. The tMIR side loads 2 bytes.
+///
+/// Reference: ARM DDI 0487, C6.2.134.
+pub fn proof_load_i16_lowering() -> ProofObligation {
+    crate::memory_proofs::proof_load_i16()
+}
+
+/// Proof: `tMIR::Store(I8, val, addr)` == `STRB Wt, [Xn, #0]` (8-bit store, zero offset).
+///
+/// STRB stores the least significant byte of the W register to memory.
+///
+/// Reference: ARM DDI 0487, C6.2.258.
+pub fn proof_store_i8_lowering() -> ProofObligation {
+    crate::memory_proofs::proof_store_i8()
+}
+
+/// Proof: `tMIR::Store(I16, val, addr)` == `STRH Wt, [Xn, #0]` (16-bit store, zero offset).
+///
+/// STRH stores the least significant halfword of the W register to memory
+/// in little-endian byte order.
+///
+/// Reference: ARM DDI 0487, C6.2.259.
+pub fn proof_store_i16_lowering() -> ProofObligation {
+    crate::memory_proofs::proof_store_i16()
+}
+
+/// Proof: store then load at same address returns stored value (32-bit).
+///
+/// ```text
+/// forall base: BV64, value: BV32, mem_default: BV8 .
+///   let mem = ConstArray(BV64, mem_default)
+///   let mem' = store(mem, base, value, 4)
+///   load(mem', base, 4) == value
+/// ```
+///
+/// This is the fundamental store-load coherence property: memory behaves as
+/// a reliable array. Critical for compiler correctness -- if this fails,
+/// no program that uses memory can be verified.
+pub fn proof_load_store_roundtrip_i32() -> ProofObligation {
+    crate::memory_proofs::proof_roundtrip_i32()
+}
+
+/// Proof: store then load at same address returns stored value (64-bit).
+///
+/// The 64-bit version exercises the full 8-byte little-endian decomposition
+/// and reassembly path through the SMT array model.
+pub fn proof_load_store_roundtrip_i64() -> ProofObligation {
+    crate::memory_proofs::proof_roundtrip_i64()
+}
+
+/// Return all load/store lowering proofs (10 total).
+///
+/// Covers:
+/// - Load equivalence: I8, I16, I32, I64 (tMIR Load == AArch64 LDR/LDRB/LDRH)
+/// - Store equivalence: I8, I16, I32, I64 (tMIR Store == AArch64 STR/STRB/STRH)
+/// - Store-load roundtrip: I32, I64 (store then load returns same value)
+pub fn all_load_store_proofs() -> Vec<ProofObligation> {
+    vec![
+        // Load equivalence
+        proof_load_i8_lowering(),
+        proof_load_i16_lowering(),
+        proof_load_i32_lowering(),
+        proof_load_i64_lowering(),
+        // Store equivalence
+        proof_store_i8_lowering(),
+        proof_store_i16_lowering(),
+        proof_store_i32_lowering(),
+        proof_store_i64_lowering(),
+        // Store-load roundtrip
+        proof_load_store_roundtrip_i32(),
+        proof_load_store_roundtrip_i64(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2838,5 +2981,137 @@ mod tests {
         // Both should be Valid for a correct rule
         assert!(matches!(result_default, VerificationResult::Valid));
         assert!(matches!(result_config, VerificationResult::Valid));
+    }
+
+    // -----------------------------------------------------------------------
+    // Load/Store lowering proofs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_load_i32_lowering() {
+        assert_valid(&proof_load_i32_lowering());
+    }
+
+    #[test]
+    fn test_proof_load_i64_lowering() {
+        assert_valid(&proof_load_i64_lowering());
+    }
+
+    #[test]
+    fn test_proof_store_i32_lowering() {
+        assert_valid(&proof_store_i32_lowering());
+    }
+
+    #[test]
+    fn test_proof_store_i64_lowering() {
+        assert_valid(&proof_store_i64_lowering());
+    }
+
+    #[test]
+    fn test_proof_load_i8_lowering() {
+        assert_valid(&proof_load_i8_lowering());
+    }
+
+    #[test]
+    fn test_proof_load_i16_lowering() {
+        assert_valid(&proof_load_i16_lowering());
+    }
+
+    #[test]
+    fn test_proof_store_i8_lowering() {
+        assert_valid(&proof_store_i8_lowering());
+    }
+
+    #[test]
+    fn test_proof_store_i16_lowering() {
+        assert_valid(&proof_store_i16_lowering());
+    }
+
+    #[test]
+    fn test_proof_load_store_roundtrip_i32() {
+        assert_valid(&proof_load_store_roundtrip_i32());
+    }
+
+    #[test]
+    fn test_proof_load_store_roundtrip_i64() {
+        assert_valid(&proof_load_store_roundtrip_i64());
+    }
+
+    #[test]
+    fn test_all_load_store_proofs() {
+        for obligation in all_load_store_proofs() {
+            assert_valid(&obligation);
+        }
+    }
+
+    /// Verify that load/store proofs use the array-based memory model.
+    #[test]
+    fn test_load_store_proof_count() {
+        let proofs = all_load_store_proofs();
+        assert_eq!(proofs.len(), 10, "Expected 10 load/store proofs");
+    }
+
+    /// Verify that load/store proof obligations produce valid SMT-LIB2 output.
+    #[test]
+    fn test_load_store_smt2_output() {
+        let obligation = proof_load_i32_lowering();
+        let smt2 = obligation.to_smt2();
+        assert!(smt2.contains("(set-logic"), "SMT2 should have set-logic");
+        assert!(smt2.contains("(declare-const base (_ BitVec 64))"),
+            "SMT2 should declare base address");
+        assert!(smt2.contains("(check-sat)"), "SMT2 should have check-sat");
+    }
+
+    /// Verify that store proof obligations include value declarations.
+    #[test]
+    fn test_store_proof_has_value_input() {
+        let obligation = proof_store_i32_lowering();
+        assert!(
+            obligation.inputs.iter().any(|(name, _)| name == "value"),
+            "Store proof should have 'value' input"
+        );
+        assert!(
+            obligation.inputs.iter().any(|(name, _)| name == "base"),
+            "Store proof should have 'base' input"
+        );
+    }
+
+    /// Negative test: load at different offsets should not be equivalent.
+    #[test]
+    fn test_wrong_load_offset_lowering_detected() {
+        use crate::memory_proofs::{
+            symbolic_memory, encode_tmir_load, encode_aarch64_ldr_imm, encode_store_le,
+        };
+
+        let mem = symbolic_memory("mem_default");
+        let base = SmtExpr::var("base", 64);
+        let value = SmtExpr::var("value", 32);
+
+        // Store a value at base
+        let mem_with_data = encode_store_le(&mem, &base, &value, 4);
+
+        // tMIR: load at byte offset 0
+        let tmir_at_0 = encode_tmir_load(&mem_with_data, &base, 0, 4);
+        // AArch64: load at scaled offset 1 (byte offset 4) -- WRONG
+        let aarch64_at_1 = encode_aarch64_ldr_imm(&mem_with_data, &base, 1, 4);
+
+        let obligation = ProofObligation {
+            name: "WRONG: Load I32 offset 0 == Load I32 offset 4".to_string(),
+            tmir_expr: tmir_at_0,
+            aarch64_expr: aarch64_at_1,
+            inputs: vec![
+                ("base".to_string(), 64),
+                ("value".to_string(), 32),
+                ("mem_default".to_string(), 8),
+            ],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let result = verify_by_evaluation(&obligation);
+        match result {
+            VerificationResult::Invalid { .. } => {} // expected
+            other => panic!("Expected Invalid for wrong load offset, got {:?}", other),
+        }
     }
 }

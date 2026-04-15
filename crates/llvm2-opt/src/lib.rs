@@ -30,6 +30,7 @@
 //! | [`AddrModeFormation`] | Fold ADD+LDR/STR into rich AArch64 addressing modes |
 //! | [`CmpSelectCombine`] | Diamond CFG to CSEL/CSET conditional select formation |
 //! | [`CfgSimplify`] | Simplify CFG: branch folding, empty block elim, unreachable removal |
+//! | [`const_materialize`] | Optimal constant materialization (MOVZ/MOVK, logical imm, MOVN) |
 //!
 //! # Memory Effects Model
 //!
@@ -51,6 +52,7 @@ pub mod addr_mode;
 pub mod cfg_simplify;
 pub mod cmp_select;
 pub mod const_fold;
+pub mod const_materialize;
 pub mod copy_prop;
 pub mod cse;
 pub mod dce;
