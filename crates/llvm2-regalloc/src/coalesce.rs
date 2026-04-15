@@ -279,14 +279,16 @@ fn resolve_rewrite(mut id: u32, rewrites: &HashMap<u32, u32>) -> u32 {
 ///   and the behavior of [`coalesce_copies`]).
 /// - **Conservative:** additionally rejects merges that would increase
 ///   register pressure by creating a longer combined interval whose total
-///   span exceeds the sum of the individual spans.
+///   extent exceeds the sum of the individual extents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoalesceMode {
     /// Coalesce whenever intervals do not overlap.
     Aggressive,
-    /// Coalesce only when the merged interval's total span does not exceed
-    /// the sum of the individual spans — a simple heuristic to avoid
-    /// increasing register pressure.
+    /// Coalesce only when the merged interval's extent (max end - min start)
+    /// does not exceed the sum of the individual extents — a heuristic to
+    /// avoid creating live ranges that span wide program regions and increase
+    /// register pressure. Adjacent intervals are always accepted; intervals
+    /// with a gap between them are rejected proportionally to the gap size.
     Conservative,
 }
 
@@ -322,6 +324,19 @@ impl CoalesceResult {
 /// Compute the total span (sum of range lengths) of a [`LiveInterval`].
 fn interval_span(interval: &LiveInterval) -> u32 {
     interval.ranges.iter().map(|r| r.end - r.start).sum()
+}
+
+/// Compute the extent (max_end - min_start) of a [`LiveInterval`].
+///
+/// Returns 0 for empty intervals. The extent captures how wide the live
+/// range is in program order — a merged interval with the same total span
+/// but a much larger extent occupies a register across a wider code region,
+/// increasing pressure.
+fn interval_extent(interval: &LiveInterval) -> u32 {
+    match (interval.ranges.first(), interval.ranges.last()) {
+        (Some(first), Some(last)) => last.end.saturating_sub(first.start),
+        _ => 0,
+    }
 }
 
 /// Stateful copy coalescer with configurable aggressiveness.
@@ -367,8 +382,11 @@ impl CopyCoalescer {
     /// Check whether two intervals can be coalesced.
     ///
     /// In **Aggressive** mode, intervals are coalescible when they do not
-    /// overlap.  In **Conservative** mode, the merged interval's total span
-    /// must also not exceed the sum of the individual spans.
+    /// overlap.  In **Conservative** mode, the merged interval's *extent*
+    /// (max end - min start) must also not exceed the sum of the individual
+    /// extents. This rejects merges that would create a single live range
+    /// spanning a much wider program region than the two originals combined,
+    /// which would increase register pressure.
     pub fn can_coalesce(
         &self,
         src_interval: &LiveInterval,
@@ -381,9 +399,10 @@ impl CopyCoalescer {
             CoalesceMode::Aggressive => true,
             CoalesceMode::Conservative => {
                 let merged = Self::merge_intervals(src_interval, dst_interval);
-                let merged_span = interval_span(&merged);
-                let sum_span = interval_span(src_interval) + interval_span(dst_interval);
-                merged_span <= sum_span
+                let merged_extent = interval_extent(&merged);
+                let sum_extent =
+                    interval_extent(src_interval) + interval_extent(dst_interval);
+                merged_extent <= sum_extent
             }
         }
     }
@@ -1051,44 +1070,41 @@ mod tests {
     }
 
     #[test]
-    fn test_coalescer_conservative_rejects_span_increase() {
-        // Two intervals with a gap between them: merging creates a combined
-        // interval whose span exceeds the sum of the individuals because
-        // add_range merges adjacent ranges across the gap.
+    fn test_coalescer_conservative_rejects_wide_gap() {
+        // Two intervals with a wide gap between them. Conservative mode uses
+        // extent (max_end - min_start) to detect that merging would occupy a
+        // register across a much wider program region:
         //
-        // src: [0, 2)  -> span = 2
-        // dst: [10, 12) -> span = 2
-        // sum_span = 4
-        // merged: [0, 2) + [10, 12) = two ranges, merged span = 2 + 2 = 4  (OK)
+        // src: [0, 2)   -> extent = 2
+        // dst: [10, 12) -> extent = 2
+        // sum_extent = 4
+        // merged: [0, 2) + [10, 12) -> extent = 12
+        // 12 > 4 -> REJECT
         //
-        // So for a simple non-adjacent case, conservative allows it.
-        // Let's construct a case where adjacency causes merging that expands span:
-        // src: [0, 5)   -> span = 5
-        // dst: [5, 10)  -> span = 5
-        // sum_span = 10
-        // merged: [0, 10) -> merged span = 10 (OK, == sum)
-        //
-        // To get conservative to REJECT, we need merged span > sum:
-        // That can't happen with non-overlapping ranges since add_range
-        // only merges overlapping/adjacent ranges. The merged span equals
-        // the sum when ranges are adjacent, and stays at sum when disjoint.
-        // So conservative mode will accept all non-overlapping cases when
-        // using strict span arithmetic.
-        //
-        // Let's test the boundary: conservative should still accept
-        // non-overlapping copies just like aggressive.
+        // Aggressive mode allows this because the intervals don't overlap.
 
         let func = make_function(vec![vec![copy_inst(vreg(1), vreg(0))]]);
         let mut intervals = HashMap::from([
             (0, interval(0, &[(0, 2)])),
-            (1, interval(1, &[(5, 7)])),
+            (1, interval(1, &[(10, 12)])),
         ]);
 
         let mut coalescer = CopyCoalescer::new(CoalesceMode::Conservative);
         let result = coalescer.coalesce(&func, &mut intervals);
 
-        assert_eq!(result.copies_removed, 1);
-        assert_eq!(result.intervals_merged, 1);
+        // Conservative rejects due to extent increase.
+        assert_eq!(result.copies_removed, 0);
+        assert_eq!(result.intervals_merged, 0);
+
+        // But aggressive would accept:
+        let mut intervals2 = HashMap::from([
+            (0, interval(0, &[(0, 2)])),
+            (1, interval(1, &[(10, 12)])),
+        ]);
+        let mut aggressive = CopyCoalescer::new(CoalesceMode::Aggressive);
+        let result2 = aggressive.coalesce(&func, &mut intervals2);
+        assert_eq!(result2.copies_removed, 1);
+        assert_eq!(result2.intervals_merged, 1);
     }
 
     #[test]
@@ -1153,11 +1169,20 @@ mod tests {
         let conservative = CopyCoalescer::new(CoalesceMode::Conservative);
         let aggressive = CopyCoalescer::new(CoalesceMode::Aggressive);
 
-        // Non-overlapping, non-adjacent — both modes should accept.
-        let src = interval(0, &[(0, 2)]);
-        let dst = interval(1, &[(5, 7)]);
-        assert!(conservative.can_coalesce(&src, &dst));
-        assert!(aggressive.can_coalesce(&src, &dst));
+        // Non-overlapping, adjacent — both modes accept (extent equals sum).
+        // src: [0, 2) extent=2, dst: [2, 4) extent=2, sum=4, merged=[0,4) extent=4
+        let src_adj = interval(0, &[(0, 2)]);
+        let dst_adj = interval(1, &[(2, 4)]);
+        assert!(conservative.can_coalesce(&src_adj, &dst_adj));
+        assert!(aggressive.can_coalesce(&src_adj, &dst_adj));
+
+        // Non-overlapping, wide gap — conservative rejects, aggressive accepts.
+        // src: [0, 2) extent=2, dst: [10, 12) extent=2, sum=4
+        // merged: [0,2)+[10,12) extent=12 > 4 -> REJECT
+        let src_gap = interval(0, &[(0, 2)]);
+        let dst_gap = interval(1, &[(10, 12)]);
+        assert!(!conservative.can_coalesce(&src_gap, &dst_gap));
+        assert!(aggressive.can_coalesce(&src_gap, &dst_gap));
 
         // Overlapping — both modes reject.
         let src_overlap = interval(0, &[(0, 4)]);
@@ -1364,5 +1389,186 @@ mod tests {
     fn test_interval_span_empty() {
         let i = LiveInterval::new(vreg(0));
         assert_eq!(interval_span(&i), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Extent-based conservative heuristic tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_interval_extent_single_range() {
+        let i = interval(0, &[(3, 7)]);
+        assert_eq!(interval_extent(&i), 4);
+    }
+
+    #[test]
+    fn test_interval_extent_multiple_ranges() {
+        let i = interval(0, &[(0, 3), (10, 15)]);
+        assert_eq!(interval_extent(&i), 15); // 15 - 0
+    }
+
+    #[test]
+    fn test_interval_extent_empty() {
+        let i = LiveInterval::new(vreg(0));
+        assert_eq!(interval_extent(&i), 0);
+    }
+
+    #[test]
+    fn test_conservative_rejects_distant_intervals() {
+        // Intervals far apart: conservative should reject because merged
+        // extent far exceeds sum of individual extents.
+        // src: [0, 1) extent=1, dst: [100, 101) extent=1
+        // sum_extent = 2, merged_extent = 101 -> REJECT
+        let coalescer = CopyCoalescer::new(CoalesceMode::Conservative);
+        let src = interval(0, &[(0, 1)]);
+        let dst = interval(1, &[(100, 101)]);
+        assert!(!coalescer.can_coalesce(&src, &dst));
+    }
+
+    #[test]
+    fn test_conservative_accepts_adjacent_intervals() {
+        // Adjacent intervals: merged extent == sum of extents.
+        // src: [0, 5) extent=5, dst: [5, 10) extent=5
+        // sum_extent = 10, merged_extent = 10 -> ACCEPT
+        let coalescer = CopyCoalescer::new(CoalesceMode::Conservative);
+        let src = interval(0, &[(0, 5)]);
+        let dst = interval(1, &[(5, 10)]);
+        assert!(coalescer.can_coalesce(&src, &dst));
+    }
+
+    #[test]
+    fn test_conservative_rejects_small_gap() {
+        // Even a small gap causes rejection: merged extent barely exceeds sum.
+        // src: [0, 3) extent=3, dst: [4, 7) extent=3
+        // sum_extent = 6, merged_extent = 7 -> 7 > 6 -> REJECT
+        let coalescer = CopyCoalescer::new(CoalesceMode::Conservative);
+        let src = interval(0, &[(0, 3)]);
+        let dst = interval(1, &[(4, 7)]);
+        assert!(!coalescer.can_coalesce(&src, &dst));
+    }
+
+    #[test]
+    fn test_conservative_multi_range_intervals() {
+        // Multi-range src with large internal gap: extent already large.
+        // src: [0, 2), [8, 10) -> extent = 10
+        // dst: [10, 12) -> extent = 2
+        // sum_extent = 12
+        // merged: [0,2), [8,12) -> extent = 12
+        // 12 <= 12 -> ACCEPT
+        let coalescer = CopyCoalescer::new(CoalesceMode::Conservative);
+        let src = interval(0, &[(0, 2), (8, 10)]);
+        let dst = interval(1, &[(10, 12)]);
+        assert!(coalescer.can_coalesce(&src, &dst));
+    }
+
+    #[test]
+    fn test_conservative_multi_range_rejects_when_far() {
+        // src: [0, 2), [3, 5) -> extent = 5
+        // dst: [50, 52) -> extent = 2
+        // sum_extent = 7
+        // merged: [0,2), [3,5), [50,52) -> extent = 52
+        // 52 > 7 -> REJECT
+        let coalescer = CopyCoalescer::new(CoalesceMode::Conservative);
+        let src = interval(0, &[(0, 2), (3, 5)]);
+        let dst = interval(1, &[(50, 52)]);
+        assert!(!coalescer.can_coalesce(&src, &dst));
+    }
+
+    #[test]
+    fn test_conservative_coalesce_partial_chain() {
+        // A chain where the first merge is accepted (adjacent) but the second
+        // is rejected (wide gap) by conservative mode.
+        //
+        // copy v1 <- v0 (intervals adjacent, accepted)
+        // copy v2 <- v1 (v1 now has extent [0,2), v2 at [20,21) -> rejected)
+        let func = make_function(vec![vec![
+            copy_inst(vreg(1), vreg(0)),
+            copy_inst(vreg(2), vreg(1)),
+        ]]);
+
+        let mut intervals = HashMap::from([
+            (0, interval(0, &[(0, 1)])),
+            (1, interval(1, &[(1, 2)])),
+            (2, interval(2, &[(20, 21)])),
+        ]);
+
+        let mut coalescer = CopyCoalescer::new(CoalesceMode::Conservative);
+        let result = coalescer.coalesce(&func, &mut intervals);
+
+        // First copy: v0 [0,1) and v1 [1,2) are adjacent -> accepted.
+        // After merge: v1 has extent [0,2).
+        // Second copy: merged v1 [0,2) and v2 [20,21):
+        //   sum_extent = 2 + 1 = 3, merged_extent = 21 -> REJECT
+        assert_eq!(result.copies_removed, 1);
+        assert_eq!(result.intervals_merged, 1);
+
+        // Compare with aggressive which accepts both:
+        let mut intervals2 = HashMap::from([
+            (0, interval(0, &[(0, 1)])),
+            (1, interval(1, &[(1, 2)])),
+            (2, interval(2, &[(20, 21)])),
+        ]);
+        let mut aggressive = CopyCoalescer::new(CoalesceMode::Aggressive);
+        let result2 = aggressive.coalesce(&func, &mut intervals2);
+        assert_eq!(result2.copies_removed, 2);
+        assert_eq!(result2.intervals_merged, 2);
+    }
+
+    #[test]
+    fn test_conservative_empty_src_accepted() {
+        // Empty src merged with non-empty dst: extent stays same.
+        let coalescer = CopyCoalescer::new(CoalesceMode::Conservative);
+        let src = LiveInterval::new(vreg(0));
+        let dst = interval(1, &[(5, 10)]);
+        assert!(coalescer.can_coalesce(&src, &dst));
+    }
+
+    #[test]
+    fn test_conservative_empty_dst_accepted() {
+        let coalescer = CopyCoalescer::new(CoalesceMode::Conservative);
+        let src = interval(0, &[(5, 10)]);
+        let dst = LiveInterval::new(vreg(1));
+        assert!(coalescer.can_coalesce(&src, &dst));
+    }
+
+    #[test]
+    fn test_aggressive_vs_conservative_stats_differ() {
+        // Construct a function where aggressive coalesces more than conservative.
+        let func = make_function(vec![vec![
+            copy_inst(vreg(1), vreg(0)),
+            copy_inst(vreg(3), vreg(2)),
+        ]]);
+
+        // First pair: adjacent -> both modes accept.
+        // Second pair: wide gap -> conservative rejects.
+        let mut intervals_agg = HashMap::from([
+            (0, interval(0, &[(0, 1)])),
+            (1, interval(1, &[(1, 2)])),
+            (2, interval(2, &[(3, 4)])),
+            (3, interval(3, &[(50, 51)])),
+        ]);
+        let mut intervals_con = intervals_agg.clone();
+
+        let mut aggressive = CopyCoalescer::new(CoalesceMode::Aggressive);
+        let result_agg = aggressive.coalesce(&func, &mut intervals_agg);
+
+        let mut conservative = CopyCoalescer::new(CoalesceMode::Conservative);
+        let result_con = conservative.coalesce(&func, &mut intervals_con);
+
+        // Aggressive: both copies coalesced.
+        assert_eq!(result_agg.copies_removed, 2);
+        assert_eq!(result_agg.intervals_merged, 2);
+
+        // Conservative: only the first (adjacent) copy coalesced.
+        assert_eq!(result_con.copies_removed, 1);
+        assert_eq!(result_con.intervals_merged, 1);
+
+        // Stats should reflect the difference.
+        let stats_agg = result_agg.stats(2);
+        let stats_con = result_con.stats(2);
+        assert_eq!(stats_agg.copies_eliminated, 2);
+        assert_eq!(stats_agg.copies_remaining, 0);
+        assert_eq!(stats_con.copies_eliminated, 1);
+        assert_eq!(stats_con.copies_remaining, 1);
     }
 }
