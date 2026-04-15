@@ -29,4 +29,4 @@ pub mod encode;
 // Re-exports
 // ---------------------------------------------------------------------------
 
-pub use encode::X86Encoder;
+pub use encode::{ModRM, RexPrefix, Sib, X86EncodeError, X86Encoder, X86InstOperands};
