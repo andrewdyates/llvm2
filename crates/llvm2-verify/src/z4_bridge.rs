@@ -181,12 +181,31 @@ fn infer_logic_walk(expr: &SmtExpr, has_array: &mut bool, has_fp: &mut bool, has
         | SmtExpr::FPMul { lhs, rhs, .. }
         | SmtExpr::FPDiv { lhs, rhs, .. }
         | SmtExpr::FPEq { lhs, rhs }
-        | SmtExpr::FPLt { lhs, rhs } => {
+        | SmtExpr::FPLt { lhs, rhs }
+        | SmtExpr::FPGt { lhs, rhs }
+        | SmtExpr::FPGe { lhs, rhs }
+        | SmtExpr::FPLe { lhs, rhs } => {
             *has_fp = true;
             infer_logic_walk(lhs, has_array, has_fp, has_uf);
             infer_logic_walk(rhs, has_array, has_fp, has_uf);
         }
-        SmtExpr::FPNeg { operand } => {
+        SmtExpr::FPFma { a, b, c, .. } => {
+            *has_fp = true;
+            infer_logic_walk(a, has_array, has_fp, has_uf);
+            infer_logic_walk(b, has_array, has_fp, has_uf);
+            infer_logic_walk(c, has_array, has_fp, has_uf);
+        }
+        SmtExpr::FPNeg { operand }
+        | SmtExpr::FPAbs { operand }
+        | SmtExpr::FPSqrt { operand, .. }
+        | SmtExpr::FPIsNaN { operand }
+        | SmtExpr::FPIsInf { operand }
+        | SmtExpr::FPIsZero { operand }
+        | SmtExpr::FPIsNormal { operand }
+        | SmtExpr::FPToSBv { operand, .. }
+        | SmtExpr::FPToUBv { operand, .. }
+        | SmtExpr::BvToFP { operand, .. }
+        | SmtExpr::FPToFP { operand, .. } => {
             *has_fp = true;
             infer_logic_walk(operand, has_array, has_fp, has_uf);
         }
@@ -871,8 +890,22 @@ fn translate_expr_to_z4(
         | SmtExpr::FPMul { .. }
         | SmtExpr::FPDiv { .. }
         | SmtExpr::FPNeg { .. }
+        | SmtExpr::FPAbs { .. }
+        | SmtExpr::FPSqrt { .. }
+        | SmtExpr::FPFma { .. }
         | SmtExpr::FPEq { .. }
         | SmtExpr::FPLt { .. }
+        | SmtExpr::FPGt { .. }
+        | SmtExpr::FPGe { .. }
+        | SmtExpr::FPLe { .. }
+        | SmtExpr::FPIsNaN { .. }
+        | SmtExpr::FPIsInf { .. }
+        | SmtExpr::FPIsZero { .. }
+        | SmtExpr::FPIsNormal { .. }
+        | SmtExpr::FPToSBv { .. }
+        | SmtExpr::FPToUBv { .. }
+        | SmtExpr::BvToFP { .. }
+        | SmtExpr::FPToFP { .. }
         | SmtExpr::FPConst { .. } => {
             Err("Floating-point theory (QF_FP) not yet supported in z4 native API; use CLI fallback with z3".to_string())
         }

@@ -178,7 +178,10 @@ impl RuleProposal {
             | SmtExpr::And { lhs, rhs }
             | SmtExpr::Or { lhs, rhs }
             | SmtExpr::FPEq { lhs, rhs }
-            | SmtExpr::FPLt { lhs, rhs } => {
+            | SmtExpr::FPLt { lhs, rhs }
+            | SmtExpr::FPGt { lhs, rhs }
+            | SmtExpr::FPGe { lhs, rhs }
+            | SmtExpr::FPLe { lhs, rhs } => {
                 Self::find_var_width_in_expr(lhs, target)
                     .or_else(|| Self::find_var_width_in_expr(rhs, target))
             }
@@ -189,12 +192,27 @@ impl RuleProposal {
                 Self::find_var_width_in_expr(lhs, target)
                     .or_else(|| Self::find_var_width_in_expr(rhs, target))
             }
+            SmtExpr::FPFma { a, b, c, .. } => {
+                Self::find_var_width_in_expr(a, target)
+                    .or_else(|| Self::find_var_width_in_expr(b, target))
+                    .or_else(|| Self::find_var_width_in_expr(c, target))
+            }
             SmtExpr::BvNeg { operand, .. }
             | SmtExpr::Not { operand }
             | SmtExpr::Extract { operand, .. }
             | SmtExpr::ZeroExtend { operand, .. }
             | SmtExpr::SignExtend { operand, .. }
-            | SmtExpr::FPNeg { operand } => {
+            | SmtExpr::FPNeg { operand }
+            | SmtExpr::FPAbs { operand }
+            | SmtExpr::FPSqrt { operand, .. }
+            | SmtExpr::FPIsNaN { operand }
+            | SmtExpr::FPIsInf { operand }
+            | SmtExpr::FPIsZero { operand }
+            | SmtExpr::FPIsNormal { operand }
+            | SmtExpr::FPToSBv { operand, .. }
+            | SmtExpr::FPToUBv { operand, .. }
+            | SmtExpr::BvToFP { operand, .. }
+            | SmtExpr::FPToFP { operand, .. } => {
                 Self::find_var_width_in_expr(operand, target)
             }
             SmtExpr::Concat { hi, lo, .. } => {
@@ -677,17 +695,37 @@ fn estimate_expr_cost(expr: &SmtExpr) -> i32 {
         | SmtExpr::And { lhs, rhs }
         | SmtExpr::Or { lhs, rhs }
         | SmtExpr::FPEq { lhs, rhs }
-        | SmtExpr::FPLt { lhs, rhs } => 1 + estimate_expr_cost(lhs) + estimate_expr_cost(rhs),
+        | SmtExpr::FPLt { lhs, rhs }
+        | SmtExpr::FPGt { lhs, rhs }
+        | SmtExpr::FPGe { lhs, rhs }
+        | SmtExpr::FPLe { lhs, rhs } => 1 + estimate_expr_cost(lhs) + estimate_expr_cost(rhs),
         SmtExpr::FPAdd { lhs, rhs, .. }
         | SmtExpr::FPSub { lhs, rhs, .. }
         | SmtExpr::FPMul { lhs, rhs, .. }
         | SmtExpr::FPDiv { lhs, rhs, .. } => {
             3 + estimate_expr_cost(lhs) + estimate_expr_cost(rhs)
         }
+        SmtExpr::FPFma { a, b, c, .. } => {
+            5 + estimate_expr_cost(a) + estimate_expr_cost(b) + estimate_expr_cost(c)
+        }
         SmtExpr::BvNeg { operand, .. }
         | SmtExpr::Not { operand }
-        | SmtExpr::FPNeg { operand } => {
+        | SmtExpr::FPNeg { operand }
+        | SmtExpr::FPAbs { operand }
+        | SmtExpr::FPIsNaN { operand }
+        | SmtExpr::FPIsInf { operand }
+        | SmtExpr::FPIsZero { operand }
+        | SmtExpr::FPIsNormal { operand } => {
             1 + estimate_expr_cost(operand)
+        }
+        SmtExpr::FPSqrt { operand, .. } => {
+            4 + estimate_expr_cost(operand)
+        }
+        SmtExpr::FPToSBv { operand, .. }
+        | SmtExpr::FPToUBv { operand, .. }
+        | SmtExpr::BvToFP { operand, .. }
+        | SmtExpr::FPToFP { operand, .. } => {
+            2 + estimate_expr_cost(operand)
         }
         SmtExpr::Extract { operand, .. }
         | SmtExpr::ZeroExtend { operand, .. }

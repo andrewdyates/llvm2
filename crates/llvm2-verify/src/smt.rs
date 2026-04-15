@@ -327,11 +327,53 @@ pub enum SmtExpr {
     /// `(fp.lt a b)` -- floating-point less-than (returns Bool).
     FPLt { lhs: Box<SmtExpr>, rhs: Box<SmtExpr> },
 
+    /// `(fp.gt a b)` -- floating-point greater-than (returns Bool).
+    FPGt { lhs: Box<SmtExpr>, rhs: Box<SmtExpr> },
+
+    /// `(fp.geq a b)` -- floating-point greater-or-equal (returns Bool).
+    FPGe { lhs: Box<SmtExpr>, rhs: Box<SmtExpr> },
+
+    /// `(fp.leq a b)` -- floating-point less-or-equal (returns Bool).
+    FPLe { lhs: Box<SmtExpr>, rhs: Box<SmtExpr> },
+
     /// Floating-point constant from f64 bits.
     ///
     /// `eb` = exponent bits, `sb` = significand bits.
     /// The `bits` field holds the IEEE 754 bit pattern.
     FPConst { bits: u64, eb: u32, sb: u32 },
+
+    /// `(fp.sqrt rm a)` -- floating-point square root.
+    FPSqrt { rm: RoundingMode, operand: Box<SmtExpr> },
+
+    /// `(fp.abs a)` -- floating-point absolute value.
+    FPAbs { operand: Box<SmtExpr> },
+
+    /// `(fp.fma rm a b c)` -- floating-point fused multiply-add: `a * b + c`.
+    FPFma { rm: RoundingMode, a: Box<SmtExpr>, b: Box<SmtExpr>, c: Box<SmtExpr> },
+
+    /// `(fp.isNaN a)` -- true if the argument is NaN (returns Bool).
+    FPIsNaN { operand: Box<SmtExpr> },
+
+    /// `(fp.isInfinite a)` -- true if the argument is +/- infinity (returns Bool).
+    FPIsInf { operand: Box<SmtExpr> },
+
+    /// `(fp.isZero a)` -- true if the argument is +/- zero (returns Bool).
+    FPIsZero { operand: Box<SmtExpr> },
+
+    /// `(fp.isNormal a)` -- true if the argument is a normal FP number (returns Bool).
+    FPIsNormal { operand: Box<SmtExpr> },
+
+    /// `((_ fp.to_sbv width) rm a)` -- convert FP to signed bitvector.
+    FPToSBv { rm: RoundingMode, operand: Box<SmtExpr>, width: u32 },
+
+    /// `((_ fp.to_ubv width) rm a)` -- convert FP to unsigned bitvector.
+    FPToUBv { rm: RoundingMode, operand: Box<SmtExpr>, width: u32 },
+
+    /// `((_ to_fp eb sb) rm bv)` -- convert bitvector to FP with rounding.
+    BvToFP { rm: RoundingMode, operand: Box<SmtExpr>, eb: u32, sb: u32 },
+
+    /// `((_ to_fp eb sb) rm fp)` -- convert between FP formats with rounding.
+    FPToFP { rm: RoundingMode, operand: Box<SmtExpr>, eb: u32, sb: u32 },
 
     // -- Uninterpreted functions (QF_UF theory) --
 
@@ -701,6 +743,76 @@ impl SmtExpr {
         SmtExpr::FPLt { lhs: Box::new(self), rhs: Box::new(other) }
     }
 
+    /// `(fp.gt a b)` -- floating-point greater-than (returns Bool).
+    pub fn fp_gt(self, other: Self) -> Self {
+        SmtExpr::FPGt { lhs: Box::new(self), rhs: Box::new(other) }
+    }
+
+    /// `(fp.geq a b)` -- floating-point greater-or-equal (returns Bool).
+    pub fn fp_ge(self, other: Self) -> Self {
+        SmtExpr::FPGe { lhs: Box::new(self), rhs: Box::new(other) }
+    }
+
+    /// `(fp.leq a b)` -- floating-point less-or-equal (returns Bool).
+    pub fn fp_le(self, other: Self) -> Self {
+        SmtExpr::FPLe { lhs: Box::new(self), rhs: Box::new(other) }
+    }
+
+    /// `(fp.sqrt rm a)` -- floating-point square root.
+    pub fn fp_sqrt(rm: RoundingMode, a: Self) -> Self {
+        SmtExpr::FPSqrt { rm, operand: Box::new(a) }
+    }
+
+    /// `(fp.abs a)` -- floating-point absolute value.
+    pub fn fp_abs(self) -> Self {
+        SmtExpr::FPAbs { operand: Box::new(self) }
+    }
+
+    /// `(fp.fma rm a b c)` -- floating-point fused multiply-add: `a * b + c`.
+    pub fn fp_fma(rm: RoundingMode, a: Self, b: Self, c: Self) -> Self {
+        SmtExpr::FPFma { rm, a: Box::new(a), b: Box::new(b), c: Box::new(c) }
+    }
+
+    /// `(fp.isNaN a)` -- true if the argument is NaN (returns Bool).
+    pub fn fp_is_nan(self) -> Self {
+        SmtExpr::FPIsNaN { operand: Box::new(self) }
+    }
+
+    /// `(fp.isInfinite a)` -- true if the argument is infinity (returns Bool).
+    pub fn fp_is_inf(self) -> Self {
+        SmtExpr::FPIsInf { operand: Box::new(self) }
+    }
+
+    /// `(fp.isZero a)` -- true if the argument is +/- zero (returns Bool).
+    pub fn fp_is_zero(self) -> Self {
+        SmtExpr::FPIsZero { operand: Box::new(self) }
+    }
+
+    /// `(fp.isNormal a)` -- true if the argument is a normal FP number (returns Bool).
+    pub fn fp_is_normal(self) -> Self {
+        SmtExpr::FPIsNormal { operand: Box::new(self) }
+    }
+
+    /// `((_ fp.to_sbv width) rm a)` -- convert FP to signed bitvector.
+    pub fn fp_to_sbv(rm: RoundingMode, a: Self, width: u32) -> Self {
+        SmtExpr::FPToSBv { rm, operand: Box::new(a), width }
+    }
+
+    /// `((_ fp.to_ubv width) rm a)` -- convert FP to unsigned bitvector.
+    pub fn fp_to_ubv(rm: RoundingMode, a: Self, width: u32) -> Self {
+        SmtExpr::FPToUBv { rm, operand: Box::new(a), width }
+    }
+
+    /// `((_ to_fp eb sb) rm bv)` -- convert signed bitvector to FP.
+    pub fn bv_to_fp(rm: RoundingMode, bv: Self, eb: u32, sb: u32) -> Self {
+        SmtExpr::BvToFP { rm, operand: Box::new(bv), eb, sb }
+    }
+
+    /// `((_ to_fp eb sb) rm fp)` -- convert between FP formats.
+    pub fn fp_to_fp(rm: RoundingMode, fp: Self, eb: u32, sb: u32) -> Self {
+        SmtExpr::FPToFP { rm, operand: Box::new(fp), eb, sb }
+    }
+
     // -- Uninterpreted function constructors --
 
     /// Uninterpreted function application.
@@ -745,6 +857,8 @@ impl SmtExpr {
             }
             // UF returns its declared sort.
             SmtExpr::UF { ret_sort, .. } => ret_sort.bv_width().ok_or(SmtError::BoolHasNoWidth),
+            // FP-to-BV conversions produce bitvectors.
+            SmtExpr::FPToSBv { width, .. } | SmtExpr::FPToUBv { width, .. } => Ok(*width),
             SmtExpr::BoolConst(_)
             | SmtExpr::Eq { .. }
             | SmtExpr::Not { .. }
@@ -759,14 +873,26 @@ impl SmtExpr {
             | SmtExpr::And { .. }
             | SmtExpr::Or { .. }
             | SmtExpr::FPEq { .. }
-            | SmtExpr::FPLt { .. } => Err(SmtError::BoolHasNoWidth),
+            | SmtExpr::FPLt { .. }
+            | SmtExpr::FPGt { .. }
+            | SmtExpr::FPGe { .. }
+            | SmtExpr::FPLe { .. }
+            | SmtExpr::FPIsNaN { .. }
+            | SmtExpr::FPIsInf { .. }
+            | SmtExpr::FPIsZero { .. }
+            | SmtExpr::FPIsNormal { .. } => Err(SmtError::BoolHasNoWidth),
             // FP / array / UF decl nodes have no BV width.
             SmtExpr::FPAdd { .. }
             | SmtExpr::FPSub { .. }
             | SmtExpr::FPMul { .. }
             | SmtExpr::FPDiv { .. }
             | SmtExpr::FPNeg { .. }
+            | SmtExpr::FPAbs { .. }
+            | SmtExpr::FPSqrt { .. }
+            | SmtExpr::FPFma { .. }
             | SmtExpr::FPConst { .. }
+            | SmtExpr::BvToFP { .. }
+            | SmtExpr::FPToFP { .. }
             | SmtExpr::Store { .. }
             | SmtExpr::ConstArray { .. }
             | SmtExpr::UFDecl { .. } => Err(SmtError::BoolHasNoWidth),
@@ -801,14 +927,31 @@ impl SmtExpr {
             | SmtExpr::And { .. }
             | SmtExpr::Or { .. }
             | SmtExpr::FPEq { .. }
-            | SmtExpr::FPLt { .. } => SmtSort::Bool,
+            | SmtExpr::FPLt { .. }
+            | SmtExpr::FPGt { .. }
+            | SmtExpr::FPGe { .. }
+            | SmtExpr::FPLe { .. }
+            | SmtExpr::FPIsNaN { .. }
+            | SmtExpr::FPIsInf { .. }
+            | SmtExpr::FPIsZero { .. }
+            | SmtExpr::FPIsNormal { .. } => SmtSort::Bool,
             // Floating-point expressions
             SmtExpr::FPAdd { lhs, .. }
             | SmtExpr::FPSub { lhs, .. }
             | SmtExpr::FPMul { lhs, .. }
             | SmtExpr::FPDiv { lhs, .. } => lhs.sort(),
-            SmtExpr::FPNeg { operand } => operand.sort(),
+            SmtExpr::FPSqrt { operand, .. }
+            | SmtExpr::FPAbs { operand }
+            | SmtExpr::FPNeg { operand } => operand.sort(),
+            SmtExpr::FPFma { a, .. } => a.sort(),
             SmtExpr::FPConst { eb, sb, .. } => SmtSort::FloatingPoint(*eb, *sb),
+            SmtExpr::BvToFP { eb, sb, .. } | SmtExpr::FPToFP { eb, sb, .. } => {
+                SmtSort::FloatingPoint(*eb, *sb)
+            }
+            // FP-to-BV conversions produce bitvectors.
+            SmtExpr::FPToSBv { width, .. } | SmtExpr::FPToUBv { width, .. } => {
+                SmtSort::BitVec(*width)
+            }
             // Array expressions
             SmtExpr::Store { array, .. } => array.sort(),
             SmtExpr::ConstArray { index_sort, value } => {
@@ -867,7 +1010,10 @@ impl SmtExpr {
             | SmtExpr::And { lhs, rhs }
             | SmtExpr::Or { lhs, rhs }
             | SmtExpr::FPEq { lhs, rhs }
-            | SmtExpr::FPLt { lhs, rhs } => {
+            | SmtExpr::FPLt { lhs, rhs }
+            | SmtExpr::FPGt { lhs, rhs }
+            | SmtExpr::FPGe { lhs, rhs }
+            | SmtExpr::FPLe { lhs, rhs } => {
                 lhs.collect_vars(vars);
                 rhs.collect_vars(vars);
             }
@@ -878,12 +1024,27 @@ impl SmtExpr {
                 lhs.collect_vars(vars);
                 rhs.collect_vars(vars);
             }
+            SmtExpr::FPFma { a, b, c, .. } => {
+                a.collect_vars(vars);
+                b.collect_vars(vars);
+                c.collect_vars(vars);
+            }
             SmtExpr::BvNeg { operand, .. }
             | SmtExpr::Not { operand }
             | SmtExpr::Extract { operand, .. }
             | SmtExpr::ZeroExtend { operand, .. }
             | SmtExpr::SignExtend { operand, .. }
-            | SmtExpr::FPNeg { operand } => {
+            | SmtExpr::FPNeg { operand }
+            | SmtExpr::FPAbs { operand }
+            | SmtExpr::FPSqrt { operand, .. }
+            | SmtExpr::FPIsNaN { operand }
+            | SmtExpr::FPIsInf { operand }
+            | SmtExpr::FPIsZero { operand }
+            | SmtExpr::FPIsNormal { operand }
+            | SmtExpr::FPToSBv { operand, .. }
+            | SmtExpr::FPToUBv { operand, .. }
+            | SmtExpr::BvToFP { operand, .. }
+            | SmtExpr::FPToFP { operand, .. } => {
                 operand.collect_vars(vars);
             }
             SmtExpr::Concat { hi, lo, .. } => {
@@ -1365,6 +1526,85 @@ impl SmtExpr {
                 let b = rhs.try_eval(env)?.as_f64();
                 Ok(EvalResult::Bool(a < b))
             }
+            SmtExpr::FPGt { lhs, rhs } => {
+                let a = lhs.try_eval(env)?.as_f64();
+                let b = rhs.try_eval(env)?.as_f64();
+                Ok(EvalResult::Bool(a > b))
+            }
+            SmtExpr::FPGe { lhs, rhs } => {
+                let a = lhs.try_eval(env)?.as_f64();
+                let b = rhs.try_eval(env)?.as_f64();
+                Ok(EvalResult::Bool(a >= b))
+            }
+            SmtExpr::FPLe { lhs, rhs } => {
+                let a = lhs.try_eval(env)?.as_f64();
+                let b = rhs.try_eval(env)?.as_f64();
+                Ok(EvalResult::Bool(a <= b))
+            }
+            SmtExpr::FPSqrt { operand, .. } => {
+                let a = operand.try_eval(env)?.as_f64();
+                Ok(EvalResult::Float(a.sqrt()))
+            }
+            SmtExpr::FPAbs { operand } => {
+                let a = operand.try_eval(env)?.as_f64();
+                Ok(EvalResult::Float(a.abs()))
+            }
+            SmtExpr::FPFma { a, b, c, .. } => {
+                let av = a.try_eval(env)?.as_f64();
+                let bv = b.try_eval(env)?.as_f64();
+                let cv = c.try_eval(env)?.as_f64();
+                Ok(EvalResult::Float(av.mul_add(bv, cv)))
+            }
+            SmtExpr::FPIsNaN { operand } => {
+                let a = operand.try_eval(env)?.as_f64();
+                Ok(EvalResult::Bool(a.is_nan()))
+            }
+            SmtExpr::FPIsInf { operand } => {
+                let a = operand.try_eval(env)?.as_f64();
+                Ok(EvalResult::Bool(a.is_infinite()))
+            }
+            SmtExpr::FPIsZero { operand } => {
+                let a = operand.try_eval(env)?.as_f64();
+                Ok(EvalResult::Bool(a == 0.0))
+            }
+            SmtExpr::FPIsNormal { operand } => {
+                let a = operand.try_eval(env)?.as_f64();
+                Ok(EvalResult::Bool(a.is_normal()))
+            }
+            SmtExpr::FPToSBv { operand, width, .. } => {
+                let a = operand.try_eval(env)?.as_f64();
+                // Truncate toward zero (RTZ), clamp to signed range.
+                let trunc = a as i64;
+                Ok(EvalResult::Bv(mask(trunc as u64, *width)))
+            }
+            SmtExpr::FPToUBv { operand, width, .. } => {
+                let a = operand.try_eval(env)?.as_f64();
+                // Truncate toward zero (RTZ), clamp to unsigned range.
+                let trunc = a as u64;
+                Ok(EvalResult::Bv(mask(trunc, *width)))
+            }
+            SmtExpr::BvToFP { operand, eb, sb, .. } => {
+                let v = operand.try_eval(env)?.as_u64();
+                let src_width = operand.bv_width();
+                // Interpret as signed integer, convert to f64.
+                let signed = sign_extend(v, src_width);
+                let f = if *eb == 8 && *sb == 24 {
+                    (signed as f32) as f64
+                } else {
+                    signed as f64
+                };
+                Ok(EvalResult::Float(f))
+            }
+            SmtExpr::FPToFP { operand, eb, sb, .. } => {
+                let f = operand.try_eval(env)?.as_f64();
+                // Convert between FP formats via Rust f32/f64.
+                let result = if *eb == 8 && *sb == 24 {
+                    (f as f32) as f64
+                } else {
+                    f
+                };
+                Ok(EvalResult::Float(result))
+            }
 
             // -- Uninterpreted functions --
             // UF evaluation is not meaningful in concrete evaluation (they are
@@ -1514,6 +1754,48 @@ impl fmt::Display for SmtExpr {
             }
             SmtExpr::FPLt { lhs, rhs } => {
                 write!(f, "(fp.lt {} {})", lhs, rhs)
+            }
+            SmtExpr::FPGt { lhs, rhs } => {
+                write!(f, "(fp.gt {} {})", lhs, rhs)
+            }
+            SmtExpr::FPGe { lhs, rhs } => {
+                write!(f, "(fp.geq {} {})", lhs, rhs)
+            }
+            SmtExpr::FPLe { lhs, rhs } => {
+                write!(f, "(fp.leq {} {})", lhs, rhs)
+            }
+            SmtExpr::FPSqrt { rm, operand } => {
+                write!(f, "(fp.sqrt {} {})", rm, operand)
+            }
+            SmtExpr::FPAbs { operand } => {
+                write!(f, "(fp.abs {})", operand)
+            }
+            SmtExpr::FPFma { rm, a, b, c } => {
+                write!(f, "(fp.fma {} {} {} {})", rm, a, b, c)
+            }
+            SmtExpr::FPIsNaN { operand } => {
+                write!(f, "(fp.isNaN {})", operand)
+            }
+            SmtExpr::FPIsInf { operand } => {
+                write!(f, "(fp.isInfinite {})", operand)
+            }
+            SmtExpr::FPIsZero { operand } => {
+                write!(f, "(fp.isZero {})", operand)
+            }
+            SmtExpr::FPIsNormal { operand } => {
+                write!(f, "(fp.isNormal {})", operand)
+            }
+            SmtExpr::FPToSBv { rm, operand, width } => {
+                write!(f, "((_ fp.to_sbv {}) {} {})", width, rm, operand)
+            }
+            SmtExpr::FPToUBv { rm, operand, width } => {
+                write!(f, "((_ fp.to_ubv {}) {} {})", width, rm, operand)
+            }
+            SmtExpr::BvToFP { rm, operand, eb, sb } => {
+                write!(f, "((_ to_fp {} {}) {} {})", eb, sb, rm, operand)
+            }
+            SmtExpr::FPToFP { rm, operand, eb, sb } => {
+                write!(f, "((_ to_fp {} {}) {} {})", eb, sb, rm, operand)
             }
             // Uninterpreted functions
             SmtExpr::UF { name, args, .. } => {
@@ -2595,5 +2877,342 @@ mod tests {
         assert_eq!(sign_extend128(u128::MAX, 128), -1i128);
         // Zero width
         assert_eq!(sign_extend128(0xFF, 0), 0i128);
+    }
+
+    // -----------------------------------------------------------------------
+    // QF_FP extended operations tests (#123)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fp_sqrt() {
+        let a = SmtExpr::fp64_const(9.0);
+        let expr = SmtExpr::fp_sqrt(RoundingMode::RNE, a);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Float(3.0));
+    }
+
+    #[test]
+    fn test_fp_sqrt_display() {
+        let expr = SmtExpr::fp_sqrt(RoundingMode::RTZ, SmtExpr::fp64_const(4.0));
+        assert_eq!(format!("{}", expr).split_once(' ').unwrap().0, "(fp.sqrt");
+    }
+
+    #[test]
+    fn test_fp_abs_positive() {
+        let a = SmtExpr::fp64_const(3.5);
+        let expr = a.fp_abs();
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Float(3.5));
+    }
+
+    #[test]
+    fn test_fp_abs_negative() {
+        let a = SmtExpr::fp64_const(-7.25);
+        let expr = a.fp_abs();
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Float(7.25));
+    }
+
+    #[test]
+    fn test_fp_abs_display() {
+        let expr = SmtExpr::fp64_const(-1.0).fp_abs();
+        assert!(format!("{}", expr).starts_with("(fp.abs"));
+    }
+
+    #[test]
+    fn test_fp_fma() {
+        // fma(2.0, 3.0, 4.0) = 2.0 * 3.0 + 4.0 = 10.0
+        let expr = SmtExpr::fp_fma(
+            RoundingMode::RNE,
+            SmtExpr::fp64_const(2.0),
+            SmtExpr::fp64_const(3.0),
+            SmtExpr::fp64_const(4.0),
+        );
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Float(10.0));
+    }
+
+    #[test]
+    fn test_fp_fma_display() {
+        let expr = SmtExpr::fp_fma(
+            RoundingMode::RNE,
+            SmtExpr::fp64_const(1.0),
+            SmtExpr::fp64_const(2.0),
+            SmtExpr::fp64_const(3.0),
+        );
+        assert!(format!("{}", expr).starts_with("(fp.fma RNE"));
+    }
+
+    #[test]
+    fn test_fp_gt() {
+        let a = SmtExpr::fp64_const(3.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let expr = a.fp_gt(b);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(true));
+    }
+
+    #[test]
+    fn test_fp_ge() {
+        let a = SmtExpr::fp64_const(2.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let expr = a.fp_ge(b);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(true));
+    }
+
+    #[test]
+    fn test_fp_le() {
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let expr = a.fp_le(b);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(true));
+    }
+
+    #[test]
+    fn test_fp_comparison_display() {
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(2.0);
+        assert!(format!("{}", a.clone().fp_gt(b.clone())).starts_with("(fp.gt"));
+        assert!(format!("{}", a.clone().fp_ge(b.clone())).starts_with("(fp.geq"));
+        assert!(format!("{}", a.fp_le(b)).starts_with("(fp.leq"));
+    }
+
+    #[test]
+    fn test_fp_is_nan() {
+        let nan = SmtExpr::fp64_const(f64::NAN);
+        let expr = nan.fp_is_nan();
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(true));
+
+        let normal = SmtExpr::fp64_const(1.0);
+        let expr2 = normal.fp_is_nan();
+        let result2 = expr2.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result2, EvalResult::Bool(false));
+    }
+
+    #[test]
+    fn test_fp_is_inf() {
+        let inf = SmtExpr::fp64_const(f64::INFINITY);
+        let expr = inf.fp_is_inf();
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(true));
+
+        let neg_inf = SmtExpr::fp64_const(f64::NEG_INFINITY);
+        let expr2 = neg_inf.fp_is_inf();
+        let result2 = expr2.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result2, EvalResult::Bool(true));
+
+        let normal = SmtExpr::fp64_const(42.0);
+        let expr3 = normal.fp_is_inf();
+        let result3 = expr3.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result3, EvalResult::Bool(false));
+    }
+
+    #[test]
+    fn test_fp_is_zero() {
+        let zero = SmtExpr::fp64_const(0.0);
+        let expr = zero.fp_is_zero();
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(true));
+
+        let neg_zero = SmtExpr::fp64_const(-0.0);
+        let expr2 = neg_zero.fp_is_zero();
+        let result2 = expr2.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result2, EvalResult::Bool(true));
+
+        let nonzero = SmtExpr::fp64_const(1.0);
+        let expr3 = nonzero.fp_is_zero();
+        let result3 = expr3.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result3, EvalResult::Bool(false));
+    }
+
+    #[test]
+    fn test_fp_is_normal() {
+        let normal = SmtExpr::fp64_const(1.0);
+        let expr = normal.fp_is_normal();
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(true));
+
+        // Subnormals are not normal
+        let subnormal = SmtExpr::fp64_const(5e-324);
+        let expr2 = subnormal.fp_is_normal();
+        let result2 = expr2.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result2, EvalResult::Bool(false));
+
+        // Zero is not normal
+        let zero = SmtExpr::fp64_const(0.0);
+        let expr3 = zero.fp_is_normal();
+        let result3 = expr3.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result3, EvalResult::Bool(false));
+    }
+
+    #[test]
+    fn test_fp_predicate_display() {
+        let a = SmtExpr::fp64_const(1.0);
+        assert!(format!("{}", a.clone().fp_is_nan()).starts_with("(fp.isNaN"));
+        assert!(format!("{}", a.clone().fp_is_inf()).starts_with("(fp.isInfinite"));
+        assert!(format!("{}", a.clone().fp_is_zero()).starts_with("(fp.isZero"));
+        assert!(format!("{}", a.fp_is_normal()).starts_with("(fp.isNormal"));
+    }
+
+    #[test]
+    fn test_fp_to_sbv() {
+        let a = SmtExpr::fp64_const(42.7);
+        let expr = SmtExpr::fp_to_sbv(RoundingMode::RTZ, a, 32);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bv(42));
+    }
+
+    #[test]
+    fn test_fp_to_sbv_negative() {
+        let a = SmtExpr::fp64_const(-10.9);
+        let expr = SmtExpr::fp_to_sbv(RoundingMode::RTZ, a, 32);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        // -10 as u32 = 0xFFFFFFF6
+        assert_eq!(result, EvalResult::Bv(mask((-10i64) as u64, 32)));
+    }
+
+    #[test]
+    fn test_fp_to_ubv() {
+        let a = SmtExpr::fp64_const(255.9);
+        let expr = SmtExpr::fp_to_ubv(RoundingMode::RTZ, a, 8);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bv(255));
+    }
+
+    #[test]
+    fn test_fp_to_bv_display() {
+        let a = SmtExpr::fp64_const(1.0);
+        let sbv = SmtExpr::fp_to_sbv(RoundingMode::RTZ, a.clone(), 32);
+        assert!(format!("{}", sbv).starts_with("((_ fp.to_sbv 32)"));
+
+        let ubv = SmtExpr::fp_to_ubv(RoundingMode::RNE, a, 64);
+        assert!(format!("{}", ubv).starts_with("((_ fp.to_ubv 64)"));
+    }
+
+    #[test]
+    fn test_bv_to_fp() {
+        let bv = SmtExpr::bv_const(42, 32);
+        let expr = SmtExpr::bv_to_fp(RoundingMode::RNE, bv, 8, 24);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Float(42.0f32 as f64));
+    }
+
+    #[test]
+    fn test_bv_to_fp_negative() {
+        // -1 in 8 bits = 0xFF
+        let bv = SmtExpr::bv_const(0xFF, 8);
+        let expr = SmtExpr::bv_to_fp(RoundingMode::RNE, bv, 11, 53);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Float(-1.0));
+    }
+
+    #[test]
+    fn test_bv_to_fp_display() {
+        let bv = SmtExpr::bv_const(42, 32);
+        let expr = SmtExpr::bv_to_fp(RoundingMode::RNE, bv, 8, 24);
+        assert!(format!("{}", expr).starts_with("((_ to_fp 8 24)"));
+    }
+
+    #[test]
+    fn test_fp_to_fp_downcast() {
+        // FP64 -> FP32 (lossy conversion)
+        let a = SmtExpr::fp64_const(1.5);
+        let expr = SmtExpr::fp_to_fp(RoundingMode::RNE, a, 8, 24);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Float(1.5f32 as f64));
+    }
+
+    #[test]
+    fn test_fp_to_fp_display() {
+        let a = SmtExpr::fp64_const(1.0);
+        let expr = SmtExpr::fp_to_fp(RoundingMode::RTZ, a, 5, 11);
+        assert!(format!("{}", expr).starts_with("((_ to_fp 5 11)"));
+    }
+
+    #[test]
+    fn test_fp_sort_new_variants() {
+        // FPSqrt returns same FP sort as operand
+        let sqrt = SmtExpr::fp_sqrt(RoundingMode::RNE, SmtExpr::fp32_const(4.0));
+        assert_eq!(sqrt.sort(), SmtSort::FloatingPoint(8, 24));
+
+        // FPAbs returns same FP sort as operand
+        let abs = SmtExpr::fp64_const(-1.0).fp_abs();
+        assert_eq!(abs.sort(), SmtSort::FloatingPoint(11, 53));
+
+        // FPFma returns same FP sort as first operand
+        let fma = SmtExpr::fp_fma(
+            RoundingMode::RNE,
+            SmtExpr::fp32_const(1.0),
+            SmtExpr::fp32_const(2.0),
+            SmtExpr::fp32_const(3.0),
+        );
+        assert_eq!(fma.sort(), SmtSort::FloatingPoint(8, 24));
+
+        // FP predicates return Bool
+        assert_eq!(SmtExpr::fp64_const(1.0).fp_is_nan().sort(), SmtSort::Bool);
+        assert_eq!(SmtExpr::fp64_const(1.0).fp_is_inf().sort(), SmtSort::Bool);
+        assert_eq!(SmtExpr::fp64_const(1.0).fp_is_zero().sort(), SmtSort::Bool);
+        assert_eq!(SmtExpr::fp64_const(1.0).fp_is_normal().sort(), SmtSort::Bool);
+        assert_eq!(SmtExpr::fp64_const(1.0).fp_gt(SmtExpr::fp64_const(2.0)).sort(), SmtSort::Bool);
+        assert_eq!(SmtExpr::fp64_const(1.0).fp_ge(SmtExpr::fp64_const(2.0)).sort(), SmtSort::Bool);
+        assert_eq!(SmtExpr::fp64_const(1.0).fp_le(SmtExpr::fp64_const(2.0)).sort(), SmtSort::Bool);
+
+        // FP-to-BV conversions return BitVec
+        let to_sbv = SmtExpr::fp_to_sbv(RoundingMode::RTZ, SmtExpr::fp64_const(1.0), 32);
+        assert_eq!(to_sbv.sort(), SmtSort::BitVec(32));
+        let to_ubv = SmtExpr::fp_to_ubv(RoundingMode::RTZ, SmtExpr::fp64_const(1.0), 64);
+        assert_eq!(to_ubv.sort(), SmtSort::BitVec(64));
+
+        // BV-to-FP and FP-to-FP conversions return FloatingPoint
+        let bv_to_fp = SmtExpr::bv_to_fp(RoundingMode::RNE, SmtExpr::bv_const(42, 32), 8, 24);
+        assert_eq!(bv_to_fp.sort(), SmtSort::FloatingPoint(8, 24));
+        let fp_to_fp = SmtExpr::fp_to_fp(RoundingMode::RNE, SmtExpr::fp64_const(1.0), 5, 11);
+        assert_eq!(fp_to_fp.sort(), SmtSort::FloatingPoint(5, 11));
+    }
+
+    #[test]
+    fn test_fp_free_vars_new_variants() {
+        // FPFma with vars
+        let fma = SmtExpr::fp_fma(
+            RoundingMode::RNE,
+            SmtExpr::fp64_const(1.0),
+            SmtExpr::fp64_const(2.0),
+            SmtExpr::fp64_const(3.0),
+        );
+        assert!(fma.free_vars().is_empty());
+
+        // FPSqrt, FPAbs with constants have no free vars
+        let sqrt = SmtExpr::fp_sqrt(RoundingMode::RNE, SmtExpr::fp64_const(4.0));
+        assert!(sqrt.free_vars().is_empty());
+
+        let abs = SmtExpr::fp64_const(-1.0).fp_abs();
+        assert!(abs.free_vars().is_empty());
+    }
+
+    #[test]
+    fn test_fp_to_sbv_bv_width() {
+        // FPToSBv should have a BV width.
+        let expr = SmtExpr::fp_to_sbv(RoundingMode::RTZ, SmtExpr::fp64_const(1.0), 32);
+        assert_eq!(expr.try_bv_width().unwrap(), 32);
+    }
+
+    #[test]
+    fn test_fp_to_ubv_bv_width() {
+        let expr = SmtExpr::fp_to_ubv(RoundingMode::RTZ, SmtExpr::fp64_const(1.0), 16);
+        assert_eq!(expr.try_bv_width().unwrap(), 16);
+    }
+
+    #[test]
+    fn test_fp_new_ops_no_bv_width() {
+        // FP operations should return BoolHasNoWidth.
+        assert!(SmtExpr::fp_sqrt(RoundingMode::RNE, SmtExpr::fp64_const(4.0))
+            .try_bv_width().is_err());
+        assert!(SmtExpr::fp64_const(-1.0).fp_abs().try_bv_width().is_err());
+        assert!(SmtExpr::fp64_const(1.0).fp_is_nan().try_bv_width().is_err());
+        assert!(SmtExpr::bv_to_fp(RoundingMode::RNE, SmtExpr::bv_const(0, 32), 8, 24)
+            .try_bv_width().is_err());
     }
 }
