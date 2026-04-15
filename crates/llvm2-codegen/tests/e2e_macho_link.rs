@@ -629,8 +629,8 @@ fn test_e2e_link_add_i32_otool_validation() {
     }
 
     // -- nm: symbol table --
-    if has_nm() {
-        if let Some(nm_out) = run_nm(&obj_path) {
+    if has_nm()
+        && let Some(nm_out) = run_nm(&obj_path) {
             assert!(
                 nm_out.contains("_add_i32"),
                 "nm must show _add_i32 symbol.\n{}", nm_out
@@ -640,7 +640,6 @@ fn test_e2e_link_add_i32_otool_validation() {
                 "add_i32 must be a global text symbol (T).\n{}", nm_out
             );
         }
-    }
 
     cleanup(&dir);
 }
@@ -995,13 +994,12 @@ fn test_e2e_link_all_functions_otool_validates() {
             "{}: disassembly must reference function name.\n{}", name, disasm);
 
         // nm must show the symbol
-        if has_nm() {
-            if let Some(nm_out) = run_nm(&obj_path) {
+        if has_nm()
+            && let Some(nm_out) = run_nm(&obj_path) {
                 let symbol = format!("_{}", name);
                 assert!(nm_out.contains(&symbol),
                     "{}: nm must show {} symbol.\n{}", name, symbol, nm_out);
             }
-        }
     }
 
     cleanup(&dir);

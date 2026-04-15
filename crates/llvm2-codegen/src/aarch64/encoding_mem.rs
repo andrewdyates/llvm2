@@ -572,7 +572,7 @@ mod tests {
             2, RegExtend::Sxtw, false, 1, 0,
         ).unwrap();
         // size=10, V=0, opc=00, Rm=2, option=110, S=0, Rn=1, Rt=0
-        let expected = (0b10 << 30) | (0b111 << 27) | (0b00 << 22) | (1 << 21)
+        let expected = ((0b10 << 30) | (0b111 << 27)) | (1 << 21)
             | (2 << 16) | (0b110 << 13) | (0b10 << 10) | (1 << 5);
         assert_eq!(enc, expected);
     }

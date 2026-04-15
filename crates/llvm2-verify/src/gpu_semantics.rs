@@ -72,12 +72,12 @@ impl GpuKernelShape {
 
     /// Number of threadgroups needed to cover the grid.
     pub fn num_threadgroups(&self) -> u64 {
-        (self.grid_size + self.threadgroup_size as u64 - 1) / self.threadgroup_size as u64
+        self.grid_size.div_ceil(self.threadgroup_size as u64)
     }
 
     /// Number of SIMD groups per threadgroup.
     pub fn simd_groups_per_threadgroup(&self) -> u32 {
-        (self.threadgroup_size + self.simd_width - 1) / self.simd_width
+        self.threadgroup_size.div_ceil(self.simd_width)
     }
 
     /// Validate the kernel shape against Metal hardware constraints.
@@ -88,7 +88,7 @@ impl GpuKernelShape {
             && self.threadgroup_size > 0
             && self.threadgroup_size <= 1024
             && self.simd_width > 0
-            && self.threadgroup_size % self.simd_width == 0
+            && self.threadgroup_size.is_multiple_of(self.simd_width)
     }
 }
 

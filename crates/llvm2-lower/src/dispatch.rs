@@ -541,8 +541,8 @@ pub fn validate_profitability_compliance(
     let mut mismatches = Vec::new();
 
     for (node_id, &dispatched_target) in &plan.assignment {
-        if let Some(rec) = rec_map.get(node_id) {
-            if dispatched_target != rec.recommended_target {
+        if let Some(rec) = rec_map.get(node_id)
+            && dispatched_target != rec.recommended_target {
                 mismatches.push(ProfitabilityMismatch {
                     node_id: *node_id,
                     dispatched_target,
@@ -553,7 +553,6 @@ pub fn validate_profitability_compliance(
                     ),
                 });
             }
-        }
     }
 
     if mismatches.is_empty() {
@@ -634,14 +633,13 @@ pub fn validate_dispatch_plan(
                     }
                     let src_target = plan.assignment.get(&edge.from).copied()
                         .unwrap_or(ComputeTarget::CpuScalar);
-                    if src_target != *target && edge.transfer_bytes > 0 {
-                        if !transferred.contains(&(edge.from, *target)) {
+                    if src_target != *target && edge.transfer_bytes > 0
+                        && !transferred.contains(&(edge.from, *target)) {
                             return Err(DispatchError::UnsatisfiedDependency {
                                 consumer: *node_id,
                                 producer: edge.from,
                             });
                         }
-                    }
                     // Check async sync requirement.
                     if is_async_target(src_target) && pending_async.contains(&edge.from) {
                         return Err(DispatchError::MissingSyncBeforeRead {
@@ -809,14 +807,13 @@ pub fn verify_data_transfers(
         };
 
         // Cross-target edge with data to move must have a transfer op.
-        if src != dst && edge.transfer_bytes > 0 {
-            if !covered.contains(&(edge.from, edge.to)) {
+        if src != dst && edge.transfer_bytes > 0
+            && !covered.contains(&(edge.from, edge.to)) {
                 errors.push(format!(
                     "Missing DataTransfer for edge {} -> {} ({} -> {}, {} bytes)",
                     edge.from, edge.to, src, dst, edge.transfer_bytes
                 ));
             }
-        }
     }
 
     if errors.is_empty() {

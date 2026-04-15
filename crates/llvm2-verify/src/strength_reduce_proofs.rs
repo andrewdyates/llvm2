@@ -562,7 +562,8 @@ pub fn proof_dce_composition_8() -> ProofObligation {
 ///   - Idempotence:           3 shift amounts x 2 widths =  6
 ///   - No-change safety:      2 ops x 2 widths           =  4
 ///   - DCE composition:       1 x 2 widths               =  2
-///                                                  TOTAL = 66
+///
+///   TOTAL = 66
 #[inline(never)]
 pub fn all_strength_reduce_proofs() -> Vec<ProofObligation> {
     let mut proofs = Vec::new();

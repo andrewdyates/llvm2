@@ -239,11 +239,10 @@ impl ScopedValueTable {
     /// Invalidate all load value numbers (called on store/call).
     /// Saves the current load table so it can be restored on scope pop.
     fn kill_loads(&mut self) {
-        if let Some(frame) = self.scope_stack.last_mut() {
-            if frame.cleared_loads.is_none() {
+        if let Some(frame) = self.scope_stack.last_mut()
+            && frame.cleared_loads.is_none() {
                 frame.cleared_loads = Some(self.load_table.clone());
             }
-        }
         self.load_table.clear();
     }
 }
@@ -363,11 +362,10 @@ fn run_gvn(func: &mut MachFunction, dom: &DomTree) -> bool {
             let use_start = if produces_value(inst.opcode) { 1 } else { 0 };
 
             for i in use_start..inst.operands.len() {
-                if let MachOperand::VReg(vreg) = &inst.operands[i] {
-                    if let Some(replacement) = replacements.get(&vreg.id) {
+                if let MachOperand::VReg(vreg) = &inst.operands[i]
+                    && let Some(replacement) = replacements.get(&vreg.id) {
                         inst.operands[i] = MachOperand::VReg(*replacement);
                     }
-                }
             }
         }
     }
@@ -453,8 +451,8 @@ fn dom_walk_gvn(
         }
 
         // Handle pure instructions.
-        if effect == MemoryEffect::Pure {
-            if let Some(expr_key) = make_expr_key(inst, table, imm_vns, fimm_vns, alloc) {
+        if effect == MemoryEffect::Pure
+            && let Some(expr_key) = make_expr_key(inst, table, imm_vns, fimm_vns, alloc) {
                 if let Some((existing_vn, leader)) = table.lookup_expr(&expr_key) {
                     // Found a matching expression — eliminate this one.
                     let vn = *existing_vn;
@@ -478,7 +476,6 @@ fn dom_walk_gvn(
                 );
                 continue;
             }
-        }
 
         // Fallback: non-matchable instruction, assign fresh value number.
         let vn = alloc.fresh();
@@ -517,11 +514,10 @@ fn make_expr_key(
     }
 
     // Canonicalize commutative operations.
-    if is_commutative(inst.opcode) && op_vns.len() == 2 {
-        if op_vns[0] > op_vns[1] {
+    if is_commutative(inst.opcode) && op_vns.len() == 2
+        && op_vns[0] > op_vns[1] {
             op_vns.swap(0, 1);
         }
-    }
 
     Some(VNExprKey {
         opcode: inst.opcode,

@@ -179,7 +179,7 @@ mod tests {
     fn operand_size_copy_clone() {
         let a = OperandSize::S32;
         let b = a; // Copy
-        let c = a.clone(); // Clone
+        let c = a; // Clone
         assert_eq!(a, b);
         assert_eq!(a, c);
     }
@@ -209,7 +209,7 @@ mod tests {
     fn float_size_copy_clone() {
         let a = FloatSize::F64;
         let b = a;
-        let c = a.clone();
+        let c = a;
         assert_eq!(a, b);
         assert_eq!(a, c);
     }

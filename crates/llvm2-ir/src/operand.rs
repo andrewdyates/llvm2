@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn construct_fimm_operand() {
-        let op = MachOperand::FImm(3.14);
+        let op = MachOperand::FImm(2.78);
         assert!(!op.is_vreg());
         assert!(!op.is_preg());
         assert!(!op.is_imm());
@@ -328,7 +328,7 @@ mod tests {
             MachOperand::VReg(VReg::new(0, RegClass::Gpr64)),
             MachOperand::PReg(X0),
             MachOperand::Imm(42),
-            MachOperand::FImm(3.14),
+            MachOperand::FImm(2.78),
             MachOperand::Block(BlockId(0)),
             MachOperand::StackSlot(StackSlotId(0)),
             MachOperand::FrameIndex(FrameIdx(-8)),

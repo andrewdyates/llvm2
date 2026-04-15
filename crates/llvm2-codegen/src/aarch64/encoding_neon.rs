@@ -177,8 +177,7 @@ pub fn encode_int_vec3_same(
     let (q, size) = arr.q_size();
     let (u, opcode) = op.u_opcode();
 
-    Ok((0 << 31)       // bit 31 = 0
-        | (q << 30)
+    Ok((q << 30)
         | (u << 29)
         | (0b01110 << 24)
         | (size << 22)
@@ -282,10 +281,9 @@ pub fn encode_vec_not(
     check_reg(rd)?;
 
     // NOT is MVN (alias): 0|Q|1|01110|00|10000|00101|10|Rn|Rd
-    Ok((q << 30)
+    Ok(((q << 30)
         | (1 << 29)       // U = 1
-        | (0b01110 << 24)
-        | (0b00 << 22)    // size = 00
+        | (0b01110 << 24))    // size = 00
         | (0b10000 << 17)
         | (0b00101 << 12)
         | (0b10 << 10)
@@ -417,11 +415,9 @@ pub fn encode_dup_element(
     }
 
     // DUP (element): 0|Q|0|01110000|imm5|0|0000|1|Rn|Rd
-    Ok((q << 30)
+    Ok(((q << 30)
         | (0b001110000 << 21)
-        | (imm5 << 16)
-        | (0b0 << 15)
-        | (0b0000 << 11)
+        | (imm5 << 16))
         | (1 << 10)
         | ((rn as u32) << 5)
         | (rd as u32))
@@ -447,10 +443,9 @@ pub fn encode_dup_general(
     };
 
     // DUP (general): 0|Q|0|01110000|imm5|0|0011|1|Rn|Rd
-    Ok((q << 30)
+    Ok(((q << 30)
         | (0b001110000 << 21)
-        | (imm5 << 16)
-        | (0b0 << 15)
+        | (imm5 << 16))
         | (0b0011 << 11)
         | (1 << 10)
         | ((rn as u32) << 5)
@@ -491,12 +486,9 @@ pub fn encode_ins_general(
 
     // INS (general): 0|1|0|01110000|imm5|0|0011|1|Rn|Rd
     // Q=1 always for INS (operates on full 128-bit register)
-    Ok((0b0 << 31)
-        | (1 << 30)          // Q = 1
-        | (0b0 << 29)
+    Ok(((1 << 30)
         | (0b01110000 << 21)
-        | (imm5 << 16)
-        | (0b0 << 15)
+        | (imm5 << 16))
         | (0b0011 << 11)
         | (1 << 10)
         | ((rn as u32) << 5)
@@ -531,8 +523,7 @@ pub fn encode_movi_byte(
     let defgh = (imm8 as u32) & 0b11111;
 
     // MOVI (byte): 0|Q|op=0|0111100000|abc|cmode=1110|o2=0|1|defgh|Rd
-    Ok((q << 30)
-        | (0b0 << 29)        // op = 0
+    Ok((q << 30)        // op = 0
         | (0b0111100000 << 19)
         | (abc << 16)
         | (0b1110 << 12)     // cmode = 1110 (byte mask)
@@ -575,10 +566,9 @@ pub fn encode_ld1_post_imm(
 
     // LD1 single register, post-index immediate:
     // 0|Q|0011001|L=1|0|11111|opcode=0111|size|Rn|Rt
-    Ok((q << 30)
+    Ok(((q << 30)
         | (0b0011001 << 23)
-        | (1 << 22)          // L = 1 (load)
-        | (0b0 << 21)
+        | (1 << 22))
         | (0b11111 << 16)   // Rm = 11111 (immediate post-index)
         | (0b0111 << 12)    // opcode = 0111 (1 register)
         | (size << 10)
@@ -601,10 +591,8 @@ pub fn encode_st1_post_imm(
 
     // ST1 single register, post-index immediate:
     // 0|Q|0011001|L=0|0|11111|opcode=0111|size|Rn|Rt
-    Ok((q << 30)
-        | (0b0011001 << 23)
-        | (0 << 22)          // L = 0 (store)
-        | (0b0 << 21)
+    Ok(((q << 30)
+        | (0b0011001 << 23))
         | (0b11111 << 16)   // Rm = 11111 (immediate post-index)
         | (0b0111 << 12)    // opcode = 0111 (1 register)
         | (size << 10)
@@ -836,7 +824,7 @@ mod tests {
         let abc = (enc >> 16) & 0b111;
         let defgh = (enc >> 5) & 0b11111;
         let reconstructed = (abc << 5) | defgh;
-        assert_eq!(reconstructed, 0xAB as u32, "immediate round-trips");
+        assert_eq!(reconstructed, 0xAB_u32, "immediate round-trips");
     }
 
     #[test]

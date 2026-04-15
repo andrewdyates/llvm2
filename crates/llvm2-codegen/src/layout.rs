@@ -96,20 +96,13 @@ fn pick_best_successor(
     let ft = get_fallthrough_successor(func, block);
 
     // Prefer the fall-through successor if it's unplaced.
-    if let Some(ft_block) = ft {
-        if !placed[ft_block.0 as usize] {
+    if let Some(ft_block) = ft
+        && !placed[ft_block.0 as usize] {
             return Some(ft_block);
         }
-    }
 
     // Otherwise pick the first unplaced successor.
-    for &succ in &blk.succs {
-        if !placed[succ.0 as usize] {
-            return Some(succ);
-        }
-    }
-
-    None
+    blk.succs.iter().find(|&&succ| !placed[succ.0 as usize]).copied()
 }
 
 /// Find the next chain head: an unplaced block that has at least one placed
@@ -177,14 +170,12 @@ pub fn get_fallthrough_successor(
             // Check if the second-to-last instruction is a conditional branch.
             // Pattern: BCond target ; B fallthrough
             // In this case, the fall-through is the B's target.
-            if term.opcode == AArch64Opcode::B {
-                if let Some(prev) = get_second_to_last(func, block) {
-                    if is_conditional_branch(prev.opcode) {
+            if term.opcode == AArch64Opcode::B
+                && let Some(prev) = get_second_to_last(func, block)
+                    && is_conditional_branch(prev.opcode) {
                         // The B's target is where we'd fall through to if placed next.
                         return get_branch_target(term);
                     }
-                }
-            }
             None
         }
 

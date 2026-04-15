@@ -310,8 +310,8 @@ impl ISelFunction {
 
     /// Add a block to the function (if not already present).
     pub fn ensure_block(&mut self, block: Block) {
-        if !self.blocks.contains_key(&block) {
-            self.blocks.insert(block, ISelBlock::default());
+        if let std::collections::hash_map::Entry::Vacant(e) = self.blocks.entry(block) {
+            e.insert(ISelBlock::default());
             self.block_order.push(block);
         }
     }
@@ -359,7 +359,7 @@ impl ISelFunction {
                     let ir_operands: Vec<llvm2_ir::MachOperand> = isel_inst
                         .operands
                         .iter()
-                        .map(|op| convert_isel_operand_to_ir(op))
+                        .map(convert_isel_operand_to_ir)
                         .collect();
                     let ir_inst = IrInst::new(isel_inst.opcode, ir_operands);
                     let inst_id = ir_func.push_inst(ir_inst);
@@ -499,7 +499,7 @@ impl InstructionSelector {
         self.value_map
             .get(val)
             .cloned()
-            .ok_or_else(|| ISelError::UndefinedValue(*val))
+            .ok_or(ISelError::UndefinedValue(*val))
     }
 
     /// Get the type of a tMIR Value.
@@ -694,7 +694,7 @@ impl InstructionSelector {
         let dst = self.new_vreg(class);
         let result = &inst.results[0];
 
-        if imm >= 0 && imm <= 0xFFFF {
+        if (0..=0xFFFF).contains(&imm) {
             // Simple MOVZ
             let opc = if Self::is_32bit(&ty) {
                 AArch64Opcode::Movz
@@ -705,7 +705,7 @@ impl InstructionSelector {
                 block,
                 ISelInst::new(opc, vec![ISelOperand::VReg(dst), ISelOperand::Imm(imm)]),
             );
-        } else if imm < 0 && imm >= -0x10000 {
+        } else if (-0x10000..0).contains(&imm) {
             // MOVN for small negative values
             let opc = if Self::is_32bit(&ty) {
                 AArch64Opcode::Movn
@@ -2884,7 +2884,7 @@ impl InstructionSelector {
         //   immr = (reg_size - lsb) % reg_size
         //   imms = width - 1
         let reg_size = if is_32 { 32 } else { 64 };
-        let immr = ((reg_size - lsb as i64) % reg_size) as i64;
+        let immr = (reg_size - lsb as i64) % reg_size;
         let imms = (width - 1) as i64;
 
         let opc = if is_32 {
@@ -7059,7 +7059,7 @@ mod tests {
         let (mut isel, entry) = make_empty_isel();
         isel.select_instruction(
             &Instruction {
-                opcode: Opcode::Fconst { ty: Type::F64, imm: 3.14 },
+                opcode: Opcode::Fconst { ty: Type::F64, imm: 2.78 },
                 args: vec![],
                 results: vec![Value(0)],
             },

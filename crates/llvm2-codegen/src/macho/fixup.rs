@@ -280,7 +280,7 @@ pub fn apply_branch26(insn_bytes: &mut [u8; 4], byte_offset: i64) {
 
     let word_offset = byte_offset >> 2;
     assert!(
-        word_offset >= -(1 << 25) && word_offset < (1 << 25),
+        (-(1 << 25)..(1 << 25)).contains(&word_offset),
         "Branch26 offset out of range: {} words ({} bytes)",
         word_offset,
         byte_offset
@@ -307,7 +307,7 @@ pub fn apply_branch26(insn_bytes: &mut [u8; 4], byte_offset: i64) {
 /// Panics if the page offset exceeds +/-4 GB (21-bit signed range).
 pub fn apply_page21(insn_bytes: &mut [u8; 4], page_offset: i64) {
     assert!(
-        page_offset >= -(1 << 20) && page_offset < (1 << 20),
+        (-(1 << 20)..(1 << 20)).contains(&page_offset),
         "Page21 offset out of range: {} pages",
         page_offset
     );

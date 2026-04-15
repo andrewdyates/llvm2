@@ -289,11 +289,10 @@ pub fn build_dag(func: &MachFunction, block_id: BlockId) -> ScheduleDAG {
     let mut def_map: HashMap<u32, usize> = HashMap::new();
     for (idx, &inst_id) in inst_ids.iter().enumerate() {
         let inst = func.inst(inst_id);
-        if inst_produces_value(inst) {
-            if let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
+        if inst_produces_value(inst)
+            && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
                 def_map.insert(vreg.id, idx);
             }
-        }
     }
 
     // 1. Data dependencies (RAW): for each use operand, add edge from def.
@@ -301,11 +300,10 @@ pub fn build_dag(func: &MachFunction, block_id: BlockId) -> ScheduleDAG {
         let inst = func.inst(inst_id);
         let use_start = if inst_produces_value(inst) { 1 } else { 0 };
         for operand in &inst.operands[use_start..] {
-            if let MachOperand::VReg(vreg) = operand {
-                if let Some(&def_idx) = def_map.get(&vreg.id) {
+            if let MachOperand::VReg(vreg) = operand
+                && let Some(&def_idx) = def_map.get(&vreg.id) {
                     add_edge(def_idx, idx, &mut edges);
                 }
-            }
         }
     }
 
@@ -529,11 +527,10 @@ fn compute_pressure_info(
         let mut defs = Vec::new();
         let mut uses = Vec::new();
 
-        if produces {
-            if let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
+        if produces
+            && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
                 defs.push((vreg.id, vreg.class));
             }
-        }
 
         let use_start = if produces { 1 } else { 0 };
         for operand in &inst.operands[use_start..] {
@@ -1250,12 +1247,11 @@ pub fn compute_register_pressure(
         let produces = inst_produces_value(inst);
 
         // First operand is def if instruction produces a value.
-        if produces {
-            if let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
+        if produces
+            && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
                 def_pos.entry(vreg.id).or_insert(pos);
                 vreg_class.insert(vreg.id, vreg.class);
             }
-        }
 
         // All other operands are uses.
         let use_start = if produces { 1 } else { 0 };
@@ -1277,8 +1273,8 @@ pub fn compute_register_pressure(
         let inst = func.inst(inst_id);
 
         // Add def to live set.
-        if inst_produces_value(inst) {
-            if let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
+        if inst_produces_value(inst)
+            && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
                 let is_fpr = matches!(
                     vreg.class,
                     RegClass::Fpr128 | RegClass::Fpr64 | RegClass::Fpr32
@@ -1290,7 +1286,6 @@ pub fn compute_register_pressure(
                     live_gprs.insert(vreg.id);
                 }
             }
-        }
 
         // Update max pressure.
         max_gpr = max_gpr.max(live_gprs.len() as u32);

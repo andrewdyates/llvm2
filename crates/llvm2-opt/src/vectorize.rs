@@ -234,11 +234,10 @@ fn is_dependency_free(
         let block = func.block(block_id);
         for &inst_id in &block.insts {
             let inst = func.inst(inst_id);
-            if produces_value(inst.opcode) {
-                if let Some(MachOperand::VReg(vreg)) = inst.operands.first() {
+            if produces_value(inst.opcode)
+                && let Some(MachOperand::VReg(vreg)) = inst.operands.first() {
                     loop_defs.insert(vreg.id, inst_id);
                 }
-            }
         }
     }
 
@@ -250,8 +249,8 @@ fn is_dependency_free(
         let inst = func.inst(inst_id);
         // Source operands are operands[1..] for most instructions.
         for operand in inst.operands.iter().skip(1) {
-            if let MachOperand::VReg(vreg) = operand {
-                if let Some(&def_inst) = loop_defs.get(&vreg.id) {
+            if let MachOperand::VReg(vreg) = operand
+                && let Some(&def_inst) = loop_defs.get(&vreg.id) {
                     // This value is defined inside the loop.
                     // If it's NOT a vectorizable instruction, we have a
                     // dependency on a non-vectorizable computation (e.g.,
@@ -264,7 +263,6 @@ fn is_dependency_free(
                         return false;
                     }
                 }
-            }
         }
     }
 
@@ -287,11 +285,10 @@ fn estimate_trip_count(func: &MachFunction, lp: &NaturalLoop) -> Option<u32> {
             AArch64Opcode::CmpRI | AArch64Opcode::CMPWri | AArch64Opcode::CMPXri => {
                 // The immediate operand is typically the last operand.
                 for operand in &inst.operands {
-                    if let MachOperand::Imm(val) = operand {
-                        if *val > 0 && *val < 1_000_000 {
+                    if let MachOperand::Imm(val) = operand
+                        && *val > 0 && *val < 1_000_000 {
                             return Some(*val as u32);
                         }
-                    }
                 }
             }
             _ => {}
@@ -305,11 +302,10 @@ fn estimate_trip_count(func: &MachFunction, lp: &NaturalLoop) -> Option<u32> {
         match inst.opcode {
             AArch64Opcode::CmpRI | AArch64Opcode::CMPWri | AArch64Opcode::CMPXri => {
                 for operand in &inst.operands {
-                    if let MachOperand::Imm(val) = operand {
-                        if *val > 0 && *val < 1_000_000 {
+                    if let MachOperand::Imm(val) = operand
+                        && *val > 0 && *val < 1_000_000 {
                             return Some(*val as u32);
                         }
-                    }
                 }
             }
             _ => {}
@@ -458,7 +454,7 @@ fn compute_neon_cost(
         .sum();
 
     let vector_iters = (trip_count / vf) as f64;
-    let remainder = (trip_count % vf) as u32;
+    let remainder = trip_count % vf;
 
     // Scalar epilogue cost for remaining elements.
     let scalar_model = cost_model.scalar_model();
@@ -666,12 +662,11 @@ fn adjust_trip_count_in_block(
             AArch64Opcode::CmpRI | AArch64Opcode::CMPWri | AArch64Opcode::CMPXri => {
                 let num_ops = inst.operands.len();
                 for op_idx in 0..num_ops {
-                    if let MachOperand::Imm(val) = &func.inst(inst_id).operands[op_idx] {
-                        if *val == old_tc as i64 {
+                    if let MachOperand::Imm(val) = &func.inst(inst_id).operands[op_idx]
+                        && *val == old_tc as i64 {
                             func.inst_mut(inst_id).operands[op_idx] =
                                 MachOperand::Imm(new_tc as i64);
                         }
-                    }
                 }
             }
             _ => {}
@@ -1738,11 +1733,10 @@ mod tests {
             let inst = func.inst(inst_id);
             if inst.opcode == AArch64Opcode::CmpRI {
                 for operand in &inst.operands {
-                    if let MachOperand::Imm(val) = operand {
-                        if *val == 25 {
+                    if let MachOperand::Imm(val) = operand
+                        && *val == 25 {
                             found_new_cmp = true;
                         }
-                    }
                 }
             }
         }

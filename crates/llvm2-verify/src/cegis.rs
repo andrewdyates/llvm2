@@ -352,15 +352,14 @@ impl CegisLoop {
                     if !assignments.is_empty() {
                         let source_val = source_smt.try_eval(&cex.values);
                         let target_val = target_smt.try_eval(&cex.values);
-                        if let (Ok(s), Ok(t)) = (source_val, target_val) {
-                            if s == t {
+                        if let (Ok(s), Ok(t)) = (source_val, target_val)
+                            && s == t {
                                 // Solver returned a model that doesn't actually
                                 // distinguish the expressions. This can happen
                                 // due to incomplete solver semantics or encoding
                                 // issues. Continue to next iteration.
                                 continue;
                             }
-                        }
                     }
 
                     // Add to counterexample set for future fast-path rejections

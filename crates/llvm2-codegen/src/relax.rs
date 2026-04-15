@@ -145,8 +145,8 @@ impl BranchRelaxation {
                     continue;
                 }
 
-                if is_branch_with_block_target(inst) {
-                    if let Some(target_bid) = get_branch_target_block(inst) {
+                if is_branch_with_block_target(inst)
+                    && let Some(target_bid) = get_branch_target_block(inst) {
                         let target_offset = infos[target_bid.0 as usize].offset;
                         let displacement =
                             target_offset as i64 - inst_byte_offset as i64;
@@ -155,7 +155,6 @@ impl BranchRelaxation {
                             return true;
                         }
                     }
-                }
 
                 inst_byte_offset += 4;
             }
@@ -201,8 +200,8 @@ pub fn relax_branches(func: &mut MachFunction) -> Result<RelaxedCode, RelaxError
                     continue;
                 }
 
-                if is_branch_with_block_target(inst) {
-                    if let Some(target_bid) = get_branch_target_block(inst) {
+                if is_branch_with_block_target(inst)
+                    && let Some(target_bid) = get_branch_target_block(inst) {
                         let target_offset = infos[target_bid.0 as usize].offset;
                         let displacement =
                             target_offset as i64 - inst_byte_offset as i64;
@@ -213,7 +212,6 @@ pub fn relax_branches(func: &mut MachFunction) -> Result<RelaxedCode, RelaxError
                             break; // restart scan for this block
                         }
                     }
-                }
 
                 inst_byte_offset += 4;
             }
@@ -1448,7 +1446,7 @@ mod tests {
             .operands
             .iter()
             .filter_map(|op| op.as_imm())
-            .last()
+            .next_back()
             .unwrap();
         assert_eq!(offset_imm, 262143, "displacement in instruction units");
     }
@@ -1702,7 +1700,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_branch_relaxation_default() {
-        let pass = BranchRelaxation::default();
+        let pass = BranchRelaxation;
         let mut func = make_func("default_test", 1);
         let bb0 = BlockId(0);
         add_inst(&mut func, bb0, MachInst::new(AArch64Opcode::Ret, vec![]));

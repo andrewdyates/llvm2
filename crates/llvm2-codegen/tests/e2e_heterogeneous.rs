@@ -214,7 +214,7 @@ fn e2e_pure_cpu_graph_produces_no_gpu_ane_output() {
     assert_eq!(plan.count_fallbacks(), 0);
 
     // All assignments are CpuScalar.
-    for (_, target) in &plan.assignment {
+    for target in plan.assignment.values() {
         assert_eq!(*target, ComputeTarget::CpuScalar);
     }
 

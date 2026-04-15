@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn test_note_gnu_stack_default() {
-        let note = NoteGnuStack::default();
+        let note = NoteGnuStack;
         assert_eq!(note, NoteGnuStack::new());
     }
 

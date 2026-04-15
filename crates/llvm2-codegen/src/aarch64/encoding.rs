@@ -398,12 +398,10 @@ mod tests {
     fn test_sub_shifted_reg_xzr() {
         // SUB XZR, X0, X1 (NEG alias): rd=31
         // sf=1, op=1, S=0, shift=00, Rm=1, imm6=0, Rn=0, Rd=31
-        let expected = (1u32 << 31)
+        let expected = ((1u32 << 31)
             | (1 << 30)
             | (0b01011 << 24)
-            | (1 << 16)
-            | (0 << 10)
-            | (0 << 5)
+            | (1 << 16))
             | 31;
         let enc = encode_add_sub_shifted_reg(1, 1, 0, 0, 1, 0, 0, 31);
         assert_eq!(enc, expected, "SUB XZR, X0, X1 = 0x{enc:08X}");
@@ -473,7 +471,6 @@ mod tests {
         // BIC X0, X1, X2  (AND with N=1 — inverted Rm)
         // sf=1, opc=00, shift=00, N=1, Rm=2, imm6=0, Rn=1, Rd=0
         let expected = (1u32 << 31)
-            | (0b00 << 29)
             | (0b01010 << 24)
             | (1 << 21) // N=1
             | (2 << 16)
@@ -795,8 +792,7 @@ mod tests {
             | (0b01 << 24)
             | (0b01 << 22) // LDR
             | (1 << 10) // imm12=1
-            | (1 << 5)
-            | 0;
+            | (1 << 5);
         let enc = encode_load_store_ui(0b11, 0, 0b01, 1, 1, 0);
         assert_eq!(enc, expected, "LDR X0, [X1, #8] = 0x{enc:08X}");
         assert_eq!(enc, 0xF9400420);
@@ -878,8 +874,7 @@ mod tests {
             | (0b010 << 23)
             | (2 << 15) // imm7=2
             | (1 << 10) // Rt2=1
-            | (31 << 5) // Rn=SP
-            | 0; // Rt=0
+            | (31 << 5); // Rt=0
         let enc = encode_load_store_pair(0b10, 0, 0, 2, 1, 31, 0);
         assert_eq!(enc, expected, "STP X0, X1, [SP, #16] = 0x{enc:08X}");
         assert_eq!(enc, 0xA90107E0);

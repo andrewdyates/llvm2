@@ -900,7 +900,7 @@ impl UnwindInfo {
     /// Returns the number of callee-saved register pairs (including FP/LR).
     pub fn num_saved_pairs(&self) -> usize {
         // FP/LR is 1 pair, additional registers come in pairs of 2.
-        (self.saved_registers.len() + 1) / 2
+        self.saved_registers.len().div_ceil(2)
     }
 
     /// Returns only the GPR save entries (non-FPR).
@@ -1209,10 +1209,10 @@ pub fn generate_dwarf_cfi(info: &UnwindInfo) -> Vec<DwarfCfiOp> {
         // DWARF register number.
         let dwarf_reg = if saved.is_fpr {
             // V-registers: our encoding V0=64..V31=95, DWARF D0=64..D31=95
-            enc as u16
+            enc
         } else {
             // X-registers: encoding 0-31, DWARF 0-31
-            enc as u16
+            enc
         };
 
         // Compute factored offset from CFA.
@@ -4178,7 +4178,7 @@ mod tests {
 
     #[test]
     fn compact_unwind_frameless_dwarf_fallback_propagates_personality() {
-        let mut info = UnwindInfo {
+        let info = UnwindInfo {
             saved_registers: vec![],
             frame_size: 32,
             has_frame_pointer: false,

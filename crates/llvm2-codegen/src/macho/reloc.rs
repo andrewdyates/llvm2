@@ -344,7 +344,7 @@ pub fn create_addend_pair(
     );
     // Addend must fit in signed 24-bit (per LLVM: isInt<24>)
     assert!(
-        addend >= -(1 << 23) && addend < (1 << 23),
+        (-(1 << 23)..(1 << 23)).contains(&addend),
         "addend {} does not fit in signed 24-bit field",
         addend
     );

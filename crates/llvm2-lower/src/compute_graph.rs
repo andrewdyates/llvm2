@@ -382,12 +382,9 @@ fn derive_dominant_op(body: &[InstrNode], kind: NodeKind) -> String {
     let mut op_counts: HashMap<&'static str, usize> = HashMap::new();
 
     for node in body {
-        match &node.instr {
-            Instr::BinOp { op, .. } => {
-                let name = binop_to_op_name(op);
-                *op_counts.entry(name).or_insert(0) += 1;
-            }
-            _ => {}
+        if let Instr::BinOp { op, .. } = &node.instr {
+            let name = binop_to_op_name(op);
+            *op_counts.entry(name).or_insert(0) += 1;
         }
     }
 
@@ -650,11 +647,10 @@ impl ComputeGraph {
             for (i, vid) in all_values.iter().enumerate() {
                 let val = Value(i as u32);
                 lir_values.push(val);
-                if let Some(ty) = value_types_map.get(vid) {
-                    if let Ok(lir_ty) = crate::adapter::translate_type(ty) {
+                if let Some(ty) = value_types_map.get(vid)
+                    && let Ok(lir_ty) = crate::adapter::translate_type(ty) {
                         desc.value_types.insert(val, lir_ty);
                     }
-                }
             }
             desc.values = lir_values;
 
@@ -896,8 +892,8 @@ fn detect_data_parallel(instrs: &[&InstrNode], value_types: &HashMap<ValueId, Ty
                 return false;
             }
             // At least one operand must be array-typed
-            let lhs_is_array = value_types.get(lhs).map_or(false, |ty| matches!(ty, Ty::Array(_, _)));
-            let rhs_is_array = value_types.get(rhs).map_or(false, |ty| matches!(ty, Ty::Array(_, _)));
+            let lhs_is_array = value_types.get(lhs).is_some_and(|ty| matches!(ty, Ty::Array(_, _)));
+            let rhs_is_array = value_types.get(rhs).is_some_and(|ty| matches!(ty, Ty::Array(_, _)));
             lhs_is_array || rhs_is_array
         }
         _ => false,
@@ -950,8 +946,8 @@ fn detect_matrix_heavy(instrs: &[&InstrNode], value_types: &HashMap<ValueId, Ty>
                 if matches!(op, BinOp::FMul | BinOp::Mul) =>
             {
                 // Check that at least one operand is array-typed
-                let lhs_is_array = value_types.get(lhs).map_or(false, |ty| matches!(ty, Ty::Array(_, _)));
-                let rhs_is_array = value_types.get(rhs).map_or(false, |ty| matches!(ty, Ty::Array(_, _)));
+                let lhs_is_array = value_types.get(lhs).is_some_and(|ty| matches!(ty, Ty::Array(_, _)));
+                let rhs_is_array = value_types.get(rhs).is_some_and(|ty| matches!(ty, Ty::Array(_, _)));
                 if lhs_is_array || rhs_is_array {
                     for r in &node.results {
                         mul_results.insert(*r);
@@ -1257,11 +1253,10 @@ impl GraphBuilder {
         for (i, vid) in consumed_values.iter().chain(produced_values.iter()).enumerate() {
             let val = Value(i as u32);
             lir_values.push(val);
-            if let Some(ty) = value_types.get(vid) {
-                if let Ok(lir_ty) = crate::adapter::translate_type(ty) {
+            if let Some(ty) = value_types.get(vid)
+                && let Ok(lir_ty) = crate::adapter::translate_type(ty) {
                     subgraph_desc.value_types.insert(val, lir_ty);
                 }
-            }
         }
         subgraph_desc.values = lir_values;
 
@@ -1308,8 +1303,8 @@ impl GraphBuilder {
 
         for node in &graph.nodes {
             for vid in &node.consumed_values {
-                if let Some(&producer_id) = value_to_node.get(vid) {
-                    if producer_id != node.id && !seen_edges.contains(&(producer_id, node.id)) {
+                if let Some(&producer_id) = value_to_node.get(vid)
+                    && producer_id != node.id && !seen_edges.contains(&(producer_id, node.id)) {
                         seen_edges.insert((producer_id, node.id));
 
                         // Estimate transfer size: use the node's data size as approximation
@@ -1326,7 +1321,6 @@ impl GraphBuilder {
                             transfer_cost: TransferCost::zero(), // filled in by partition_cost
                         });
                     }
-                }
             }
         }
     }
@@ -1336,7 +1330,7 @@ impl GraphBuilder {
 fn estimate_type_bytes(ty: &Ty) -> u32 {
     match ty {
         Ty::Bool => 1,
-        Ty::Int(w) | Ty::UInt(w) | Ty::Float(w) => (*w as u32 + 7) / 8,
+        Ty::Int(w) | Ty::UInt(w) | Ty::Float(w) => (*w as u32).div_ceil(8),
         Ty::Ptr(_) => 8,
         Ty::Array(elem, count) => estimate_type_bytes(elem) * (*count as u32),
         Ty::Struct(_) => 8, // rough estimate
@@ -2022,7 +2016,7 @@ mod tests {
 
     #[test]
     fn test_detect_data_parallel_requires_arrays() {
-        let instrs = vec![InstrNode {
+        let instrs = [InstrNode {
             instr: Instr::BinOp {
                 op: BinOp::Add,
                 ty: Ty::Int(32),
@@ -2047,7 +2041,7 @@ mod tests {
 
     #[test]
     fn test_detect_data_parallel_with_arrays() {
-        let instrs = vec![InstrNode {
+        let instrs = [InstrNode {
             instr: Instr::BinOp {
                 op: BinOp::FAdd,
                 ty: Ty::Array(Box::new(Ty::Float(64)), 100),
@@ -2073,7 +2067,7 @@ mod tests {
     #[test]
     fn test_detect_matrix_heavy_requires_mac() {
         // FMul alone is not matrix-heavy
-        let instrs = vec![InstrNode {
+        let instrs = [InstrNode {
             instr: Instr::BinOp {
                 op: BinOp::FMul,
                 ty: Ty::Array(Box::new(Ty::Float(64)), 100),
@@ -2097,8 +2091,7 @@ mod tests {
 
     #[test]
     fn test_classify_node_matrix_over_parallel() {
-        let instrs = vec![
-            InstrNode {
+        let instrs = [InstrNode {
                 instr: Instr::BinOp {
                     op: BinOp::FMul,
                     ty: Ty::Array(Box::new(Ty::Float(64)), 100),
@@ -2117,8 +2110,7 @@ mod tests {
                 },
                 results: vec![ValueId(3)],
                 proofs: vec![],
-            },
-        ];
+            }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
@@ -2388,11 +2380,11 @@ mod tests {
                 Value(i),
                 vec![
                     Proof::InBounds {
-                        base: tmir_types::ValueId(i as u32),
-                        index: tmir_types::ValueId(i as u32 + 100),
+                        base: tmir_types::ValueId(i),
+                        index: tmir_types::ValueId(i + 100),
                     },
                     Proof::ValidBorrow {
-                        borrow: tmir_types::ValueId(i as u32),
+                        borrow: tmir_types::ValueId(i),
                     },
                 ],
             );
@@ -2635,11 +2627,11 @@ mod tests {
                 Value(i),
                 vec![
                     Proof::InBounds {
-                        base: tmir_types::ValueId(i as u32),
-                        index: tmir_types::ValueId(i as u32 + 100),
+                        base: tmir_types::ValueId(i),
+                        index: tmir_types::ValueId(i + 100),
                     },
                     Proof::ValidBorrow {
-                        borrow: tmir_types::ValueId(i as u32),
+                        borrow: tmir_types::ValueId(i),
                     },
                 ],
             );
@@ -2749,7 +2741,7 @@ mod tests {
     #[test]
     fn test_small_array_not_data_parallel() {
         // An array of 2 elements is too small to justify vectorization
-        let instrs = vec![InstrNode {
+        let instrs = [InstrNode {
             instr: Instr::BinOp {
                 op: BinOp::FAdd,
                 ty: Ty::Array(Box::new(Ty::Float(64)), 2),
@@ -2779,7 +2771,7 @@ mod tests {
     fn test_scalar_op_with_array_param_not_data_parallel() {
         // The binary op operates on scalar i32 values, even though an array
         // parameter exists in the value types. This should NOT match.
-        let instrs = vec![InstrNode {
+        let instrs = [InstrNode {
             instr: Instr::BinOp {
                 op: BinOp::Add,
                 ty: Ty::Int(32),
@@ -2810,7 +2802,7 @@ mod tests {
 
     #[test]
     fn test_fmul_only_with_array_not_matrix_heavy() {
-        let instrs = vec![InstrNode {
+        let instrs = [InstrNode {
             instr: Instr::BinOp {
                 op: BinOp::FMul,
                 ty: Ty::Array(Box::new(Ty::Float(64)), 100),
@@ -2883,8 +2875,7 @@ mod tests {
 
     #[test]
     fn test_scalar_fmul_fadd_not_matrix_heavy() {
-        let instrs = vec![
-            InstrNode {
+        let instrs = [InstrNode {
                 instr: Instr::BinOp {
                     op: BinOp::FMul,
                     ty: Ty::Float(64),
@@ -2903,8 +2894,7 @@ mod tests {
                 },
                 results: vec![ValueId(3)],
                 proofs: vec![],
-            },
-        ];
+            }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
@@ -2926,8 +2916,7 @@ mod tests {
     #[test]
     fn test_small_array_mac_not_matrix_heavy() {
         // Array has only 2 elements -- below MIN_VECTORIZABLE_ELEMENTS
-        let instrs = vec![
-            InstrNode {
+        let instrs = [InstrNode {
                 instr: Instr::BinOp {
                     op: BinOp::FMul,
                     ty: Ty::Array(Box::new(Ty::Float(64)), 2),
@@ -2946,8 +2935,7 @@ mod tests {
                 },
                 results: vec![ValueId(3)],
                 proofs: vec![],
-            },
-        ];
+            }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
@@ -2967,8 +2955,7 @@ mod tests {
     #[test]
     fn test_valid_mac_with_dependency_matches() {
         // FMul produces ValueId(2), FAdd consumes ValueId(2) -- valid MAC
-        let instrs = vec![
-            InstrNode {
+        let instrs = [InstrNode {
                 instr: Instr::BinOp {
                     op: BinOp::FMul,
                     ty: Ty::Array(Box::new(Ty::Float(64)), 100),
@@ -2987,8 +2974,7 @@ mod tests {
                 },
                 results: vec![ValueId(3)],
                 proofs: vec![],
-            },
-        ];
+            }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();

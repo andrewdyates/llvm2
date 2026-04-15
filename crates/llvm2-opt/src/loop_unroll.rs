@@ -76,16 +76,14 @@ impl MachinePass for LoopUnroll {
             .collect();
 
         for lp in &innermost {
-            if let Some(trip_count) = analyze_trip_count(func, lp) {
-                if trip_count <= MAX_TRIP_COUNT && trip_count > 0 {
+            if let Some(trip_count) = analyze_trip_count(func, lp)
+                && trip_count <= MAX_TRIP_COUNT && trip_count > 0 {
                     let body_inst_count = count_body_insts(func, lp);
-                    if body_inst_count <= MAX_BODY_INSTS {
-                        if unroll_loop(func, lp, trip_count as usize) {
+                    if body_inst_count <= MAX_BODY_INSTS
+                        && unroll_loop(func, lp, trip_count as usize) {
                             changed = true;
                         }
-                    }
                 }
-            }
         }
 
         changed
@@ -155,13 +153,13 @@ fn analyze_trip_count(func: &MachFunction, lp: &NaturalLoop) -> Option<u64> {
     if limit > init_val && step > 0 {
         let range = (limit - init_val) as u64;
         let step_u = step as u64;
-        let trips = (range + step_u - 1) / step_u;
+        let trips = range.div_ceil(step_u);
         Some(trips)
     } else if limit < init_val && step < 0 {
         // Counting-down loop.
         let range = (init_val - limit) as u64;
         let step_u = (-step) as u64;
-        let trips = (range + step_u - 1) / step_u;
+        let trips = range.div_ceil(step_u);
         Some(trips)
     } else if init_val == limit {
         Some(0) // zero trips
@@ -176,14 +174,13 @@ fn find_header_cmp(func: &MachFunction, header: &llvm2_ir::MachBlock) -> Option<
         let inst = func.inst(inst_id);
         if inst.opcode == AArch64Opcode::CmpRI {
             // CmpRI operands: [vreg, imm]
-            if inst.operands.len() >= 2 {
-                if let (Some(vreg), Some(imm)) = (
+            if inst.operands.len() >= 2
+                && let (Some(vreg), Some(imm)) = (
                     inst.operands[0].as_vreg(),
                     inst.operands[1].as_imm(),
                 ) {
                     return Some((vreg.id, imm));
                 }
-            }
         }
     }
     None
@@ -201,42 +198,36 @@ fn find_iv_init(func: &MachFunction, preheader: BlockId, cmp_vreg_id: u32, lp: &
 
     for &inst_id in &header_block.insts {
         let inst = func.inst(inst_id);
-        if inst.opcode == AArch64Opcode::Phi {
-            if let Some(def) = inst.operands.first().and_then(|op| op.as_vreg()) {
-                if def.id == cmp_vreg_id {
+        if inst.opcode == AArch64Opcode::Phi
+            && let Some(def) = inst.operands.first().and_then(|op| op.as_vreg())
+                && def.id == cmp_vreg_id {
                     // Phi operands: [def, val_from_pred0, block0, val_from_pred1, block1, ...]
                     // Find the operand pair where block == preheader.
                     let mut i = 1;
                     while i + 1 < inst.operands.len() {
-                        if let MachOperand::Block(bid) = &inst.operands[i + 1] {
-                            if *bid == preheader {
+                        if let MachOperand::Block(bid) = &inst.operands[i + 1]
+                            && *bid == preheader {
                                 if let Some(v) = inst.operands[i].as_vreg() {
                                     init_vreg_id = v.id;
                                 }
                                 break;
                             }
-                        }
                         i += 2;
                     }
                     break;
                 }
-            }
-        }
     }
 
     // Now find the MovI that defines init_vreg_id in the preheader.
     let ph_block = func.block(preheader);
     for &inst_id in &ph_block.insts {
         let inst = func.inst(inst_id);
-        if inst.opcode == AArch64Opcode::MovI {
-            if let Some(def) = inst.operands.first().and_then(|op| op.as_vreg()) {
-                if def.id == init_vreg_id {
-                    if let Some(val) = inst.operands.get(1).and_then(|op| op.as_imm()) {
+        if inst.opcode == AArch64Opcode::MovI
+            && let Some(def) = inst.operands.first().and_then(|op| op.as_vreg())
+                && def.id == init_vreg_id
+                    && let Some(val) = inst.operands.get(1).and_then(|op| op.as_imm()) {
                         return Some(val);
                     }
-                }
-            }
-        }
     }
 
     None
@@ -261,13 +252,11 @@ fn find_phi_backedge_vreg(func: &MachFunction, lp: &NaturalLoop, cmp_vreg_id: u3
             // Phi operands: [def, val0, block0, val1, block1, ...]
             let mut i = 1;
             while i + 1 < inst.operands.len() {
-                if let MachOperand::Block(bid) = &inst.operands[i + 1] {
-                    if lp.body.contains(bid) {
-                        if let Some(v) = inst.operands[i].as_vreg() {
+                if let MachOperand::Block(bid) = &inst.operands[i + 1]
+                    && lp.body.contains(bid)
+                        && let Some(v) = inst.operands[i].as_vreg() {
                             return Some(v.id);
                         }
-                    }
-                }
                 i += 2;
             }
         }
@@ -286,30 +275,26 @@ fn find_iv_step(func: &MachFunction, lp: &NaturalLoop, backedge_vreg_id: u32, iv
         let inst = func.inst(inst_id);
         match inst.opcode {
             AArch64Opcode::AddRI => {
-                if inst.operands.len() >= 3 {
-                    if let (Some(dst), Some(src), Some(step)) = (
+                if inst.operands.len() >= 3
+                    && let (Some(dst), Some(src), Some(step)) = (
                         inst.operands[0].as_vreg(),
                         inst.operands[1].as_vreg(),
                         inst.operands[2].as_imm(),
-                    ) {
-                        if dst.id == backedge_vreg_id && src.id == iv_vreg_id {
+                    )
+                        && dst.id == backedge_vreg_id && src.id == iv_vreg_id {
                             return Some(step);
                         }
-                    }
-                }
             }
             AArch64Opcode::SubRI => {
-                if inst.operands.len() >= 3 {
-                    if let (Some(dst), Some(src), Some(step)) = (
+                if inst.operands.len() >= 3
+                    && let (Some(dst), Some(src), Some(step)) = (
                         inst.operands[0].as_vreg(),
                         inst.operands[1].as_vreg(),
                         inst.operands[2].as_imm(),
-                    ) {
-                        if dst.id == backedge_vreg_id && src.id == iv_vreg_id {
+                    )
+                        && dst.id == backedge_vreg_id && src.id == iv_vreg_id {
                             return Some(-step);
                         }
-                    }
-                }
             }
             _ => {}
         }
@@ -383,11 +368,10 @@ fn unroll_loop(func: &mut MachFunction, lp: &NaturalLoop, trip_count: usize) -> 
     let mut defined_vregs: Vec<u32> = Vec::new();
     for &(_bid, iid) in &body_insts {
         let inst = func.inst(iid);
-        if inst_produces_value(inst) {
-            if let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
+        if inst_produces_value(inst)
+            && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
                 defined_vregs.push(vreg.id);
             }
-        }
     }
 
     // Create a "flattened" block for the unrolled iterations after the existing body.
@@ -419,11 +403,10 @@ fn unroll_loop(func: &mut MachFunction, lp: &NaturalLoop, trip_count: usize) -> 
                 .map(|(idx, op)| {
                     if let MachOperand::VReg(vreg) = op {
                         // For the def (operand 0 on value-producing insts), use this iter's rename.
-                        if idx == 0 && inst_produces_value(inst) {
-                            if let Some(&new_id) = rename.get(&vreg.id) {
+                        if idx == 0 && inst_produces_value(inst)
+                            && let Some(&new_id) = rename.get(&vreg.id) {
                                 return MachOperand::VReg(VReg::new(new_id, vreg.class));
                             }
-                        }
                         // For uses: use the previous iteration's version of
                         // this vreg (connecting iteration N to iteration N-1).
                         if let Some(&prev_id) = prev_rename.get(&vreg.id) {
@@ -519,12 +502,7 @@ fn unroll_loop(func: &mut MachFunction, lp: &NaturalLoop, trip_count: usize) -> 
 
 /// Find the exit block of a loop (successor of header not in loop body).
 fn find_exit_block(func: &MachFunction, lp: &NaturalLoop) -> Option<BlockId> {
-    for &succ in &func.block(lp.header).succs {
-        if !lp.body.contains(&succ) {
-            return Some(succ);
-        }
-    }
-    None
+    func.block(lp.header).succs.iter().find(|&&succ| !lp.body.contains(&succ)).copied()
 }
 
 /// Redirect preheader to exit for zero-trip loops.
@@ -555,11 +533,10 @@ fn rewrite_branch_target(func: &mut MachFunction, block: BlockId, old_target: Bl
     if let Some(&last_id) = block_data.insts.last() {
         let inst = func.inst_mut(last_id);
         for op in &mut inst.operands {
-            if let MachOperand::Block(target) = op {
-                if *target == old_target {
+            if let MachOperand::Block(target) = op
+                && *target == old_target {
                     *target = new_target;
                 }
-            }
         }
     }
 }

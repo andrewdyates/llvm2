@@ -213,13 +213,11 @@ fn find_induction_variables(func: &MachFunction, lp: &NaturalLoop) -> Vec<Induct
         let mut loop_val: Option<VReg> = None;
         let mut i = 1;
         while i + 1 < inst.operands.len() {
-            if let MachOperand::Block(bid) = &inst.operands[i + 1] {
-                if lp.body.contains(bid) {
-                    if let Some(v) = inst.operands[i].as_vreg() {
+            if let MachOperand::Block(bid) = &inst.operands[i + 1]
+                && lp.body.contains(bid)
+                    && let Some(v) = inst.operands[i].as_vreg() {
                         loop_val = Some(v);
                     }
-                }
-            }
             i += 2;
         }
 
@@ -253,30 +251,26 @@ fn find_iv_step(func: &MachFunction, lp: &NaturalLoop, phi_vreg_id: u32, result_
             match inst.opcode {
                 AArch64Opcode::AddRI => {
                     // AddRI [dst, src, imm]
-                    if inst.operands.len() >= 3 {
-                        if let (Some(dst), Some(src), Some(step)) = (
+                    if inst.operands.len() >= 3
+                        && let (Some(dst), Some(src), Some(step)) = (
                             inst.operands[0].as_vreg(),
                             inst.operands[1].as_vreg(),
                             inst.operands[2].as_imm(),
-                        ) {
-                            if dst.id == result_vreg_id && src.id == phi_vreg_id {
+                        )
+                            && dst.id == result_vreg_id && src.id == phi_vreg_id {
                                 return Some(step);
                             }
-                        }
-                    }
                 }
                 AArch64Opcode::SubRI => {
-                    if inst.operands.len() >= 3 {
-                        if let (Some(dst), Some(src), Some(step)) = (
+                    if inst.operands.len() >= 3
+                        && let (Some(dst), Some(src), Some(step)) = (
                             inst.operands[0].as_vreg(),
                             inst.operands[1].as_vreg(),
                             inst.operands[2].as_imm(),
-                        ) {
-                            if dst.id == result_vreg_id && src.id == phi_vreg_id {
+                        )
+                            && dst.id == result_vreg_id && src.id == phi_vreg_id {
                                 return Some(-step);
                             }
-                        }
-                    }
                 }
                 _ => {}
             }
@@ -295,11 +289,10 @@ fn collect_loop_defined_vregs(func: &MachFunction, lp: &NaturalLoop) -> HashSet<
         let block = func.block(block_id);
         for &inst_id in &block.insts {
             let inst = func.inst(inst_id);
-            if inst_produces_value(inst) {
-                if let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
+            if inst_produces_value(inst)
+                && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
                     defs.insert(vreg.id);
                 }
-            }
         }
     }
     defs
@@ -551,13 +544,11 @@ fn find_iv_init_vreg(func: &MachFunction, lp: &NaturalLoop) -> Option<u32> {
         // Find the operand that comes from outside the loop.
         let mut i = 1;
         while i + 1 < inst.operands.len() {
-            if let MachOperand::Block(bid) = &inst.operands[i + 1] {
-                if !lp.body.contains(bid) {
-                    if let Some(v) = inst.operands[i].as_vreg() {
+            if let MachOperand::Block(bid) = &inst.operands[i + 1]
+                && !lp.body.contains(bid)
+                    && let Some(v) = inst.operands[i].as_vreg() {
                         return Some(v.id);
                     }
-                }
-            }
             i += 2;
         }
     }

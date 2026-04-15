@@ -139,8 +139,8 @@ pub fn insert_call_save_restore(
                 let mut restores = Vec::new();
 
                 for &vreg in &crossing.live_across {
-                    if let Some(&preg) = allocation.get(&vreg) {
-                        if caller_saved.contains(&preg) {
+                    if let Some(&preg) = allocation.get(&vreg)
+                        && caller_saved.contains(&preg) {
                             // Need to save before and restore after.
                             let slot = StackSlotId(func.next_stack_slot);
                             func.next_stack_slot += 1;
@@ -175,7 +175,6 @@ pub fn insert_call_save_restore(
 
                             pairs_inserted += 1;
                         }
-                    }
                 }
 
                 if !saves.is_empty() || !restores.is_empty() {
@@ -200,7 +199,7 @@ pub fn insert_call_save_restore(
         }
 
         // Insert saves before the call.
-        for (_i, save) in saves.into_iter().rev().enumerate() {
+        for save in saves.into_iter().rev() {
             let save_id = InstId(func.insts.len() as u32);
             func.insts.push(save);
             block.insts.insert(pos, save_id);
@@ -335,7 +334,7 @@ mod tests {
             },
         ];
 
-        let inst_ids: Vec<InstId> = (0..3).map(|i| InstId(i)).collect();
+        let inst_ids: Vec<InstId> = (0..3).map(InstId).collect();
         let func = MachFunction {
             name: "test".into(),
             insts,
@@ -501,7 +500,7 @@ mod tests {
             stack_slots: HashMap::new(),
         };
 
-        let numbering: HashMap<InstId, u32> = (0..3).map(|i| (InstId(i), i as u32)).collect();
+        let numbering: HashMap<InstId, u32> = (0..3).map(|i| (InstId(i), i)).collect();
         // v0 live [0, 2) — dies before call at index 2.
         let intervals = HashMap::from([(0u32, interval_at(0, 0, 2))]);
         let crossings = find_call_crossings(&func, &intervals, &numbering);
@@ -561,7 +560,7 @@ mod tests {
             stack_slots: HashMap::new(),
         };
 
-        let numbering: HashMap<InstId, u32> = (0..4).map(|i| (InstId(i), i as u32)).collect();
+        let numbering: HashMap<InstId, u32> = (0..4).map(|i| (InstId(i), i)).collect();
         let intervals = HashMap::from([
             (0u32, interval_at(0, 0, 4)),
             (1u32, interval_at(1, 1, 4)),

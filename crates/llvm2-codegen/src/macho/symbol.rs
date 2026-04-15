@@ -741,8 +741,8 @@ mod tests {
     #[test]
     fn test_build_version_macos() {
         // macOS 14.0.0
-        let minos = (14 << 16) | (0 << 8) | 0;
-        let sdk = (14 << 16) | (0 << 8) | 0;
+        let minos = 14 << 16;
+        let sdk = 14 << 16;
         let cmd = encode_build_version(minos, sdk);
 
         assert_eq!(cmd.len(), 24);
@@ -770,10 +770,10 @@ mod tests {
 
     #[test]
     fn test_build_version_with_tool() {
-        let minos = (14 << 16) | (0 << 8) | 0;
-        let sdk = (14 << 16) | (0 << 8) | 0;
+        let minos = 14 << 16;
+        let sdk = 14 << 16;
         let tool_ld = 3; // ld
-        let tool_ver = (1 << 16) | (0 << 8) | 0; // 1.0.0
+        let tool_ver = 1 << 16; // 1.0.0
         let cmd = encode_build_version_with_tool(minos, sdk, tool_ld, tool_ver);
 
         assert_eq!(cmd.len(), 32);

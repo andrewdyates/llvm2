@@ -346,14 +346,14 @@ fn classify_def_use(
     if is_store || is_branch || is_return || is_cmp || inst.operands.is_empty() {
         // All uses, no defs.
         let uses: Vec<RaOp> = inst.operands.iter()
-            .map(|op| convert_op(op))
+            .map(&convert_op)
             .collect::<Result<_, _>>()?;
         Ok((Vec::new(), uses))
     } else {
         // First operand is def, rest are uses.
         let defs = vec![convert_op(&inst.operands[0])?];
         let uses: Vec<RaOp> = inst.operands[1..].iter()
-            .map(|op| convert_op(op))
+            .map(convert_op)
             .collect::<Result<_, _>>()?;
         Ok((defs, uses))
     }
@@ -376,13 +376,12 @@ pub fn apply_regalloc(
 ) {
     for inst in &mut ir_func.insts {
         for operand in &mut inst.operands {
-            if let IrOperand::VReg(vreg) = operand {
-                if let Some(&preg) = allocation.get(vreg) {
+            if let IrOperand::VReg(vreg) = operand
+                && let Some(&preg) = allocation.get(vreg) {
                     *operand = IrOperand::PReg(preg);
                 }
                 // If not found in allocation, the vreg was spilled.
                 // Spill code insertion should have already handled this.
-            }
         }
     }
 }
@@ -2473,7 +2472,7 @@ mod dispatch_verification_tests {
         assert_eq!(plan.count_syncs(), 0, "no syncs");
 
         // All assignments should be CpuScalar.
-        for (_, target) in &plan.assignment {
+        for target in plan.assignment.values() {
             assert_eq!(*target, ComputeTarget::CpuScalar);
         }
     }

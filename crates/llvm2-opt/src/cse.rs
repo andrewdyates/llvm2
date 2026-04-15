@@ -201,11 +201,10 @@ fn run_cse(func: &mut MachFunction, dom: &DomTree) -> bool {
             let use_start = if produces_value(inst.opcode) { 1 } else { 0 };
 
             for i in use_start..inst.operands.len() {
-                if let MachOperand::VReg(vreg) = &inst.operands[i] {
-                    if let Some(replacement) = replacements.get(&vreg.id) {
+                if let MachOperand::VReg(vreg) = &inst.operands[i]
+                    && let Some(replacement) = replacements.get(&vreg.id) {
                         inst.operands[i] = MachOperand::VReg(*replacement);
                     }
-                }
             }
         }
     }

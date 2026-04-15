@@ -153,7 +153,7 @@ pub fn encode_logical_immediate(value: u64, width: u32) -> Option<(u8, u8, u8)> 
     };
 
     for &size in sizes {
-        if width % size != 0 {
+        if !width.is_multiple_of(size) {
             continue;
         }
 

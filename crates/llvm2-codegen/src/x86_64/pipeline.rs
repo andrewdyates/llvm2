@@ -126,11 +126,10 @@ impl X86RegAssignment {
             if let Some(mblock) = func.blocks.get(block) {
                 for inst in &mblock.insts {
                     for op in &inst.operands {
-                        if let X86ISelOperand::VReg(v) = op {
-                            if !vregs.contains(v) {
+                        if let X86ISelOperand::VReg(v) = op
+                            && !vregs.contains(v) {
                                 vregs.push(*v);
                             }
-                        }
                     }
                 }
             }
@@ -154,25 +153,23 @@ impl X86RegAssignment {
                         vreg.id
                     )));
                 }
-            } else {
-                if gpr_idx < X86_ALLOCATABLE_GPRS.len() {
-                    let preg = X86_ALLOCATABLE_GPRS[gpr_idx];
-                    allocation.insert(*vreg, preg);
+            } else if gpr_idx < X86_ALLOCATABLE_GPRS.len() {
+                let preg = X86_ALLOCATABLE_GPRS[gpr_idx];
+                allocation.insert(*vreg, preg);
 
-                    // Track callee-saved usage.
-                    if X86_CALLEE_SAVED_GPRS.contains(&preg)
-                        && !used_callee_saved.contains(&preg)
-                    {
-                        used_callee_saved.push(preg);
-                    }
-
-                    gpr_idx += 1;
-                } else {
-                    return Err(X86PipelineError::RegAlloc(format!(
-                        "ran out of GPR registers for vreg v{}",
-                        vreg.id
-                    )));
+                // Track callee-saved usage.
+                if X86_CALLEE_SAVED_GPRS.contains(&preg)
+                    && !used_callee_saved.contains(&preg)
+                {
+                    used_callee_saved.push(preg);
                 }
+
+                gpr_idx += 1;
+            } else {
+                return Err(X86PipelineError::RegAlloc(format!(
+                    "ran out of GPR registers for vreg v{}",
+                    vreg.id
+                )));
             }
         }
 
@@ -330,11 +327,10 @@ fn resolve_inst_operands(
                 }
             }
             // If MemAddr came first, dst might not be set yet.
-            if ops.dst.is_none() {
-                if let Some(last) = inst.operands.last() {
+            if ops.dst.is_none()
+                && let Some(last) = inst.operands.last() {
                     ops.dst = resolve_operand(last, alloc);
                 }
-            }
         }
 
         // PUSH / POP: single register
@@ -547,7 +543,7 @@ fn compute_frame_size(num_callee_saved: usize, num_spills: u32) -> u32 {
     // Each callee-saved register is 8 bytes (PUSH).
     // RBP is saved separately.
     // Spill slots are 8 bytes each.
-    let locals = num_spills as u32 * 8;
+    let locals = num_spills * 8;
 
     // After PUSH RBP: RSP is 16-byte aligned (return addr + RBP = 16 bytes).
     // After pushing callee-saved: may be misaligned.
@@ -888,14 +884,13 @@ impl X86Pipeline {
         let epilogue = generate_epilogue(&assignment.used_callee_saved, frame_size);
 
         // Insert prologue at the start of the entry block.
-        if let Some(entry_block) = func.block_order.first().copied() {
-            if let Some(mblock) = func.blocks.get_mut(&entry_block) {
+        if let Some(entry_block) = func.block_order.first().copied()
+            && let Some(mblock) = func.blocks.get_mut(&entry_block) {
                 // Prepend prologue instructions.
                 let mut new_insts = prologue;
                 new_insts.append(&mut mblock.insts);
                 mblock.insts = new_insts;
             }
-        }
 
         // Insert epilogue before every RET instruction.
         for block_id in func.block_order.clone() {

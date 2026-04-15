@@ -404,8 +404,8 @@ fn verify_fp_input(obligation: &ProofObligation, is_f32: bool) -> VerificationRe
         let tmir_result = tmir_expr.try_eval(&env);
         let aarch64_result = aarch64_expr.try_eval(&env);
 
-        if let (Ok(t), Ok(a)) = (&tmir_result, &aarch64_result) {
-            if !convert_results_equal(t, a) {
+        if let (Ok(t), Ok(a)) = (&tmir_result, &aarch64_result)
+            && !convert_results_equal(t, a) {
                 return VerificationResult::Invalid {
                     counterexample: format!(
                         "a={}, tmir={:?}, aarch64={:?}",
@@ -413,7 +413,6 @@ fn verify_fp_input(obligation: &ProofObligation, is_f32: bool) -> VerificationRe
                     ),
                 };
             }
-        }
     }
 
     VerificationResult::Valid
@@ -453,8 +452,8 @@ fn verify_bv_input(obligation: &ProofObligation) -> VerificationResult {
         let tmir_result = obligation.tmir_expr.try_eval(&env);
         let aarch64_result = obligation.aarch64_expr.try_eval(&env);
 
-        if let (Ok(t), Ok(a)) = (&tmir_result, &aarch64_result) {
-            if !convert_results_equal(t, a) {
+        if let (Ok(t), Ok(a)) = (&tmir_result, &aarch64_result)
+            && !convert_results_equal(t, a) {
                 return VerificationResult::Invalid {
                     counterexample: format!(
                         "a=0x{:x}, tmir={:?}, aarch64={:?}",
@@ -462,7 +461,6 @@ fn verify_bv_input(obligation: &ProofObligation) -> VerificationResult {
                     ),
                 };
             }
-        }
     }
 
     VerificationResult::Valid
@@ -582,8 +580,8 @@ fn f64_convert_test_values() -> Vec<f64> {
         0.1,
         -0.1,
         0.000001,
-        3.14159265358979,
-        -3.14159265358979,
+        std::f64::consts::PI,
+        -std::f64::consts::PI,
     ]
 }
 
@@ -870,7 +868,7 @@ mod tests {
     fn test_fcvt_widen_exact() {
         // Verify f32 -> f64 is exact: 3.14f32 -> 3.14f32 as f64
         let env = HashMap::new();
-        let val = 3.14f32;
+        let val = std::f32::consts::PI;
         let expr = SmtExpr::fp_to_fp(
             RoundingMode::RNE,
             SmtExpr::fp32_const(val),

@@ -228,7 +228,7 @@ mod tests {
     fn copy_clone_all_types() {
         let inst = InstId(1);
         let inst2 = inst; // Copy
-        let inst3 = inst.clone(); // Clone
+        let inst3 = inst; // Clone
         assert_eq!(inst, inst2);
         assert_eq!(inst, inst3);
 

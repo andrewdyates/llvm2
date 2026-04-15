@@ -743,6 +743,7 @@ pub fn proof_dup_consistency_16b() -> ProofObligation {
 ///   - Comparison: CMEQ (2) = 2
 ///   - Memory: LD1/ST1 (2) = 2
 ///   - Cross-check: NOT involution (2), DUP consistency (2) = 4
+///
 ///   Total = 28
 pub fn all_neon_encoding_proofs() -> Vec<ProofObligation> {
     vec![

@@ -356,10 +356,10 @@ mod tests {
 
     #[test]
     fn test_fneg_double() {
-        let a = SmtExpr::fp64_const(3.14);
+        let a = SmtExpr::fp64_const(std::f64::consts::PI);
         let expr = encode_fneg(FPSize::Double, a);
         let result = expr.try_eval(&env(&[])).unwrap();
-        assert_eq!(result, EvalResult::Float(-3.14));
+        assert_eq!(result, EvalResult::Float(-std::f64::consts::PI));
     }
 
     #[test]

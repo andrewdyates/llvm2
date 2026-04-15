@@ -125,8 +125,8 @@ impl RiscVISelFunction {
 
     /// Add a block to the function (if not already present).
     pub fn ensure_block(&mut self, block: llvm2_lower::instructions::Block) {
-        if !self.blocks.contains_key(&block) {
-            self.blocks.insert(block, RiscVISelBlock::default());
+        if let std::collections::hash_map::Entry::Vacant(e) = self.blocks.entry(block) {
+            e.insert(RiscVISelBlock::default());
             self.block_order.push(block);
         }
     }
@@ -198,11 +198,10 @@ impl RiscVRegAssignment {
             if let Some(mblock) = func.blocks.get(block) {
                 for inst in &mblock.insts {
                     for op in &inst.operands {
-                        if let RiscVISelOperand::VReg(v) = op {
-                            if !vregs.contains(v) {
+                        if let RiscVISelOperand::VReg(v) = op
+                            && !vregs.contains(v) {
                                 vregs.push(*v);
                             }
-                        }
                     }
                 }
             }
@@ -226,25 +225,23 @@ impl RiscVRegAssignment {
                         vreg.id
                     )));
                 }
-            } else {
-                if gpr_idx < RISCV_ALLOCATABLE_GPRS.len() {
-                    let preg = RISCV_ALLOCATABLE_GPRS[gpr_idx];
-                    allocation.insert(*vreg, preg);
+            } else if gpr_idx < RISCV_ALLOCATABLE_GPRS.len() {
+                let preg = RISCV_ALLOCATABLE_GPRS[gpr_idx];
+                allocation.insert(*vreg, preg);
 
-                    // Track callee-saved usage.
-                    if RISCV_CALLEE_SAVED_GPRS.contains(&preg)
-                        && !used_callee_saved.contains(&preg)
-                    {
-                        used_callee_saved.push(preg);
-                    }
-
-                    gpr_idx += 1;
-                } else {
-                    return Err(RiscVPipelineError::RegAlloc(format!(
-                        "ran out of GPR registers for vreg v{}",
-                        vreg.id
-                    )));
+                // Track callee-saved usage.
+                if RISCV_CALLEE_SAVED_GPRS.contains(&preg)
+                    && !used_callee_saved.contains(&preg)
+                {
+                    used_callee_saved.push(preg);
                 }
+
+                gpr_idx += 1;
+            } else {
+                return Err(RiscVPipelineError::RegAlloc(format!(
+                    "ran out of GPR registers for vreg v{}",
+                    vreg.id
+                )));
             }
         }
 
@@ -768,13 +765,12 @@ impl RiscVPipeline {
         let epilogue = generate_epilogue(&assignment.used_callee_saved, frame_size);
 
         // Insert prologue at the start of the entry block.
-        if let Some(entry_block) = func.block_order.first().copied() {
-            if let Some(mblock) = func.blocks.get_mut(&entry_block) {
+        if let Some(entry_block) = func.block_order.first().copied()
+            && let Some(mblock) = func.blocks.get_mut(&entry_block) {
                 let mut new_insts = prologue;
                 new_insts.append(&mut mblock.insts);
                 mblock.insts = new_insts;
             }
-        }
 
         // Insert epilogue before every JALR that acts as RET.
         // Convention: JALR x0, ra, 0 is the return instruction.

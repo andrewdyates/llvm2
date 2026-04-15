@@ -357,7 +357,6 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             let rm = preg_hw(2)?;
             let cond = imm_val(3) as u32 & 0xF;
             Ok((sf << 31)
-                | (0b00 << 29)
                 | (0b11010100 << 21)
                 | (rm << 16)
                 | (cond << 12)
@@ -372,12 +371,11 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             let rn = preg_hw(1)?;
             let rm = preg_hw(2)?;
             let cond = imm_val(3) as u32 & 0xF;
-            Ok((sf << 31)
+            Ok(((sf << 31)
                 | (0b10 << 29)
                 | (0b11010100 << 21)
                 | (rm << 16)
-                | (cond << 12)
-                | (0b00 << 10)
+                | (cond << 12))
                 | (rn << 5)
                 | rd)
         }
@@ -421,10 +419,8 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             } else {
                 (0b011u32, 0u32)
             };
-            Ok((size << 30)
-                | (0b111 << 27)
-                | (0 << 26)
-                | (0b00 << 24)
+            Ok(((size << 30)
+                | (0b111 << 27))
                 | (0b01 << 22)
                 | (1 << 21)
                 | (rm << 16)
@@ -446,11 +442,8 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             } else {
                 (0b011u32, 0u32)
             };
-            Ok((size << 30)
-                | (0b111 << 27)
-                | (0 << 26)
-                | (0b00 << 24)
-                | (0b00 << 22)
+            Ok(((size << 30)
+                | (0b111 << 27))
                 | (1 << 21)
                 | (rm << 16)
                 | (option << 13)
@@ -939,12 +932,9 @@ mod tests {
             vec![MachOperand::PReg(X0), MachOperand::Imm(3), MachOperand::Imm(2)],
         );
         let word = encode_inst(&inst).unwrap();
-        let expected = (0u32 << 31)
-            | (0b011011 << 25)
-            | (0 << 24)
+        let expected = (0b011011 << 25)
             | (3 << 19)
-            | (2 << 5)
-            | 0;
+            | (2 << 5);
         assert_eq!(word, expected, "TBZ X0, #3, +2 = 0x{word:08X}");
         assert_ne!(word, 0xD503201F, "TBZ must not emit NOP");
     }
@@ -956,12 +946,10 @@ mod tests {
             vec![MachOperand::PReg(X0), MachOperand::Imm(3), MachOperand::Imm(2)],
         );
         let word = encode_inst(&inst).unwrap();
-        let expected = (0u32 << 31)
-            | (0b011011 << 25)
+        let expected = (0b011011 << 25)
             | (1 << 24)
             | (3 << 19)
-            | (2 << 5)
-            | 0;
+            | (2 << 5);
         assert_eq!(word, expected, "TBNZ X0, #3, +2 = 0x{word:08X}");
         assert_ne!(word, 0xD503201F, "TBNZ must not emit NOP");
     }
@@ -974,12 +962,9 @@ mod tests {
             vec![MachOperand::PReg(X0), MachOperand::Imm(32), MachOperand::Imm(5)],
         );
         let word = encode_inst(&inst).unwrap();
-        let expected = (1u32 << 31)
-            | (0b011011 << 25)
-            | (0 << 24)
-            | (0 << 19)
-            | (5 << 5)
-            | 0;
+        let expected = ((1u32 << 31)
+            | (0b011011 << 25))
+            | (5 << 5);
         assert_eq!(word, expected, "TBZ X0, #32, +5 = 0x{word:08X}");
     }
 
@@ -1382,13 +1367,10 @@ mod tests {
         let word = encode_inst(&inst).unwrap();
         // MADD X0, X1, X0, XZR
         // sf=1 | 00 | 11011 | 000 | Rm=0 | o0=0 | Ra=31 | Rn=1 | Rd=0
-        let expected = (1u32 << 31)
-            | (0b0011011u32 << 24)
-            | (0 << 16)   // Rm=X0
-            | (0 << 15)   // o0=0
+        let expected = ((1u32 << 31)
+            | (0b0011011u32 << 24))   // o0=0
             | (31 << 10)  // Ra=XZR
-            | (1 << 5)    // Rn=X1
-            | 0;           // Rd=X0
+            | (1 << 5);           // Rd=X0
         assert_eq!(word, expected, "MUL X0, X1, X0 = 0x{word:08X}");
     }
 

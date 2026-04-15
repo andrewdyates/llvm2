@@ -60,13 +60,12 @@ impl MachinePass for ConstantFolding {
             let block = func.block(*block_id);
             for &inst_id in &block.insts {
                 let inst = func.inst(inst_id);
-                if inst.opcode == AArch64Opcode::MovI {
-                    if let (Some(MachOperand::VReg(dst)), Some(MachOperand::Imm(val))) =
+                if inst.opcode == AArch64Opcode::MovI
+                    && let (Some(MachOperand::VReg(dst)), Some(MachOperand::Imm(val))) =
                         (inst.operands.first(), inst.operands.get(1))
                     {
                         constants.insert(dst.id, *val);
                     }
-                }
             }
         }
 
@@ -166,7 +165,7 @@ fn try_fold(
             let shift = ops[2].as_imm()?;
 
             // Validate shift amount (0..63 for 64-bit).
-            if shift < 0 || shift > 63 {
+            if !(0..=63).contains(&shift) {
                 return None;
             }
             let shift = shift as u32;

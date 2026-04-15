@@ -374,7 +374,7 @@ impl<'a> VerificationRunner<'a> {
         // Clone proofs and config for thread ownership.
         let proofs: Vec<CategorizedProof> = all_proofs.to_vec();
         let config = self.config.clone();
-        let chunk_size = (proofs.len() + threads - 1) / threads;
+        let chunk_size = proofs.len().div_ceil(threads);
 
         let handles: Vec<std::thread::JoinHandle<Vec<VerificationRunResult>>> = proofs
             .chunks(chunk_size)

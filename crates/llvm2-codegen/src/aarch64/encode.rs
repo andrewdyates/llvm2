@@ -190,12 +190,9 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let rn = preg_hw(inst, 1)?;
             let rm = preg_hw(inst, 2)?;
             let ra = 31u32; // XZR — MADD Rd, Rn, Rm, XZR = MUL
-            Ok((sf << 31)
-                | (0b00 << 29)
-                | (0b11011 << 24)
-                | (0b000 << 21)
-                | (rm << 16)
-                | (0 << 15) // o0 = 0 for MADD
+            Ok((((sf << 31)
+                | (0b11011 << 24))
+                | (rm << 16)) // o0 = 0 for MADD
                 | (ra << 10)
                 | (rn << 5)
                 | rd)
@@ -213,10 +210,8 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let rn = preg_hw(inst, 1)?;
             let rm = preg_hw(inst, 2)?;
             let ra = if inst.operands.len() > 3 { preg_hw(inst, 3)? } else { 31 };
-            Ok((sf << 31)
-                | (0b00 << 29)
-                | (0b11011 << 24)
-                | (0b000 << 21)
+            Ok(((sf << 31)
+                | (0b11011 << 24))
                 | (rm << 16)
                 | (1 << 15) // o0 = 1 for MSUB
                 | (ra << 10)
@@ -234,12 +229,10 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let rn = preg_hw(inst, 1)?;
             let rm = preg_hw(inst, 2)?;
             let ra = 31u32; // XZR for SMULL alias
-            Ok((1u32 << 31) // sf = 1 (64-bit result)
-                | (0b00 << 29)
+            Ok(((1u32 << 31)
                 | (0b11011 << 24)
                 | (0b001 << 21) // op54=00, op31=1 (long multiply)
-                | (rm << 16)
-                | (0 << 15) // o0 = 0 (SMADDL)
+                | (rm << 16)) // o0 = 0 (SMADDL)
                 | (ra << 10)
                 | (rn << 5)
                 | rd)
@@ -255,12 +248,10 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let rn = preg_hw(inst, 1)?;
             let rm = preg_hw(inst, 2)?;
             let ra = 31u32; // XZR for UMULL alias
-            Ok((1u32 << 31) // sf = 1 (64-bit result)
-                | (0b00 << 29)
+            Ok(((1u32 << 31)
                 | (0b11011 << 24)
                 | (0b101 << 21) // op54=00, op31=1, U=1 (unsigned long multiply)
-                | (rm << 16)
-                | (0 << 15) // o0 = 0 (UMADDL)
+                | (rm << 16)) // o0 = 0 (UMADDL)
                 | (ra << 10)
                 | (rn << 5)
                 | rd)
@@ -446,7 +437,6 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let imms = regsize - 1;
             // SBFM: opc=00
             Ok((sf << 31)
-                | (0b00 << 29)
                 | (0b100110 << 23)
                 | (n << 22)
                 | (immr << 16)
@@ -524,7 +514,6 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let rn = 31u32; // XZR/WZR
             let rm = 31u32; // XZR/WZR
             Ok((sf << 31)
-                | (0b00 << 29)
                 | (0b11010100 << 21)
                 | (rm << 16)
                 | (inv_cond << 12)
@@ -657,9 +646,8 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             // We encode 64-bit literal load: opc=01, V=0
             let imm19 = imm_val(inst, 1) as u32 & 0x7FFFF;
             let rt = preg_hw(inst, 0)?;
-            Ok((0b01 << 30)
-                | (0b011 << 27)
-                | (0b00 << 24)
+            Ok(((0b01 << 30)
+                | (0b011 << 27))
                 | (imm19 << 5)
                 | rt)
         }
@@ -771,9 +759,8 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             };
             let b5 = (bit >> 5) & 1;
             let b40 = bit & 0x1F;
-            Ok((b5 << 31)
-                | (0b011011 << 25)
-                | (0 << 24) // op=0 for TBZ
+            Ok(((b5 << 31)
+                | (0b011011 << 25)) // op=0 for TBZ
                 | (b40 << 19)
                 | (imm14 << 5)
                 | rt)
@@ -828,11 +815,9 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let rd = preg_hw(inst, 0)?;
             let rn = preg_hw(inst, 1)?;
             // sf=1, opc=00(SBFM), N=1, immr=0, imms=31
-            Ok((1u32 << 31)
-                | (0b00 << 29)
+            Ok(((1u32 << 31)
                 | (0b100110 << 23)
-                | (1 << 22) // N=1
-                | (0 << 16) // immr=0
+                | (1 << 22)) // immr=0
                 | (31 << 10) // imms=31
                 | (rn << 5)
                 | rd)
@@ -853,11 +838,9 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
         AArch64Opcode::Sxtb => {
             let rd = preg_hw(inst, 0)?;
             let rn = preg_hw(inst, 1)?;
-            Ok((1u32 << 31)
-                | (0b00 << 29)
+            Ok(((1u32 << 31)
                 | (0b100110 << 23)
-                | (1 << 22)
-                | (0 << 16)
+                | (1 << 22))
                 | (7 << 10) // imms=7
                 | (rn << 5)
                 | rd)
@@ -867,11 +850,9 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
         AArch64Opcode::Sxth => {
             let rd = preg_hw(inst, 0)?;
             let rn = preg_hw(inst, 1)?;
-            Ok((1u32 << 31)
-                | (0b00 << 29)
+            Ok(((1u32 << 31)
                 | (0b100110 << 23)
-                | (1 << 22)
-                | (0 << 16)
+                | (1 << 22))
                 | (15 << 10) // imms=15
                 | (rn << 5)
                 | rd)
@@ -883,11 +864,8 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let rd = preg_hw(inst, 0)?;
             let rn = preg_hw(inst, 1)?;
             // sf=0, opc=10(UBFM), N=0, immr=0, imms=7
-            Ok((0u32 << 31)
-                | (0b10 << 29)
-                | (0b100110 << 23)
-                | (0 << 22) // N=0 (32-bit)
-                | (0 << 16) // immr=0
+            Ok(((0b10 << 29)
+                | (0b100110 << 23)) // immr=0
                 | (7 << 10) // imms=7
                 | (rn << 5)
                 | rd)
@@ -899,11 +877,8 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let rd = preg_hw(inst, 0)?;
             let rn = preg_hw(inst, 1)?;
             // sf=0, opc=10(UBFM), N=0, immr=0, imms=15
-            Ok((0u32 << 31)
-                | (0b10 << 29)
-                | (0b100110 << 23)
-                | (0 << 22) // N=0 (32-bit)
-                | (0 << 16) // immr=0
+            Ok(((0b10 << 29)
+                | (0b100110 << 23)) // immr=0
                 | (15 << 10) // imms=15
                 | (rn << 5)
                 | rd)
@@ -1148,12 +1123,10 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let rn = preg_hw(inst, 1)?;
             let rm = preg_hw(inst, 2)?;
             let cond = imm_val(inst, 3) as u32 & 0xF;
-            Ok((sf << 31)
-                | (0b00 << 29)
+            Ok(((sf << 31)
                 | (0b11010100 << 21)
                 | (rm << 16)
-                | (cond << 12)
-                | (0b00 << 10)
+                | (cond << 12))
                 | (rn << 5)
                 | rd)
         }
@@ -1492,7 +1465,7 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let rt = preg_hw(inst, 0)?;
             let rn = preg_hw(inst, 1)?;
             // size(2) 001000 0 1 0 11111 1 11111 Rn(5) Rt(5)
-            Ok((size << 30) | (0b001000 << 24) | (0 << 23) | (1 << 22) | (0 << 21)
+            Ok((((size << 30) | (0b001000 << 24)) | (1 << 22))
                 | (0b11111 << 16) | (1 << 15) | (0b11111 << 10) | (rn << 5) | rt)
         }
 
@@ -1506,7 +1479,7 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let rt = preg_hw(inst, 1)?; // value
             let rn = preg_hw(inst, 2)?; // address
             // size(2) 001000 0 0 0 Rs(5) 1 11111 Rn(5) Rt(5)
-            Ok((size << 30) | (0b001000 << 24) | (0 << 23) | (0 << 22) | (0 << 21)
+            Ok(((size << 30) | (0b001000 << 24))
                 | (rs << 16) | (1 << 15) | (0b11111 << 10) | (rn << 5) | rt)
         }
 
@@ -1589,8 +1562,7 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let immr = imm_val(inst, 2) as u32 & 0x3F;
             let imms = imm_val(inst, 3) as u32 & 0x3F;
             let n = sf;
-            Ok((sf << 31)
-                | (0b00 << 29) // opc = 00 (SBFM)
+            Ok((sf << 31) // opc = 00 (SBFM)
                 | (0b100110 << 23)
                 | (n << 22)
                 | (immr << 16)
@@ -1765,8 +1737,7 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let n = imm_val(inst, 2) as u32 & 1;
             let immr = imm_val(inst, 3) as u32 & 0x3F;
             let imms = imm_val(inst, 4) as u32 & 0x3F;
-            Ok((sf << 31)
-                | (0b00 << 29) // opc = 00 (AND)
+            Ok((sf << 31) // opc = 00 (AND)
                 | (0b100100 << 23)
                 | (n << 22)
                 | (immr << 16)
@@ -1835,7 +1806,6 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let rm = preg_hw(inst, 2)?;
             let cond = imm_val(inst, 3) as u32 & 0xF;
             Ok((sf << 31)
-                | (0b00 << 29)
                 | (0b11010100 << 21)
                 | (rm << 16)
                 | (cond << 12)
@@ -1853,12 +1823,11 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             let rn = preg_hw(inst, 1)?;
             let rm = preg_hw(inst, 2)?;
             let cond = imm_val(inst, 3) as u32 & 0xF;
-            Ok((sf << 31)
+            Ok(((sf << 31)
                 | (0b10 << 29) // op = 1, S = 0
                 | (0b11010100 << 21)
                 | (rm << 16)
-                | (cond << 12)
-                | (0b00 << 10) // op2 = 00 (CSINV)
+                | (cond << 12)) // op2 = 00 (CSINV)
                 | (rn << 5)
                 | rd)
         }
@@ -1922,12 +1891,11 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
                 Some(MachOperand::Imm(v)) => (*v as u32) & 0xFF,
                 _ => 0,
             };
-            Ok((0b00011110u32 << 24)
+            Ok(((0b00011110u32 << 24)
                 | (ftype << 22)
                 | (1 << 21)
                 | (imm8 << 13)
-                | (0b100 << 10)
-                | (0b00000 << 5)
+                | (0b100 << 10))
                 | rd)
         }
 
@@ -2039,11 +2007,10 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
 /// ARM ARM C6.2.117: LDAR encoding uses the load-acquire ordered access format.
 fn encode_load_acquire(size: u32, rn: u32, rt: u32) -> u32 {
     // size(2) 001000 1 1 0 11111 1 11111 Rn(5) Rt(5)
-    (size << 30)
+    ((size << 30)
         | (0b001000 << 24)
         | (1 << 23) // o2 = 1 (ordered)
-        | (1 << 22) // L = 1 (load)
-        | (0 << 21) // o1 = 0
+        | (1 << 22)) // o1 = 0
         | (0b11111 << 16) // Rs = 11111 (not used)
         | (1 << 15) // o0 = 1
         | (0b11111 << 10) // Rt2 = 11111 (not used)
@@ -2056,11 +2023,9 @@ fn encode_load_acquire(size: u32, rn: u32, rt: u32) -> u32 {
 /// ARM ARM C6.2.260: STLR encoding uses the store-release ordered access format.
 fn encode_store_release(size: u32, rn: u32, rt: u32) -> u32 {
     // size(2) 001000 1 0 0 11111 1 11111 Rn(5) Rt(5)
-    (size << 30)
+    ((size << 30)
         | (0b001000 << 24)
-        | (1 << 23) // o2 = 1 (ordered)
-        | (0 << 22) // L = 0 (store)
-        | (0 << 21) // o1 = 0
+        | (1 << 23)) // o1 = 0
         | (0b11111 << 16) // Rs = 11111 (not used)
         | (1 << 15) // o0 = 1
         | (0b11111 << 10) // Rt2 = 11111 (not used)
@@ -2092,17 +2057,14 @@ fn encode_lse_atomic(
     let rt = preg_hw(inst, 1)?;
     let rn = preg_hw(inst, 2)?;
 
-    Ok((size << 30)
-        | (0b111 << 27)
-        | (0 << 26)
-        | (0b00 << 24)
+    Ok((((size << 30)
+        | (0b111 << 27))
         | (a << 23)
         | (r << 22)
         | (1 << 21)
         | (rs << 16)
         | (o3 << 15)
-        | (opc << 12)
-        | (0b00 << 10)
+        | (opc << 12))
         | (rn << 5)
         | rt)
 }
@@ -2158,7 +2120,7 @@ fn encode_fmov_imm8(value: f64) -> u32 {
 
     // Exponent must be in range: biased [1020, 1027] for f64 (bias=1023)
     // This maps to unbiased [-3, +4]
-    if exp < 1020 || exp > 1027 {
+    if !(1020..=1027).contains(&exp) {
         return 0;
     }
 
@@ -2362,7 +2324,7 @@ mod tests {
         let inst = mk(AArch64Opcode::MulRR, vec![preg(X0), preg(X1), preg(X2)]);
         let enc = encode_instruction(&inst).unwrap();
         // Expected: sf=1, 00 11011 000 Rm=2 0 Ra=31 Rn=1 Rd=0
-        let expected = (1u32 << 31) | (0b11011 << 24) | (2 << 16) | (31 << 10) | (1 << 5) | 0;
+        let expected = (1u32 << 31) | (0b11011 << 24) | (2 << 16) | (31 << 10) | (1 << 5);
         assert_eq!(enc, expected, "MUL X0, X1, X2 = {enc:#010X}");
     }
 
@@ -2380,8 +2342,7 @@ mod tests {
             | (2 << 16)
             | (1 << 15) // o0 = 1 for MSUB
             | (9 << 10) // Ra = X9
-            | (1 << 5)
-            | 0;
+            | (1 << 5);
         assert_eq!(enc, expected, "MSUB X0, X1, X2, X9 = {enc:#010X}");
     }
 
@@ -2398,8 +2359,7 @@ mod tests {
             | (2 << 16)
             | (1 << 15) // o0 = 1 for MSUB
             | (31 << 10) // Ra = XZR (31)
-            | (1 << 5)
-            | 0;
+            | (1 << 5);
         assert_eq!(enc, expected, "MNEG X0, X1, X2 = {enc:#010X}");
     }
 
@@ -2412,14 +2372,12 @@ mod tests {
             vec![preg(X0), preg(X1), preg(X2)],
         );
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (1u32 << 31)
+        let expected = ((1u32 << 31)
             | (0b11011 << 24)
             | (0b001 << 21) // signed long multiply
-            | (2 << 16)
-            | (0 << 15) // o0 = 0
+            | (2 << 16)) // o0 = 0
             | (31 << 10) // Ra = XZR
-            | (1 << 5)
-            | 0;
+            | (1 << 5);
         assert_eq!(enc, expected, "SMULL X0, W1, W2 = {enc:#010X}");
     }
 
@@ -2432,14 +2390,12 @@ mod tests {
             vec![preg(X0), preg(X1), preg(X2)],
         );
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (1u32 << 31)
+        let expected = ((1u32 << 31)
             | (0b11011 << 24)
             | (0b101 << 21) // unsigned long multiply
-            | (2 << 16)
-            | (0 << 15) // o0 = 0
+            | (2 << 16)) // o0 = 0
             | (31 << 10) // Ra = XZR
-            | (1 << 5)
-            | 0;
+            | (1 << 5);
         assert_eq!(enc, expected, "UMULL X0, W1, W2 = {enc:#010X}");
     }
 
@@ -2467,7 +2423,7 @@ mod tests {
         let inst = mk(AArch64Opcode::SDiv, vec![preg(X0), preg(X1), preg(X2)]);
         let enc = encode_instruction(&inst).unwrap();
         // sf=1 0 0011010110 Rm=2 000011 Rn=1 Rd=0
-        let expected = (1u32 << 31) | (0b0_0011010110 << 21) | (2 << 16) | (0b000011 << 10) | (1 << 5) | 0;
+        let expected = (1u32 << 31) | (0b0_0011010110 << 21) | (2 << 16) | (0b000011 << 10) | (1 << 5);
         assert_eq!(enc, expected, "SDIV X0, X1, X2 = {enc:#010X}");
     }
 
@@ -2475,7 +2431,7 @@ mod tests {
     fn test_udiv() {
         let inst = mk(AArch64Opcode::UDiv, vec![preg(X0), preg(X1), preg(X2)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (1u32 << 31) | (0b0_0011010110 << 21) | (2 << 16) | (0b000010 << 10) | (1 << 5) | 0;
+        let expected = (1u32 << 31) | (0b0_0011010110 << 21) | (2 << 16) | (0b000010 << 10) | (1 << 5);
         assert_eq!(enc, expected, "UDIV X0, X1, X2 = {enc:#010X}");
     }
 
@@ -2639,12 +2595,9 @@ mod tests {
         // TBZ X0, #3, +2
         let inst = mk(AArch64Opcode::Tbz, vec![preg(X0), imm(3), imm(2)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (0u32 << 31)
-            | (0b011011 << 25)
-            | (0 << 24)       // op=0 (TBZ)
+        let expected = (0b011011 << 25)       // op=0 (TBZ)
             | (3 << 19)       // b40=3
-            | (2 << 5)        // imm14=2
-            | 0;              // Rt=X0=0
+            | (2 << 5);              // Rt=X0=0
         assert_eq!(enc, expected, "TBZ X0, #3, +2 = {enc:#010X}");
         assert_ne!(enc, NOP, "TBZ must not emit NOP");
     }
@@ -2653,12 +2606,10 @@ mod tests {
     fn test_tbnz_bit3() {
         let inst = mk(AArch64Opcode::Tbnz, vec![preg(X0), imm(3), imm(2)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (0u32 << 31)
-            | (0b011011 << 25)
+        let expected = (0b011011 << 25)
             | (1 << 24)       // op=1 (TBNZ)
             | (3 << 19)
-            | (2 << 5)
-            | 0;
+            | (2 << 5);
         assert_eq!(enc, expected, "TBNZ X0, #3, +2 = {enc:#010X}");
         assert_ne!(enc, NOP, "TBNZ must not emit NOP");
     }
@@ -2668,12 +2619,9 @@ mod tests {
         // TBZ X0, #32, +5  (bit 32: b5=1, b40=0)
         let inst = mk(AArch64Opcode::Tbz, vec![preg(X0), imm(32), imm(5)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (1u32 << 31)
-            | (0b011011 << 25)
-            | (0 << 24)
-            | (0 << 19)       // b40 = 32 & 0x1F = 0
-            | (5 << 5)
-            | 0;
+        let expected = ((1u32 << 31)
+            | (0b011011 << 25))       // b40 = 32 & 0x1F = 0
+            | (5 << 5);
         assert_eq!(enc, expected, "TBZ X0, #32, +5 = {enc:#010X}");
     }
 
@@ -2806,8 +2754,8 @@ mod tests {
         // SXTW X0, X1 = SBFM X0, X1, #0, #31
         let inst = mk(AArch64Opcode::Sxtw, vec![preg(X0), preg(X1)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (1u32 << 31) | (0b00 << 29) | (0b100110 << 23)
-            | (1 << 22) | (31 << 10) | (1 << 5) | 0;
+        let expected = (1u32 << 31) | (0b100110 << 23)
+            | (1 << 22) | (31 << 10) | (1 << 5);
         assert_eq!(enc, expected, "SXTW X0, X1 = {enc:#010X}");
     }
 
@@ -2817,7 +2765,7 @@ mod tests {
         let inst = mk(AArch64Opcode::LslRR, vec![preg(X0), preg(X1), preg(X2)]);
         let enc = encode_instruction(&inst).unwrap();
         let expected = (1u32 << 31) | (0b0_0011010110 << 21) | (2 << 16)
-            | (0b001000 << 10) | (1 << 5) | 0;
+            | (0b001000 << 10) | (1 << 5);
         assert_eq!(enc, expected, "LSLV X0, X1, X2 = {enc:#010X}");
     }
 
@@ -2826,7 +2774,7 @@ mod tests {
         let inst = mk(AArch64Opcode::LsrRR, vec![preg(X0), preg(X1), preg(X2)]);
         let enc = encode_instruction(&inst).unwrap();
         let expected = (1u32 << 31) | (0b0_0011010110 << 21) | (2 << 16)
-            | (0b001001 << 10) | (1 << 5) | 0;
+            | (0b001001 << 10) | (1 << 5);
         assert_eq!(enc, expected);
     }
 
@@ -2835,7 +2783,7 @@ mod tests {
         let inst = mk(AArch64Opcode::AsrRR, vec![preg(X0), preg(X1), preg(X2)]);
         let enc = encode_instruction(&inst).unwrap();
         let expected = (1u32 << 31) | (0b0_0011010110 << 21) | (2 << 16)
-            | (0b001010 << 10) | (1 << 5) | 0;
+            | (0b001010 << 10) | (1 << 5);
         assert_eq!(enc, expected);
     }
 
@@ -3060,7 +3008,7 @@ mod tests {
         let inst = mk(AArch64Opcode::MulRR, vec![preg(W0), preg(W1), preg(W2)]);
         let enc = encode_instruction(&inst).unwrap();
         // Expected: sf=0, 00 11011 000 Rm=2 0 Ra=31 Rn=1 Rd=0
-        let expected = (0u32 << 31) | (0b11011 << 24) | (2 << 16) | (31 << 10) | (1 << 5) | 0;
+        let expected = (0b11011 << 24) | (2 << 16) | (31 << 10) | (1 << 5);
         assert_eq!(enc, expected, "MUL W0, W1, W2 = {enc:#010X}");
         assert_eq!(enc >> 31, 0, "MUL W0, W1, W2 must have sf=0");
     }
@@ -3070,7 +3018,7 @@ mod tests {
         // SDIV W0, W1, W2 — sf=0
         let inst = mk(AArch64Opcode::SDiv, vec![preg(W0), preg(W1), preg(W2)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (0u32 << 31) | (0b0_0011010110 << 21) | (2 << 16) | (0b000011 << 10) | (1 << 5) | 0;
+        let expected = (0b0_0011010110 << 21) | (2 << 16) | (0b000011 << 10) | (1 << 5);
         assert_eq!(enc, expected, "SDIV W0, W1, W2 = {enc:#010X}");
         assert_eq!(enc >> 31, 0, "SDIV W0, W1, W2 must have sf=0");
     }
@@ -3160,8 +3108,8 @@ mod tests {
         // LSLV W0, W1, W2 — sf=0
         let inst = mk(AArch64Opcode::LslRR, vec![preg(W0), preg(W1), preg(W2)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (0u32 << 31) | (0b0_0011010110 << 21) | (2 << 16)
-            | (0b001000 << 10) | (1 << 5) | 0;
+        let expected = (0b0_0011010110 << 21) | (2 << 16)
+            | (0b001000 << 10) | (1 << 5);
         assert_eq!(enc, expected, "LSLV W0, W1, W2 = {enc:#010X}");
         assert_eq!(enc >> 31, 0, "LSLV W0, W1, W2 must have sf=0");
     }
@@ -3464,14 +3412,12 @@ mod tests {
         // ARM ARM: sf=1 opc=10 100110 N=1 immr=0 imms=7 Rn=1 Rd=0
         let inst = mk(AArch64Opcode::Ubfm, vec![preg(X0), preg(X1), imm(0), imm(7)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (1u32 << 31)
+        let expected = ((1u32 << 31)
             | (0b10 << 29)
             | (0b100110 << 23)
-            | (1 << 22) // N=1
-            | (0 << 16) // immr=0
+            | (1 << 22)) // immr=0
             | (7 << 10) // imms=7
-            | (1 << 5)
-            | 0;
+            | (1 << 5);
         assert_eq!(enc, expected, "UBFM X0, X1, #0, #7 = {enc:#010X}");
         // Verify fixed field: bits [28:23] = 100110
         assert_eq!((enc >> 23) & 0x3F, 0b100110);
@@ -3504,14 +3450,11 @@ mod tests {
         // ARM ARM: sf=1 opc=00 100110 N=1 immr=0 imms=31 Rn=1 Rd=0
         let inst = mk(AArch64Opcode::Sbfm, vec![preg(X0), preg(X1), imm(0), imm(31)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (1u32 << 31)
-            | (0b00 << 29)
+        let expected = ((1u32 << 31)
             | (0b100110 << 23)
-            | (1 << 22) // N=1
-            | (0 << 16) // immr=0
+            | (1 << 22)) // immr=0
             | (31 << 10) // imms=31
-            | (1 << 5)
-            | 0;
+            | (1 << 5);
         assert_eq!(enc, expected, "SBFM X0, X1, #0, #31 = {enc:#010X}");
     }
 
@@ -3557,8 +3500,7 @@ mod tests {
             | (1 << 22) // N=1
             | (4 << 16) // immr=4
             | (11 << 10) // imms=11
-            | (1 << 5)
-            | 0;
+            | (1 << 5);
         assert_eq!(enc, expected, "BFM X0, X1, #4, #11 = {enc:#010X}");
         assert_eq!((enc >> 29) & 0b11, 0b01, "BFM opc must be 01");
     }
@@ -3884,8 +3826,7 @@ mod tests {
             | (1 << 22)            // N=1
             | (16 << 16)           // immr=16
             | (31 << 10)           // imms=31
-            | (1 << 5)            // Rn=1
-            | 0;                   // Rd=0
+            | (1 << 5);                   // Rd=0
         assert_eq!(enc, expected, "UBFM X0, X1, #16, #31 = {enc:#010X}");
     }
 
@@ -4516,10 +4457,9 @@ mod tests {
         // 1_00_11010100_00010_0000_01_00001_00000
         let inst = mk(AArch64Opcode::Csinc, vec![preg(X0), preg(X1), preg(X2), imm(0)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (1u32 << 31)
+        let expected = ((1u32 << 31)
             | (0b11010100 << 21)
-            | (2 << 16)
-            | (0b0000 << 12) // EQ
+            | (2 << 16)) // EQ
             | (0b01 << 10)
             | (1 << 5);
         assert_eq!(enc, expected, "CSINC X0, X1, X2, EQ = {enc:#010X}");
@@ -4548,12 +4488,10 @@ mod tests {
         // sf=1, op=1, S=0, 11010100, Rm=2, cond=0000(EQ), op2=00, Rn=1, Rd=0
         let inst = mk(AArch64Opcode::Csinv, vec![preg(X0), preg(X1), preg(X2), imm(0)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (1u32 << 31)
+        let expected = ((1u32 << 31)
             | (0b10 << 29) // op=1, S=0
             | (0b11010100 << 21)
-            | (2 << 16)
-            | (0b0000 << 12) // EQ
-            | (0b00 << 10) // op2=00
+            | (2 << 16)) // op2=00
             | (1 << 5);
         assert_eq!(enc, expected, "CSINV X0, X1, X2, EQ = {enc:#010X}");
     }
@@ -4564,11 +4502,10 @@ mod tests {
         // sf=0, cond=1011(LT)
         let inst = mk(AArch64Opcode::Csinv, vec![preg(W0), preg(W1), preg(W2), imm(0b1011)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (0b10u32 << 29)
+        let expected = ((0b10u32 << 29)
             | (0b11010100 << 21)
             | (2 << 16)
-            | (0b1011 << 12) // LT
-            | (0b00 << 10)
+            | (0b1011 << 12))
             | (1 << 5);
         assert_eq!(enc, expected, "CSINV W0, W1, W2, LT = {enc:#010X}");
     }
@@ -4582,11 +4519,10 @@ mod tests {
         // sf=1, op=1, S=0, 11010100, Rm=2, cond=0000(EQ), op2=01, Rn=1, Rd=0
         let inst = mk(AArch64Opcode::Csneg, vec![preg(X0), preg(X1), preg(X2), imm(0)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (1u32 << 31)
+        let expected = ((1u32 << 31)
             | (0b10 << 29) // op=1, S=0
             | (0b11010100 << 21)
-            | (2 << 16)
-            | (0b0000 << 12) // EQ
+            | (2 << 16)) // EQ
             | (0b01 << 10) // op2=01
             | (1 << 5);
         assert_eq!(enc, expected, "CSNEG X0, X1, X2, EQ = {enc:#010X}");
@@ -4653,14 +4589,11 @@ mod tests {
         // 1_00_100100_1_000000_000111_00001_00000
         let inst = mk(AArch64Opcode::AndRI, vec![preg(X0), preg(X1), imm(1), imm(0), imm(7)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (1u32 << 31)
-            | (0b00 << 29)
+        let expected = ((1u32 << 31)
             | (0b100100 << 23)
-            | (1 << 22) // N=1
-            | (0 << 16) // immr=0
+            | (1 << 22)) // immr=0
             | (7 << 10) // imms=7
-            | (1 << 5)  // Rn=1
-            | 0;         // Rd=0
+            | (1 << 5);         // Rd=0
         assert_eq!(enc, expected, "AND X0, X1, #0xFF = {enc:#010X}");
     }
 
@@ -4674,14 +4607,10 @@ mod tests {
             vec![preg(X0), MachOperand::Special(SpecialReg::XZR), imm(0), imm(0), imm(0)],
         );
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (1u32 << 31)
+        let expected = ((1u32 << 31)
             | (0b01 << 29) // ORR
-            | (0b100100 << 23)
-            | (0 << 22) // N=0
-            | (0 << 16) // immr=0
-            | (0 << 10) // imms=0
-            | (31 << 5) // Rn=XZR
-            | 0;         // Rd=0
+            | (0b100100 << 23)) // imms=0
+            | (31 << 5);         // Rd=0
         assert_eq!(enc, expected, "ORR X0, XZR, #imm = {enc:#010X}");
     }
 
@@ -4698,8 +4627,7 @@ mod tests {
             | (1 << 22) // N=1
             | (16 << 16) // immr=16
             | (31 << 10) // imms=31
-            | (1 << 5)  // Rn=1
-            | 0;         // Rd=0
+            | (1 << 5);         // Rd=0
         assert_eq!(enc, expected, "EOR X0, X1, #imm = {enc:#010X}");
     }
 
@@ -4709,13 +4637,9 @@ mod tests {
         // sf=0, opc=00, N=0 (must be 0 for 32-bit), immr=0, imms=3
         let inst = mk(AArch64Opcode::AndRI, vec![preg(W0), preg(W1), imm(0), imm(0), imm(3)]);
         let enc = encode_instruction(&inst).unwrap();
-        let expected = (0b00u32 << 29)
-            | (0b100100 << 23)
-            | (0 << 22) // N=0
-            | (0 << 16) // immr=0
+        let expected = (0b100100 << 23) // immr=0
             | (3 << 10) // imms=3
-            | (1 << 5)  // Rn=1
-            | 0;
+            | (1 << 5);
         assert_eq!(enc, expected, "AND W0, W1, #0xF = {enc:#010X}");
     }
 
@@ -4733,12 +4657,9 @@ mod tests {
         let inst = mk(AArch64Opcode::FmovImm, vec![preg(S0), MachOperand::FImm(2.0)]);
         let enc = encode_instruction(&inst).unwrap();
         // ftype=00, imm8=0x00
-        let expected = (0b00011110u32 << 24)
-            | (0b00 << 22) // ftype=single
-            | (1 << 21)
-            | (0x00 << 13) // imm8
-            | (0b100 << 10)
-            | 0; // Rd=S0
+        let expected = ((0b00011110u32 << 24) // ftype=single
+            | (1 << 21)) // imm8
+            | (0b100 << 10); // Rd=S0
         assert_eq!(enc, expected, "FMOV S0, #2.0 = {enc:#010X}");
     }
 
@@ -4755,8 +4676,7 @@ mod tests {
             | (0b01 << 22) // ftype=double
             | (1 << 21)
             | (0x70u32 << 13) // imm8 = 0b01110000
-            | (0b100 << 10)
-            | 0; // Rd=D0
+            | (0b100 << 10); // Rd=D0
         assert_eq!(enc, expected, "FMOV D0, #1.0 = {enc:#010X}");
     }
 
@@ -4772,8 +4692,7 @@ mod tests {
             | (0b01 << 22) // ftype=double
             | (1 << 21)
             | (0xF0u32 << 13) // imm8 = 0b11110000
-            | (0b100 << 10)
-            | 0;
+            | (0b100 << 10);
         assert_eq!(enc, expected, "FMOV D0, #-1.0 = {enc:#010X}");
     }
 
@@ -4790,8 +4709,7 @@ mod tests {
             | (0b01 << 22)
             | (1 << 21)
             | (0x60u32 << 13)
-            | (0b100 << 10)
-            | 0;
+            | (0b100 << 10);
         assert_eq!(enc, expected, "FMOV D0, #0.5 = {enc:#010X}");
     }
 

@@ -443,7 +443,7 @@ mod tests {
         assert!(result.trace.is_some(), "trace should be present with Summary level");
         let trace = result.trace.unwrap();
         assert!(!trace.entries.is_empty());
-        assert!(trace.total_duration > Duration::ZERO || trace.total_duration == Duration::ZERO);
+        assert!(trace.total_duration >= Duration::ZERO);
     }
 
     #[test]

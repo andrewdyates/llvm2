@@ -646,8 +646,9 @@ pub fn proof_vectorize_sshr_8h() -> ProofObligation {
 /// 11 operations across multiple arrangements:
 /// - Arithmetic: ADD (4S/8H/2D), SUB (4S/8H/2D), MUL (4S/8H/16B), NEG (4S/2D) = 12
 /// - Bitwise: AND (8B/16B/8H/2D), ORR (8B/16B/8H/2D), EOR (8B/16B/8H/2D),
-///            BIC (8B/16B) = 14
+///   BIC (8B/16B) = 14
 /// - Shifts: SHL (4S/8H), USHR (4S/2D), SSHR (4S/8H) = 6
+///
 /// Total: 12 + 14 - 1 (BIC only 2) + 6 = 31 (adjusted: 12 + 14 + 6 - 1 = 31)
 ///
 /// These validate every integer/bitwise mapping in `scalar_to_neon_op()`.

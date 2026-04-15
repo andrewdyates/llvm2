@@ -90,11 +90,10 @@ fn eliminate_dead_stores(func: &mut MachFunction, result: &mut PostRAOptResult) 
     for block in &func.blocks {
         for &inst_id in &block.insts {
             let inst = &func.insts[inst_id.0 as usize];
-            if inst.opcode == PSEUDO_SPILL_LOAD {
-                if let Some(slot) = extract_stack_slot_from_uses(inst) {
+            if inst.opcode == PSEUDO_SPILL_LOAD
+                && let Some(slot) = extract_stack_slot_from_uses(inst) {
                     loaded_slots.insert(slot);
                 }
-            }
         }
     }
 
@@ -102,14 +101,12 @@ fn eliminate_dead_stores(func: &mut MachFunction, result: &mut PostRAOptResult) 
     for block in &func.blocks {
         for &inst_id in &block.insts {
             let inst = &func.insts[inst_id.0 as usize];
-            if inst.opcode == PSEUDO_SPILL_STORE {
-                if let Some(slot) = extract_stack_slot_from_uses(inst) {
-                    if !loaded_slots.contains(&slot) {
+            if inst.opcode == PSEUDO_SPILL_STORE
+                && let Some(slot) = extract_stack_slot_from_uses(inst)
+                    && !loaded_slots.contains(&slot) {
                         nop_inst(&mut func.insts[inst_id.0 as usize]);
                         result.dead_stores_removed += 1;
                     }
-                }
-            }
         }
     }
 }
@@ -296,11 +293,10 @@ fn nop_inst(inst: &mut MachInst) {
 /// Rewrite VReg uses in an instruction according to the rewrite map.
 fn rewrite_vreg_uses(inst: &mut MachInst, rewrites: &HashMap<u32, VReg>) {
     for op in &mut inst.uses {
-        if let MachOperand::VReg(vreg) = op {
-            if let Some(new_vreg) = rewrites.get(&vreg.id) {
+        if let MachOperand::VReg(vreg) = op
+            && let Some(new_vreg) = rewrites.get(&vreg.id) {
                 *vreg = *new_vreg;
             }
-        }
     }
 }
 
@@ -702,7 +698,7 @@ mod tests {
             MachInst {
                 opcode: 1,
                 defs: vec![MachOperand::VReg(fv0)],
-                uses: vec![MachOperand::FImm(3.14)],
+                uses: vec![MachOperand::FImm(2.78)],
                 implicit_defs: Vec::new(),
                 implicit_uses: Vec::new(),
                 flags: InstFlags::default(),
