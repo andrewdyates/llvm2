@@ -550,7 +550,8 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             encode_instruction(inst).map_err(map_encode_error)
         }
         AArch64Opcode::Sxtw | AArch64Opcode::Uxtw
-        | AArch64Opcode::Sxtb | AArch64Opcode::Sxth => {
+        | AArch64Opcode::Sxtb | AArch64Opcode::Sxth
+        | AArch64Opcode::Uxtb | AArch64Opcode::Uxth => {
             preg_hw(0)?; preg_hw(1)?;
             encode_instruction(inst).map_err(map_encode_error)
         }

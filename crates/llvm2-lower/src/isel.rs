@@ -2463,8 +2463,8 @@ impl InstructionSelector {
         } else {
             // Unsigned extension
             match from_ty {
-                Type::I8 => AArch64Opcode::Uxtw,
-                Type::I16 => AArch64Opcode::Uxtw,
+                Type::I8 => AArch64Opcode::Uxtb,   // AND Wd, Wn, #0xFF (UBFM Wd, Wn, #0, #7)
+                Type::I16 => AArch64Opcode::Uxth,   // AND Wd, Wn, #0xFFFF (UBFM Wd, Wn, #0, #15)
                 Type::I32 if to_64 => {
                     // UXTW: zero-extend W to X. On AArch64, writing a W register
                     // implicitly zero-extends to X, so a MOV Wd, Wn suffices.
@@ -2990,10 +2990,16 @@ impl InstructionSelector {
 
     /// Select integer truncation (narrow: i64->i32, i32->i16, etc.).
     ///
-    /// On AArch64, truncation is essentially free for register values: the
-    /// hardware uses the lower bits of the wider register. We emit a MOV
-    /// to the narrower register class so that subsequent instructions see
-    /// the correct width.
+    /// On AArch64, truncation strategy depends on target width:
+    ///
+    /// - i64 -> i32: MOV Wd, Wn (upper 32 bits ignored, W-register write
+    ///   implicitly zero-extends)
+    /// - i32/i64 -> i16: AND Wd, Wn, #0xFFFF (mask to 16 bits)
+    /// - i32/i64 -> i8:  AND Wd, Wn, #0xFF   (mask to 8 bits)
+    ///
+    /// Sub-32-bit truncation requires an explicit AND to ensure the upper
+    /// bits are cleared. A plain MOV would leave stale bits that could
+    /// affect subsequent operations expecting a clean narrow value.
     fn select_trunc(&mut self, to_ty: &Type, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         assert!(!inst.args.is_empty(), "Trunc must have 1 arg");
         assert!(!inst.results.is_empty(), "Trunc must have a result");
@@ -3006,20 +3012,38 @@ impl InstructionSelector {
         let dst_class = reg_class_for_type(to_ty);
         let dst = self.new_vreg(dst_class);
 
-        // On AArch64, truncating from 64-bit to 32-bit (or narrower) is a
-        // simple MOV to the W register — the upper 32 bits are ignored.
-        // For sub-32-bit targets (I8, I16), we use a 32-bit MOV since
-        // AArch64 W registers naturally zero-extend the upper bits.
-        let opc = if Self::is_32bit(to_ty) {
-            AArch64Opcode::MovR
-        } else {
-            AArch64Opcode::MovR
-        };
-
-        self.func.push_inst(
-            block,
-            ISelInst::new(opc, vec![ISelOperand::VReg(dst), src]),
-        );
+        match to_ty {
+            Type::I8 => {
+                // Trunc to i8: AND Wd, Wn, #0xFF
+                self.func.push_inst(
+                    block,
+                    ISelInst::new(
+                        AArch64Opcode::AndRI,
+                        vec![ISelOperand::VReg(dst), src, ISelOperand::Imm(0xFF)],
+                    ),
+                );
+            }
+            Type::I16 => {
+                // Trunc to i16: AND Wd, Wn, #0xFFFF
+                self.func.push_inst(
+                    block,
+                    ISelInst::new(
+                        AArch64Opcode::AndRI,
+                        vec![ISelOperand::VReg(dst), src, ISelOperand::Imm(0xFFFF)],
+                    ),
+                );
+            }
+            _ => {
+                // Trunc to i32 (from i64): MOV Wd, Wn — upper bits ignored
+                self.func.push_inst(
+                    block,
+                    ISelInst::new(
+                        AArch64Opcode::MovR,
+                        vec![ISelOperand::VReg(dst), src],
+                    ),
+                );
+            }
+        }
 
         self.define_value(result_val, ISelOperand::VReg(dst), to_ty.clone());
         Ok(())
@@ -3868,7 +3892,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::Uxtw);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::Uxtb);
     }
 
     #[test]
@@ -3894,7 +3918,7 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::Uxtw);
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::Uxth);
     }
 
     #[test]
@@ -5143,8 +5167,9 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        // I16 is sub-32-bit, still uses MovR
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::MovR);
+        // Trunc to i16 uses AND with mask 0xFFFF
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::AndRI);
+        assert_eq!(mfunc.blocks[&entry].insts[1].operands[2], ISelOperand::Imm(0xFFFF));
     }
 
     #[test]
@@ -5167,7 +5192,9 @@ mod tests {
         ).unwrap();
 
         let mfunc = isel.finalize();
-        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::MovR);
+        // Trunc to i8 uses AND with mask 0xFF
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::AndRI);
+        assert_eq!(mfunc.blocks[&entry].insts[1].operands[2], ISelOperand::Imm(0xFF));
     }
 
     // =======================================================================
