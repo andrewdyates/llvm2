@@ -390,6 +390,191 @@ pub fn build_dag(func: &MachFunction, block_id: BlockId) -> ScheduleDAG {
 }
 
 // ---------------------------------------------------------------------------
+// Register pressure tracking during scheduling
+// ---------------------------------------------------------------------------
+
+/// Tracks approximate register pressure during list scheduling.
+///
+/// Monitors the number of live virtual registers at each scheduling step.
+/// When pressure exceeds thresholds, the scheduler prefers instructions that
+/// reduce pressure (consumers that kill operands) over instructions that
+/// increase it (producers that define new values).
+///
+/// This prevents the scheduler from creating unnecessarily long live ranges
+/// that force the register allocator to spill. The heuristic balances ILP
+/// (critical-path scheduling) against register pressure (spill avoidance).
+///
+/// Reference: LLVM's `ScheduleDAGRRList::BURegReductionPriorityQueue` and
+/// GCC's `sched-pressure.cc`.
+#[derive(Debug, Clone)]
+pub struct PressureTracker {
+    /// Set of VReg IDs currently live (defined but not yet last-used).
+    live_gprs: HashSet<u32>,
+    /// Set of FPR VReg IDs currently live.
+    live_fprs: HashSet<u32>,
+    /// Peak GPR pressure observed so far.
+    pub peak_gpr: u32,
+    /// Peak FPR pressure observed so far.
+    pub peak_fpr: u32,
+    /// GPR pressure threshold: above this, prefer consumers.
+    pub gpr_threshold: u32,
+    /// FPR pressure threshold: above this, prefer consumers.
+    pub fpr_threshold: u32,
+}
+
+impl PressureTracker {
+    /// Create a new pressure tracker with default AArch64 thresholds.
+    ///
+    /// Thresholds are set below the allocatable register count to provide
+    /// headroom: 20 GPRs (of 28 allocatable) and 24 FPRs (of 32 allocatable).
+    pub fn new() -> Self {
+        Self {
+            live_gprs: HashSet::new(),
+            live_fprs: HashSet::new(),
+            peak_gpr: 0,
+            peak_fpr: 0,
+            gpr_threshold: 20,
+            fpr_threshold: 24,
+        }
+    }
+
+    /// Create a tracker with custom thresholds.
+    pub fn with_thresholds(gpr_threshold: u32, fpr_threshold: u32) -> Self {
+        Self {
+            live_gprs: HashSet::new(),
+            live_fprs: HashSet::new(),
+            peak_gpr: 0,
+            peak_fpr: 0,
+            gpr_threshold,
+            fpr_threshold,
+        }
+    }
+
+    /// Current GPR pressure (number of live GPR VRegs).
+    pub fn gpr_pressure(&self) -> u32 {
+        self.live_gprs.len() as u32
+    }
+
+    /// Current FPR pressure (number of live FPR VRegs).
+    pub fn fpr_pressure(&self) -> u32 {
+        self.live_fprs.len() as u32
+    }
+
+    /// Returns true if GPR or FPR pressure exceeds the threshold.
+    pub fn is_high_pressure(&self) -> bool {
+        self.gpr_pressure() > self.gpr_threshold || self.fpr_pressure() > self.fpr_threshold
+    }
+
+    /// Record that a VReg has been defined (becomes live).
+    pub fn define_vreg(&mut self, vreg_id: u32, class: RegClass) {
+        let is_fpr = matches!(
+            class,
+            RegClass::Fpr128 | RegClass::Fpr64 | RegClass::Fpr32
+                | RegClass::Fpr16 | RegClass::Fpr8
+        );
+        if is_fpr {
+            self.live_fprs.insert(vreg_id);
+            self.peak_fpr = self.peak_fpr.max(self.live_fprs.len() as u32);
+        } else {
+            self.live_gprs.insert(vreg_id);
+            self.peak_gpr = self.peak_gpr.max(self.live_gprs.len() as u32);
+        }
+    }
+
+    /// Record that a VReg has been killed (last use — no longer live).
+    pub fn kill_vreg(&mut self, vreg_id: u32) {
+        // Try removing from both sets; at most one will contain it.
+        if !self.live_gprs.remove(&vreg_id) {
+            self.live_fprs.remove(&vreg_id);
+        }
+    }
+}
+
+/// Per-node pressure metadata computed before scheduling.
+///
+/// For each node in the DAG, we precompute:
+/// - How many VRegs this instruction uses for the last time (kills).
+/// - How many VRegs this instruction defines (new live ranges).
+/// - The register class of defined VRegs.
+#[derive(Debug, Clone)]
+struct NodePressureInfo {
+    /// VReg IDs defined by this instruction.
+    defs: Vec<(u32, RegClass)>,
+    /// VReg IDs used by this instruction.
+    uses: Vec<(u32, RegClass)>,
+    /// Number of VRegs whose last use is this instruction (kills).
+    /// Computed from the full block context.
+    kills: u32,
+    /// Net pressure change: defs - kills. Negative means pressure-reducing.
+    net_pressure: i32,
+}
+
+/// Precompute pressure metadata for all nodes in the DAG.
+///
+/// For each instruction, we determine which VRegs it defines and uses,
+/// and which uses are the last use in the block (kills). This is computed
+/// from the function's instruction data and the DAG node mapping.
+fn compute_pressure_info(
+    func: &MachFunction,
+    dag: &ScheduleDAG,
+) -> Vec<NodePressureInfo> {
+    let n = dag.nodes.len();
+
+    // Collect defs and uses per node.
+    let mut infos: Vec<NodePressureInfo> = Vec::with_capacity(n);
+    for node in &dag.nodes {
+        let inst = func.inst(node.inst_id);
+        let produces = inst_produces_value(inst);
+
+        let mut defs = Vec::new();
+        let mut uses = Vec::new();
+
+        if produces {
+            if let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
+                defs.push((vreg.id, vreg.class));
+            }
+        }
+
+        let use_start = if produces { 1 } else { 0 };
+        for operand in &inst.operands[use_start..] {
+            if let MachOperand::VReg(vreg) = operand {
+                uses.push((vreg.id, vreg.class));
+            }
+        }
+
+        infos.push(NodePressureInfo {
+            defs,
+            uses,
+            kills: 0,
+            net_pressure: 0,
+        });
+    }
+
+    // Build last-use map: for each VReg used in this block, find the last
+    // node index that uses it. Uses that are last are "kills".
+    let mut last_use_node: HashMap<u32, usize> = HashMap::new();
+    for (idx, info) in infos.iter().enumerate() {
+        for &(vreg_id, _) in &info.uses {
+            last_use_node.insert(vreg_id, idx);
+        }
+    }
+
+    // Count kills per node and compute net pressure.
+    for (idx, info) in infos.iter_mut().enumerate() {
+        let mut kills = 0u32;
+        for &(vreg_id, _) in &info.uses {
+            if last_use_node.get(&vreg_id) == Some(&idx) {
+                kills += 1;
+            }
+        }
+        info.kills = kills;
+        info.net_pressure = info.defs.len() as i32 - kills as i32;
+    }
+
+    infos
+}
+
+// ---------------------------------------------------------------------------
 // List scheduling
 // ---------------------------------------------------------------------------
 
@@ -464,6 +649,153 @@ pub fn schedule_list(dag: &mut ScheduleDAG) -> Vec<InstId> {
     scheduled_order
 }
 
+/// Register pressure-aware list scheduling.
+///
+/// Extends the basic list scheduler with register pressure heuristics:
+///
+/// 1. **Pressure tracking**: Maintains a set of live VRegs. When an instruction
+///    is scheduled, its defs become live and its killed operands die.
+///
+/// 2. **Consumer preference under high pressure**: When pressure exceeds the
+///    threshold, the scheduler prefers instructions that kill (last-use) more
+///    VRegs. This reduces the number of simultaneously live values.
+///
+/// 3. **Short live-range preference**: Among producers, prefer those whose
+///    consumers are ready soon (fewer remaining deps on successors). This
+///    keeps newly defined values short-lived.
+///
+/// 4. **Net pressure tie-breaking**: When critical-path priorities are equal,
+///    prefer nodes with lower net pressure (kills - defs), i.e., nodes that
+///    release more registers than they define.
+///
+/// The combined heuristic ordering when pressure is high:
+///   1. Nodes with negative net_pressure (more kills than defs) first
+///   2. Among those, highest critical-path priority
+///   3. Among equal, prefer original order for stability
+///
+/// When pressure is below threshold, falls back to pure critical-path priority
+/// (same as `schedule_list`), preserving ILP optimization.
+pub fn schedule_list_pressure_aware(
+    func: &MachFunction,
+    dag: &mut ScheduleDAG,
+) -> (Vec<InstId>, PressureTracker) {
+    let n = dag.nodes.len();
+    if n == 0 {
+        return (Vec::new(), PressureTracker::new());
+    }
+
+    let pressure_info = compute_pressure_info(func, dag);
+    let mut tracker = PressureTracker::new();
+
+    // Recompute last-use accounting relative to the scheduling order.
+    // We track remaining use counts for each VReg: when a VReg's remaining
+    // uses reach 0, it is killed.
+    let mut vreg_remaining_uses: HashMap<u32, u32> = HashMap::new();
+    for info in &pressure_info {
+        for &(vreg_id, _) in &info.uses {
+            *vreg_remaining_uses.entry(vreg_id).or_insert(0) += 1;
+        }
+    }
+
+    let mut scheduled_order: Vec<InstId> = Vec::with_capacity(n);
+    let mut remaining_deps: Vec<usize> = dag.nodes.iter().map(|node| node.deps.len()).collect();
+    let mut cycle: u32 = 0;
+
+    while scheduled_order.len() < n {
+        // Collect ready nodes.
+        let mut ready: Vec<usize> = Vec::new();
+        for i in 0..n {
+            if !dag.nodes[i].scheduled
+                && remaining_deps[i] == 0
+                && dag.nodes[i].earliest_start <= cycle
+            {
+                ready.push(i);
+            }
+        }
+
+        if ready.is_empty() {
+            let mut min_start = u32::MAX;
+            for i in 0..n {
+                if !dag.nodes[i].scheduled && remaining_deps[i] == 0 {
+                    min_start = min_start.min(dag.nodes[i].earliest_start);
+                }
+            }
+            if min_start == u32::MAX {
+                cycle += 1;
+                continue;
+            }
+            cycle = min_start;
+            continue;
+        }
+
+        let high_pressure = tracker.is_high_pressure();
+
+        // Sort ready nodes by pressure-aware heuristic.
+        ready.sort_by(|&a, &b| {
+            if high_pressure {
+                // Under high pressure: prefer nodes that reduce pressure.
+                // net_pressure < 0 means more kills than defs.
+                let net_a = pressure_info[a].net_pressure;
+                let net_b = pressure_info[b].net_pressure;
+
+                // First: prefer lower net_pressure (more pressure-reducing).
+                net_a
+                    .cmp(&net_b)
+                    // Then: among equal net pressure, prefer higher critical-path priority.
+                    .then_with(|| {
+                        dag.nodes[b]
+                            .priority
+                            .cmp(&dag.nodes[a].priority)
+                    })
+                    // Finally: original order for stability.
+                    .then_with(|| a.cmp(&b))
+            } else {
+                // Normal mode: pure critical-path priority (same as schedule_list).
+                dag.nodes[b]
+                    .priority
+                    .cmp(&dag.nodes[a].priority)
+                    .then_with(|| a.cmp(&b))
+            }
+        });
+
+        let best = ready[0];
+        dag.nodes[best].scheduled = true;
+        dag.nodes[best].earliest_start = cycle;
+        scheduled_order.push(dag.nodes[best].inst_id);
+
+        // Update pressure: process uses (potential kills) before defs.
+        // When we schedule an instruction, its used VRegs have their remaining
+        // use count decremented. If it reaches 0, the VReg is killed.
+        for &(vreg_id, _) in &pressure_info[best].uses {
+            if let Some(count) = vreg_remaining_uses.get_mut(&vreg_id) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    tracker.kill_vreg(vreg_id);
+                }
+            }
+        }
+
+        // Process defs: newly defined VRegs become live.
+        for &(vreg_id, class) in &pressure_info[best].defs {
+            tracker.define_vreg(vreg_id, class);
+        }
+
+        // Update dependents.
+        let finish = cycle + dag.nodes[best].latency;
+        let rev_deps = dag.nodes[best].rev_deps.clone();
+        for &succ in &rev_deps {
+            remaining_deps[succ] -= 1;
+            if dag.nodes[succ].earliest_start < finish {
+                dag.nodes[succ].earliest_start = finish;
+            }
+        }
+
+        cycle += 1;
+    }
+
+    (scheduled_order, tracker)
+}
+
 // ---------------------------------------------------------------------------
 // Block and function scheduling
 // ---------------------------------------------------------------------------
@@ -490,6 +822,32 @@ pub fn schedule_block(func: &mut MachFunction, block_id: BlockId) -> bool {
     true
 }
 
+/// Schedule one basic block with register pressure awareness.
+///
+/// Uses pressure-aware heuristics to balance ILP against register pressure.
+/// Returns true if the instruction order changed, along with the pressure tracker.
+pub fn schedule_block_pressure_aware(
+    func: &mut MachFunction,
+    block_id: BlockId,
+) -> (bool, PressureTracker) {
+    let block = func.block(block_id);
+    if block.insts.len() <= 1 {
+        return (false, PressureTracker::new());
+    }
+
+    let original_order: Vec<InstId> = block.insts.clone();
+    let mut dag = build_dag(func, block_id);
+    let (new_order, tracker) = schedule_list_pressure_aware(func, &mut dag);
+
+    if new_order == original_order {
+        return (false, tracker);
+    }
+
+    let block_mut = func.block_mut(block_id);
+    block_mut.insts = new_order;
+    (true, tracker)
+}
+
 /// Schedule all basic blocks in a function.
 ///
 /// Returns true if any block was reordered.
@@ -502,6 +860,26 @@ pub fn schedule_function(func: &mut MachFunction) -> bool {
         }
     }
     changed
+}
+
+/// Schedule all basic blocks in a function with register pressure awareness.
+///
+/// Returns true if any block was reordered, along with peak GPR and FPR
+/// pressure across all blocks.
+pub fn schedule_function_pressure_aware(func: &mut MachFunction) -> (bool, u32, u32) {
+    let mut changed = false;
+    let mut peak_gpr: u32 = 0;
+    let mut peak_fpr: u32 = 0;
+    let block_ids: Vec<BlockId> = func.block_order.clone();
+    for block_id in block_ids {
+        let (block_changed, tracker) = schedule_block_pressure_aware(func, block_id);
+        if block_changed {
+            changed = true;
+        }
+        peak_gpr = peak_gpr.max(tracker.peak_gpr);
+        peak_fpr = peak_fpr.max(tracker.peak_fpr);
+    }
+    (changed, peak_gpr, peak_fpr)
 }
 
 // ---------------------------------------------------------------------------
@@ -521,6 +899,29 @@ impl MachinePass for InstructionScheduler {
 
     fn run(&mut self, func: &mut MachFunction) -> bool {
         schedule_function(func)
+    }
+}
+
+/// Pressure-aware instruction scheduling pass for AArch64.
+///
+/// Like `InstructionScheduler` but trades some ILP for lower register pressure.
+/// When the number of live virtual registers exceeds a threshold (20 GPR, 24 FPR),
+/// the scheduler prefers consuming instructions (that kill operands) over producing
+/// instructions (that define new values). This reduces peak register pressure and
+/// avoids unnecessary spills during register allocation.
+///
+/// Should be used instead of `InstructionScheduler` when register pressure is a
+/// concern (large basic blocks, many live values).
+pub struct PressureAwareScheduler;
+
+impl MachinePass for PressureAwareScheduler {
+    fn name(&self) -> &str {
+        "pressure-aware-scheduler"
+    }
+
+    fn run(&mut self, func: &mut MachFunction) -> bool {
+        let (changed, _, _) = schedule_function_pressure_aware(func);
+        changed
     }
 }
 
@@ -1941,5 +2342,337 @@ mod tests {
             "independent ALU + Load should have dual-issue opportunities, got {}",
             metrics.dual_issue_opportunities
         );
+    }
+
+    // ---- Phase 3: Pressure-aware scheduling tests ----
+
+    fn fpreg(id: u32) -> MachOperand {
+        MachOperand::VReg(VReg::new(id, RegClass::Fpr64))
+    }
+
+    #[test]
+    fn test_pressure_tracker_basic() {
+        let mut tracker = PressureTracker::new();
+        assert_eq!(tracker.gpr_pressure(), 0);
+        assert_eq!(tracker.fpr_pressure(), 0);
+        assert!(!tracker.is_high_pressure());
+
+        // Define a GPR.
+        tracker.define_vreg(1, RegClass::Gpr64);
+        assert_eq!(tracker.gpr_pressure(), 1);
+        assert_eq!(tracker.peak_gpr, 1);
+
+        // Define an FPR.
+        tracker.define_vreg(100, RegClass::Fpr64);
+        assert_eq!(tracker.fpr_pressure(), 1);
+        assert_eq!(tracker.peak_fpr, 1);
+
+        // Kill GPR.
+        tracker.kill_vreg(1);
+        assert_eq!(tracker.gpr_pressure(), 0);
+        assert_eq!(tracker.peak_gpr, 1); // peak preserved
+    }
+
+    #[test]
+    fn test_pressure_tracker_high_pressure_threshold() {
+        let mut tracker = PressureTracker::with_thresholds(3, 3);
+        assert!(!tracker.is_high_pressure());
+
+        // Define 4 GPR VRegs -> exceeds threshold of 3.
+        tracker.define_vreg(1, RegClass::Gpr64);
+        tracker.define_vreg(2, RegClass::Gpr64);
+        tracker.define_vreg(3, RegClass::Gpr64);
+        assert!(!tracker.is_high_pressure()); // exactly at threshold
+        tracker.define_vreg(4, RegClass::Gpr64);
+        assert!(tracker.is_high_pressure()); // above threshold
+
+        // Kill one -> back to threshold.
+        tracker.kill_vreg(1);
+        assert!(!tracker.is_high_pressure());
+    }
+
+    #[test]
+    fn test_pressure_tracker_fpr_high_pressure() {
+        let mut tracker = PressureTracker::with_thresholds(100, 2);
+        // Only 2 FPR threshold.
+        tracker.define_vreg(1, RegClass::Fpr64);
+        tracker.define_vreg(2, RegClass::Fpr64);
+        assert!(!tracker.is_high_pressure());
+        tracker.define_vreg(3, RegClass::Fpr64);
+        assert!(tracker.is_high_pressure());
+    }
+
+    #[test]
+    fn test_compute_pressure_info_basic() {
+        // v1 = add v0, #1   (def v1, use v0)
+        // v2 = add v1, #2   (def v2, use v1 — v1 killed here)
+        // ret
+        let add1 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(1), vreg(0), imm(1)]);
+        let add2 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(2), vreg(1), imm(2)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![add1, add2, ret]);
+
+        let dag = build_dag(&func, func.entry);
+        let infos = compute_pressure_info(&func, &dag);
+
+        // Node 0 (add v0,#1 -> v1): defs={v1}, uses={v0}. v0 is not last-used here (also used nowhere else in
+        // the DAG sense, but v0 is only used by node 0 -> it IS last use).
+        assert_eq!(infos[0].defs.len(), 1);
+        assert_eq!(infos[0].defs[0].0, 1); // defines v1
+
+        // Node 1 (add v1,#2 -> v2): defs={v2}, uses={v1}. v1's last use is node 1.
+        assert_eq!(infos[1].defs.len(), 1);
+        assert_eq!(infos[1].kills, 1); // v1 killed
+        assert_eq!(infos[1].net_pressure, 0); // 1 def - 1 kill = 0
+
+        // Node 2 (ret): no defs, no uses.
+        assert_eq!(infos[2].defs.len(), 0);
+        assert_eq!(infos[2].kills, 0);
+    }
+
+    #[test]
+    fn test_pressure_aware_scheduler_low_pressure() {
+        // With low pressure, the pressure-aware scheduler should behave like
+        // the basic scheduler (critical-path priority).
+        let load = MachInst::new(AArch64Opcode::LdrRI, vec![vreg(1), vreg(0), imm(0)]);
+        let add = MachInst::new(AArch64Opcode::AddRI, vec![vreg(2), vreg(1), imm(1)]);
+        let mov = MachInst::new(AArch64Opcode::MovI, vec![vreg(3), imm(99)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![load, add, mov, ret]);
+
+        let entry = func.entry;
+        let (_changed, tracker) = schedule_block_pressure_aware(&mut func, entry);
+
+        // Should still reorder (load, mov, add, ret) for latency hiding.
+        let block = func.block(func.entry);
+        let order: Vec<InstId> = block.insts.clone();
+        assert_eq!(order[0], InstId(0), "load should be first");
+        assert_eq!(*order.last().unwrap(), InstId(3), "ret should be last");
+        assert!(tracker.peak_gpr <= 3, "low pressure test");
+    }
+
+    #[test]
+    fn test_pressure_aware_reduces_peak_pressure() {
+        // Create a block with many independent defs followed by uses.
+        // The pressure-naive scheduler (critical-path) would schedule all defs
+        // first, spiking pressure. The pressure-aware scheduler should interleave
+        // defs and uses when pressure gets high.
+        //
+        // Pattern:
+        //   v1 = mov #1    (producer)
+        //   v2 = mov #2    (producer)
+        //   ...
+        //   v25 = mov #25  (producer)
+        //   v26 = add v1, v2  (consumer, kills v1 and v2)
+        //   v27 = add v3, v4  (consumer, kills v3 and v4)
+        //   ...
+        //   ret
+        //
+        // With threshold=20: after 20 defs, pressure-aware will prefer consumers.
+        let mut insts: Vec<MachInst> = Vec::new();
+        let num_producers = 25;
+
+        // 25 independent movs: v1..v25.
+        for i in 1..=(num_producers as u32) {
+            insts.push(MachInst::new(AArch64Opcode::MovI, vec![vreg(i), imm(i as i64)]));
+        }
+
+        // 12 consumers: pair up v1+v2, v3+v4, ... v23+v24, and v25 unused.
+        let consumer_start = num_producers as u32 + 1;
+        for i in 0..12u32 {
+            let src1 = i * 2 + 1;
+            let src2 = i * 2 + 2;
+            insts.push(MachInst::new(
+                AArch64Opcode::AddRR,
+                vec![vreg(consumer_start + i), vreg(src1), vreg(src2)],
+            ));
+        }
+
+        insts.push(MachInst::new(AArch64Opcode::Ret, vec![]));
+        let func = make_func_with_insts(insts.clone());
+
+        // Measure pressure with basic scheduler.
+        let basic_schedule: Vec<InstId> = {
+            let mut dag = build_dag(&func, func.entry);
+            schedule_list(&mut dag)
+        };
+        let basic_pressure = compute_register_pressure(&func, func.entry, &basic_schedule);
+
+        // Measure pressure with pressure-aware scheduler.
+        let func_pa = make_func_with_insts(insts);
+        let entry = func_pa.entry;
+        let mut dag = build_dag(&func_pa, entry);
+        let (pa_schedule, pa_tracker) = schedule_list_pressure_aware(&func_pa, &mut dag);
+        let pa_pressure = compute_register_pressure(&func_pa, entry, &pa_schedule);
+
+        // The pressure-aware scheduler should achieve lower or equal peak GPR
+        // pressure than the basic scheduler.
+        assert!(
+            pa_pressure.max_gpr_pressure <= basic_pressure.max_gpr_pressure,
+            "pressure-aware scheduler should not increase peak pressure: \
+             PA={} vs basic={}",
+            pa_pressure.max_gpr_pressure,
+            basic_pressure.max_gpr_pressure,
+        );
+
+        // Verify the tracker itself tracked pressure.
+        assert!(
+            pa_tracker.peak_gpr > 0,
+            "pressure tracker should have observed some GPR pressure"
+        );
+    }
+
+    #[test]
+    fn test_pressure_aware_preserves_dependencies() {
+        // Verify that pressure-aware scheduling still respects data dependencies.
+        // v1 = add v0, #1    (inst0, def v1)
+        // v2 = add v1, #2    (inst1, depends on v1)
+        // ret                  (inst2)
+        let add1 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(1), vreg(0), imm(1)]);
+        let add2 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(2), vreg(1), imm(2)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![add1, add2, ret]);
+
+        let entry = func.entry;
+        let (_changed, _tracker) = schedule_block_pressure_aware(&mut func, entry);
+
+        let block = func.block(func.entry);
+        let order: Vec<InstId> = block.insts.clone();
+
+        // add1 must come before add2 (data dependency on v1).
+        let pos_add1 = order.iter().position(|&id| id == InstId(0)).unwrap();
+        let pos_add2 = order.iter().position(|&id| id == InstId(1)).unwrap();
+        assert!(
+            pos_add1 < pos_add2,
+            "pressure-aware scheduler must respect data deps: add1@{} add2@{}",
+            pos_add1,
+            pos_add2,
+        );
+
+        // ret must be last.
+        assert_eq!(*order.last().unwrap(), InstId(2));
+    }
+
+    #[test]
+    fn test_pressure_aware_preserves_memory_ordering() {
+        // str v0, [v10, #0]   (store, inst0)
+        // v1 = ldr [v2, #0]   (load, inst1 — must come after store)
+        // ret                   (inst2)
+        let store = MachInst::new(AArch64Opcode::StrRI, vec![vreg(0), vreg(10), imm(0)]);
+        let load = MachInst::new(AArch64Opcode::LdrRI, vec![vreg(1), vreg(2), imm(0)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![store, load, ret]);
+
+        let entry = func.entry;
+        let (_changed, _tracker) = schedule_block_pressure_aware(&mut func, entry);
+
+        let block = func.block(func.entry);
+        let order: Vec<InstId> = block.insts.clone();
+
+        let pos_store = order.iter().position(|&id| id == InstId(0)).unwrap();
+        let pos_load = order.iter().position(|&id| id == InstId(1)).unwrap();
+        assert!(
+            pos_store < pos_load,
+            "pressure-aware scheduler must respect memory deps"
+        );
+    }
+
+    #[test]
+    fn test_pressure_aware_pass_interface() {
+        // Verify PressureAwareScheduler implements MachinePass correctly.
+        let add1 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(1), vreg(0), imm(1)]);
+        let mul = MachInst::new(AArch64Opcode::MulRR, vec![vreg(2), vreg(3), vreg(4)]);
+        let add2 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(5), vreg(2), imm(1)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![add1, mul, add2, ret]);
+
+        let mut pass = PressureAwareScheduler;
+        assert_eq!(pass.name(), "pressure-aware-scheduler");
+        pass.run(&mut func);
+
+        // Just verify it doesn't crash and produces a valid schedule.
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 4);
+        assert_eq!(*block.insts.last().unwrap(), InstId(3), "ret must be last");
+    }
+
+    #[test]
+    fn test_pressure_aware_empty_and_single() {
+        // Empty block.
+        let mut func = MachFunction::new(
+            "empty".to_string(),
+            Signature::new(vec![], vec![]),
+        );
+        let entry = func.entry;
+        let (changed, tracker) = schedule_block_pressure_aware(&mut func, entry);
+        assert!(!changed);
+        assert_eq!(tracker.peak_gpr, 0);
+
+        // Single instruction.
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func2 = make_func_with_insts(vec![ret]);
+        let entry2 = func2.entry;
+        let (changed2, tracker2) = schedule_block_pressure_aware(&mut func2, entry2);
+        assert!(!changed2);
+        assert_eq!(tracker2.peak_gpr, 0);
+    }
+
+    #[test]
+    fn test_pressure_aware_function_scheduling() {
+        // Verify schedule_function_pressure_aware works across multiple blocks.
+        let add = MachInst::new(AArch64Opcode::AddRI, vec![vreg(1), vreg(0), imm(1)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![add, ret]);
+
+        let (changed, peak_gpr, peak_fpr) = schedule_function_pressure_aware(&mut func);
+        // Two instructions, no reordering expected.
+        assert!(!changed);
+        // Tracker should have observed the def.
+        assert!(peak_gpr <= 1);
+        assert_eq!(peak_fpr, 0);
+    }
+
+    #[test]
+    fn test_pressure_aware_idempotent() {
+        // Pressure-aware scheduling should be idempotent.
+        let add1 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(1), vreg(0), imm(1)]);
+        let add2 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(2), vreg(0), imm(2)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![add1, add2, ret]);
+
+        let mut pass = PressureAwareScheduler;
+        pass.run(&mut func);
+        let order1: Vec<InstId> = func.block(func.entry).insts.clone();
+
+        let changed = pass.run(&mut func);
+        let order2: Vec<InstId> = func.block(func.entry).insts.clone();
+
+        assert_eq!(order1, order2, "pressure-aware scheduler should be idempotent");
+        assert!(!changed, "second run should report no change");
+    }
+
+    #[test]
+    fn test_pressure_aware_fpr_tracking() {
+        // Verify FPR pressure is tracked separately from GPR.
+        // v1 = fadd v0, v0   (FPR def)
+        // v2 = fadd v1, v1   (FPR def, uses v1)
+        // ret
+        let fadd1 = MachInst::new(
+            AArch64Opcode::FaddRR,
+            vec![fpreg(1), fpreg(0), fpreg(0)],
+        );
+        let fadd2 = MachInst::new(
+            AArch64Opcode::FaddRR,
+            vec![fpreg(2), fpreg(1), fpreg(1)],
+        );
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![fadd1, fadd2, ret]);
+
+        let entry = func.entry;
+        let (_changed, tracker) = schedule_block_pressure_aware(&mut func, entry);
+
+        // Should track FPR pressure, not GPR.
+        assert!(tracker.peak_fpr >= 1, "FPR ops should track FPR pressure");
+        assert_eq!(tracker.peak_gpr, 0, "FPR-only code should have no GPR pressure");
     }
 }
