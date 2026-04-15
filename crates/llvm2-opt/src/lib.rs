@@ -25,6 +25,7 @@
 //! | [`CopyPropagation`] | Replace uses of `mov dst, src` with `src` |
 //! | [`Peephole`] | AArch64-specific instruction simplification |
 //! | [`CommonSubexprElim`] | Eliminate redundant computations (dominator-based) |
+//! | [`GlobalValueNumbering`] | Value-number-based redundancy elimination with load numbering |
 //! | [`LoopInvariantCodeMotion`] | Hoist loop-invariant computations to preheader |
 //! | [`ProofOptimization`] | Consume tMIR proof annotations to eliminate runtime checks |
 //! | [`AddrModeFormation`] | Fold ADD+LDR/STR into rich AArch64 addressing modes |
@@ -36,7 +37,7 @@
 //! # Memory Effects Model
 //!
 //! The [`effects`] module classifies each opcode as Pure, Load, Store,
-//! or Call. This is used by DCE, CSE, and LICM to ensure safety.
+//! or Call. This is used by DCE, CSE, GVN, and LICM to ensure safety.
 //!
 //! # Usage
 //!
@@ -60,6 +61,7 @@ pub mod cse;
 pub mod dce;
 pub mod dom;
 pub mod effects;
+pub mod gvn;
 pub mod licm;
 pub mod loop_unroll;
 pub mod loops;

@@ -30,6 +30,7 @@ use crate::const_fold::ConstantFolding;
 use crate::copy_prop::CopyPropagation;
 use crate::cse::CommonSubexprElim;
 use crate::dce::DeadCodeElimination;
+use crate::gvn::GlobalValueNumbering;
 use crate::licm::LoopInvariantCodeMotion;
 use crate::loop_unroll::LoopUnroll;
 use crate::pass_manager::{PassManager, PassStats};
@@ -91,6 +92,7 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(ConstantFolding))
                     .with_pass(Box::new(CopyPropagation))
                     .with_pass(Box::new(CommonSubexprElim))
+                    .with_pass(Box::new(GlobalValueNumbering))
                     .with_pass(Box::new(LoopInvariantCodeMotion))
                     .with_pass(Box::new(StrengthReduction))
                     .with_pass(Box::new(LoopUnroll))
@@ -112,6 +114,7 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(ConstantFolding))
                     .with_pass(Box::new(CopyPropagation))
                     .with_pass(Box::new(CommonSubexprElim))
+                    .with_pass(Box::new(GlobalValueNumbering))
                     .with_pass(Box::new(LoopInvariantCodeMotion))
                     .with_pass(Box::new(StrengthReduction))
                     .with_pass(Box::new(LoopUnroll))
@@ -227,9 +230,9 @@ mod tests {
     fn test_o3_iterates() {
         let pipeline = OptimizationPipeline::new(OptLevel::O3);
         let pm = pipeline.build_pass_manager();
-        // 13 passes: proof-opts + const-fold + copy-prop + cse + licm +
+        // 14 passes: proof-opts + const-fold + copy-prop + cse + gvn + licm +
         // strength-reduce + loop-unroll + peephole + addr-mode + cmp-select +
         // cmp-branch-fusion + dce + cfg-simplify
-        assert_eq!(pm.num_passes(), 13);
+        assert_eq!(pm.num_passes(), 14);
     }
 }
