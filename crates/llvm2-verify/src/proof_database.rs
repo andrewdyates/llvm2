@@ -559,16 +559,16 @@ mod tests {
     fn test_vectorization_proofs_count() {
         let db = ProofDatabase::new();
         let count = db.count_by_category(ProofCategory::Vectorization);
-        // 11 ops x 2 arrangements = 22
-        assert_eq!(count, 22, "expected 22 vectorization proofs, got {}", count);
+        // 11 ops x 2 arrangements = 22 base + 9 additional vector proofs from Wave 13
+        assert_eq!(count, 31, "expected 31 vectorization proofs, got {}", count);
     }
 
     #[test]
     fn test_memory_proofs_count() {
         let db = ProofDatabase::new();
         let count = db.count_by_category(ProofCategory::Memory);
-        // 6 load + 6 store + 4 roundtrip + 8 non-interference + 3 endianness = 27
-        assert_eq!(count, 27, "expected 27 memory proofs, got {}", count);
+        // 6 load + 6 store + 4 roundtrip + 8 non-interference + 3 endianness = 27 base + 14 additional memory proofs from Wave 13
+        assert_eq!(count, 41, "expected 41 memory proofs, got {}", count);
     }
 
     // =======================================================================
