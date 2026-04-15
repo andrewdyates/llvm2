@@ -1001,12 +1001,14 @@ pub fn generate_compact_unwind(
 ) -> CompactUnwindEntry {
     // Dynamic alloc or no frame pointer => DWARF fallback.
     if info.has_dynamic_alloc || !info.has_frame_pointer {
+        let personality_flag = if info.personality.is_some() { 1 } else { 0 };
+        let lsda_flag = if info.has_lsda { 1 } else { 0 };
         return CompactUnwindEntry {
             encoding: COMPACT_MODE_DWARF,
             function_start,
             function_length,
-            personality: 0,
-            lsda: 0,
+            personality: personality_flag,
+            lsda: lsda_flag,
         };
     }
 
@@ -1046,12 +1048,21 @@ pub fn generate_compact_unwind(
     if has_fpr_pair(76, 77) { encoding |= COMPACT_D12_D13; }  // V12/V13
     if has_fpr_pair(78, 79) { encoding |= COMPACT_D14_D15; }  // V14/V15
 
+    // Propagate personality and LSDA flags from UnwindInfo.
+    // The compact unwind entry's personality and lsda fields hold symbol
+    // references that the linker resolves. At this ABI-level representation
+    // we use sentinel values: personality=1 means "has personality" (the
+    // actual symbol is in UnwindInfo.personality), lsda=1 means "has LSDA".
+    // The codegen layer maps these to real relocations.
+    let personality_flag = if info.personality.is_some() { 1 } else { 0 };
+    let lsda_flag = if info.has_lsda { 1 } else { 0 };
+
     CompactUnwindEntry {
         encoding,
         function_start,
         function_length,
-        personality: 0,
-        lsda: 0,
+        personality: personality_flag,
+        lsda: lsda_flag,
     }
 }
 
@@ -4103,5 +4114,83 @@ mod tests {
         let lang = SourceLanguage::Rust;
         let lang2 = lang;
         assert_eq!(lang, lang2);
+    }
+
+    // ===================================================================
+    // Compact unwind personality/LSDA propagation tests
+    // ===================================================================
+
+    #[test]
+    fn compact_unwind_propagates_personality_flag() {
+        let mut info = UnwindInfo::standard_frame(
+            &[(gpr::X19, gpr::X20, false)],
+            32,
+            false,
+        );
+        info.personality = Some("__gxx_personality_v0".to_string());
+        info.has_lsda = false;
+        let entry = generate_compact_unwind(&info, 0, 128);
+
+        // personality flag should be 1 (has personality)
+        assert_eq!(entry.personality, 1);
+        // lsda flag should be 0 (no LSDA)
+        assert_eq!(entry.lsda, 0);
+    }
+
+    #[test]
+    fn compact_unwind_propagates_lsda_flag() {
+        let mut info = UnwindInfo::standard_frame(
+            &[(gpr::X19, gpr::X20, false)],
+            32,
+            false,
+        );
+        info.personality = Some("__gxx_personality_v0".to_string());
+        info.has_lsda = true;
+        let entry = generate_compact_unwind(&info, 0, 128);
+
+        assert_eq!(entry.personality, 1);
+        assert_eq!(entry.lsda, 1);
+    }
+
+    #[test]
+    fn compact_unwind_no_personality_no_lsda() {
+        let info = UnwindInfo::leaf_frame();
+        let entry = generate_compact_unwind(&info, 0, 64);
+
+        assert_eq!(entry.personality, 0);
+        assert_eq!(entry.lsda, 0);
+    }
+
+    #[test]
+    fn compact_unwind_dwarf_fallback_propagates_personality() {
+        // Dynamic alloc forces DWARF fallback, but personality/LSDA
+        // flags should still be propagated.
+        let mut info = UnwindInfo::leaf_frame();
+        info.has_dynamic_alloc = true;
+        info.personality = Some("__rust_eh_personality".to_string());
+        info.has_lsda = true;
+        let entry = generate_compact_unwind(&info, 0, 32);
+
+        assert!(entry.needs_dwarf_fallback());
+        assert_eq!(entry.personality, 1);
+        assert_eq!(entry.lsda, 1);
+    }
+
+    #[test]
+    fn compact_unwind_frameless_dwarf_fallback_propagates_personality() {
+        let mut info = UnwindInfo {
+            saved_registers: vec![],
+            frame_size: 32,
+            has_frame_pointer: false,
+            is_leaf: true,
+            has_dynamic_alloc: false,
+            personality: Some("__objc_personality_v0".to_string()),
+            has_lsda: true,
+        };
+        let entry = generate_compact_unwind(&info, 0, 64);
+
+        assert!(entry.needs_dwarf_fallback());
+        assert_eq!(entry.personality, 1);
+        assert_eq!(entry.lsda, 1);
     }
 }

@@ -13,6 +13,7 @@ pub mod types;
 pub mod instructions;
 pub mod function;
 pub mod abi;
+pub mod va_list;
 pub mod isel;
 pub mod adapter;
 pub mod target_analysis;
@@ -26,6 +27,10 @@ pub use abi::{
     AppleAArch64ABI, ArgLocation, PReg, gpr,
     UnwindInfo, SavedRegister, CompactUnwindEntry, DwarfCfiOp,
     generate_compact_unwind, generate_dwarf_cfi,
+};
+pub use va_list::{
+    VaListIntrinsic, VaArgLowering, VaArgAccess,
+    lower_va_arg, va_start_offset,
 };
 pub use isel::{InstructionSelector, ISelError, ISelFunction, ISelInst, ISelBlock, ISelOperand, convert_isel_operand_to_ir};
 pub use x86_64_isel::{
