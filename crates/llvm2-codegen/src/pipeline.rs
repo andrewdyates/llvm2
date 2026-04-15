@@ -121,6 +121,13 @@ pub enum PipelineError {
     CoreMLEmit(#[from] CoreMLEmitError),
     #[error("Metal kernel emission failed: {0}")]
     MetalEmit(#[from] crate::metal_emitter::MetalEmitError),
+    #[error("function verification failed: {failures} failures, {coverage:.1}% coverage ({function})")]
+    VerificationFailed {
+        function: String,
+        failures: usize,
+        coverage: f64,
+        report: llvm2_verify::FunctionVerificationReport,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +168,16 @@ pub struct PipelineConfig {
     /// set to [`DispatchVerifyMode::ErrorOnFailure`], verification failures
     /// produce a [`PipelineError::DispatchVerificationFailed`].
     pub verify_dispatch: DispatchVerifyMode,
+    /// Whether to run function-level verification after optimization.
+    ///
+    /// When enabled, the pipeline calls [`llvm2_verify::verify_function`] on
+    /// the optimized IR before register allocation and returns
+    /// [`PipelineError::VerificationFailed`] if any instruction fails
+    /// verification. Pseudo-ops and unverified (no-proof) instructions are
+    /// tolerated — only explicit verification failures are fatal.
+    ///
+    /// Default: `false` (verification disabled for compilation speed).
+    pub verify: bool,
 }
 
 impl Default for PipelineConfig {
@@ -169,6 +186,7 @@ impl Default for PipelineConfig {
             opt_level: OptLevel::O2,
             emit_debug: false,
             verify_dispatch: DispatchVerifyMode::FallbackOnFailure,
+            verify: false,
         }
     }
 }
@@ -561,6 +579,9 @@ impl Pipeline {
         // Phase 3: Optimization
         self.run_optimization(&mut ir_func);
 
+        // Phase 3.5: Verification (optional — gated by config.verify)
+        self.run_verification(&ir_func)?;
+
         // Phase 4-6: Register Allocation
         self.run_regalloc(&mut ir_func)?;
 
@@ -593,6 +614,9 @@ impl Pipeline {
     ) -> Result<Vec<u8>, PipelineError> {
         // Phase 3: Optimization
         self.run_optimization(ir_func);
+
+        // Phase 3.5: Verification (optional — gated by config.verify)
+        self.run_verification(ir_func)?;
 
         // Phase 4-6: Register Allocation
         self.run_regalloc(ir_func)?;
@@ -690,6 +714,31 @@ impl Pipeline {
 
         let pipeline = OptimizationPipeline::new(opt_level);
         let _stats = pipeline.run(func);
+    }
+
+    /// Phase 3.5: Run function-level verification (optional).
+    ///
+    /// When `self.config.verify` is true, calls [`llvm2_verify::verify_function`]
+    /// on the optimized IR. Returns an error only if any instruction *fails*
+    /// verification (i.e., a proof was found but produced Invalid/Unknown).
+    /// Unverified instructions (no proof available) are tolerated — they are
+    /// expected for opcodes not yet covered by the proof database.
+    fn run_verification(
+        &self,
+        func: &IrMachFunction,
+    ) -> Result<llvm2_verify::FunctionVerificationReport, PipelineError> {
+        let report = llvm2_verify::verify_function(func);
+
+        if self.config.verify && report.failed_count() > 0 {
+            return Err(PipelineError::VerificationFailed {
+                function: report.function_name.clone(),
+                failures: report.failed_count(),
+                coverage: report.coverage_percent(),
+                report,
+            });
+        }
+
+        Ok(report)
     }
 
     /// Phase 4-6: Run register allocation and apply results.
@@ -1066,6 +1115,7 @@ pub fn compile_to_object(
         opt_level,
         emit_debug: false,
         verify_dispatch: DispatchVerifyMode::FallbackOnFailure,
+        verify: false,
     };
     let pipeline = Pipeline::new(config);
     pipeline.compile_function(input)
@@ -1645,10 +1695,12 @@ mod tests {
         let config = PipelineConfig {
             opt_level: OptLevel::O0,
             emit_debug: true,
-            verify_dispatch: DispatchVerifyMode::FallbackOnFailure,
+            verify: true,
+            ..Default::default()
         };
         assert_eq!(config.opt_level, OptLevel::O0);
         assert!(config.emit_debug);
+        assert!(config.verify);
     }
 
     #[test]
@@ -1656,7 +1708,7 @@ mod tests {
         let config = PipelineConfig {
             opt_level: OptLevel::O3,
             emit_debug: true,
-            verify_dispatch: DispatchVerifyMode::FallbackOnFailure,
+            ..Default::default()
         };
         let cloned = config.clone();
         assert_eq!(cloned.opt_level, OptLevel::O3);
@@ -1672,7 +1724,7 @@ mod tests {
         let config = PipelineConfig {
             opt_level: OptLevel::O1,
             emit_debug: false,
-            verify_dispatch: DispatchVerifyMode::FallbackOnFailure,
+            ..Default::default()
         };
         let pipeline = Pipeline::new(config);
         assert_eq!(pipeline.config.opt_level, OptLevel::O1);
@@ -1830,6 +1882,139 @@ mod tests {
         let err = PipelineError::InvalidOperand("FrameIndex must be eliminated".to_string());
         let msg = format!("{}", err);
         assert!(msg.contains("invalid operand"));
+    }
+
+    // =========================================================================
+    // Pipeline verification integration tests
+    // =========================================================================
+
+    #[test]
+    fn pipeline_config_default_verify_is_false() {
+        let config = PipelineConfig::default();
+        assert!(!config.verify, "verify should be false by default");
+    }
+
+    #[test]
+    fn pipeline_config_verify_enabled() {
+        let config = PipelineConfig {
+            verify: true,
+            ..Default::default()
+        };
+        assert!(config.verify);
+    }
+
+    #[test]
+    fn run_verification_disabled_returns_report() {
+        // With verify=false, run_verification should always return Ok
+        // even though the function has unverified instructions.
+        let pipeline = Pipeline::new(PipelineConfig {
+            verify: false,
+            ..Default::default()
+        });
+        let func = build_add_test_function();
+        let result = pipeline.run_verification(&func);
+        assert!(result.is_ok(), "verification disabled should always succeed");
+        let report = result.unwrap();
+        assert_eq!(report.function_name, "add");
+        assert!(report.total() > 0);
+    }
+
+    #[test]
+    fn run_verification_enabled_passes_add_function() {
+        // The add test function has AddRR (verified) + Ret (unverified).
+        // Since there are no *failed* instructions (just unverified), it
+        // should pass even with verify=true.
+        let pipeline = Pipeline::new(PipelineConfig {
+            verify: true,
+            ..Default::default()
+        });
+        let func = build_add_test_function();
+        let result = pipeline.run_verification(&func);
+        assert!(result.is_ok(), "add function has no failed proofs, should pass");
+        let report = result.unwrap();
+        assert!(report.verified_count() >= 1, "AddRR should be verified");
+    }
+
+    #[test]
+    fn run_verification_enabled_reports_coverage() {
+        let pipeline = Pipeline::new(PipelineConfig {
+            verify: true,
+            ..Default::default()
+        });
+
+        // Build a function with only verified instructions.
+        let sig = IrSignature::new(vec![Type::I64, Type::I64], vec![Type::I64]);
+        let mut func = IrMachFunction::new("all_verified".to_string(), sig);
+        let entry = func.entry;
+
+        let add = IrMachInst::new(
+            IrOpcode::AddRR,
+            vec![IrOperand::PReg(X0), IrOperand::PReg(X0), IrOperand::PReg(X1)],
+        );
+        let add_id = func.push_inst(add);
+        func.append_inst(entry, add_id);
+
+        let sub = IrMachInst::new(
+            IrOpcode::SubRR,
+            vec![IrOperand::PReg(X0), IrOperand::PReg(X0), IrOperand::PReg(X1)],
+        );
+        let sub_id = func.push_inst(sub);
+        func.append_inst(entry, sub_id);
+
+        let result = pipeline.run_verification(&func);
+        assert!(result.is_ok());
+        let report = result.unwrap();
+        assert_eq!(report.verified_count(), 2);
+        assert_eq!(report.failed_count(), 0);
+        assert_eq!(report.coverage_percent(), 100.0);
+    }
+
+    #[test]
+    fn compile_ir_function_with_verification_enabled() {
+        // End-to-end: compile a pre-built IR function with verification on.
+        let pipeline = Pipeline::new(PipelineConfig {
+            opt_level: OptLevel::O0,
+            verify: true,
+            ..Default::default()
+        });
+
+        let mut func = build_add_test_function();
+        let result = pipeline.compile_ir_function(&mut func);
+        // Should succeed — AddRR has a proof, Ret is unverified (not failed).
+        assert!(result.is_ok(), "compile_ir_function with verify=true should succeed for add: {:?}", result.err());
+    }
+
+    #[test]
+    fn compile_ir_function_without_verification() {
+        // Compile with verification off — should always succeed.
+        let pipeline = Pipeline::new(PipelineConfig {
+            opt_level: OptLevel::O0,
+            verify: false,
+            ..Default::default()
+        });
+
+        let mut func = build_add_test_function();
+        let result = pipeline.compile_ir_function(&mut func);
+        assert!(result.is_ok(), "compile_ir_function with verify=false should succeed");
+    }
+
+    #[test]
+    fn verification_failed_error_display() {
+        let report = llvm2_verify::FunctionVerificationReport {
+            function_name: "bad_func".to_string(),
+            instructions: vec![],
+        };
+        let err = PipelineError::VerificationFailed {
+            function: "bad_func".to_string(),
+            failures: 3,
+            coverage: 42.5,
+            report,
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("function verification failed"));
+        assert!(msg.contains("3 failures"));
+        assert!(msg.contains("42.5%"));
+        assert!(msg.contains("bad_func"));
     }
 }
 
