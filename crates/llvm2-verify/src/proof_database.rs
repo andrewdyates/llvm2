@@ -913,8 +913,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            32,
-            "expected 32 categories, got {}",
+            33,
+            "expected 33 categories, got {}",
             categories.len()
         );
     }
