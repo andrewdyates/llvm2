@@ -33,8 +33,15 @@ pub mod gpr {
         X0, X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15,
         X16, X17, X18, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28,
         FP, LR,
+        // FPR128 (V/Q registers) — 128-bit NEON/SIMD
         V0, V1, V2, V3, V4, V5, V6, V7,
         V8, V9, V10, V11, V12, V13, V14, V15,
+        V16, V17, V18, V19, V20, V21, V22, V23,
+        V24, V25, V26, V27, V28, V29, V30, V31,
+        // FPR64 (D registers) — 64-bit FP, aliases lower 64 bits of V
+        D0, D1, D2, D3, D4, D5, D6, D7,
+        // FPR32 (S registers) — 32-bit FP, aliases lower 32 bits of V
+        S0, S1, S2, S3, S4, S5, S6, S7,
     };
 }
 
@@ -65,10 +72,28 @@ const GPR_ARG_REGS: [PReg; 8] = [
     gpr::X4, gpr::X5, gpr::X6, gpr::X7,
 ];
 
-/// FPR argument registers: V0-V7
+/// FPR argument registers: V0-V7 (128-bit view, used for all FP/SIMD args)
 const FPR_ARG_REGS: [PReg; 8] = [
     gpr::V0, gpr::V1, gpr::V2, gpr::V3,
     gpr::V4, gpr::V5, gpr::V6, gpr::V7,
+];
+
+/// S-register argument sequence: S0-S7 (typed 32-bit view of V0-V7 for F32 args).
+///
+/// These alias the same physical registers as V0-V7 / D0-D7 but use the
+/// Fpr32 register class, enabling size-correct instruction selection.
+const S_ARG_REGS: [PReg; 8] = [
+    gpr::S0, gpr::S1, gpr::S2, gpr::S3,
+    gpr::S4, gpr::S5, gpr::S6, gpr::S7,
+];
+
+/// D-register argument sequence: D0-D7 (typed 64-bit view of V0-V7 for F64 args).
+///
+/// These alias the same physical registers as V0-V7 but use the Fpr64
+/// register class.
+const D_ARG_REGS: [PReg; 8] = [
+    gpr::D0, gpr::D1, gpr::D2, gpr::D3,
+    gpr::D4, gpr::D5, gpr::D6, gpr::D7,
 ];
 
 /// Callee-saved GPRs: X19-X28 + FP(X29) + LR(X30)
@@ -93,6 +118,19 @@ const CALL_CLOBBER_GPRS: [PReg; 19] = [
     gpr::X8, gpr::X9, gpr::X10, gpr::X11,
     gpr::X12, gpr::X13, gpr::X14, gpr::X15,
     gpr::X16, gpr::X17, gpr::X18,
+];
+
+/// Call-clobbered FPRs: V0-V7, V16-V31 (everything not callee-saved V8-V15).
+///
+/// Per AAPCS64, V0-V7 are argument/result registers (clobbered by calls)
+/// and V16-V31 are caller-saved temporaries.
+const CALL_CLOBBER_FPRS: [PReg; 24] = [
+    gpr::V0,  gpr::V1,  gpr::V2,  gpr::V3,
+    gpr::V4,  gpr::V5,  gpr::V6,  gpr::V7,
+    gpr::V16, gpr::V17, gpr::V18, gpr::V19,
+    gpr::V20, gpr::V21, gpr::V22, gpr::V23,
+    gpr::V24, gpr::V25, gpr::V26, gpr::V27,
+    gpr::V28, gpr::V29, gpr::V30, gpr::V31,
 ];
 
 // ---------------------------------------------------------------------------
@@ -263,6 +301,26 @@ impl AppleAArch64ABI {
                     }
                 }
 
+                // 128-bit NEON/SIMD vector -> FPR (V0-V7)
+                //
+                // Per AAPCS64/Apple ABI, SIMD&FP arguments use the same V0-V7
+                // register sequence as scalar float arguments, with independent
+                // numbering from the GPR sequence.
+                Type::V128 => {
+                    if fpr_idx < FPR_ARG_REGS.len() {
+                        result.push(ArgLocation::Reg(FPR_ARG_REGS[fpr_idx]));
+                        fpr_idx += 1;
+                    } else {
+                        // 128-bit vectors are 16-byte aligned on stack.
+                        stack_offset = align_up(stack_offset, 16);
+                        result.push(ArgLocation::Stack {
+                            offset: stack_offset,
+                            size: 16,
+                        });
+                        stack_offset += 16;
+                    }
+                }
+
                 // Aggregate types: check for HFA first, then size-based classification.
                 Type::Struct(_) | Type::Array(_, _) => {
                     // HFA: 1-4 same-type FP fields -> consecutive FPR registers.
@@ -380,6 +438,16 @@ impl AppleAArch64ABI {
                     }
                 }
 
+                // 128-bit NEON/SIMD vector return -> V0
+                Type::V128 => {
+                    if fpr_idx < FPR_ARG_REGS.len() {
+                        result.push(ArgLocation::Reg(FPR_ARG_REGS[fpr_idx]));
+                        fpr_idx += 1;
+                    } else {
+                        result.push(ArgLocation::Indirect { ptr_reg: gpr::X8 });
+                    }
+                }
+
                 // Aggregate returns: HFA in V regs, small structs in X regs, large via sret.
                 Type::Struct(_) | Type::Array(_, _) => {
                     // Check for HFA: return in consecutive V registers.
@@ -429,6 +497,68 @@ impl AppleAArch64ABI {
     /// Call-clobbered GPRs (X0-X18).
     pub fn call_clobber_gprs() -> &'static [PReg] {
         &CALL_CLOBBER_GPRS
+    }
+
+    /// Call-clobbered FPRs (V0-V7, V16-V31).
+    ///
+    /// These registers are NOT preserved across function calls. V8-V15 are
+    /// callee-saved (lower 64 bits only on Apple AArch64).
+    pub fn call_clobber_fprs() -> &'static [PReg] {
+        &CALL_CLOBBER_FPRS
+    }
+
+    /// Typed FPR argument registers for F32: S0-S7.
+    ///
+    /// Returns the 32-bit view of the argument FPR registers. S0-S7 alias
+    /// the lower 32 bits of V0-V7 and share the same FPR allocation sequence.
+    pub fn s_arg_regs() -> &'static [PReg] {
+        &S_ARG_REGS
+    }
+
+    /// Typed FPR argument registers for F64: D0-D7.
+    ///
+    /// Returns the 64-bit view of the argument FPR registers. D0-D7 alias
+    /// the lower 64 bits of V0-V7 and share the same FPR allocation sequence.
+    pub fn d_arg_regs() -> &'static [PReg] {
+        &D_ARG_REGS
+    }
+
+    /// Classify a single floating-point or SIMD argument, returning the
+    /// appropriately-typed register.
+    ///
+    /// Unlike `classify_params()` which always returns V registers (Fpr128),
+    /// this method returns the correctly-sized register alias:
+    /// - F32  -> S0-S7 (Fpr32 class)
+    /// - F64  -> D0-D7 (Fpr64 class)
+    /// - V128 -> V0-V7 (Fpr128 class)
+    ///
+    /// Returns `Some((location, next_fpr_idx))` if an FPR slot is available,
+    /// `None` if all FPR slots are exhausted (caller should use stack).
+    ///
+    /// This is useful for instruction selection where the register class
+    /// must match the operand size (e.g., `FMOV S0, S1` vs `FMOV D0, D1`).
+    pub fn classify_fp_arg(ty: &Type, fpr_idx: usize) -> Option<(ArgLocation, usize)> {
+        if fpr_idx >= FPR_ARG_REGS.len() {
+            return None;
+        }
+        match ty {
+            Type::F32 => Some((ArgLocation::Reg(S_ARG_REGS[fpr_idx]), fpr_idx + 1)),
+            Type::F64 => Some((ArgLocation::Reg(D_ARG_REGS[fpr_idx]), fpr_idx + 1)),
+            Type::V128 => Some((ArgLocation::Reg(FPR_ARG_REGS[fpr_idx]), fpr_idx + 1)),
+            _ => None,
+        }
+    }
+
+    /// Classify a 128-bit NEON vector argument.
+    ///
+    /// NEON vectors use the same V0-V7 FPR sequence as scalar FP arguments.
+    /// Returns `Some((location, next_fpr_idx))` if an FPR slot is available,
+    /// `None` if all FPR slots are exhausted.
+    pub fn classify_vector_arg(fpr_idx: usize) -> Option<(ArgLocation, usize)> {
+        if fpr_idx >= FPR_ARG_REGS.len() {
+            return None;
+        }
+        Some((ArgLocation::Reg(FPR_ARG_REGS[fpr_idx]), fpr_idx + 1))
     }
 
     /// Total stack space consumed by overflow arguments.
@@ -2031,5 +2161,324 @@ mod tests {
         };
         assert_eq!(entry.mode(), COMPACT_MODE_FRAME);
         assert!(!entry.needs_dwarf_fallback());
+    }
+
+    // ===================================================================
+    // SIMD/FP vector argument passing tests
+    // ===================================================================
+
+    // --- Pure FP function: (f32, f32) -> f32 ---
+
+    #[test]
+    fn classify_pure_f32_function() {
+        // fn add_f32(f32, f32) -> f32
+        // Both args in V0, V1; return in V0
+        let locs = AppleAArch64ABI::classify_params(&[Type::F32, Type::F32]);
+        assert_eq!(locs.len(), 2);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+        assert_eq!(locs[1], ArgLocation::Reg(gpr::V1));
+
+        let ret = AppleAArch64ABI::classify_returns(&[Type::F32]);
+        assert_eq!(ret.len(), 1);
+        assert_eq!(ret[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    // --- Mixed int + FP: (i64, f64, i32, f32) -> f64 ---
+
+    #[test]
+    fn classify_mixed_int_fp_with_return() {
+        // fn mixed(i64, f64, i32, f32) -> f64
+        // i64 -> X0, f64 -> V0, i32 -> X1, f32 -> V1
+        let locs = AppleAArch64ABI::classify_params(
+            &[Type::I64, Type::F64, Type::I32, Type::F32],
+        );
+        assert_eq!(locs.len(), 4);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));   // i64
+        assert_eq!(locs[1], ArgLocation::Reg(gpr::V0));   // f64
+        assert_eq!(locs[2], ArgLocation::Reg(gpr::X1));   // i32
+        assert_eq!(locs[3], ArgLocation::Reg(gpr::V1));   // f32
+
+        // Return f64 -> V0
+        let ret = AppleAArch64ABI::classify_returns(&[Type::F64]);
+        assert_eq!(ret.len(), 1);
+        assert_eq!(ret[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    // --- >8 FP args: overflow to stack ---
+
+    #[test]
+    fn classify_fp_overflow_10_f32_args() {
+        // 10 f32 args: first 8 in V0-V7, last 2 on stack
+        let params: Vec<Type> = (0..10).map(|_| Type::F32).collect();
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 10);
+        for i in 0..8 {
+            assert_eq!(locs[i], ArgLocation::Reg(FPR_ARG_REGS[i]),
+                "F32 arg {} should be in V{}", i, i);
+        }
+        // 9th and 10th on stack (4-byte F32, promoted to 8-byte aligned slot)
+        assert!(matches!(locs[8], ArgLocation::Stack { offset: 0, size: 4 }));
+        assert!(matches!(locs[9], ArgLocation::Stack { offset: 8, size: 4 }));
+    }
+
+    #[test]
+    fn classify_fp_overflow_9_f64_args() {
+        // 9 f64 args: first 8 in V0-V7, 9th on stack
+        let params: Vec<Type> = (0..9).map(|_| Type::F64).collect();
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 9);
+        for i in 0..8 {
+            assert_eq!(locs[i], ArgLocation::Reg(FPR_ARG_REGS[i]));
+        }
+        assert!(matches!(locs[8], ArgLocation::Stack { offset: 0, size: 8 }));
+    }
+
+    // --- 128-bit NEON vector arg passing ---
+
+    #[test]
+    fn classify_v128_param_in_fpr() {
+        // Single 128-bit vector -> V0
+        let locs = AppleAArch64ABI::classify_params(&[Type::V128]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    #[test]
+    fn classify_v128_return() {
+        // V128 return -> V0
+        let ret = AppleAArch64ABI::classify_returns(&[Type::V128]);
+        assert_eq!(ret.len(), 1);
+        assert_eq!(ret[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    #[test]
+    fn classify_multiple_v128_params() {
+        // 4 vector args -> V0, V1, V2, V3
+        let params = vec![Type::V128; 4];
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 4);
+        for i in 0..4 {
+            assert_eq!(locs[i], ArgLocation::Reg(FPR_ARG_REGS[i]));
+        }
+    }
+
+    #[test]
+    fn classify_v128_overflow_to_stack() {
+        // 9 vector args: V0-V7 in regs, 9th on stack (16-byte aligned)
+        let params: Vec<Type> = (0..9).map(|_| Type::V128).collect();
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 9);
+        for i in 0..8 {
+            assert_eq!(locs[i], ArgLocation::Reg(FPR_ARG_REGS[i]));
+        }
+        assert!(matches!(locs[8], ArgLocation::Stack { offset: 0, size: 16 }));
+    }
+
+    #[test]
+    fn classify_mixed_v128_and_f64() {
+        // V128 and F64 share the same FPR sequence
+        // fn(v128, f64, v128) -> V0, V1, V2
+        let locs = AppleAArch64ABI::classify_params(
+            &[Type::V128, Type::F64, Type::V128],
+        );
+        assert_eq!(locs.len(), 3);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));  // v128
+        assert_eq!(locs[1], ArgLocation::Reg(gpr::V1));  // f64
+        assert_eq!(locs[2], ArgLocation::Reg(gpr::V2));  // v128
+    }
+
+    #[test]
+    fn classify_mixed_int_v128() {
+        // int and vector args use independent register pools
+        // fn(i64, v128, i64, v128) -> X0, V0, X1, V1
+        let locs = AppleAArch64ABI::classify_params(
+            &[Type::I64, Type::V128, Type::I64, Type::V128],
+        );
+        assert_eq!(locs.len(), 4);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+        assert_eq!(locs[1], ArgLocation::Reg(gpr::V0));
+        assert_eq!(locs[2], ArgLocation::Reg(gpr::X1));
+        assert_eq!(locs[3], ArgLocation::Reg(gpr::V1));
+    }
+
+    // --- FP return values ---
+
+    #[test]
+    fn classify_f32_return() {
+        let ret = AppleAArch64ABI::classify_returns(&[Type::F32]);
+        assert_eq!(ret.len(), 1);
+        assert_eq!(ret[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    #[test]
+    fn classify_multiple_fp_returns() {
+        // Returning (f64, f32) -> V0, V1
+        let ret = AppleAArch64ABI::classify_returns(&[Type::F64, Type::F32]);
+        assert_eq!(ret.len(), 2);
+        assert_eq!(ret[0], ArgLocation::Reg(gpr::V0));
+        assert_eq!(ret[1], ArgLocation::Reg(gpr::V1));
+    }
+
+    // --- HFA return (struct with 2-4 floats) ---
+
+    #[test]
+    fn classify_hfa_return_two_f32() {
+        // struct { f32, f32 } -> HFA return, V0 (consumes V0+V1)
+        let hfa = Type::Struct(vec![Type::F32, Type::F32]);
+        let ret = AppleAArch64ABI::classify_returns(&[hfa]);
+        assert_eq!(ret.len(), 1);
+        assert_eq!(ret[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    #[test]
+    fn classify_hfa_return_three_f64() {
+        // struct { f64, f64, f64 } -> HFA return, V0 (consumes V0+V1+V2)
+        let hfa = Type::Struct(vec![Type::F64, Type::F64, Type::F64]);
+        let ret = AppleAArch64ABI::classify_returns(&[hfa]);
+        assert_eq!(ret.len(), 1);
+        assert_eq!(ret[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    #[test]
+    fn classify_hfa_return_four_f32() {
+        // struct { f32, f32, f32, f32 } -> HFA, V0 (consumes V0-V3)
+        let hfa = Type::Struct(vec![Type::F32, Type::F32, Type::F32, Type::F32]);
+        let ret = AppleAArch64ABI::classify_returns(&[hfa]);
+        assert_eq!(ret.len(), 1);
+        assert_eq!(ret[0], ArgLocation::Reg(gpr::V0));
+    }
+
+    // --- classify_fp_arg() typed register helper ---
+
+    #[test]
+    fn classify_fp_arg_f32_returns_s_register() {
+        let (loc, next) = AppleAArch64ABI::classify_fp_arg(&Type::F32, 0).unwrap();
+        assert_eq!(loc, ArgLocation::Reg(gpr::S0));
+        assert_eq!(next, 1);
+    }
+
+    #[test]
+    fn classify_fp_arg_f64_returns_d_register() {
+        let (loc, next) = AppleAArch64ABI::classify_fp_arg(&Type::F64, 0).unwrap();
+        assert_eq!(loc, ArgLocation::Reg(gpr::D0));
+        assert_eq!(next, 1);
+    }
+
+    #[test]
+    fn classify_fp_arg_v128_returns_v_register() {
+        let (loc, next) = AppleAArch64ABI::classify_fp_arg(&Type::V128, 0).unwrap();
+        assert_eq!(loc, ArgLocation::Reg(gpr::V0));
+        assert_eq!(next, 1);
+    }
+
+    #[test]
+    fn classify_fp_arg_at_index_3() {
+        // F32 at fpr_idx=3 -> S3
+        let (loc, next) = AppleAArch64ABI::classify_fp_arg(&Type::F32, 3).unwrap();
+        assert_eq!(loc, ArgLocation::Reg(gpr::S3));
+        assert_eq!(next, 4);
+    }
+
+    #[test]
+    fn classify_fp_arg_exhausted_returns_none() {
+        // fpr_idx=8 (all slots used) -> None
+        assert!(AppleAArch64ABI::classify_fp_arg(&Type::F64, 8).is_none());
+    }
+
+    #[test]
+    fn classify_fp_arg_non_fp_type_returns_none() {
+        // Integer type is not a FP arg
+        assert!(AppleAArch64ABI::classify_fp_arg(&Type::I64, 0).is_none());
+    }
+
+    // --- classify_vector_arg() helper ---
+
+    #[test]
+    fn classify_vector_arg_at_zero() {
+        let (loc, next) = AppleAArch64ABI::classify_vector_arg(0).unwrap();
+        assert_eq!(loc, ArgLocation::Reg(gpr::V0));
+        assert_eq!(next, 1);
+    }
+
+    #[test]
+    fn classify_vector_arg_at_7() {
+        let (loc, next) = AppleAArch64ABI::classify_vector_arg(7).unwrap();
+        assert_eq!(loc, ArgLocation::Reg(gpr::V7));
+        assert_eq!(next, 8);
+    }
+
+    #[test]
+    fn classify_vector_arg_exhausted() {
+        assert!(AppleAArch64ABI::classify_vector_arg(8).is_none());
+    }
+
+    // --- call_clobber_fprs ---
+
+    #[test]
+    fn call_clobber_fprs_correct() {
+        let clobber = AppleAArch64ABI::call_clobber_fprs();
+        assert_eq!(clobber.len(), 24); // V0-V7 (8) + V16-V31 (16)
+        // V0-V7 are arg registers, clobbered
+        assert!(clobber.contains(&gpr::V0));
+        assert!(clobber.contains(&gpr::V7));
+        // V8-V15 are callee-saved, NOT in clobber list
+        assert!(!clobber.contains(&gpr::V8));
+        assert!(!clobber.contains(&gpr::V15));
+        // V16-V31 are clobbered
+        assert!(clobber.contains(&gpr::V16));
+        assert!(clobber.contains(&gpr::V31));
+    }
+
+    // --- S/D register accessor tests ---
+
+    #[test]
+    fn s_arg_regs_correct() {
+        let s_regs = AppleAArch64ABI::s_arg_regs();
+        assert_eq!(s_regs.len(), 8);
+        assert_eq!(s_regs[0], gpr::S0);
+        assert_eq!(s_regs[7], gpr::S7);
+    }
+
+    #[test]
+    fn d_arg_regs_correct() {
+        let d_regs = AppleAArch64ABI::d_arg_regs();
+        assert_eq!(d_regs.len(), 8);
+        assert_eq!(d_regs[0], gpr::D0);
+        assert_eq!(d_regs[7], gpr::D7);
+    }
+
+    // --- V128 in variadic context ---
+
+    #[test]
+    fn variadic_v128_on_stack() {
+        // fn(i64, ...) called with (ptr, v128_arg)
+        // Fixed: ptr -> X0, Variadic: v128 -> stack (16 bytes)
+        let params = vec![Type::I64, Type::V128];
+        let locs = AppleAArch64ABI::classify_params_variadic(1, &params);
+        assert_eq!(locs.len(), 2);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+        assert!(matches!(locs[1], ArgLocation::Stack { offset: 0, size: 16 }));
+    }
+
+    // --- V128 stack args size ---
+
+    #[test]
+    fn stack_args_size_with_v128_overflow() {
+        // 9 v128 args: 8 in regs, 1 on stack (16 bytes)
+        let params: Vec<Type> = (0..9).map(|_| Type::V128).collect();
+        let size = AppleAArch64ABI::stack_args_size(&params);
+        assert_eq!(size, 16);
+    }
+
+    // --- V128 type properties ---
+
+    #[test]
+    fn v128_type_properties() {
+        assert_eq!(Type::V128.bytes(), 16);
+        assert_eq!(Type::V128.bits(), 128);
+        assert_eq!(Type::V128.storage_bits(), 128);
+        assert_eq!(Type::V128.align(), 16);
+        assert!(!Type::V128.is_aggregate());
+        assert!(Type::V128.is_scalar());
     }
 }

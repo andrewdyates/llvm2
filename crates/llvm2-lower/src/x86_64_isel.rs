@@ -45,6 +45,7 @@ fn reg_class_for_type(ty: &Type) -> RegClass {
         Type::I64 | Type::I128 => RegClass::Gpr64,
         Type::F32 => RegClass::Fpr32,
         Type::F64 => RegClass::Fpr64,
+        Type::V128 => RegClass::Fpr128,
         Type::Struct(_) | Type::Array(_, _) => RegClass::Gpr64,
     }
 }

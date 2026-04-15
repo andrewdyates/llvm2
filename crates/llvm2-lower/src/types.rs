@@ -47,6 +47,11 @@ pub enum Type {
     F64,
     /// Boolean (1-bit)
     B1,
+    /// 128-bit NEON/SIMD vector (e.g., float32x4, int32x4).
+    ///
+    /// Passed in V0-V7 (FPR128 class) per Apple AArch64 ABI.
+    /// Size: 16 bytes, alignment: 16 bytes.
+    V128,
     /// Aggregate structure type with C-like field layout.
     Struct(Vec<Type>),
     /// Fixed-size array type: element type and count.
@@ -74,7 +79,7 @@ impl Type {
             Type::I16 => 2,
             Type::I32 | Type::F32 => 4,
             Type::I64 | Type::F64 => 8,
-            Type::I128 => 16,
+            Type::I128 | Type::V128 => 16,
             Type::Struct(fields) => {
                 let mut offset: u32 = 0;
                 let mut max_align: u32 = 1;
@@ -98,6 +103,8 @@ impl Type {
     /// Natural alignment in bytes.
     pub fn align(&self) -> u32 {
         match self {
+            // V128 has 16-byte alignment (NEON requirement).
+            Type::V128 => 16,
             Type::Struct(fields) => fields.iter().map(|f| f.align()).max().unwrap_or(1),
             Type::Array(elem, _) => elem.align(),
             _ => self.bytes().min(8),
@@ -184,6 +191,9 @@ impl From<&Type> for llvm2_ir::function::Type {
             Type::F32 => llvm2_ir::function::Type::F32,
             Type::F64 => llvm2_ir::function::Type::F64,
             Type::B1 => llvm2_ir::function::Type::B1,
+            // V128 maps to I128 as a placeholder (same size, 16 bytes).
+            // TODO: Add a proper V128 variant to llvm2_ir::function::Type.
+            Type::V128 => llvm2_ir::function::Type::I128,
             Type::Struct(fields) => {
                 let ir_fields: Vec<llvm2_ir::function::Type> =
                     fields.iter().map(|f| f.into()).collect();
