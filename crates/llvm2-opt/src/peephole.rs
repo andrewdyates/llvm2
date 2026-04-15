@@ -26,9 +26,11 @@
 //!
 //! # Note on cmp+b.cond Fusing
 //!
-//! CMP+BCond fusing into CBZ/CBNZ is deferred to a later pass because it
-//! requires cross-instruction analysis (the CMP must be immediately
-//! followed by the BCond with no intervening flag-setting instructions).
+//! CMP+BCond fusing into CBZ/CBNZ/TBZ/TBNZ is handled by the
+//! [`cmp_branch_fusion`](crate::cmp_branch_fusion) pass, which runs after
+//! peephole. It requires cross-instruction analysis (the CMP must be
+//! immediately followed by the BCond with no intervening flag-setting
+//! instructions).
 
 use llvm2_ir::{AArch64Opcode, InstId, MachFunction, MachInst, MachOperand};
 
