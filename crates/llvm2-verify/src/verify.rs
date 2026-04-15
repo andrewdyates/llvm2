@@ -643,7 +643,7 @@ mod tests {
     fn test_verifier_memory_model() {
         let verifier = Verifier::new();
         let report = verifier.verify_memory_model();
-        assert!(report.total() >= 41, "expected >= 41 memory proofs, got {}", report.total());
+        assert!(report.total() >= 62, "expected >= 62 memory proofs, got {}", report.total());
         assert!(report.all_valid(), "Memory proofs failed:\n{}", report.summary());
     }
 
