@@ -549,7 +549,21 @@ mod tests {
 
     #[test]
     fn test_report_display_contains_key_fields() {
-        let db = ProofDatabase::new();
+        // Use Arithmetic + Memory subset -- display format test doesn't need
+        // all 1000+ proofs, just enough for category breakdown. See #234.
+        let full_db = ProofDatabase::new();
+        let mut subset: Vec<_> = full_db
+            .by_category(ProofCategory::Arithmetic)
+            .into_iter()
+            .cloned()
+            .collect();
+        subset.extend(
+            full_db
+                .by_category(ProofCategory::Memory)
+                .into_iter()
+                .cloned(),
+        );
+        let db = ProofDatabase::from_proofs(subset);
         let runner = VerificationRunner::new(&db);
         let report = runner.run_all();
         let text = format!("{}", report);
@@ -569,7 +583,15 @@ mod tests {
 
     #[test]
     fn test_report_display_shows_strength() {
-        let db = ProofDatabase::new();
+        // Use Arithmetic subset -- strength display test doesn't need all
+        // proofs, just enough to have both exhaustive and statistical. See #234.
+        let full_db = ProofDatabase::new();
+        let subset: Vec<_> = full_db
+            .by_category(ProofCategory::Arithmetic)
+            .into_iter()
+            .cloned()
+            .collect();
+        let db = ProofDatabase::from_proofs(subset);
         let runner = VerificationRunner::new(&db);
         let report = runner.run_all();
         let text = format!("{}", report);
@@ -626,7 +648,22 @@ mod tests {
 
     #[test]
     fn test_run_parallel_matches_sequential() {
-        let db = ProofDatabase::new();
+        // Use a small subset of proofs to keep runtime well under the 600s
+        // cargo timeout. The full database has 1000+ proofs; running them
+        // twice (sequential + parallel) exceeds the timeout. We only need
+        // enough proofs to exercise the chunking/threading logic. See #234.
+        let full_db = ProofDatabase::new();
+        let subset: Vec<_> = full_db
+            .by_category(ProofCategory::Arithmetic)
+            .into_iter()
+            .cloned()
+            .collect();
+        assert!(
+            subset.len() >= 5,
+            "need at least 5 Arithmetic proofs for meaningful parallel test, got {}",
+            subset.len()
+        );
+        let db = ProofDatabase::from_proofs(subset);
         let runner = VerificationRunner::new(&db);
 
         let sequential = runner.run_all();
@@ -651,7 +688,14 @@ mod tests {
 
     #[test]
     fn test_run_parallel_single_thread() {
-        let db = ProofDatabase::new();
+        // Use Arithmetic subset to avoid timeout. See #234.
+        let full_db = ProofDatabase::new();
+        let subset: Vec<_> = full_db
+            .by_category(ProofCategory::Arithmetic)
+            .into_iter()
+            .cloned()
+            .collect();
+        let db = ProofDatabase::from_proofs(subset);
         let runner = VerificationRunner::new(&db);
         let report = runner.run_parallel(1);
 
@@ -665,7 +709,14 @@ mod tests {
 
     #[test]
     fn test_duration_is_tracked() {
-        let db = ProofDatabase::new();
+        // Use Arithmetic subset -- timing invariants don't need all proofs. See #234.
+        let full_db = ProofDatabase::new();
+        let subset: Vec<_> = full_db
+            .by_category(ProofCategory::Arithmetic)
+            .into_iter()
+            .cloned()
+            .collect();
+        let db = ProofDatabase::from_proofs(subset);
         let runner = VerificationRunner::new(&db);
         let report = runner.run_all();
 
@@ -719,7 +770,14 @@ mod tests {
 
     #[test]
     fn test_custom_config_runner() {
-        let db = ProofDatabase::new();
+        // Use Arithmetic subset -- custom config test doesn't need all proofs. See #234.
+        let full_db = ProofDatabase::new();
+        let subset: Vec<_> = full_db
+            .by_category(ProofCategory::Arithmetic)
+            .into_iter()
+            .cloned()
+            .collect();
+        let db = ProofDatabase::from_proofs(subset);
         let config = VerificationConfig::with_sample_count(1_000);
         let runner = VerificationRunner::with_config(&db, config);
 
@@ -736,7 +794,14 @@ mod tests {
 
     #[test]
     fn test_failed_details_empty_when_all_pass() {
-        let db = ProofDatabase::new();
+        // Use Arithmetic subset -- empty-failure check doesn't need all proofs. See #234.
+        let full_db = ProofDatabase::new();
+        let subset: Vec<_> = full_db
+            .by_category(ProofCategory::Arithmetic)
+            .into_iter()
+            .cloned()
+            .collect();
+        let db = ProofDatabase::from_proofs(subset);
         let runner = VerificationRunner::new(&db);
         let report = runner.run_all();
 

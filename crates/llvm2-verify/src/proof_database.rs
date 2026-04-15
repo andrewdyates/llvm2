@@ -627,6 +627,14 @@ impl ProofDatabase {
     pub fn is_empty(&self) -> bool {
         self.proofs.is_empty()
     }
+
+    /// Construct a database from a pre-built list of categorized proofs.
+    ///
+    /// Useful for testing with a subset of proofs without constructing the
+    /// full database.
+    pub fn from_proofs(proofs: Vec<CategorizedProof>) -> Self {
+        Self { proofs }
+    }
 }
 
 impl Default for ProofDatabase {
