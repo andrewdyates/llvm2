@@ -2264,7 +2264,7 @@ impl UnifiedSynthesisEngine {
         });
 
         // Add NEON results (best per arrangement) using cost model
-        for (_key, rule) in &best_by_synth_target {
+        for rule in best_by_synth_target.values() {
             if let SynthTarget::Neon(arr) = rule.target {
                 let op_name = rule_op_name(&rule.name);
                 let neon_width = arr.lane_count() * arr.lane_bits();

@@ -1252,8 +1252,8 @@ pub fn validate_ane_compatibility(program: &MilProgram) -> Vec<String> {
 
     // Check for excessive reduction dimensions (ANE prefers single-axis reductions)
     for (idx, op) in program.operations.iter().enumerate() {
-        if let MilOperation::Reduce { axes, .. } = op {
-            if axes.len() > 2 {
+        if let MilOperation::Reduce { axes, .. } = op
+            && axes.len() > 2 {
                 warnings.push(format!(
                     "op[{}] '{}' reduces over {} axes; ANE may fall back to CPU for >2 axes",
                     idx,
@@ -1261,7 +1261,6 @@ pub fn validate_ane_compatibility(program: &MilProgram) -> Vec<String> {
                     axes.len(),
                 ));
             }
-        }
     }
 
     warnings

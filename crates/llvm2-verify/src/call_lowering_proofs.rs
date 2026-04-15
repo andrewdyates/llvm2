@@ -105,7 +105,7 @@ use crate::smt::SmtExpr;
 ///
 /// Reference: abi.rs:107 GPR_ARG_REGS, isel.rs:1220-1242
 fn proof_int_arg_placement_n(arg_idx: u32, width: u32) -> ProofObligation {
-    let arg = SmtExpr::var(&format!("arg_{}", arg_idx), width);
+    let arg = SmtExpr::var(format!("arg_{}", arg_idx), width);
 
     // tMIR side: argument value that should be passed
     let tmir = arg.clone();
@@ -158,7 +158,7 @@ pub fn proof_arg_placement_x1_through_x7_8bit() -> Vec<ProofObligation> {
 pub fn proof_arg_placement_all_8_regs() -> ProofObligation {
     let width = 64;
     let args: Vec<SmtExpr> = (0..8)
-        .map(|i| SmtExpr::var(&format!("arg_{}", i), width))
+        .map(|i| SmtExpr::var(format!("arg_{}", i), width))
         .collect();
 
     // XOR all source arguments
@@ -187,7 +187,7 @@ pub fn proof_arg_placement_all_8_regs() -> ProofObligation {
 pub fn proof_arg_placement_all_8_regs_8bit() -> ProofObligation {
     let width = 8;
     let args: Vec<SmtExpr> = (0..8)
-        .map(|i| SmtExpr::var(&format!("arg_{}", i), width))
+        .map(|i| SmtExpr::var(format!("arg_{}", i), width))
         .collect();
 
     let mut tmir = args[0].clone();
@@ -226,7 +226,7 @@ pub fn proof_arg_placement_all_8_regs_8bit() -> ProofObligation {
 ///
 /// Reference: abi.rs:113 FPR_ARG_REGS, isel.rs:1220-1242
 fn proof_fp_arg_placement_n(arg_idx: u32, width: u32) -> ProofObligation {
-    let arg = SmtExpr::var(&format!("farg_{}", arg_idx), width);
+    let arg = SmtExpr::var(format!("farg_{}", arg_idx), width);
 
     let tmir = arg.clone();
     let aarch64 = arg;
@@ -269,7 +269,7 @@ pub fn proof_fp_arg_placement_v1_through_v7_8bit() -> Vec<ProofObligation> {
 pub fn proof_fp_arg_all_8_regs() -> ProofObligation {
     let width = 64;
     let args: Vec<SmtExpr> = (0..8)
-        .map(|i| SmtExpr::var(&format!("farg_{}", i), width))
+        .map(|i| SmtExpr::var(format!("farg_{}", i), width))
         .collect();
 
     let mut tmir = args[0].clone();
@@ -296,7 +296,7 @@ pub fn proof_fp_arg_all_8_regs() -> ProofObligation {
 pub fn proof_fp_arg_all_8_regs_8bit() -> ProofObligation {
     let width = 8;
     let args: Vec<SmtExpr> = (0..8)
-        .map(|i| SmtExpr::var(&format!("farg_{}", i), width))
+        .map(|i| SmtExpr::var(format!("farg_{}", i), width))
         .collect();
 
     let mut tmir = args[0].clone();
@@ -646,7 +646,7 @@ pub fn proof_stack_alignment_16_8bit() -> ProofObligation {
     let width = 8;
     let sp_base = SmtExpr::var("sp_base", width);
     let frame_slots = SmtExpr::var("frame_slots", width);
-    let sixteen = SmtExpr::bv_const(16 % 256, width); // 16 fits in 8 bits
+    let sixteen = SmtExpr::bv_const(16, width); // 16 fits in 8 bits
 
     let tmir = SmtExpr::bv_const(0, width);
 

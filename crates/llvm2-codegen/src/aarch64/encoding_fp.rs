@@ -396,7 +396,7 @@ mod tests {
         // FCMPE S0, S1
         let enc = encode_fcmp(FpSize::Single, FpCmpOp::Cmpe, 1, 0).unwrap();
         // opc = 0b10000
-        let expected = (0b11110u32 << 24) | (0b00 << 22) | (1 << 21)
+        let expected = (0b11110u32 << 24) | (1 << 21)
             | (1 << 16) | (0b1000 << 10) | 0b10000;
         assert_eq!(enc, expected);
     }

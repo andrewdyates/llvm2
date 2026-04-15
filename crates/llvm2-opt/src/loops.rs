@@ -232,12 +232,11 @@ fn compute_nesting(loops: &mut HashMap<BlockId, NaturalLoop>) {
             let body2 = &loops[&h2].body;
 
             // Check if loop h1 is contained in loop h2.
-            if body1.is_subset(body2) && body1.len() < body2.len() {
-                if body2.len() < best_parent_size {
+            if body1.is_subset(body2) && body1.len() < body2.len()
+                && body2.len() < best_parent_size {
                     best_parent = Some(h2);
                     best_parent_size = body2.len();
                 }
-            }
         }
 
         if let Some(parent_header) = best_parent {
@@ -311,11 +310,10 @@ pub fn create_preheader(
         if let Some(&last_inst_id) = pred_block.insts.last() {
             let inst = func.inst_mut(last_inst_id);
             for operand in &mut inst.operands {
-                if let MachOperand::Block(target) = operand {
-                    if *target == header {
+                if let MachOperand::Block(target) = operand
+                    && *target == header {
                         *target = preheader;
                     }
-                }
             }
         }
     }

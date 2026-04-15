@@ -200,11 +200,11 @@ fn scan_function(func: &MachFunction) -> ScanResult {
             if let MachOperand::PReg(preg) = op {
                 let r = preg.encoding();
                 // X19=19 through X28=28
-                if r >= 19 && r <= 28 {
+                if (19..=28).contains(&r) {
                     gpr_used |= 1 << (r - 19);
                 }
                 // V8=72 through V15=79 (unified PReg encoding)
-                else if r >= 72 && r <= 79 {
+                else if (72..=79).contains(&r) {
                     fpr_used |= 1 << (r - 72);
                 }
             }
@@ -213,9 +213,9 @@ fn scan_function(func: &MachFunction) -> ScanResult {
         // Check implicit defs/uses.
         for preg in inst.implicit_defs.iter().chain(inst.implicit_uses.iter()) {
             let r = preg.encoding();
-            if r >= 19 && r <= 28 {
+            if (19..=28).contains(&r) {
                 gpr_used |= 1 << (r - 19);
-            } else if r >= 72 && r <= 79 {
+            } else if (72..=79).contains(&r) {
                 fpr_used |= 1 << (r - 72);
             }
         }
@@ -410,7 +410,7 @@ pub fn emit_prologue(layout: &FrameLayout) -> Vec<MachInst> {
         // Still save FP/LR if frame pointer is used (Apple requires it).
         if layout.uses_frame_pointer && !layout.callee_saved_pairs.is_empty() {
             // STP X29, X30, [SP, #-16]!
-            insts.push(make_stp_pre_index(X29, X30, -(16 as i64)));
+            insts.push(make_stp_pre_index(X29, X30, -16_i64));
             // MOV X29, SP
             insts.push(make_mov_sp_to_fp());
         }
@@ -594,7 +594,7 @@ fn compute_slot_offsets(func: &MachFunction, layout: &FrameLayout) -> Vec<i32> {
         let align = slot.align as i32;
         if align > 0 {
             // Round down to alignment boundary (for negative offsets).
-            current_offset = current_offset & !(align - 1);
+            current_offset &= !(align - 1);
         }
         offsets.push(current_offset);
     }
@@ -626,7 +626,7 @@ use llvm2_ir::regs::X16;
 /// Offsets outside this range require materialization in a scratch register.
 #[inline]
 pub fn is_large_offset(offset: i64) -> bool {
-    offset < AARCH64_MIN_IMM_OFFSET || offset > AARCH64_MAX_IMM_OFFSET
+    !(AARCH64_MIN_IMM_OFFSET..=AARCH64_MAX_IMM_OFFSET).contains(&offset)
 }
 
 /// Statistics from a frame index elimination pass.
@@ -1353,8 +1353,8 @@ mod tests {
     #[test]
     fn test_layout_with_all_callee_saved() {
         // Function uses all callee-saved GPRs (X19-X28) and all FPRs (V8-V15).
-        let mut regs: Vec<PReg> = (19..=28).map(|r| PReg::new(r)).collect();
-        let fprs: Vec<PReg> = (72..=79).map(|r| PReg::new(r)).collect(); // V8-V15
+        let mut regs: Vec<PReg> = (19..=28).map(PReg::new).collect();
+        let fprs: Vec<PReg> = (72..=79).map(PReg::new).collect(); // V8-V15
         regs.extend(fprs);
         let func = make_func_with_callee_saved_gprs(&regs);
         let layout = compute_frame_layout(&func, 0, false);
@@ -1660,8 +1660,8 @@ mod tests {
     #[test]
     fn test_compact_unwind_all_regs() {
         // All callee-saved registers.
-        let mut regs: Vec<PReg> = (19..=28).map(|r| PReg::new(r)).collect();
-        let fprs: Vec<PReg> = (72..=79).map(|r| PReg::new(r)).collect(); // V8-V15
+        let mut regs: Vec<PReg> = (19..=28).map(PReg::new).collect();
+        let fprs: Vec<PReg> = (72..=79).map(PReg::new).collect(); // V8-V15
         regs.extend(fprs);
         let func = make_func_with_callee_saved_gprs(&regs);
         let layout = compute_frame_layout(&func, 0, false);

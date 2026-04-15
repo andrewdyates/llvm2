@@ -579,7 +579,7 @@ impl X86Encoder {
             } else {
                 self.emit_modrm(ModRM::indirect(reg_or_ext, base_enc));
             }
-        } else if disp >= -128 && disp <= 127 {
+        } else if (-128..=127).contains(&disp) {
             // mod=01: [base+disp8]
             if needs_sib {
                 self.emit_modrm(ModRM {

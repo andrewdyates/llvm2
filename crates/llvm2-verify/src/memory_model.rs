@@ -186,7 +186,7 @@ pub fn effective_address_scaled(base: u64, scaled_imm: u64, scale: u32) -> u64 {
 
 /// Check natural alignment: address is a multiple of `align_bytes`.
 pub fn is_aligned(addr: u64, align_bytes: u32) -> bool {
-    (addr % align_bytes as u64) == 0
+    addr.is_multiple_of(align_bytes as u64)
 }
 
 // ---------------------------------------------------------------------------

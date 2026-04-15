@@ -208,8 +208,8 @@ impl X86ISelFunction {
 
     /// Add a block to the function (if not already present).
     pub fn ensure_block(&mut self, block: Block) {
-        if !self.blocks.contains_key(&block) {
-            self.blocks.insert(block, X86ISelBlock::default());
+        if let std::collections::hash_map::Entry::Vacant(e) = self.blocks.entry(block) {
+            e.insert(X86ISelBlock::default());
             self.block_order.push(block);
         }
     }
@@ -307,7 +307,7 @@ impl X86InstructionSelector {
         self.value_map
             .get(val)
             .cloned()
-            .ok_or_else(|| X86ISelError::UndefinedValue(*val))
+            .ok_or(X86ISelError::UndefinedValue(*val))
     }
 
     /// Get the type of a tMIR Value.
@@ -905,31 +905,29 @@ impl X86InstructionSelector {
                     );
                     stack_offset += 8;
                 }
+            } else if gpr_idx < X86_ARG_GPRS.len() {
+                // Move to GPR argument register
+                self.func.push_inst(
+                    block,
+                    X86ISelInst::new(
+                        X86Opcode::MovRR,
+                        vec![
+                            X86ISelOperand::PReg(X86_ARG_GPRS[gpr_idx]),
+                            src,
+                        ],
+                    ),
+                );
+                gpr_idx += 1;
             } else {
-                if gpr_idx < X86_ARG_GPRS.len() {
-                    // Move to GPR argument register
-                    self.func.push_inst(
-                        block,
-                        X86ISelInst::new(
-                            X86Opcode::MovRR,
-                            vec![
-                                X86ISelOperand::PReg(X86_ARG_GPRS[gpr_idx]),
-                                src,
-                            ],
-                        ),
-                    );
-                    gpr_idx += 1;
-                } else {
-                    // Stack-passed integer argument
-                    self.func.push_inst(
-                        block,
-                        X86ISelInst::new(
-                            X86Opcode::Push,
-                            vec![src],
-                        ),
-                    );
-                    stack_offset += 8;
-                }
+                // Stack-passed integer argument
+                self.func.push_inst(
+                    block,
+                    X86ISelInst::new(
+                        X86Opcode::Push,
+                        vec![src],
+                    ),
+                );
+                stack_offset += 8;
             }
         }
 

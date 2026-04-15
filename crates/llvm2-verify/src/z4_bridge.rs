@@ -507,23 +507,21 @@ pub fn verify_with_cli(obligation: &ProofObligation, config: &Z4Config) -> Z4Res
 /// Search PATH for z3 or z4 binary.
 fn find_solver_binary() -> String {
     // Prefer z3 (widely available, well-tested SMT-LIB2 support)
-    if let Ok(output) = std::process::Command::new("which").arg("z3").output() {
-        if output.status.success() {
+    if let Ok(output) = std::process::Command::new("which").arg("z3").output()
+        && output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
                 return path;
             }
         }
-    }
     // Fallback: z4 binary
-    if let Ok(output) = std::process::Command::new("which").arg("z4").output() {
-        if output.status.success() {
+    if let Ok(output) = std::process::Command::new("which").arg("z4").output()
+        && output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
                 return path;
             }
         }
-    }
     String::new()
 }
 
@@ -1961,7 +1959,7 @@ mod tests {
 
     #[test]
     fn test_infer_logic_fp_const_only() {
-        let expr = SmtExpr::fp64_const(3.14);
+        let expr = SmtExpr::fp64_const(std::f64::consts::PI);
         assert_eq!(infer_logic(&expr), "QF_BVFP");
     }
 

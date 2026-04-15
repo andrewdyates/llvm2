@@ -378,11 +378,10 @@ fn build_env(
     if let Some((name, _)) = inputs.first() {
         env.insert(name.clone(), mask(a_val, width));
     }
-    if let Some((name, _)) = inputs.get(1) {
-        if let Some(bv) = b_val {
+    if let Some((name, _)) = inputs.get(1)
+        && let Some(bv) = b_val {
             env.insert(name.clone(), mask(bv, width));
         }
-    }
     env
 }
 
@@ -1164,7 +1163,7 @@ pub fn verify_fp_by_evaluation(obligation: &ProofObligation) -> VerificationResu
         f64::INFINITY, f64::NEG_INFINITY,
         f64::MIN_POSITIVE, -f64::MIN_POSITIVE,
         f64::MAX, f64::MIN,
-        3.14159265358979, -3.14159265358979,
+        std::f64::consts::PI, -std::f64::consts::PI,
         1.0 / 3.0, -1.0 / 3.0,
         42.0, -42.0, 100.0, -100.0,
         0.000001, -0.000001,
@@ -1177,7 +1176,7 @@ pub fn verify_fp_by_evaluation(obligation: &ProofObligation) -> VerificationResu
         f32::INFINITY, f32::NEG_INFINITY,
         f32::MIN_POSITIVE, -f32::MIN_POSITIVE,
         f32::MAX, f32::MIN,
-        3.14159f32, -3.14159f32,
+        std::f32::consts::PI, -std::f32::consts::PI,
         42.0f32, -42.0f32, 100.0f32, -100.0f32,
         0.000001f32, -0.000001f32,
     ];
@@ -1193,13 +1192,12 @@ pub fn verify_fp_by_evaluation(obligation: &ProofObligation) -> VerificationResu
                 let aarch64_expr = build_fp_unary_expr(&obligation.aarch64_expr, a_val as f64, is_f32);
                 let tmir_result = tmir_expr.try_eval(&empty_env);
                 let aarch64_result = aarch64_expr.try_eval(&empty_env);
-                if let (Ok(t), Ok(a)) = (&tmir_result, &aarch64_result) {
-                    if !fp_results_equal(t, a) {
+                if let (Ok(t), Ok(a)) = (&tmir_result, &aarch64_result)
+                    && !fp_results_equal(t, a) {
                         return VerificationResult::Invalid {
                             counterexample: format!("a={}, tmir={:?}, aarch64={:?}", a_val, t, a),
                         };
                     }
-                }
             }
         } else {
             for &a_val in &f64_test_values {
@@ -1207,13 +1205,12 @@ pub fn verify_fp_by_evaluation(obligation: &ProofObligation) -> VerificationResu
                 let aarch64_expr = build_fp_unary_expr(&obligation.aarch64_expr, a_val, is_f32);
                 let tmir_result = tmir_expr.try_eval(&empty_env);
                 let aarch64_result = aarch64_expr.try_eval(&empty_env);
-                if let (Ok(t), Ok(a)) = (&tmir_result, &aarch64_result) {
-                    if !fp_results_equal(t, a) {
+                if let (Ok(t), Ok(a)) = (&tmir_result, &aarch64_result)
+                    && !fp_results_equal(t, a) {
                         return VerificationResult::Invalid {
                             counterexample: format!("a={}, tmir={:?}, aarch64={:?}", a_val, t, a),
                         };
                     }
-                }
             }
         }
     } else {
@@ -1225,13 +1222,12 @@ pub fn verify_fp_by_evaluation(obligation: &ProofObligation) -> VerificationResu
                     let aarch64_expr = build_fp_binary_expr(&obligation.aarch64_expr, a_val as f64, b_val as f64, is_f32);
                     let tmir_result = tmir_expr.try_eval(&empty_env);
                     let aarch64_result = aarch64_expr.try_eval(&empty_env);
-                    if let (Ok(t), Ok(a)) = (&tmir_result, &aarch64_result) {
-                        if !fp_results_equal(t, a) {
+                    if let (Ok(t), Ok(a)) = (&tmir_result, &aarch64_result)
+                        && !fp_results_equal(t, a) {
                             return VerificationResult::Invalid {
                                 counterexample: format!("a={}, b={}, tmir={:?}, aarch64={:?}", a_val, b_val, t, a),
                             };
                         }
-                    }
                 }
             }
         } else {
@@ -1241,13 +1237,12 @@ pub fn verify_fp_by_evaluation(obligation: &ProofObligation) -> VerificationResu
                     let aarch64_expr = build_fp_binary_expr(&obligation.aarch64_expr, a_val, b_val, is_f32);
                     let tmir_result = tmir_expr.try_eval(&empty_env);
                     let aarch64_result = aarch64_expr.try_eval(&empty_env);
-                    if let (Ok(t), Ok(a)) = (&tmir_result, &aarch64_result) {
-                        if !fp_results_equal(t, a) {
+                    if let (Ok(t), Ok(a)) = (&tmir_result, &aarch64_result)
+                        && !fp_results_equal(t, a) {
                             return VerificationResult::Invalid {
                                 counterexample: format!("a={}, b={}, tmir={:?}, aarch64={:?}", a_val, b_val, t, a),
                             };
                         }
-                    }
                 }
             }
         }

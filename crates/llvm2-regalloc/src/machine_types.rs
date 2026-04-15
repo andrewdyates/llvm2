@@ -535,9 +535,9 @@ mod tests {
 
     #[test]
     fn try_from_ir_operand_fimm() {
-        let ir_op = llvm2_ir::MachOperand::FImm(3.14);
+        let ir_op = llvm2_ir::MachOperand::FImm(2.78);
         let ra_op = RegAllocOperand::try_from(&ir_op).unwrap();
-        assert_eq!(ra_op, RegAllocOperand::FImm(3.14));
+        assert_eq!(ra_op, RegAllocOperand::FImm(2.78));
     }
 
     #[test]

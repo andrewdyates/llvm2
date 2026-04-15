@@ -351,8 +351,8 @@ mod tests {
     fn test_gpr64_roundtrip() {
         // All 16 GPR64 registers should survive roundtrip conversion.
         for &gpr in &X86_ALL_GPRS {
-            let preg = x86_to_preg(gpr).expect(&format!("failed to convert {:?}", gpr));
-            let back = preg_to_x86(preg).expect(&format!("failed to convert back {:?}", preg));
+            let preg = x86_to_preg(gpr).unwrap_or_else(|| panic!("failed to convert {:?}", gpr));
+            let back = preg_to_x86(preg).unwrap_or_else(|| panic!("failed to convert back {:?}", preg));
             assert_eq!(gpr, back, "roundtrip failed for {:?}", gpr);
         }
     }
@@ -362,8 +362,8 @@ mod tests {
         let gpr32s = [EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI,
                       R8D, R9D, R10D, R11D, R12D, R13D, R14D, R15D];
         for &gpr in &gpr32s {
-            let preg = x86_to_preg(gpr).expect(&format!("failed to convert {:?}", gpr));
-            let back = preg_to_x86(preg).expect(&format!("failed to convert back {:?}", preg));
+            let preg = x86_to_preg(gpr).unwrap_or_else(|| panic!("failed to convert {:?}", gpr));
+            let back = preg_to_x86(preg).unwrap_or_else(|| panic!("failed to convert back {:?}", preg));
             assert_eq!(gpr, back, "roundtrip failed for {:?}", gpr);
         }
     }
@@ -371,8 +371,8 @@ mod tests {
     #[test]
     fn test_xmm_roundtrip() {
         for &xmm in &X86_ALL_XMMS {
-            let preg = x86_to_preg(xmm).expect(&format!("failed to convert {:?}", xmm));
-            let back = preg_to_x86(preg).expect(&format!("failed to convert back {:?}", preg));
+            let preg = x86_to_preg(xmm).unwrap_or_else(|| panic!("failed to convert {:?}", xmm));
+            let back = preg_to_x86(preg).unwrap_or_else(|| panic!("failed to convert back {:?}", preg));
             assert_eq!(xmm, back, "roundtrip failed for {:?}", xmm);
         }
     }
@@ -1037,7 +1037,7 @@ mod tests {
         };
 
         let numbering: HashMap<InstId, u32> =
-            (0..3).map(|i| (InstId(i), i as u32)).collect();
+            (0..3).map(|i| (InstId(i), i)).collect();
 
         let mut interval = LiveInterval::new(VReg::new(0, RegClass::Gpr64));
         interval.add_range(0, 3);

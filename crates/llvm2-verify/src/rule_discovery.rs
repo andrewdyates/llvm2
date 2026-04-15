@@ -754,7 +754,7 @@ fn estimate_expr_cost(expr: &SmtExpr) -> i32 {
         }
         SmtExpr::ConstArray { value, .. } => estimate_expr_cost(value),
         SmtExpr::UF { args, .. } => {
-            2 + args.iter().map(|a| estimate_expr_cost(a)).sum::<i32>()
+            2 + args.iter().map(estimate_expr_cost).sum::<i32>()
         }
         SmtExpr::FPConst { .. } => 0,
         SmtExpr::UFDecl { .. } => 0,

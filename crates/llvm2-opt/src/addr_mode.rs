@@ -167,26 +167,22 @@ impl MachinePass for AddrModeFormation {
                 }
 
                 // --- Try form_base_plus_imm: fold AddRI into LDR/STR offset ---
-                if let Some(&add_inst_id) = add_ri_defs.get(&base_vreg.id) {
-                    if !to_delete.contains(&add_inst_id) {
-                        if form_base_plus_imm(func, inst_id, add_inst_id, base_idx, offset_idx, mem_offset) {
+                if let Some(&add_inst_id) = add_ri_defs.get(&base_vreg.id)
+                    && !to_delete.contains(&add_inst_id)
+                        && form_base_plus_imm(func, inst_id, add_inst_id, base_idx, offset_idx, mem_offset) {
                             to_delete.insert(add_inst_id);
                             changed = true;
                             continue;
                         }
-                    }
-                }
 
                 // --- Try form_base_plus_reg: fold AddRR into LdrRO/StrRO ---
-                if let Some(&add_inst_id) = add_rr_defs.get(&base_vreg.id) {
-                    if !to_delete.contains(&add_inst_id) {
-                        if form_base_plus_reg(func, inst_id, add_inst_id, base_idx, offset_idx, mem_offset) {
+                if let Some(&add_inst_id) = add_rr_defs.get(&base_vreg.id)
+                    && !to_delete.contains(&add_inst_id)
+                        && form_base_plus_reg(func, inst_id, add_inst_id, base_idx, offset_idx, mem_offset) {
                             to_delete.insert(add_inst_id);
                             changed = true;
                             continue;
                         }
-                    }
-                }
             }
         }
 
@@ -234,7 +230,7 @@ fn form_base_plus_imm(
 
     // Validate range: must be non-negative and fit in unsigned
     // 12-bit scaled immediate. Use conservative 64-bit bound.
-    if combined_offset < 0 || combined_offset > MAX_UNSIGNED_OFFSET {
+    if !(0..=MAX_UNSIGNED_OFFSET).contains(&combined_offset) {
         return false;
     }
 
@@ -347,14 +343,13 @@ fn form_pre_index(
     let src = add_inst.operands[1].as_vreg();
     let offset = add_inst.operands[2].as_imm();
 
-    if let (Some(d), Some(s), Some(off)) = (dst, src, offset) {
-        if d.id == s.id && is_encodable_pre_post_offset(off) {
+    if let (Some(d), Some(s), Some(off)) = (dst, src, offset)
+        && d.id == s.id && is_encodable_pre_post_offset(off) {
             // Pattern detected but cannot transform yet.
             // TODO: emit LdrPreIndex/StrPreIndex when opcodes exist.
             let _ = (d, off);
             return false;
         }
-    }
 
     false
 }
@@ -390,14 +385,13 @@ fn form_post_index(
     let src = add_inst.operands[1].as_vreg();
     let offset = add_inst.operands[2].as_imm();
 
-    if let (Some(d), Some(s), Some(off)) = (dst, src, offset) {
-        if d.id == s.id && is_encodable_pre_post_offset(off) {
+    if let (Some(d), Some(s), Some(off)) = (dst, src, offset)
+        && d.id == s.id && is_encodable_pre_post_offset(off) {
             // Pattern detected but cannot transform yet.
             // TODO: emit LdrPostIndex/StrPostIndex when opcodes exist.
             let _ = (d, off);
             return false;
         }
-    }
 
     false
 }
@@ -443,11 +437,10 @@ fn collect_add_ri_defs(func: &MachFunction) -> HashMap<u32, InstId> {
         let block = func.block(*block_id);
         for &inst_id in &block.insts {
             let inst = func.inst(inst_id);
-            if inst.opcode == AArch64Opcode::AddRI {
-                if let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
+            if inst.opcode == AArch64Opcode::AddRI
+                && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
                     defs.insert(vreg.id, inst_id);
                 }
-            }
         }
     }
 
@@ -465,11 +458,10 @@ fn collect_add_rr_defs(func: &MachFunction) -> HashMap<u32, InstId> {
         let block = func.block(*block_id);
         for &inst_id in &block.insts {
             let inst = func.inst(inst_id);
-            if inst.opcode == AArch64Opcode::AddRR {
-                if let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
+            if inst.opcode == AArch64Opcode::AddRR
+                && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
                     defs.insert(vreg.id, inst_id);
                 }
-            }
         }
     }
 

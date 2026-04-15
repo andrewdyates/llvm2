@@ -42,7 +42,7 @@ impl Ty {
     pub fn scalar_bytes(&self) -> Option<u32> {
         match self {
             Ty::Bool => Some(1),
-            Ty::Int(bits) | Ty::UInt(bits) | Ty::Float(bits) => Some((*bits as u32 + 7) / 8),
+            Ty::Int(bits) | Ty::UInt(bits) | Ty::Float(bits) => Some((*bits as u32).div_ceil(8)),
             Ty::Ptr(_) => Some(8), // 64-bit pointers
             _ => None,
         }

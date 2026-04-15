@@ -144,11 +144,10 @@ pub fn eliminate_phis(func: &mut MachFunction) {
             };
 
             for (i, pred_id) in block.preds.iter().enumerate() {
-                if let Some(src_vreg) = inst.uses.get(i).and_then(|op| op.as_vreg()) {
-                    if src_vreg != dest_vreg {
+                if let Some(src_vreg) = inst.uses.get(i).and_then(|op| op.as_vreg())
+                    && src_vreg != dest_vreg {
                         copies_to_insert.push((*pred_id, dest_vreg, src_vreg));
                     }
-                }
             }
 
             phi_insts_to_remove.push((block_id, inst_id));

@@ -51,7 +51,7 @@ pub fn compute_spill_slot_reuse(
             .push((si.vreg, si.slot));
     }
 
-    for (_class, spills) in &groups {
+    for spills in groups.values() {
         // Coloring: assign each spill to a "color" (shared slot).
         // Colors hold the list of vreg intervals assigned to them.
         let mut colors: Vec<(StackSlotId, Vec<u32>)> = Vec::new();
@@ -112,11 +112,10 @@ pub fn apply_spill_slot_reuse(
 
     for inst in &mut func.insts {
         for op in inst.defs.iter_mut().chain(inst.uses.iter_mut()) {
-            if let crate::machine_types::MachOperand::StackSlot(slot) = op {
-                if let Some(&new_slot) = rewrites.get(slot) {
+            if let crate::machine_types::MachOperand::StackSlot(slot) = op
+                && let Some(&new_slot) = rewrites.get(slot) {
                     *slot = new_slot;
                 }
-            }
         }
     }
 }

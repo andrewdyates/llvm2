@@ -2166,7 +2166,7 @@ mod tests {
         let e = HashMap::new();
         for i in 0u64..8 {
             let byte_val = SmtExpr::select(mem2.clone(), SmtExpr::bv_const(0x200 + i, 64));
-            let expected = (i + 1) as u64;
+            let expected = i + 1;
             assert_eq!(
                 byte_val.try_eval(&e).unwrap(),
                 EvalResult::Bv(expected),

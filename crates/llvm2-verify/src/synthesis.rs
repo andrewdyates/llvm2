@@ -69,9 +69,11 @@ use std::hash::{Hash, Hasher};
 ///   pipeline: use Evaluation for fast filtering, then CEGIS for final
 ///   validation of candidates that pass the evaluation filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum VerifyMode {
     /// Fast evaluation-based verification (random sampling / exhaustive for
     /// small widths). No solver needed.
+    #[default]
     Evaluation,
     /// Full CEGIS loop with SMT solver. Thorough but slower.
     Cegis,
@@ -82,11 +84,6 @@ pub enum VerifyMode {
     EvaluationThenCegis,
 }
 
-impl Default for VerifyMode {
-    fn default() -> Self {
-        VerifyMode::Evaluation
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Opcode enumeration

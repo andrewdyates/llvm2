@@ -127,7 +127,7 @@ pub fn proof_self_recursive_semantics_8bit() -> ProofObligation {
 /// We model this for multiple argument positions. The shuffle is a copy:
 /// `param_reg = call_arg`. After the copy, param_reg holds call_arg.
 fn proof_argument_shuffle_correctness_n(arg_idx: u32, width: u32) -> ProofObligation {
-    let new_arg = SmtExpr::var(&format!("new_arg_{}", arg_idx), width);
+    let new_arg = SmtExpr::var(format!("new_arg_{}", arg_idx), width);
 
     // tMIR side: argument passed to BL = new_arg
     let tmir = new_arg.clone();
@@ -695,7 +695,8 @@ pub fn proof_sibling_different_callees_8() -> Vec<ProofObligation> {
 ///   - Idempotence:                   1 x 2 widths =  2
 ///   - Self-recursive multi-arg:      1 x 2 widths =  2
 ///   - Sibling different callees:     4 x 2 widths =  8
-///                                              TOTAL = 38
+///
+///   TOTAL = 38
 ///
 /// Note: Guard store blocks (2), non-tail call rejection (2), and
 /// indirect call rejection (2) are NEGATIVE proofs (expected Invalid),

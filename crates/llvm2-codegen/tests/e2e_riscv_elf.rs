@@ -1120,14 +1120,13 @@ fn test_riscv_e2e_external_tool_validation() {
             let output = Command::new(cmd)
                 .args(["-d", obj_path.to_str().unwrap()])
                 .output();
-            if let Ok(out) = output {
-                if out.status.success() {
+            if let Ok(out) = output
+                && out.status.success() {
                     let disasm = String::from_utf8_lossy(&out.stdout);
                     eprintln!("{} -d output:\n{}", cmd, disasm);
                     // Should contain the function name or disassembly.
                     break;
                 }
-            }
         }
     }
 
@@ -1141,8 +1140,8 @@ fn test_riscv_e2e_external_tool_validation() {
             let output = Command::new(cmd)
                 .args(["-h", obj_path.to_str().unwrap()])
                 .output();
-            if let Ok(out) = output {
-                if out.status.success() {
+            if let Ok(out) = output
+                && out.status.success() {
                     let header_out = String::from_utf8_lossy(&out.stdout);
                     eprintln!("{} -h output:\n{}", cmd, header_out);
                     if header_out.contains("RISC-V") || header_out.contains("riscv") {
@@ -1150,7 +1149,6 @@ fn test_riscv_e2e_external_tool_validation() {
                     }
                     break;
                 }
-            }
         }
     }
 

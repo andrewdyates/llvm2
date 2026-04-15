@@ -94,12 +94,11 @@ impl MachinePass for CopyPropagation {
                 let use_start = if is_def_inst(inst) { 1 } else { 0 };
 
                 for i in use_start..inst.operands.len() {
-                    if let MachOperand::VReg(vreg) = &inst.operands[i] {
-                        if let Some(replacement) = resolved.get(&vreg.id) {
+                    if let MachOperand::VReg(vreg) = &inst.operands[i]
+                        && let Some(replacement) = resolved.get(&vreg.id) {
                             inst.operands[i] = MachOperand::VReg(*replacement);
                             changed = true;
                         }
-                    }
                 }
             }
         }
@@ -116,11 +115,10 @@ fn count_defs(func: &MachFunction) -> HashMap<u32, u32> {
         let block = func.block(*block_id);
         for &inst_id in &block.insts {
             let inst = func.inst(inst_id);
-            if is_def_inst(inst) {
-                if let Some(MachOperand::VReg(vreg)) = inst.operands.first() {
+            if is_def_inst(inst)
+                && let Some(MachOperand::VReg(vreg)) = inst.operands.first() {
                     *counts.entry(vreg.id).or_insert(0) += 1;
                 }
-            }
         }
     }
 

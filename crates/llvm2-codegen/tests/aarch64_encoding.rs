@@ -333,7 +333,7 @@ fn test_stp_w0_w1_sp_pre_neg8() {
         PairSize::W32, false, PairOp::StorePair, -2, 1, 31, 0,
     ).unwrap();
     // 00 101 0 11 0 1111110 00001 11111 00000
-    let expected = (0b00u32 << 30) | (0b101 << 27) | (0b11 << 23)
+    let expected = (0b101 << 27) | (0b11 << 23)
         | (((-2i8 as u8 & 0x7F) as u32) << 15) | (1 << 10) | (31 << 5);
     assert_eq!(enc, expected);
 }

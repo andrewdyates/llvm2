@@ -431,11 +431,11 @@ impl ProvenanceMap {
             let mut offsets = Vec::new();
             for &mach_id in mach_ids {
                 // Only include active instructions with binary offsets.
-                if let Some(&offset) = self.mach_to_offset.get(&mach_id) {
-                    if self
+                if let Some(&offset) = self.mach_to_offset.get(&mach_id)
+                    && self
                         .entries
                         .get(&mach_id)
-                        .map_or(true, |e| e.is_active())
+                        .is_none_or(|e| e.is_active())
                     {
                         offsets.push(offset);
                         self.offset_to_tmir
@@ -443,7 +443,6 @@ impl ProvenanceMap {
                             .or_default()
                             .push(tmir_id);
                     }
-                }
             }
             offsets.sort_unstable();
             offsets.dedup();

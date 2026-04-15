@@ -346,13 +346,7 @@ impl GreedyAllocator {
         }
 
         // Try all allocatable registers.
-        for &preg in allocatable {
-            if !self.interferes(vreg_id, preg) {
-                return Some(preg);
-            }
-        }
-
-        None
+        allocatable.iter().find(|&&preg| !self.interferes(vreg_id, preg)).copied()
     }
 
     /// Check whether assigning `preg` to `vreg_id` would interfere with
@@ -368,11 +362,10 @@ impl GreedyAllocator {
                 if other_id == vreg_id {
                     continue;
                 }
-                if let Some(other_iv) = self.intervals.get(&other_id) {
-                    if interval.overlaps(other_iv) {
+                if let Some(other_iv) = self.intervals.get(&other_id)
+                    && interval.overlaps(other_iv) {
                         return true;
                     }
-                }
             }
         }
 
@@ -392,25 +385,23 @@ impl GreedyAllocator {
 
     /// Remove the assignment of `vreg_id`.
     fn unassign(&mut self, vreg_id: u32) {
-        if let Some(iv) = self.intervals.get(&vreg_id) {
-            if let Some(preg) = self.assignment.remove(&iv.vreg) {
-                if let Some(list) = self.preg_assignments.get_mut(&preg) {
+        if let Some(iv) = self.intervals.get(&vreg_id)
+            && let Some(preg) = self.assignment.remove(&iv.vreg)
+                && let Some(list) = self.preg_assignments.get_mut(&preg) {
                     list.retain(|&id| id != vreg_id);
                 }
-            }
-        }
     }
 
     fn is_assigned(&self, vreg_id: u32) -> bool {
         self.intervals
             .get(&vreg_id)
-            .map_or(false, |iv| self.assignment.contains_key(&iv.vreg))
+            .is_some_and(|iv| self.assignment.contains_key(&iv.vreg))
     }
 
     fn is_spilled(&self, vreg_id: u32) -> bool {
         self.intervals
             .get(&vreg_id)
-            .map_or(false, |iv| self.spilled.iter().any(|v| v.id == iv.vreg.id))
+            .is_some_and(|iv| self.spilled.iter().any(|v| v.id == iv.vreg.id))
     }
 
     // -----------------------------------------------------------------------
@@ -470,8 +461,8 @@ impl GreedyAllocator {
                 if other_id == vreg_id {
                     continue;
                 }
-                if let Some(other_iv) = self.intervals.get(&other_id) {
-                    if interval.overlaps(other_iv) {
+                if let Some(other_iv) = self.intervals.get(&other_id)
+                    && interval.overlaps(other_iv) {
                         let other_weight = other_iv.spill_weight;
                         let other_cascade =
                             self.cascade.get(&other_id).copied().unwrap_or(0);
@@ -492,7 +483,6 @@ impl GreedyAllocator {
                         total_cost += other_weight;
                         interferers.push((other_id, other_weight, other_cascade));
                     }
-                }
             }
 
             if can_evict && !interferers.is_empty() && total_cost < best_evict_cost {
@@ -536,7 +526,7 @@ impl GreedyAllocator {
             let overlaps = self
                 .intervals
                 .get(&other_id)
-                .map_or(false, |iv| interval.overlaps(iv));
+                .is_some_and(|iv| interval.overlaps(iv));
             if overlaps {
                 let other_weight = self
                     .intervals

@@ -72,21 +72,19 @@ pub fn insert_spill_code(
             // Collect loads needed before this instruction (for spilled uses).
             let mut loads = Vec::new();
             for op in &inst.uses {
-                if let Some(vreg) = op.as_vreg() {
-                    if let Some(&slot) = vreg_to_slot.get(&vreg.id) {
+                if let Some(vreg) = op.as_vreg()
+                    && let Some(&slot) = vreg_to_slot.get(&vreg.id) {
                         loads.push(make_spill_load(vreg, slot));
                     }
-                }
             }
 
             // Collect stores needed after this instruction (for spilled defs).
             let mut stores = Vec::new();
             for op in &inst.defs {
-                if let Some(vreg) = op.as_vreg() {
-                    if let Some(&slot) = vreg_to_slot.get(&vreg.id) {
+                if let Some(vreg) = op.as_vreg()
+                    && let Some(&slot) = vreg_to_slot.get(&vreg.id) {
                         stores.push(make_spill_store(vreg, slot));
                     }
-                }
             }
 
             plan.push((inst_id, loads, stores));
@@ -331,7 +329,7 @@ mod tests {
         insts.push(MachInst {
             opcode: 1,
             defs: vec![MachOperand::VReg(VReg { id: 1, class: RegClass::Fpr64 })],
-            uses: vec![MachOperand::FImm(3.14)],
+            uses: vec![MachOperand::FImm(2.78)],
             implicit_defs: Vec::new(),
             implicit_uses: Vec::new(),
             flags: InstFlags::default(),
@@ -785,7 +783,7 @@ mod tests {
             });
         }
 
-        let inst_ids: Vec<InstId> = (0..6).map(|i| InstId(i)).collect();
+        let inst_ids: Vec<InstId> = (0..6).map(InstId).collect();
         let mut func = MachFunction {
             name: "triple_spill".into(),
             insts,

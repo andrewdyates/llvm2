@@ -191,11 +191,10 @@ fn build_loop_defs(
         let block = func.block(block_id);
         for &inst_id in &block.insts {
             let inst = func.inst(inst_id);
-            if produces_value(inst.opcode) {
-                if let Some(MachOperand::VReg(def)) = inst.operands.first() {
+            if produces_value(inst.opcode)
+                && let Some(MachOperand::VReg(def)) = inst.operands.first() {
                     defs.insert(def.id, (inst_id, block_id));
                 }
-            }
         }
     }
 

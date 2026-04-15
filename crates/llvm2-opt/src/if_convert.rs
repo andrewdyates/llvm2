@@ -281,8 +281,8 @@ fn collect_diamond_transforms(func: &MachFunction) -> Vec<DiamondTransform> {
 
         // Multi-instruction diamond: hoist all body instructions and add a CSEL
         // for the final value-producing instruction in each arm.
-        if true_body.len() == 2 && false_body.len() <= 2 || true_body.len() <= 2 && false_body.len() == 2 {
-            if let Some(insts) = try_multi_inst_diamond(func, &true_body, &false_body, cond) {
+        if (true_body.len() == 2 && false_body.len() <= 2 || true_body.len() <= 2 && false_body.len() == 2)
+            && let Some(insts) = try_multi_inst_diamond(func, &true_body, &false_body, cond) {
                 transforms.push(DiamondTransform {
                     header: header_id,
                     true_block,
@@ -292,7 +292,6 @@ fn collect_diamond_transforms(func: &MachFunction) -> Vec<DiamondTransform> {
                     bcond_inst_id: last_inst_id,
                 });
             }
-        }
     }
 
     transforms

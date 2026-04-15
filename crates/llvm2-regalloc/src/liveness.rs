@@ -354,11 +354,10 @@ fn find_loop_depth_for_inst(
     for &block_id in &func.block_order {
         let block = &func.blocks[block_id.0 as usize];
         for &inst_id in &block.insts {
-            if let Some(&idx) = inst_numbering.get(&inst_id) {
-                if idx == target_idx {
+            if let Some(&idx) = inst_numbering.get(&inst_id)
+                && idx == target_idx {
                     return block.loop_depth;
                 }
-            }
         }
     }
     0
@@ -554,11 +553,11 @@ mod tests {
         let mut interval = LiveInterval::new(VReg { id: 42, class: RegClass::Gpr64 });
         interval.add_range(0, 5);
         interval.add_range(10, 15);
-        interval.spill_weight = 3.14;
+        interval.spill_weight = 2.78;
         let s = format!("{}", interval);
         assert!(s.contains("[0, 5)"), "display should contain range: {}", s);
         assert!(s.contains("[10, 15)"), "display should contain range: {}", s);
-        assert!(s.contains("3.14"), "display should contain weight: {}", s);
+        assert!(s.contains("2.78"), "display should contain weight: {}", s);
     }
 
     /// Helper: build a two-block function for cross-block liveness testing.

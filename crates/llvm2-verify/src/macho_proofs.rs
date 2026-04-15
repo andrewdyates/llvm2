@@ -798,7 +798,7 @@ pub fn proof_section_offset_monotonicity_8bit() -> ProofObligation {
     let pre_order = offset_b.clone().bvuge(offset_a.clone());
     let pre_no_overlap = end_a.bvule(offset_b);
     let pre_no_overflow = size_a.bvule(
-        SmtExpr::bv_const(u64::MAX & 0xFF, width).bvsub(offset_a),
+        SmtExpr::bv_const(0xFF, width).bvsub(offset_a),
     );
 
     ProofObligation {

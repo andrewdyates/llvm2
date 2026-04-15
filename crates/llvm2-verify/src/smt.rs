@@ -1872,14 +1872,10 @@ impl fmt::Display for SmtExpr {
             SmtExpr::FPConst { bits, eb, sb } => {
                 // Emit as fp literal with bitvector decomposition
                 let total = eb + sb;
-                write!(f, "(fp #b{} #b{} #b{})",
-                    // sign bit
-                    if bits >> (total - 1) & 1 == 1 { "1" } else { "0" },
-                    // exponent bits
-                    format!("{:0>width$b}", (bits >> (sb - 1)) & ((1u64 << eb) - 1), width = *eb as usize),
-                    // significand bits (without implicit bit)
-                    format!("{:0>width$b}", bits & ((1u64 << (sb - 1)) - 1), width = (*sb - 1) as usize),
-                )
+                let sign = if bits >> (total - 1) & 1 == 1 { "1" } else { "0" };
+                let exp = format!("{:0>width$b}", (bits >> (sb - 1)) & ((1u64 << eb) - 1), width = *eb as usize);
+                let sig = format!("{:0>width$b}", bits & ((1u64 << (sb - 1)) - 1), width = (*sb - 1) as usize);
+                write!(f, "(fp #b{} #b{} #b{})", sign, exp, sig)
             }
             SmtExpr::FPAdd { rm, lhs, rhs } => {
                 write!(f, "(fp.add {} {} {})", rm, lhs, rhs)

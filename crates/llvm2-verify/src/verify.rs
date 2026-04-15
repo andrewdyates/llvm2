@@ -299,11 +299,10 @@ impl VerificationReport {
 
             // List failures
             for r in &cat_results {
-                if r.is_invalid() {
-                    if let VerificationResult::Invalid { ref counterexample } = r.result {
+                if r.is_invalid()
+                    && let VerificationResult::Invalid { ref counterexample } = r.result {
                         lines.push(format!("    FAIL: {} — {}", r.name, counterexample));
                     }
-                }
             }
         }
 

@@ -387,7 +387,7 @@ fn build_factorial_function() -> MachFunction {
     // But imm26 is signed. We encode as ((-4) as u32) & 0x3FFFFFF.
     let b_loop = MachInst::new(
         AArch64Opcode::B,
-        vec![MachOperand::Imm((-4i64) as i64)],
+        vec![MachOperand::Imm(-4i64)],
     );
     let b_loop_id = func.push_inst(b_loop);
     func.append_inst(bb_loop, b_loop_id);

@@ -343,13 +343,13 @@ fn translate_signature(func: &TmirFunction) -> Result<Signature, AdapterError> {
         .ty
         .params
         .iter()
-        .map(|ty| translate_type(ty))
+        .map(translate_type)
         .collect::<Result<Vec<_>, _>>()?;
     let returns: Vec<Type> = func
         .ty
         .returns
         .iter()
-        .map(|ty| translate_type(ty))
+        .map(translate_type)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Signature { params, returns })
 }
@@ -1742,7 +1742,7 @@ pub fn translate_function_with_names(
 pub fn extract_proofs(node: &InstrNode) -> Vec<Proof> {
     node.proofs
         .iter()
-        .filter_map(|p| translate_tmir_proof(p))
+        .filter_map(translate_tmir_proof)
         .collect()
 }
 
@@ -1754,7 +1754,7 @@ pub fn extract_proofs(node: &InstrNode) -> Vec<Proof> {
 pub fn extract_function_proofs(func: &TmirFunction) -> Vec<Proof> {
     func.proofs
         .iter()
-        .filter_map(|p| translate_tmir_proof(p))
+        .filter_map(translate_tmir_proof)
         .collect()
 }
 
@@ -1978,7 +1978,7 @@ mod tests {
                     InstrNode {
                         instr: Instr::FConst {
                             ty: Ty::Float(64),
-                            value: 3.14,
+                            value: 2.78,
                         },
                         results: vec![ValueId(0)],
                         proofs: vec![],
@@ -2001,7 +2001,7 @@ mod tests {
         match &entry.instructions[0].opcode {
             Opcode::Fconst { ty, imm } => {
                 assert_eq!(*ty, Type::F64);
-                assert!((imm - 3.14).abs() < f64::EPSILON);
+                assert!((imm - 2.78).abs() < f64::EPSILON);
             }
             other => panic!("expected Fconst, got {:?}", other),
         }

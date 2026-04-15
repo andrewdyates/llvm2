@@ -162,11 +162,10 @@ pub fn apply_rematerialization(
             }
 
             // Check if the loaded VReg is a remat candidate.
-            if let Some(loaded_vreg) = inst.defs.first().and_then(|op| op.as_vreg()) {
-                if remat_vregs.contains(&loaded_vreg.id) {
+            if let Some(loaded_vreg) = inst.defs.first().and_then(|op| op.as_vreg())
+                && remat_vregs.contains(&loaded_vreg.id) {
                     replacements.push((block_idx, pos, loaded_vreg.id));
                 }
-            }
         }
     }
 
@@ -198,11 +197,10 @@ fn find_defining_inst(func: &MachFunction, vreg: VReg) -> Option<InstId> {
         for &inst_id in &block.insts {
             let inst = &func.insts[inst_id.0 as usize];
             for def_op in &inst.defs {
-                if let Some(def_vreg) = def_op.as_vreg() {
-                    if def_vreg.id == vreg.id {
+                if let Some(def_vreg) = def_op.as_vreg()
+                    && def_vreg.id == vreg.id {
                         return Some(inst_id);
                     }
-                }
             }
         }
     }
@@ -487,11 +485,11 @@ mod tests {
 
     #[test]
     fn test_classify_free_fimm() {
-        // FMOV Dd, #3.14 — float immediate, no register uses.
+        // FMOV Dd, #2.78 — float immediate, no register uses.
         let inst = MachInst {
             opcode: 1,
             defs: vec![MachOperand::VReg(vreg(0))],
-            uses: vec![MachOperand::FImm(3.14)],
+            uses: vec![MachOperand::FImm(2.78)],
             implicit_defs: Vec::new(),
             implicit_uses: Vec::new(),
             flags: InstFlags::default(),

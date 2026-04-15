@@ -46,8 +46,10 @@ use crate::provenance::{PassId, TmirInstId};
 ///
 /// Ordered from least to most verbose: `None < Summary < Full < Debug`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Default)]
 pub enum TraceLevel {
     /// No logging. Zero overhead. Production default.
+    #[default]
     None = 0,
     /// Pass-level applied/rejected counts only.
     Summary = 1,
@@ -57,11 +59,6 @@ pub enum TraceLevel {
     Debug = 3,
 }
 
-impl Default for TraceLevel {
-    fn default() -> Self {
-        TraceLevel::None
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Typed IDs (serializable, self-contained)

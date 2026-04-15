@@ -281,8 +281,10 @@ fn resolve_rewrite(mut id: u32, rewrites: &HashMap<u32, u32>) -> u32 {
 ///   register pressure by creating a longer combined interval whose total
 ///   extent exceeds the sum of the individual extents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum CoalesceMode {
     /// Coalesce whenever intervals do not overlap.
+    #[default]
     Aggressive,
     /// Coalesce only when the merged interval's extent (max end - min start)
     /// does not exceed the sum of the individual extents — a heuristic to
@@ -292,11 +294,6 @@ pub enum CoalesceMode {
     Conservative,
 }
 
-impl Default for CoalesceMode {
-    fn default() -> Self {
-        CoalesceMode::Aggressive
-    }
-}
 
 /// Summary statistics for a coalescing pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

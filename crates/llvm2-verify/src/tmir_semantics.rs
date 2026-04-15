@@ -467,11 +467,11 @@ mod tests {
 
     #[test]
     fn test_encode_fneg_f32() {
-        let a = SmtExpr::fp32_const(-3.14f32);
+        let a = SmtExpr::fp32_const(-std::f32::consts::PI);
         let expr = encode_tmir_fneg(Type::F32, a);
         let result = expr.try_eval(&env(&[])).unwrap();
-        // Negation of -3.14 should be +3.14 (as f64)
-        assert_eq!(result, EvalResult::Float(3.140000104904175)); // f32 -> f64 precision
+        // Negation of -PI should be +PI (as f64, with f32 precision)
+        assert_eq!(result, EvalResult::Float(std::f32::consts::PI as f64)); // f32 -> f64 precision
     }
 
     #[test]

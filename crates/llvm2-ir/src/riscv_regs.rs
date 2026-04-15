@@ -571,21 +571,18 @@ pub fn riscv_preg_from_name(name: &str) -> Option<RiscVPReg> {
         }
     }
     // Try numeric GPR names: x0-x31
-    if let Some(rest) = name.strip_prefix('x') {
-        if let Ok(num) = rest.parse::<u16>() {
-            if num <= 31 {
+    if let Some(rest) = name.strip_prefix('x')
+        && let Ok(num) = rest.parse::<u16>()
+            && num <= 31 {
                 return Some(RiscVPReg(num));
             }
-        }
-    }
     // Try numeric FPR names: f0-f31
     if let Some(rest) = name.strip_prefix('f') {
         // Avoid matching ABI names like "fa0", "ft0", "fs0"
-        if let Ok(num) = rest.parse::<u16>() {
-            if num <= 31 {
+        if let Ok(num) = rest.parse::<u16>()
+            && num <= 31 {
                 return Some(RiscVPReg(32 + num));
             }
-        }
     }
     None
 }

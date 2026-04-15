@@ -207,11 +207,10 @@ fn try_rename_coalesce(
 
         // If dst has been redefined and we've seen all its uses up to
         // the redefinition, we can stop scanning.
-        if let Some(redef) = dst_redef_pos {
-            if i >= redef {
+        if let Some(redef) = dst_redef_pos
+            && i >= redef {
                 break;
             }
-        }
     }
 
     // If dst is never used after the copy, we can trivially remove it.
@@ -232,11 +231,10 @@ fn try_rename_coalesce(
     let last_use = last_dst_use_pos.unwrap();
 
     // src must not be redefined before the last use of dst.
-    if let Some(src_redef) = src_redef_pos {
-        if src_redef <= last_use {
+    if let Some(src_redef) = src_redef_pos
+        && src_redef <= last_use {
             return false;
         }
-    }
 
     // Check that no instruction in [0..=last_use] has an implicit def/use
     // conflict. Specifically, if an instruction implicitly defines `src`,
@@ -269,11 +267,10 @@ fn try_rename_coalesce(
 fn uses_preg(inst: &MachInst, preg: PReg) -> bool {
     // Check explicit uses.
     for op in &inst.uses {
-        if let MachOperand::PReg(p) = op {
-            if *p == preg {
+        if let MachOperand::PReg(p) = op
+            && *p == preg {
                 return true;
             }
-        }
     }
     // Check implicit uses.
     inst.implicit_uses.contains(&preg)
@@ -284,11 +281,10 @@ fn uses_preg(inst: &MachInst, preg: PReg) -> bool {
 fn defines_preg(inst: &MachInst, preg: PReg) -> bool {
     // Check explicit defs.
     for op in &inst.defs {
-        if let MachOperand::PReg(p) = op {
-            if *p == preg {
+        if let MachOperand::PReg(p) = op
+            && *p == preg {
                 return true;
             }
-        }
     }
     // Check implicit defs.
     inst.implicit_defs.contains(&preg)
@@ -298,11 +294,10 @@ fn defines_preg(inst: &MachInst, preg: PReg) -> bool {
 /// Does NOT rename implicit uses (those are fixed by the ISA).
 fn rename_preg_uses(inst: &mut MachInst, old: PReg, new: PReg) {
     for op in &mut inst.uses {
-        if let MachOperand::PReg(p) = op {
-            if *p == old {
+        if let MachOperand::PReg(p) = op
+            && *p == old {
                 *p = new;
             }
-        }
     }
 }
 

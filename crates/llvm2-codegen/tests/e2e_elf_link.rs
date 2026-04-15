@@ -746,8 +746,8 @@ fn test_e2e_elf_external_tool_validation() {
     }
 
     // -- objdump -d: disassembly --
-    if has_objdump() {
-        if let Some(disasm) = run_objdump(&obj_path) {
+    if has_objdump()
+        && let Some(disasm) = run_objdump(&obj_path) {
             eprintln!("objdump -d output:\n{}", disasm);
             // The disassembly should contain a ret instruction.
             assert!(
@@ -755,18 +755,16 @@ fn test_e2e_elf_external_tool_validation() {
                 "disassembly must contain 'ret'.\n{}", disasm
             );
         }
-    }
 
     // -- nm: symbols --
-    if has_nm() {
-        if let Some(nm_out) = run_nm(&obj_path) {
+    if has_nm()
+        && let Some(nm_out) = run_nm(&obj_path) {
             eprintln!("nm output:\n{}", nm_out);
             assert!(
                 nm_out.contains("const42"),
                 "nm must show const42 symbol.\n{}", nm_out
             );
         }
-    }
 
     cleanup(&dir);
 }
@@ -790,8 +788,8 @@ fn test_e2e_elf_add_external_tool_validation() {
     let obj_path = write_object_file(&dir, "add.o", &elf_bytes);
 
     // -- objdump -d: disassembly should show add and ret --
-    if has_objdump() {
-        if let Some(disasm) = run_objdump(&obj_path) {
+    if has_objdump()
+        && let Some(disasm) = run_objdump(&obj_path) {
             eprintln!("add disassembly:\n{}", disasm);
             assert!(
                 disasm.contains("ret") || disasm.contains("retq"),
@@ -802,17 +800,15 @@ fn test_e2e_elf_add_external_tool_validation() {
                 "add disassembly must contain 'add' instruction.\n{}", disasm
             );
         }
-    }
 
     // -- nm: symbol --
-    if has_nm() {
-        if let Some(nm_out) = run_nm(&obj_path) {
+    if has_nm()
+        && let Some(nm_out) = run_nm(&obj_path) {
             assert!(
                 nm_out.contains("add"),
                 "nm must show 'add' symbol.\n{}", nm_out
             );
         }
-    }
 
     cleanup(&dir);
 }

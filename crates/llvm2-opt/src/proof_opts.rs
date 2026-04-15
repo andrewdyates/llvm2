@@ -448,21 +448,19 @@ impl ProofOptimization {
 
             // If we hit another Retain or Release on the same pointer
             // (not the match we're looking for), stop to avoid complexity.
-            if later.opcode == AArch64Opcode::Retain {
-                if later.operands.first() == Some(&retain_ptr) {
+            if later.opcode == AArch64Opcode::Retain
+                && later.operands.first() == Some(&retain_ptr) {
                     break;
                 }
-            }
 
-            if later.opcode == AArch64Opcode::Release {
-                if later.operands.first() == Some(&retain_ptr) {
+            if later.opcode == AArch64Opcode::Release
+                && later.operands.first() == Some(&retain_ptr) {
                     // Found matching release. Remove both.
                     to_delete.insert(inst_id);
                     to_delete.insert(later_id);
                     self.stats.refcount_pairs_eliminated += 1;
                     return true;
                 }
-            }
         }
 
         false

@@ -252,11 +252,10 @@ fn simplify_branch_targets(func: &mut MachFunction) -> bool {
             let inst = func.inst(block.insts[0]);
             if inst.opcode == AArch64Opcode::B {
                 for op in &inst.operands {
-                    if let MachOperand::Block(target) = op {
-                        if *target != bid {
+                    if let MachOperand::Block(target) = op
+                        && *target != bid {
                             jump_map.insert(bid, *target);
                         }
-                    }
                 }
             }
         }
@@ -286,12 +285,11 @@ fn simplify_branch_targets(func: &mut MachFunction) -> bool {
                 .operands
                 .iter()
                 .map(|op| {
-                    if let MachOperand::Block(target) = op {
-                        if let Some(&final_target) = resolved.get(target) {
+                    if let MachOperand::Block(target) = op
+                        && let Some(&final_target) = resolved.get(target) {
                             inst_changed = true;
                             return MachOperand::Block(final_target);
                         }
-                    }
                     op.clone()
                 })
                 .collect();
@@ -314,7 +312,7 @@ fn simplify_branch_targets(func: &mut MachFunction) -> bool {
 /// Limit chain length to prevent infinite loops on cycles.
 fn resolve_chains(jump_map: &HashMap<BlockId, BlockId>) -> HashMap<BlockId, BlockId> {
     let mut resolved = HashMap::new();
-    for (&src, _) in jump_map {
+    for &src in jump_map.keys() {
         let mut target = src;
         let mut depth = 0;
         while let Some(&next) = jump_map.get(&target) {
@@ -427,13 +425,12 @@ fn fold_constant_branches(func: &mut MachFunction) -> bool {
         let block = func.block(bid);
         for &inst_id in &block.insts {
             let inst = func.inst(inst_id);
-            if inst.opcode == AArch64Opcode::MovI {
-                if let (Some(MachOperand::VReg(dst)), Some(MachOperand::Imm(val))) =
+            if inst.opcode == AArch64Opcode::MovI
+                && let (Some(MachOperand::VReg(dst)), Some(MachOperand::Imm(val))) =
                     (inst.operands.first(), inst.operands.get(1))
                 {
                     constants.insert(dst.id, *val);
                 }
-            }
         }
     }
 
@@ -450,9 +447,9 @@ fn fold_constant_branches(func: &mut MachFunction) -> bool {
             AArch64Opcode::Cbz => {
                 // Cbz: [vreg, Block(target)]
                 // Branch to target if vreg == 0.
-                if let Some(MachOperand::VReg(cond)) = inst.operands.first() {
-                    if let Some(&val) = constants.get(&cond.id) {
-                        if let Some(target) = find_block_operand(&inst.operands) {
+                if let Some(MachOperand::VReg(cond)) = inst.operands.first()
+                    && let Some(&val) = constants.get(&cond.id)
+                        && let Some(target) = find_block_operand(&inst.operands) {
                             if val == 0 {
                                 // Condition is zero: branch IS taken.
                                 *func.inst_mut(last_inst_id) = MachInst::new(
@@ -474,15 +471,13 @@ fn fold_constant_branches(func: &mut MachFunction) -> bool {
                             }
                             changed = true;
                         }
-                    }
-                }
             }
             AArch64Opcode::Cbnz => {
                 // Cbnz: [vreg, Block(target)]
                 // Branch to target if vreg != 0.
-                if let Some(MachOperand::VReg(cond)) = inst.operands.first() {
-                    if let Some(&val) = constants.get(&cond.id) {
-                        if let Some(target) = find_block_operand(&inst.operands) {
+                if let Some(MachOperand::VReg(cond)) = inst.operands.first()
+                    && let Some(&val) = constants.get(&cond.id)
+                        && let Some(target) = find_block_operand(&inst.operands) {
                             if val != 0 {
                                 // Condition is non-zero: branch IS taken.
                                 *func.inst_mut(last_inst_id) = MachInst::new(
@@ -502,8 +497,6 @@ fn fold_constant_branches(func: &mut MachFunction) -> bool {
                             }
                             changed = true;
                         }
-                    }
-                }
             }
             _ => {}
         }
@@ -603,12 +596,11 @@ fn redirect_branches(func: &mut MachFunction, from: BlockId, to: BlockId) {
                 .operands
                 .iter()
                 .map(|op| {
-                    if let MachOperand::Block(target) = op {
-                        if *target == from {
+                    if let MachOperand::Block(target) = op
+                        && *target == from {
                             rewritten = true;
                             return MachOperand::Block(to);
                         }
-                    }
                     op.clone()
                 })
                 .collect();
@@ -792,7 +784,7 @@ mod tests {
         // bb0's cbz should now reference bb2 directly.
         let bb0 = func.block(BlockId(0));
         let last = func.inst(*bb0.insts.last().unwrap());
-        let has_bb2 = last.operands.iter().any(|op| *op == MachOperand::Block(bb2));
+        let has_bb2 = last.operands.contains(&MachOperand::Block(bb2));
         assert!(has_bb2, "branch target should be threaded to bb2");
     }
 
