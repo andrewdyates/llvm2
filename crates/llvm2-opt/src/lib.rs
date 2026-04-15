@@ -67,6 +67,7 @@ pub mod passes;
 pub mod peephole;
 pub mod pipeline;
 pub mod proof_opts;
+pub mod scheduler;
 pub mod vectorize;
 
 // Re-export the most important types at crate root.
