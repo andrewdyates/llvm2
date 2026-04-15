@@ -1306,7 +1306,1424 @@ fn test_riscv_e2e_regalloc_distinct_assignments() {
 }
 
 // ===========================================================================
-// TEST 18: ELF to disk and verify with nm (if available)
+// TEST 18: All branch types (BNE, BLT, BGE, BLTU, BGEU) encoding
+// ===========================================================================
+
+/// Verify all six B-type branch instructions encode correctly through the
+/// pipeline, covering the full set of conditional branches.
+#[test]
+fn test_riscv_e2e_all_branch_types() {
+    use llvm2_lower::function::Signature;
+    use llvm2_lower::instructions::Block;
+    use llvm2_lower::types::Type;
+
+    // (opcode, funct3)
+    let branch_variants: Vec<(RiscVOpcode, u32)> = vec![
+        (RiscVOpcode::Beq,  0b000),
+        (RiscVOpcode::Bne,  0b001),
+        (RiscVOpcode::Blt,  0b100),
+        (RiscVOpcode::Bge,  0b101),
+        (RiscVOpcode::Bltu, 0b110),
+        (RiscVOpcode::Bgeu, 0b111),
+    ];
+
+    for (opcode, expected_funct3) in &branch_variants {
+        let sig = Signature {
+            params: vec![Type::I64, Type::I64],
+            returns: vec![Type::I64],
+        };
+
+        let mut func = RiscVISelFunction::new(
+            format!("branch_{:?}", opcode).to_lowercase(),
+            sig,
+        );
+        let b0 = Block(0);
+        let b1 = Block(1);
+        func.ensure_block(b0);
+        func.ensure_block(b1);
+
+        // b0: BRANCH a0, a1, b1
+        func.push_inst(b0, RiscVISelInst::new(
+            *opcode,
+            vec![
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::PReg(A1),
+                RiscVISelOperand::Block(b1),
+            ],
+        ));
+
+        // b0 fallthrough: RET
+        func.push_inst(b0, RiscVISelInst::new(
+            RiscVOpcode::Jalr,
+            vec![
+                RiscVISelOperand::PReg(ZERO),
+                RiscVISelOperand::PReg(RA),
+                RiscVISelOperand::Imm(0),
+            ],
+        ));
+
+        // b1: ADDI a0, zero, 1; RET
+        func.push_inst(b1, RiscVISelInst::new(
+            RiscVOpcode::Addi,
+            vec![
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::PReg(ZERO),
+                RiscVISelOperand::Imm(1),
+            ],
+        ));
+        func.push_inst(b1, RiscVISelInst::new(
+            RiscVOpcode::Jalr,
+            vec![
+                RiscVISelOperand::PReg(ZERO),
+                RiscVISelOperand::PReg(RA),
+                RiscVISelOperand::Imm(0),
+            ],
+        ));
+
+        let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+            emit_elf: false,
+            emit_frame: false,
+        });
+        let code = pipeline.compile_function(&func)
+            .unwrap_or_else(|e| panic!("{:?}: compilation failed: {}", opcode, e));
+
+        assert!(!code.is_empty(), "{:?}: code should not be empty", opcode);
+        assert_eq!(code.len() % 4, 0, "{:?}: code must be 4-byte aligned", opcode);
+
+        let first_inst = decode_riscv_inst(&code, 0);
+        assert_eq!(
+            riscv_opcode(first_inst), BRANCH,
+            "{:?}: first inst must be B-type (opcode=1100011)", opcode
+        );
+        assert_eq!(
+            riscv_funct3(first_inst), *expected_funct3,
+            "{:?}: funct3 mismatch: expected 0b{:03b}, got 0b{:03b}",
+            opcode, expected_funct3, riscv_funct3(first_inst)
+        );
+        assert_eq!(
+            riscv_rs1(first_inst), 10,
+            "{:?}: rs1 must be a0 (x10)", opcode
+        );
+        assert_eq!(
+            riscv_rs2(first_inst), 11,
+            "{:?}: rs2 must be a1 (x11)", opcode
+        );
+    }
+}
+
+// ===========================================================================
+// TEST 19: All memory width operations (LB, LH, LW, SB, SH, SW, LBU, LHU, LWU)
+// ===========================================================================
+
+/// Verify all integer load/store width variants encode correctly.
+#[test]
+fn test_riscv_e2e_all_memory_widths() {
+    use llvm2_lower::function::Signature;
+    use llvm2_lower::instructions::Block;
+    use llvm2_lower::types::Type;
+
+    // (load_opcode, load_funct3, store_opcode, store_funct3, width_name)
+    let widths: Vec<(RiscVOpcode, u32, RiscVOpcode, u32, &str)> = vec![
+        (RiscVOpcode::Lb,  0b000, RiscVOpcode::Sb, 0b000, "byte"),
+        (RiscVOpcode::Lh,  0b001, RiscVOpcode::Sh, 0b001, "halfword"),
+        (RiscVOpcode::Lw,  0b010, RiscVOpcode::Sw, 0b010, "word"),
+        (RiscVOpcode::Ld,  0b011, RiscVOpcode::Sd, 0b011, "doubleword"),
+    ];
+
+    for (load_op, load_f3, store_op, store_f3, width_name) in &widths {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut func = RiscVISelFunction::new(
+            format!("mem_{}", width_name),
+            sig,
+        );
+        let entry = Block(0);
+        func.ensure_block(entry);
+
+        let v0 = VReg::new(0, RegClass::Gpr64);
+        func.next_vreg = 1;
+
+        // Load from [a0 + 0]
+        func.push_inst(entry, RiscVISelInst::new(
+            *load_op,
+            vec![
+                RiscVISelOperand::VReg(v0),
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::Imm(0),
+            ],
+        ));
+
+        // Store to [a0 + 16]
+        func.push_inst(entry, RiscVISelInst::new(
+            *store_op,
+            vec![
+                RiscVISelOperand::VReg(v0),
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::Imm(16),
+            ],
+        ));
+
+        // Move result to a0 and return
+        func.push_inst(entry, RiscVISelInst::new(
+            RiscVOpcode::Addi,
+            vec![
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::VReg(v0),
+                RiscVISelOperand::Imm(0),
+            ],
+        ));
+        func.push_inst(entry, RiscVISelInst::new(
+            RiscVOpcode::Jalr,
+            vec![
+                RiscVISelOperand::PReg(ZERO),
+                RiscVISelOperand::PReg(RA),
+                RiscVISelOperand::Imm(0),
+            ],
+        ));
+
+        let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+            emit_elf: false,
+            emit_frame: false,
+        });
+        let code = pipeline.compile_function(&func)
+            .unwrap_or_else(|e| panic!("{}: compilation failed: {}", width_name, e));
+
+        assert_eq!(
+            code.len(), 16,
+            "{}: expected 16 bytes (4 instructions)", width_name
+        );
+
+        let insts: Vec<u32> = (0..4).map(|i| decode_riscv_inst(&code, i * 4)).collect();
+
+        // Load
+        assert_eq!(
+            riscv_opcode(insts[0]), LOAD,
+            "{}: inst 0 must be LOAD", width_name
+        );
+        assert_eq!(
+            riscv_funct3(insts[0]), *load_f3,
+            "{}: load funct3 mismatch", width_name
+        );
+
+        // Store
+        assert_eq!(
+            riscv_opcode(insts[1]), STORE,
+            "{}: inst 1 must be STORE", width_name
+        );
+        assert_eq!(
+            riscv_funct3(insts[1]), *store_f3,
+            "{}: store funct3 mismatch", width_name
+        );
+    }
+
+    // Also verify zero-extending loads (LBU, LHU, LWU)
+    let unsigned_loads: Vec<(RiscVOpcode, u32, &str)> = vec![
+        (RiscVOpcode::Lbu, 0b100, "byte_unsigned"),
+        (RiscVOpcode::Lhu, 0b101, "halfword_unsigned"),
+        (RiscVOpcode::Lwu, 0b110, "word_unsigned"),
+    ];
+
+    for (load_op, expected_f3, width_name) in &unsigned_loads {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut func = RiscVISelFunction::new(
+            format!("mem_{}", width_name),
+            sig,
+        );
+        let entry = Block(0);
+        func.ensure_block(entry);
+
+        // Load directly to a0 from [a0]
+        func.push_inst(entry, RiscVISelInst::new(
+            *load_op,
+            vec![
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::Imm(0),
+            ],
+        ));
+        func.push_inst(entry, RiscVISelInst::new(
+            RiscVOpcode::Jalr,
+            vec![
+                RiscVISelOperand::PReg(ZERO),
+                RiscVISelOperand::PReg(RA),
+                RiscVISelOperand::Imm(0),
+            ],
+        ));
+
+        let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+            emit_elf: false,
+            emit_frame: false,
+        });
+        let code = pipeline.compile_function(&func)
+            .unwrap_or_else(|e| panic!("{}: compilation failed: {}", width_name, e));
+
+        let inst0 = decode_riscv_inst(&code, 0);
+        assert_eq!(
+            riscv_opcode(inst0), LOAD,
+            "{}: must be LOAD opcode", width_name
+        );
+        assert_eq!(
+            riscv_funct3(inst0), *expected_f3,
+            "{}: funct3 mismatch", width_name
+        );
+    }
+}
+
+// ===========================================================================
+// TEST 20: SUB instruction encoding
+// ===========================================================================
+
+/// Verify SUB encodes as R-type with funct7=0100000 (bit 30 set).
+#[test]
+fn test_riscv_e2e_sub_encoding() {
+    use llvm2_lower::function::Signature;
+    use llvm2_lower::instructions::Block;
+    use llvm2_lower::types::Type;
+
+    let sig = Signature {
+        params: vec![Type::I64, Type::I64],
+        returns: vec![Type::I64],
+    };
+
+    let mut func = RiscVISelFunction::new("subtract".to_string(), sig);
+    let entry = Block(0);
+    func.ensure_block(entry);
+
+    // SUB a0, a0, a1
+    func.push_inst(entry, RiscVISelInst::new(
+        RiscVOpcode::Sub,
+        vec![
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::PReg(A1),
+        ],
+    ));
+
+    // RET
+    func.push_inst(entry, RiscVISelInst::new(
+        RiscVOpcode::Jalr,
+        vec![
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::PReg(RA),
+            RiscVISelOperand::Imm(0),
+        ],
+    ));
+
+    let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+        emit_elf: false,
+        emit_frame: false,
+    });
+    let code = pipeline.compile_function(&func).expect("sub compilation should succeed");
+    assert_eq!(code.len(), 8, "sub+ret should be 8 bytes");
+
+    let inst0 = decode_riscv_inst(&code, 0);
+
+    // SUB: opcode=OP (0b0110011), funct3=000, funct7=0100000
+    assert_eq!(riscv_opcode(inst0), OP, "SUB must have opcode=OP");
+    assert_eq!(riscv_funct3(inst0), 0b000, "SUB has funct3=000");
+    assert_eq!(riscv_funct7(inst0), 0b0100000, "SUB has funct7=0100000 (bit 30 set)");
+    assert_eq!(riscv_rd(inst0), 10, "SUB rd must be a0");
+    assert_eq!(riscv_rs1(inst0), 10, "SUB rs1 must be a0");
+    assert_eq!(riscv_rs2(inst0), 11, "SUB rs2 must be a1");
+}
+
+// ===========================================================================
+// TEST 21: Shift operations encoding
+// ===========================================================================
+
+/// Verify SLL, SRL, SRA, SLLI, SRLI, SRAI encode correctly.
+#[test]
+fn test_riscv_e2e_shift_operations() {
+    use llvm2_lower::function::Signature;
+    use llvm2_lower::instructions::Block;
+    use llvm2_lower::types::Type;
+
+    // R-type shifts: (opcode, funct3, funct7)
+    let r_shifts: Vec<(RiscVOpcode, u32, u32, &str)> = vec![
+        (RiscVOpcode::Sll, 0b001, 0b0000000, "SLL"),
+        (RiscVOpcode::Srl, 0b101, 0b0000000, "SRL"),
+        (RiscVOpcode::Sra, 0b101, 0b0100000, "SRA"),
+    ];
+
+    for (opcode, expected_f3, expected_f7, name) in &r_shifts {
+        let sig = Signature {
+            params: vec![Type::I64, Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut func = RiscVISelFunction::new(name.to_lowercase(), sig);
+        let entry = Block(0);
+        func.ensure_block(entry);
+
+        func.push_inst(entry, RiscVISelInst::new(
+            *opcode,
+            vec![
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::PReg(A1),
+            ],
+        ));
+        func.push_inst(entry, RiscVISelInst::new(
+            RiscVOpcode::Jalr,
+            vec![
+                RiscVISelOperand::PReg(ZERO),
+                RiscVISelOperand::PReg(RA),
+                RiscVISelOperand::Imm(0),
+            ],
+        ));
+
+        let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+            emit_elf: false,
+            emit_frame: false,
+        });
+        let code = pipeline.compile_function(&func)
+            .unwrap_or_else(|e| panic!("{}: compilation failed: {}", name, e));
+
+        let inst0 = decode_riscv_inst(&code, 0);
+        assert_eq!(riscv_opcode(inst0), OP, "{}: must be R-type", name);
+        assert_eq!(riscv_funct3(inst0), *expected_f3, "{}: funct3 mismatch", name);
+        assert_eq!(riscv_funct7(inst0), *expected_f7, "{}: funct7 mismatch", name);
+    }
+
+    // I-type shifts: SLLI, SRLI, SRAI with immediate shift amount
+    let i_shifts: Vec<(RiscVOpcode, u32, &str)> = vec![
+        (RiscVOpcode::Slli, 0b001, "SLLI"),
+        (RiscVOpcode::Srli, 0b101, "SRLI"),
+        (RiscVOpcode::Srai, 0b101, "SRAI"),
+    ];
+
+    for (opcode, expected_f3, name) in &i_shifts {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut func = RiscVISelFunction::new(name.to_lowercase(), sig);
+        let entry = Block(0);
+        func.ensure_block(entry);
+
+        // Shift by 3
+        func.push_inst(entry, RiscVISelInst::new(
+            *opcode,
+            vec![
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::Imm(3),
+            ],
+        ));
+        func.push_inst(entry, RiscVISelInst::new(
+            RiscVOpcode::Jalr,
+            vec![
+                RiscVISelOperand::PReg(ZERO),
+                RiscVISelOperand::PReg(RA),
+                RiscVISelOperand::Imm(0),
+            ],
+        ));
+
+        let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+            emit_elf: false,
+            emit_frame: false,
+        });
+        let code = pipeline.compile_function(&func)
+            .unwrap_or_else(|e| panic!("{}: compilation failed: {}", name, e));
+
+        let inst0 = decode_riscv_inst(&code, 0);
+        assert_eq!(riscv_opcode(inst0), OP_IMM, "{}: must be I-type", name);
+        assert_eq!(riscv_funct3(inst0), *expected_f3, "{}: funct3 mismatch", name);
+        assert_eq!(riscv_rd(inst0), 10, "{}: rd must be a0", name);
+        assert_eq!(riscv_rs1(inst0), 10, "{}: rs1 must be a0", name);
+    }
+}
+
+// ===========================================================================
+// TEST 22: AUIPC encoding
+// ===========================================================================
+
+/// Verify AUIPC encodes as U-type correctly.
+#[test]
+fn test_riscv_e2e_auipc_encoding() {
+    use llvm2_lower::function::Signature;
+    use llvm2_lower::instructions::Block;
+    use llvm2_lower::types::Type;
+
+    let sig = Signature {
+        params: vec![],
+        returns: vec![Type::I64],
+    };
+
+    let mut func = RiscVISelFunction::new("auipc_test".to_string(), sig);
+    let entry = Block(0);
+    func.ensure_block(entry);
+
+    // AUIPC a0, 0xABCDE
+    let auipc_op: u32 = 0b0010111;
+    func.push_inst(entry, RiscVISelInst::new(
+        RiscVOpcode::Auipc,
+        vec![
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::Imm(0xABCDE),
+        ],
+    ));
+
+    func.push_inst(entry, RiscVISelInst::new(
+        RiscVOpcode::Jalr,
+        vec![
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::PReg(RA),
+            RiscVISelOperand::Imm(0),
+        ],
+    ));
+
+    let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+        emit_elf: false,
+        emit_frame: false,
+    });
+    let code = pipeline.compile_function(&func).expect("auipc compilation should succeed");
+    assert_eq!(code.len(), 8, "AUIPC+RET should be 8 bytes");
+
+    let inst0 = decode_riscv_inst(&code, 0);
+    assert_eq!(riscv_opcode(inst0), auipc_op, "AUIPC opcode must be 0b0010111");
+    assert_eq!(riscv_rd(inst0), 10, "AUIPC rd must be a0");
+    let auipc_imm = (inst0 >> 12) & 0xFFFFF;
+    assert_eq!(
+        auipc_imm, 0xABCDE,
+        "AUIPC immediate must be 0xABCDE, got 0x{:05X}", auipc_imm
+    );
+}
+
+// ===========================================================================
+// TEST 23: Division and remainder encoding
+// ===========================================================================
+
+/// Verify DIV/DIVU/REM/REMU M-extension instructions encode correctly.
+#[test]
+fn test_riscv_e2e_div_rem_encoding() {
+    use llvm2_lower::function::Signature;
+    use llvm2_lower::instructions::Block;
+    use llvm2_lower::types::Type;
+
+    // (opcode, funct3, name) - all have funct7=0000001 (M extension)
+    let div_ops: Vec<(RiscVOpcode, u32, &str)> = vec![
+        (RiscVOpcode::Div,  0b100, "DIV"),
+        (RiscVOpcode::Divu, 0b101, "DIVU"),
+        (RiscVOpcode::Rem,  0b110, "REM"),
+        (RiscVOpcode::Remu, 0b111, "REMU"),
+    ];
+
+    for (opcode, expected_f3, name) in &div_ops {
+        let sig = Signature {
+            params: vec![Type::I64, Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut func = RiscVISelFunction::new(name.to_lowercase(), sig);
+        let entry = Block(0);
+        func.ensure_block(entry);
+
+        func.push_inst(entry, RiscVISelInst::new(
+            *opcode,
+            vec![
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::PReg(A1),
+            ],
+        ));
+        func.push_inst(entry, RiscVISelInst::new(
+            RiscVOpcode::Jalr,
+            vec![
+                RiscVISelOperand::PReg(ZERO),
+                RiscVISelOperand::PReg(RA),
+                RiscVISelOperand::Imm(0),
+            ],
+        ));
+
+        let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+            emit_elf: false,
+            emit_frame: false,
+        });
+        let code = pipeline.compile_function(&func)
+            .unwrap_or_else(|e| panic!("{}: compilation failed: {}", name, e));
+
+        let inst0 = decode_riscv_inst(&code, 0);
+        assert_eq!(riscv_opcode(inst0), OP, "{}: must be R-type OP", name);
+        assert_eq!(riscv_funct3(inst0), *expected_f3, "{}: funct3 mismatch", name);
+        assert_eq!(
+            riscv_funct7(inst0), 0b0000001,
+            "{}: must have M-extension funct7=0000001", name
+        );
+        assert_eq!(riscv_rd(inst0), 10, "{}: rd must be a0", name);
+        assert_eq!(riscv_rs1(inst0), 10, "{}: rs1 must be a0", name);
+        assert_eq!(riscv_rs2(inst0), 11, "{}: rs2 must be a1", name);
+    }
+}
+
+// ===========================================================================
+// TEST 24: JAL function call pattern encoding
+// ===========================================================================
+
+/// Verify JAL + JALR can model a call sequence (JAL ra, offset; JALR ra, a0, 0).
+#[test]
+fn test_riscv_e2e_jal_call_pattern() {
+    use llvm2_lower::function::Signature;
+    use llvm2_lower::instructions::Block;
+    use llvm2_lower::types::Type;
+
+    let sig = Signature {
+        params: vec![],
+        returns: vec![Type::I64],
+    };
+
+    let mut func = RiscVISelFunction::new("caller".to_string(), sig);
+    let b0 = Block(0);
+    let b1 = Block(1);
+    func.ensure_block(b0);
+    func.ensure_block(b1);
+
+    // b0: JAL ra, b1 (call to b1, saving return address in ra)
+    let jal_op: u32 = 0b1101111;
+    func.push_inst(b0, RiscVISelInst::new(
+        RiscVOpcode::Jal,
+        vec![
+            RiscVISelOperand::PReg(RA),
+            RiscVISelOperand::Block(b1),
+        ],
+    ));
+
+    // b0: After call returns, just RET
+    func.push_inst(b0, RiscVISelInst::new(
+        RiscVOpcode::Jalr,
+        vec![
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::PReg(RA),
+            RiscVISelOperand::Imm(0),
+        ],
+    ));
+
+    // b1: ADDI a0, zero, 99; RET
+    func.push_inst(b1, RiscVISelInst::new(
+        RiscVOpcode::Addi,
+        vec![
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::Imm(99),
+        ],
+    ));
+    func.push_inst(b1, RiscVISelInst::new(
+        RiscVOpcode::Jalr,
+        vec![
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::PReg(RA),
+            RiscVISelOperand::Imm(0),
+        ],
+    ));
+
+    let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+        emit_elf: false,
+        emit_frame: false,
+    });
+    let code = pipeline.compile_function(&func).expect("call pattern compilation should succeed");
+
+    assert_eq!(code.len(), 16, "4 instructions = 16 bytes");
+
+    let insts: Vec<u32> = (0..4).map(|i| decode_riscv_inst(&code, i * 4)).collect();
+
+    // JAL ra, offset: opcode=1101111, rd=1(ra)
+    assert_eq!(riscv_opcode(insts[0]), jal_op, "inst 0 must be JAL");
+    assert_eq!(riscv_rd(insts[0]), 1, "JAL rd must be ra (x1)");
+
+    // RET
+    assert!(is_riscv_ret(insts[1]), "inst 1 must be RET");
+
+    // ADDI a0, zero, 99
+    assert_eq!(riscv_opcode(insts[2]), OP_IMM, "inst 2 must be ADDI");
+    assert_eq!(riscv_rd(insts[2]), 10, "ADDI rd must be a0");
+    assert_eq!(riscv_imm_i(insts[2]), 99, "ADDI imm must be 99");
+
+    // RET
+    assert!(is_riscv_ret(insts[3]), "inst 3 must be RET");
+}
+
+// ===========================================================================
+// TEST 25: Multi-block diamond CFG (if-then-else) with branch resolution
+// ===========================================================================
+
+/// Build a diamond-shaped CFG: entry -> then/else -> merge, verifying branch
+/// offsets resolve correctly with both forward and fallthrough paths.
+#[test]
+fn test_riscv_e2e_diamond_cfg() {
+    use llvm2_lower::function::Signature;
+    use llvm2_lower::instructions::Block;
+    use llvm2_lower::types::Type;
+
+    let sig = Signature {
+        params: vec![Type::I64],
+        returns: vec![Type::I64],
+    };
+
+    // if (a0 == 0) then a0 = 1 else a0 = 2; return a0
+    let mut func = RiscVISelFunction::new("diamond".to_string(), sig);
+    let entry = Block(0);
+    let then_b = Block(1);
+    let else_b = Block(2);
+    let merge_b = Block(3);
+    func.ensure_block(entry);
+    func.ensure_block(then_b);
+    func.ensure_block(else_b);
+    func.ensure_block(merge_b);
+
+    // entry: BEQ a0, zero, then_b
+    func.push_inst(entry, RiscVISelInst::new(
+        RiscVOpcode::Beq,
+        vec![
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::Block(then_b),
+        ],
+    ));
+
+    // entry -> else (fallthrough by ordering): ADDI a0, zero, 2; JAL x0, merge
+    func.push_inst(entry, RiscVISelInst::new(
+        RiscVOpcode::Addi,
+        vec![
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::Imm(2),
+        ],
+    ));
+    func.push_inst(entry, RiscVISelInst::new(
+        RiscVOpcode::Jal,
+        vec![
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::Block(merge_b),
+        ],
+    ));
+
+    // then_b: ADDI a0, zero, 1
+    func.push_inst(then_b, RiscVISelInst::new(
+        RiscVOpcode::Addi,
+        vec![
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::Imm(1),
+        ],
+    ));
+
+    // merge_b: RET
+    func.push_inst(merge_b, RiscVISelInst::new(
+        RiscVOpcode::Jalr,
+        vec![
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::PReg(RA),
+            RiscVISelOperand::Imm(0),
+        ],
+    ));
+
+    let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+        emit_elf: false,
+        emit_frame: false,
+    });
+    let code = pipeline.compile_function(&func)
+        .expect("diamond CFG compilation should succeed");
+
+    // Layout: entry has 3 insts (12 bytes), then_b has 1 (4 bytes),
+    // else_b has 0, merge_b has 1 (4 bytes) = total 20 bytes.
+    assert!(!code.is_empty(), "diamond code should not be empty");
+    assert_eq!(code.len() % 4, 0, "code must be 4-byte aligned");
+
+    let num_insts = code.len() / 4;
+    let insts: Vec<u32> = (0..num_insts).map(|i| decode_riscv_inst(&code, i * 4)).collect();
+
+    // First inst: BEQ
+    assert_eq!(riscv_opcode(insts[0]), BRANCH, "first inst must be BEQ");
+    assert_eq!(riscv_funct3(insts[0]), 0b000, "BEQ funct3=000");
+
+    // Should have at least one RET
+    let has_ret = insts.iter().any(|&inst| is_riscv_ret(inst));
+    assert!(has_ret, "diamond CFG must contain RET");
+
+    // Should have both ADDI a0, zero, 1 and ADDI a0, zero, 2 somewhere
+    let has_li_1 = insts.iter().any(|&inst| {
+        riscv_opcode(inst) == OP_IMM && riscv_rd(inst) == 10
+            && riscv_rs1(inst) == 0 && riscv_imm_i(inst) == 1
+    });
+    let has_li_2 = insts.iter().any(|&inst| {
+        riscv_opcode(inst) == OP_IMM && riscv_rd(inst) == 10
+            && riscv_rs1(inst) == 0 && riscv_imm_i(inst) == 2
+    });
+    assert!(has_li_1, "diamond must contain LI a0, 1");
+    assert!(has_li_2, "diamond must contain LI a0, 2");
+}
+
+// ===========================================================================
+// TEST 26: Logical operations (AND, OR, XOR, ANDI, ORI, XORI) encoding
+// ===========================================================================
+
+/// Verify logical R-type and I-type instructions encode correctly.
+#[test]
+fn test_riscv_e2e_logical_operations() {
+    use llvm2_lower::function::Signature;
+    use llvm2_lower::instructions::Block;
+    use llvm2_lower::types::Type;
+
+    // R-type logicals: (opcode, funct3, name)
+    let r_logicals: Vec<(RiscVOpcode, u32, &str)> = vec![
+        (RiscVOpcode::And, 0b111, "AND"),
+        (RiscVOpcode::Or,  0b110, "OR"),
+        (RiscVOpcode::Xor, 0b100, "XOR"),
+    ];
+
+    for (opcode, expected_f3, name) in &r_logicals {
+        let sig = Signature {
+            params: vec![Type::I64, Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut func = RiscVISelFunction::new(name.to_lowercase(), sig);
+        let entry = Block(0);
+        func.ensure_block(entry);
+
+        func.push_inst(entry, RiscVISelInst::new(
+            *opcode,
+            vec![
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::PReg(A1),
+            ],
+        ));
+        func.push_inst(entry, RiscVISelInst::new(
+            RiscVOpcode::Jalr,
+            vec![
+                RiscVISelOperand::PReg(ZERO),
+                RiscVISelOperand::PReg(RA),
+                RiscVISelOperand::Imm(0),
+            ],
+        ));
+
+        let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+            emit_elf: false,
+            emit_frame: false,
+        });
+        let code = pipeline.compile_function(&func)
+            .unwrap_or_else(|e| panic!("{}: compilation failed: {}", name, e));
+
+        let inst0 = decode_riscv_inst(&code, 0);
+        assert_eq!(riscv_opcode(inst0), OP, "{}: must be R-type", name);
+        assert_eq!(riscv_funct3(inst0), *expected_f3, "{}: funct3 mismatch", name);
+        assert_eq!(riscv_funct7(inst0), 0b0000000, "{}: funct7 must be 0", name);
+    }
+
+    // I-type logicals: (opcode, funct3, name)
+    let i_logicals: Vec<(RiscVOpcode, u32, &str)> = vec![
+        (RiscVOpcode::Andi, 0b111, "ANDI"),
+        (RiscVOpcode::Ori,  0b110, "ORI"),
+        (RiscVOpcode::Xori, 0b100, "XORI"),
+    ];
+
+    for (opcode, expected_f3, name) in &i_logicals {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut func = RiscVISelFunction::new(name.to_lowercase(), sig);
+        let entry = Block(0);
+        func.ensure_block(entry);
+
+        func.push_inst(entry, RiscVISelInst::new(
+            *opcode,
+            vec![
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::Imm(0xFF),
+            ],
+        ));
+        func.push_inst(entry, RiscVISelInst::new(
+            RiscVOpcode::Jalr,
+            vec![
+                RiscVISelOperand::PReg(ZERO),
+                RiscVISelOperand::PReg(RA),
+                RiscVISelOperand::Imm(0),
+            ],
+        ));
+
+        let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+            emit_elf: false,
+            emit_frame: false,
+        });
+        let code = pipeline.compile_function(&func)
+            .unwrap_or_else(|e| panic!("{}: compilation failed: {}", name, e));
+
+        let inst0 = decode_riscv_inst(&code, 0);
+        assert_eq!(riscv_opcode(inst0), OP_IMM, "{}: must be I-type", name);
+        assert_eq!(riscv_funct3(inst0), *expected_f3, "{}: funct3 mismatch", name);
+        assert_eq!(riscv_rd(inst0), 10, "{}: rd must be a0", name);
+        assert_eq!(riscv_rs1(inst0), 10, "{}: rs1 must be a0", name);
+        assert_eq!(riscv_imm_i(inst0), 0xFF, "{}: imm must be 0xFF", name);
+    }
+}
+
+// ===========================================================================
+// TEST 27: SLT/SLTU set-less-than encoding
+// ===========================================================================
+
+/// Verify SLT and SLTU comparison instructions encode correctly.
+#[test]
+fn test_riscv_e2e_slt_sltu_encoding() {
+    use llvm2_lower::function::Signature;
+    use llvm2_lower::instructions::Block;
+    use llvm2_lower::types::Type;
+
+    let comparisons: Vec<(RiscVOpcode, u32, &str)> = vec![
+        (RiscVOpcode::Slt,  0b010, "SLT"),
+        (RiscVOpcode::Sltu, 0b011, "SLTU"),
+    ];
+
+    for (opcode, expected_f3, name) in &comparisons {
+        let sig = Signature {
+            params: vec![Type::I64, Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut func = RiscVISelFunction::new(name.to_lowercase(), sig);
+        let entry = Block(0);
+        func.ensure_block(entry);
+
+        func.push_inst(entry, RiscVISelInst::new(
+            *opcode,
+            vec![
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::PReg(A1),
+            ],
+        ));
+        func.push_inst(entry, RiscVISelInst::new(
+            RiscVOpcode::Jalr,
+            vec![
+                RiscVISelOperand::PReg(ZERO),
+                RiscVISelOperand::PReg(RA),
+                RiscVISelOperand::Imm(0),
+            ],
+        ));
+
+        let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+            emit_elf: false,
+            emit_frame: false,
+        });
+        let code = pipeline.compile_function(&func)
+            .unwrap_or_else(|e| panic!("{}: compilation failed: {}", name, e));
+
+        let inst0 = decode_riscv_inst(&code, 0);
+        assert_eq!(riscv_opcode(inst0), OP, "{}: must be R-type", name);
+        assert_eq!(riscv_funct3(inst0), *expected_f3, "{}: funct3 mismatch", name);
+        assert_eq!(riscv_funct7(inst0), 0b0000000, "{}: funct7 must be 0", name);
+    }
+
+    // Also verify SLTI and SLTIU (I-type)
+    let imm_comparisons: Vec<(RiscVOpcode, u32, &str)> = vec![
+        (RiscVOpcode::Slti,  0b010, "SLTI"),
+        (RiscVOpcode::Sltiu, 0b011, "SLTIU"),
+    ];
+
+    for (opcode, expected_f3, name) in &imm_comparisons {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::I64],
+        };
+        let mut func = RiscVISelFunction::new(name.to_lowercase(), sig);
+        let entry = Block(0);
+        func.ensure_block(entry);
+
+        func.push_inst(entry, RiscVISelInst::new(
+            *opcode,
+            vec![
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::PReg(A0),
+                RiscVISelOperand::Imm(10),
+            ],
+        ));
+        func.push_inst(entry, RiscVISelInst::new(
+            RiscVOpcode::Jalr,
+            vec![
+                RiscVISelOperand::PReg(ZERO),
+                RiscVISelOperand::PReg(RA),
+                RiscVISelOperand::Imm(0),
+            ],
+        ));
+
+        let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+            emit_elf: false,
+            emit_frame: false,
+        });
+        let code = pipeline.compile_function(&func)
+            .unwrap_or_else(|e| panic!("{}: compilation failed: {}", name, e));
+
+        let inst0 = decode_riscv_inst(&code, 0);
+        assert_eq!(riscv_opcode(inst0), OP_IMM, "{}: must be I-type", name);
+        assert_eq!(riscv_funct3(inst0), *expected_f3, "{}: funct3 mismatch", name);
+        assert_eq!(riscv_imm_i(inst0), 10, "{}: imm must be 10", name);
+    }
+}
+
+// ===========================================================================
+// TEST 28: ELF section properties validation
+// ===========================================================================
+
+/// Verify ELF section types and flags are correctly set for .text, .symtab,
+/// .strtab, and .shstrtab sections.
+#[test]
+fn test_riscv_e2e_elf_section_properties() {
+    let func = build_riscv_const_test_function();
+    let elf_bytes = riscv_compile_to_elf(&func)
+        .expect("RISC-V pipeline should compile to ELF");
+
+    let sh_offset = read_u64(&elf_bytes, 40) as usize;
+    let e_shnum = read_u16(&elf_bytes, 60) as usize;
+    let e_shstrndx = read_u16(&elf_bytes, 62) as usize;
+
+    // Read section string table
+    let shstrtab_shdr = sh_offset + e_shstrndx * ELF64_SHDR_SIZE;
+    let shstrtab_offset = read_u64(&elf_bytes, shstrtab_shdr + 24) as usize;
+
+    let mut found_text = false;
+    let mut found_symtab = false;
+    let mut found_strtab = false;
+
+    for i in 0..e_shnum {
+        let shdr_off = sh_offset + i * ELF64_SHDR_SIZE;
+        let sh_name_idx = read_u32(&elf_bytes, shdr_off) as usize;
+        let sh_type = read_u32(&elf_bytes, shdr_off + 4);
+        let sh_flags = read_u64(&elf_bytes, shdr_off + 8);
+
+        let name_start = shstrtab_offset + sh_name_idx;
+        let name_end = elf_bytes[name_start..]
+            .iter()
+            .position(|&b| b == 0)
+            .map(|p| name_start + p)
+            .unwrap_or(name_start);
+        let name = std::str::from_utf8(&elf_bytes[name_start..name_end]).unwrap_or("");
+
+        match name {
+            ".text" => {
+                found_text = true;
+                assert_eq!(sh_type, SHT_PROGBITS, ".text must be SHT_PROGBITS");
+                assert!(
+                    sh_flags & SHF_ALLOC != 0,
+                    ".text must have SHF_ALLOC flag"
+                );
+                assert!(
+                    sh_flags & SHF_EXECINSTR != 0,
+                    ".text must have SHF_EXECINSTR flag"
+                );
+            }
+            ".symtab" => {
+                found_symtab = true;
+                assert_eq!(sh_type, SHT_SYMTAB, ".symtab must be SHT_SYMTAB");
+            }
+            ".strtab" => {
+                found_strtab = true;
+                assert_eq!(sh_type, SHT_STRTAB, ".strtab must be SHT_STRTAB");
+            }
+            _ => {}
+        }
+    }
+
+    assert!(found_text, "ELF must contain .text section");
+    assert!(found_symtab, "ELF must contain .symtab section");
+    assert!(found_strtab, "ELF must contain .strtab section");
+}
+
+// ===========================================================================
+// TEST 29: ELF symbol table entry validation
+// ===========================================================================
+
+/// Parse the ELF symbol table and verify the function symbol has correct
+/// type (STT_FUNC), binding, and size.
+#[test]
+fn test_riscv_e2e_elf_symbol_details() {
+    let func = build_riscv_add_test_function();
+    let elf_bytes = riscv_compile_to_elf(&func)
+        .expect("RISC-V pipeline should compile add to ELF");
+
+    let sh_offset = read_u64(&elf_bytes, 40) as usize;
+    let e_shnum = read_u16(&elf_bytes, 60) as usize;
+
+    // Find .symtab
+    let mut symtab_offset = 0usize;
+    let mut symtab_size = 0usize;
+    let mut strtab_link = 0u32;
+
+    for i in 0..e_shnum {
+        let shdr_off = sh_offset + i * ELF64_SHDR_SIZE;
+        let sh_type = read_u32(&elf_bytes, shdr_off + 4);
+        if sh_type == SHT_SYMTAB {
+            symtab_offset = read_u64(&elf_bytes, shdr_off + 24) as usize;
+            symtab_size = read_u64(&elf_bytes, shdr_off + 32) as usize;
+            strtab_link = read_u32(&elf_bytes, shdr_off + 40);
+            break;
+        }
+    }
+
+    assert!(symtab_size > 0, "symtab must be non-empty");
+
+    // Get strtab for name lookup
+    let strtab_shdr = sh_offset + strtab_link as usize * ELF64_SHDR_SIZE;
+    let strtab_offset = read_u64(&elf_bytes, strtab_shdr + 24) as usize;
+
+    let num_syms = symtab_size / ELF64_SYM_SIZE;
+
+    let mut found_add = false;
+    for i in 0..num_syms {
+        let sym_off = symtab_offset + i * ELF64_SYM_SIZE;
+        let st_name = read_u32(&elf_bytes, sym_off) as usize;
+        let st_info = elf_bytes[sym_off + 4];
+        let st_size = read_u64(&elf_bytes, sym_off + 16);
+
+        if st_name == 0 { continue; }
+
+        let name_start = strtab_offset + st_name;
+        let name_end = elf_bytes[name_start..]
+            .iter()
+            .position(|&b| b == 0)
+            .map(|p| name_start + p)
+            .unwrap_or(name_start);
+        let name = std::str::from_utf8(&elf_bytes[name_start..name_end]).unwrap_or("");
+
+        if name == "add" {
+            found_add = true;
+            let sym_type = st_info & 0xF;
+            let sym_bind = st_info >> 4;
+
+            assert_eq!(
+                sym_type, STT_FUNC,
+                "'add' symbol must have type STT_FUNC (2), got {}", sym_type
+            );
+            assert_eq!(
+                sym_bind, STB_GLOBAL,
+                "'add' symbol must have binding STB_GLOBAL (1), got {}", sym_bind
+            );
+            assert!(
+                st_size > 0,
+                "'add' symbol must have non-zero size, got {}", st_size
+            );
+        }
+    }
+
+    assert!(found_add, "symbol table must contain 'add' function symbol");
+}
+
+// ===========================================================================
+// TEST 30: SUBW encoding (32-bit word subtract)
+// ===========================================================================
+
+/// Verify SUBW encodes with OP_32 opcode and correct funct7.
+#[test]
+fn test_riscv_e2e_subw_encoding() {
+    use llvm2_lower::function::Signature;
+    use llvm2_lower::instructions::Block;
+    use llvm2_lower::types::Type;
+
+    let sig = Signature {
+        params: vec![Type::I64, Type::I64],
+        returns: vec![Type::I64],
+    };
+
+    let mut func = RiscVISelFunction::new("subw".to_string(), sig);
+    let entry = Block(0);
+    func.ensure_block(entry);
+
+    // SUBW a0, a0, a1
+    func.push_inst(entry, RiscVISelInst::new(
+        RiscVOpcode::Subw,
+        vec![
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::PReg(A1),
+        ],
+    ));
+
+    // RET
+    func.push_inst(entry, RiscVISelInst::new(
+        RiscVOpcode::Jalr,
+        vec![
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::PReg(RA),
+            RiscVISelOperand::Imm(0),
+        ],
+    ));
+
+    let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+        emit_elf: false,
+        emit_frame: false,
+    });
+    let code = pipeline.compile_function(&func).expect("subw compilation should succeed");
+    assert_eq!(code.len(), 8, "subw+ret should be 8 bytes");
+
+    let inst0 = decode_riscv_inst(&code, 0);
+    let op_32: u32 = 0b0111011;
+
+    assert_eq!(riscv_opcode(inst0), op_32, "SUBW must have opcode=OP_32");
+    assert_eq!(riscv_funct3(inst0), 0b000, "SUBW has funct3=000");
+    assert_eq!(riscv_funct7(inst0), 0b0100000, "SUBW has funct7=0100000");
+    assert_eq!(riscv_rd(inst0), 10, "SUBW rd must be a0");
+    assert_eq!(riscv_rs1(inst0), 10, "SUBW rs1 must be a0");
+    assert_eq!(riscv_rs2(inst0), 11, "SUBW rs2 must be a1");
+}
+
+// ===========================================================================
+// TEST 31: Negative immediate encoding (ADDI with negative value)
+// ===========================================================================
+
+/// Verify negative immediates sign-extend correctly in I-type encoding.
+#[test]
+fn test_riscv_e2e_negative_immediate() {
+    use llvm2_lower::function::Signature;
+    use llvm2_lower::instructions::Block;
+    use llvm2_lower::types::Type;
+
+    let sig = Signature {
+        params: vec![Type::I64],
+        returns: vec![Type::I64],
+    };
+
+    let mut func = RiscVISelFunction::new("neg_imm".to_string(), sig);
+    let entry = Block(0);
+    func.ensure_block(entry);
+
+    // ADDI a0, a0, -1
+    func.push_inst(entry, RiscVISelInst::new(
+        RiscVOpcode::Addi,
+        vec![
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::Imm(-1),
+        ],
+    ));
+
+    // RET
+    func.push_inst(entry, RiscVISelInst::new(
+        RiscVOpcode::Jalr,
+        vec![
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::PReg(RA),
+            RiscVISelOperand::Imm(0),
+        ],
+    ));
+
+    let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+        emit_elf: false,
+        emit_frame: false,
+    });
+    let code = pipeline.compile_function(&func).expect("neg_imm compilation should succeed");
+    assert_eq!(code.len(), 8, "addi+ret should be 8 bytes");
+
+    let inst0 = decode_riscv_inst(&code, 0);
+    assert_eq!(riscv_opcode(inst0), OP_IMM, "must be ADDI");
+    assert_eq!(riscv_rd(inst0), 10, "rd must be a0");
+    assert_eq!(riscv_rs1(inst0), 10, "rs1 must be a0");
+
+    // -1 in 12-bit signed immediate = 0xFFF = 4095 unsigned, -1 sign-extended
+    assert_eq!(
+        riscv_imm_i(inst0), -1,
+        "ADDI imm must be -1 (sign-extended from 12-bit), got {}",
+        riscv_imm_i(inst0)
+    );
+}
+
+// ===========================================================================
+// TEST 32: Backward branch offset correctness
+// ===========================================================================
+
+/// Build a simple loop: b0 computes, b1 branches back to b0, verifying the
+/// branch offset is negative and correctly computed.
+#[test]
+fn test_riscv_e2e_backward_branch_offset() {
+    use llvm2_lower::function::Signature;
+    use llvm2_lower::instructions::Block;
+    use llvm2_lower::types::Type;
+
+    let sig = Signature {
+        params: vec![Type::I64],
+        returns: vec![Type::I64],
+    };
+
+    // Simple loop: decrement a0 until zero
+    // b0: NOP (placeholder for loop body -- keeps it simple)
+    // b1: ADDI a0, a0, -1; BNE a0, zero, b0; RET
+    let mut func = RiscVISelFunction::new("loop_back".to_string(), sig);
+    let b0 = Block(0);
+    let b1 = Block(1);
+    func.ensure_block(b0);
+    func.ensure_block(b1);
+
+    // b0: NOP (4 bytes at offset 0)
+    func.push_inst(b0, RiscVISelInst::new(RiscVOpcode::Nop, vec![]));
+
+    // b1: ADDI a0, a0, -1 (4 bytes at offset 4)
+    func.push_inst(b1, RiscVISelInst::new(
+        RiscVOpcode::Addi,
+        vec![
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::Imm(-1),
+        ],
+    ));
+
+    // b1: BNE a0, zero, b0 (4 bytes at offset 8, jumps back to offset 0)
+    func.push_inst(b1, RiscVISelInst::new(
+        RiscVOpcode::Bne,
+        vec![
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::Block(b0),
+        ],
+    ));
+
+    // b1: RET (4 bytes at offset 12)
+    func.push_inst(b1, RiscVISelInst::new(
+        RiscVOpcode::Jalr,
+        vec![
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::PReg(RA),
+            RiscVISelOperand::Imm(0),
+        ],
+    ));
+
+    let pipeline = RiscVPipeline::new(RiscVPipelineConfig {
+        emit_elf: false,
+        emit_frame: false,
+    });
+    let code = pipeline.compile_function(&func)
+        .expect("backward branch compilation should succeed");
+
+    // 4 instructions = 16 bytes
+    assert_eq!(code.len(), 16, "loop should be 16 bytes (4 instructions)");
+
+    let insts: Vec<u32> = (0..4).map(|i| decode_riscv_inst(&code, i * 4)).collect();
+
+    // inst 2 is BNE at offset 8, targeting b0 at offset 0.
+    // RISC-V B-type offset = target - branch_addr = 0 - 8 = -8
+    assert_eq!(riscv_opcode(insts[2]), BRANCH, "inst 2 must be BNE (B-type)");
+    assert_eq!(riscv_funct3(insts[2]), 0b001, "BNE funct3=001");
+
+    // Extract B-type immediate from encoding
+    // B-type: imm[12|10:5|4:1|11] spread across inst[31], inst[30:25], inst[11:8], inst[7]
+    let imm_12   = ((insts[2] >> 31) & 1) as i32;
+    let imm_10_5 = ((insts[2] >> 25) & 0x3F) as i32;
+    let imm_4_1  = ((insts[2] >> 8) & 0xF) as i32;
+    let imm_11   = ((insts[2] >> 7) & 1) as i32;
+    let b_offset = (imm_12 << 12) | (imm_11 << 11) | (imm_10_5 << 5) | (imm_4_1 << 1);
+    // Sign extend from 13 bits
+    let b_offset = if b_offset & (1 << 12) != 0 {
+        b_offset | !((1 << 13) - 1)
+    } else {
+        b_offset
+    };
+
+    assert_eq!(
+        b_offset, -8,
+        "BNE backward branch offset must be -8 (from offset 8 to offset 0), got {}",
+        b_offset
+    );
+}
+
+// ===========================================================================
+// TEST 33: Multiple functions produce distinct ELF objects
+// ===========================================================================
+
+/// Compile multiple different functions and verify each produces a valid
+/// but distinct ELF output.
+#[test]
+fn test_riscv_e2e_multiple_distinct_elfs() {
+    use llvm2_lower::function::Signature;
+    use llvm2_lower::instructions::Block;
+    use llvm2_lower::types::Type;
+
+    // Build 4 different functions
+    let func1 = build_riscv_const_test_function(); // const42
+    let func2 = build_riscv_add_test_function(); // add
+
+    // negate: SUB a0, zero, a0
+    let sig3 = Signature { params: vec![Type::I64], returns: vec![Type::I64] };
+    let mut func3 = RiscVISelFunction::new("negate".to_string(), sig3);
+    let entry3 = Block(0);
+    func3.ensure_block(entry3);
+    func3.push_inst(entry3, RiscVISelInst::new(
+        RiscVOpcode::Sub,
+        vec![
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::PReg(A0),
+        ],
+    ));
+    func3.push_inst(entry3, RiscVISelInst::new(
+        RiscVOpcode::Jalr,
+        vec![
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::PReg(RA),
+            RiscVISelOperand::Imm(0),
+        ],
+    ));
+
+    // double: SLL a0, a0, 1 (shift left by 1 = multiply by 2)
+    let sig4 = Signature { params: vec![Type::I64], returns: vec![Type::I64] };
+    let mut func4 = RiscVISelFunction::new("double_val".to_string(), sig4);
+    let entry4 = Block(0);
+    func4.ensure_block(entry4);
+    func4.push_inst(entry4, RiscVISelInst::new(
+        RiscVOpcode::Slli,
+        vec![
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::PReg(A0),
+            RiscVISelOperand::Imm(1),
+        ],
+    ));
+    func4.push_inst(entry4, RiscVISelInst::new(
+        RiscVOpcode::Jalr,
+        vec![
+            RiscVISelOperand::PReg(ZERO),
+            RiscVISelOperand::PReg(RA),
+            RiscVISelOperand::Imm(0),
+        ],
+    ));
+
+    let funcs: Vec<(&str, &RiscVISelFunction)> = vec![
+        ("const42", &func1),
+        ("add", &func2),
+        ("negate", &func3),
+        ("double_val", &func4),
+    ];
+
+    let mut elf_outputs: Vec<Vec<u8>> = Vec::new();
+
+    for (name, func) in &funcs {
+        let elf_bytes = riscv_compile_to_elf(func)
+            .unwrap_or_else(|e| panic!("{}: compilation failed: {}", name, e));
+
+        verify_riscv_elf_header(&elf_bytes);
+
+        let symbols = find_elf_symbol_names(&elf_bytes);
+        assert!(
+            symbols.contains(&name.to_string()),
+            "{}: symbol table must contain '{}'. Found: {:?}",
+            name, name, symbols
+        );
+
+        elf_outputs.push(elf_bytes);
+    }
+
+    // Verify all ELF outputs are distinct (different code = different .text)
+    for i in 0..elf_outputs.len() {
+        for j in (i + 1)..elf_outputs.len() {
+            assert_ne!(
+                elf_outputs[i], elf_outputs[j],
+                "ELF output for '{}' and '{}' should be different",
+                funcs[i].0, funcs[j].0
+            );
+        }
+    }
+}
+
+// ===========================================================================
+// TEST 34: ELF to disk and verify with nm (if available)
 // ===========================================================================
 
 /// If nm is available, verify the RISC-V ELF symbol table externally.
