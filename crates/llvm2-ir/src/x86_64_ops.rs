@@ -160,6 +160,51 @@ pub enum X86Opcode {
     Ucomisd,
 
     // =====================================================================
+    // SSE scalar single-precision
+    // =====================================================================
+
+    /// ADDSS xmm, xmm (scalar single add)
+    Addss,
+    /// SUBSS xmm, xmm (scalar single subtract)
+    Subss,
+    /// MULSS xmm, xmm (scalar single multiply)
+    Mulss,
+    /// DIVSS xmm, xmm (scalar single divide)
+    Divss,
+    /// MOVSS xmm, xmm (scalar single move)
+    MovssRR,
+    /// MOVSS xmm, [mem] (scalar single load)
+    MovssRM,
+    /// MOVSS [mem], xmm (scalar single store)
+    MovssMR,
+    /// UCOMISS xmm, xmm (unordered compare scalar single, sets RFLAGS)
+    Ucomiss,
+
+    // =====================================================================
+    // Conditional move / set
+    // =====================================================================
+
+    /// CMOVcc r64, r64 (conditional move based on RFLAGS)
+    Cmovcc,
+    /// SETcc r8 (set byte based on RFLAGS condition)
+    Setcc,
+
+    // =====================================================================
+    // Bit manipulation
+    // =====================================================================
+
+    /// BSF r64, r64 (bit scan forward — find lowest set bit)
+    Bsf,
+    /// BSR r64, r64 (bit scan reverse — find highest set bit)
+    Bsr,
+    /// TZCNT r64, r64 (trailing zero count — BMI1)
+    Tzcnt,
+    /// LZCNT r64, r64 (leading zero count — ABM/LZCNT)
+    Lzcnt,
+    /// POPCNT r64, r64 (population count — POPCNT)
+    Popcnt,
+
+    // =====================================================================
     // Stack
     // =====================================================================
 
@@ -198,13 +243,16 @@ impl X86Opcode {
             Ret => InstFlags::IS_RETURN.union(InstFlags::IS_TERMINATOR),
 
             // Memory loads
-            MovRM | MovsdRM | AddRM | SubRM | CmpRM => InstFlags::READS_MEMORY,
+            MovRM | MovsdRM | MovssRM | AddRM | SubRM | CmpRM => InstFlags::READS_MEMORY,
 
             // Memory stores
-            MovMR | MovsdMR => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
+            MovMR | MovsdMR | MovssMR => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Compare/test (set RFLAGS = side effect)
-            CmpRR | CmpRI | TestRR | TestRI | Ucomisd => InstFlags::HAS_SIDE_EFFECTS,
+            CmpRR | CmpRI | TestRR | TestRI | Ucomisd | Ucomiss => InstFlags::HAS_SIDE_EFFECTS,
+
+            // SETcc sets RFLAGS-dependent byte (reads RFLAGS)
+            Setcc => InstFlags::EMPTY,
 
             // IDIV has implicit operands (RDX:RAX) and can trap on division by zero
             Idiv => InstFlags::HAS_SIDE_EFFECTS,
@@ -375,7 +423,7 @@ mod tests {
 
     #[test]
     fn memory_load_opcodes() {
-        for op in &[X86Opcode::MovRM, X86Opcode::MovsdRM] {
+        for op in &[X86Opcode::MovRM, X86Opcode::MovsdRM, X86Opcode::MovssRM] {
             let flags = op.default_flags();
             assert!(flags.contains(InstFlags::READS_MEMORY), "{:?}", op);
             assert!(!flags.contains(InstFlags::WRITES_MEMORY), "{:?}", op);
@@ -384,7 +432,7 @@ mod tests {
 
     #[test]
     fn memory_store_opcodes() {
-        for op in &[X86Opcode::MovMR, X86Opcode::MovsdMR] {
+        for op in &[X86Opcode::MovMR, X86Opcode::MovsdMR, X86Opcode::MovssMR] {
             let flags = op.default_flags();
             assert!(flags.contains(InstFlags::WRITES_MEMORY), "{:?}", op);
             assert!(flags.contains(InstFlags::HAS_SIDE_EFFECTS), "{:?}", op);
@@ -393,7 +441,7 @@ mod tests {
 
     #[test]
     fn compare_opcodes_have_side_effects() {
-        for op in &[X86Opcode::CmpRR, X86Opcode::CmpRI, X86Opcode::TestRR, X86Opcode::TestRI, X86Opcode::Ucomisd] {
+        for op in &[X86Opcode::CmpRR, X86Opcode::CmpRI, X86Opcode::TestRR, X86Opcode::TestRI, X86Opcode::Ucomisd, X86Opcode::Ucomiss] {
             let flags = op.default_flags();
             assert!(flags.contains(InstFlags::HAS_SIDE_EFFECTS), "{:?}", op);
         }
@@ -418,6 +466,14 @@ mod tests {
             X86Opcode::Addsd, X86Opcode::Subsd,
             X86Opcode::Mulsd, X86Opcode::Divsd,
             X86Opcode::MovsdRR,
+            // SSE single-precision
+            X86Opcode::Addss, X86Opcode::Subss,
+            X86Opcode::Mulss, X86Opcode::Divss,
+            X86Opcode::MovssRR,
+            // Conditional move, SETcc, bit manipulation
+            X86Opcode::Cmovcc, X86Opcode::Setcc,
+            X86Opcode::Bsf, X86Opcode::Bsr,
+            X86Opcode::Tzcnt, X86Opcode::Lzcnt, X86Opcode::Popcnt,
         ];
         for op in &pure_ops {
             assert!(op.default_flags().is_empty(), "{:?} should have EMPTY flags", op);
