@@ -150,37 +150,22 @@ impl ElfWriter {
     /// Returns the 1-based section index.
     pub fn add_bss_section(&mut self, size: u64) -> u16 {
         let idx = self.sections.len();
+        // For NOBITS, we store a phantom vec whose length equals the BSS
+        // logical size. The section header uses data.len() for sh_size, but
+        // the data is never written to the file (NOBITS has no file content).
+        let bss_data = if size > 0 {
+            vec![0u8; size as usize]
+        } else {
+            Vec::new()
+        };
         self.sections.push(SectionData {
             name: ".bss".to_string(),
-            data: Vec::new(),
+            data: bss_data,
             sh_type: SHT_NOBITS,
             sh_flags: SHF_ALLOC | SHF_WRITE,
             align: 8,
             relocations: Vec::new(),
         });
-        // Store the BSS size in a special way: we record it on the section
-        // and handle it during write(). For now, store as empty data; the
-        // section header will record `size` directly.
-        // We use a side-channel approach: the last section's data is empty
-        // but we need the size. Store it by setting the data to a zero-length
-        // vec and recording the logical size separately.
-        // Actually, let's just store a Vec with the right logical size tracked
-        // in the section header computation.
-        self.sections.last_mut().unwrap().data = Vec::new();
-        // We need to store the bss size somewhere. Let's use the align field
-        // to pass it through... no, that's hacky. Let's add a dedicated field.
-        // For simplicity, we'll handle this by using the data length for
-        // PROGBITS and a separate tracking for NOBITS.
-        // Easiest approach: encode the size in the data vec as a marker.
-        // Actually, the cleanest solution: for NOBITS, we set data to an
-        // artificial vec of the right length but never write it. The section
-        // header will use data.len() for sh_size but sh_offset won't matter.
-        // This wastes no file space since we skip writing NOBITS data.
-        if size > 0 {
-            // Store the size as the length of a phantom vec. Since BSS data
-            // is never written to the file, this just tracks the logical size.
-            self.sections.last_mut().unwrap().data = vec![0; size as usize];
-        }
         (idx + 1) as u16
     }
 
@@ -495,12 +480,14 @@ impl ElfWriter {
             if sec.relocations.is_empty() {
                 continue;
             }
-            let target = rela_offsets[i].unwrap() as usize;
-            while buf.len() < target {
-                buf.push(0);
-            }
-            for rela in &sec.relocations {
-                buf.extend_from_slice(&rela.encode());
+            if let Some(rela_off) = rela_offsets[i] {
+                let target = rela_off as usize;
+                while buf.len() < target {
+                    buf.push(0);
+                }
+                for rela in &sec.relocations {
+                    buf.extend_from_slice(&rela.encode());
+                }
             }
         }
 
@@ -570,14 +557,18 @@ impl ElfWriter {
             if sec.relocations.is_empty() {
                 continue;
             }
-            let rela_shdr = Elf64Shdr::rela(
-                rela_name_indices[i].unwrap(),
-                rela_offsets[i].unwrap(),
-                (sec.relocations.len() * ELF64_RELA_SIZE) as u64,
-                symtab_shdr_idx,        // sh_link → .symtab
-                (i + 1) as u32,         // sh_info → user section index (1-based)
-            );
-            rela_shdr.write(&mut buf);
+            if let (Some(name_idx), Some(rela_off)) =
+                (rela_name_indices[i], rela_offsets[i])
+            {
+                let rela_shdr = Elf64Shdr::rela(
+                    name_idx,
+                    rela_off,
+                    (sec.relocations.len() * ELF64_RELA_SIZE) as u64,
+                    symtab_shdr_idx,        // sh_link → .symtab
+                    (i + 1) as u32,         // sh_info → user section index (1-based)
+                );
+                rela_shdr.write(&mut buf);
+            }
         }
 
         // .symtab section.

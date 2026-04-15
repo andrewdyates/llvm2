@@ -1166,8 +1166,10 @@ impl CoreMLEmitter {
             }
         }
 
-        // Set the last output as the program output
-        let output_shape = shape_from_node(nodes.last().unwrap(), self.dtype);
+        // Set the last output as the program output.
+        // Safety: nodes is non-empty (checked at function entry).
+        let last_node = nodes.last().ok_or(CoreMLEmitError::EmptyNodeList)?;
+        let output_shape = shape_from_node(last_node, self.dtype);
         program.add_output(CoreMLFeature::new(&last_output, output_shape, self.dtype));
 
         Ok(program)
