@@ -349,6 +349,7 @@ impl Compiler {
             opt_level: self.config.opt_level,
             emit_debug: false,
             verify_dispatch: crate::pipeline::DispatchVerifyMode::FallbackOnFailure,
+            verify: false,
         })
     }
 }

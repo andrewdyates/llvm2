@@ -1001,6 +1001,7 @@ fn test_pipeline_dispatch_verify_fallback_mode() {
         opt_level: OptLevel::O2,
         emit_debug: false,
         verify_dispatch: DispatchVerifyMode::FallbackOnFailure,
+        ..Default::default()
     };
 
     let pipeline = Pipeline::new(config);
@@ -1030,6 +1031,7 @@ fn test_pipeline_dispatch_verify_off_mode() {
         opt_level: OptLevel::O0,
         emit_debug: false,
         verify_dispatch: DispatchVerifyMode::Off,
+        ..Default::default()
     };
 
     let pipeline = Pipeline::new(config);
@@ -1053,6 +1055,7 @@ fn test_pipeline_with_debug_info() {
         opt_level: OptLevel::O0,
         emit_debug: true,
         verify_dispatch: DispatchVerifyMode::Off,
+        ..Default::default()
     };
 
     let pipeline = Pipeline::new(config);
@@ -1072,6 +1075,7 @@ fn test_pipeline_with_debug_info() {
         opt_level: OptLevel::O0,
         emit_debug: false,
         verify_dispatch: DispatchVerifyMode::Off,
+        ..Default::default()
     };
     let pipeline_no_debug = Pipeline::new(config_no_debug);
     let (lir_func2, _) = llvm2_lower::translate_function(&tmir_func, &[])
