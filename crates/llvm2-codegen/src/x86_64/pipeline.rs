@@ -519,6 +519,46 @@ fn resolve_inst_operands(
                 }
             }
         }
+
+        // SSE type conversion: [dst, src]
+        X86Opcode::Cvtsi2sd | X86Opcode::Cvtsd2si
+        | X86Opcode::Cvtsi2ss | X86Opcode::Cvtss2si
+        | X86Opcode::Cvtsd2ss | X86Opcode::Cvtss2sd => {
+            if inst.operands.len() >= 2 {
+                ops.dst = resolve_operand(&inst.operands[0], alloc);
+                ops.src = resolve_operand(&inst.operands[1], alloc);
+            }
+        }
+
+        // LEA RIP-relative: [dst, disp]
+        X86Opcode::LeaRip => {
+            if let Some(op) = inst.operands.first() {
+                ops.dst = resolve_operand(op, alloc);
+            }
+            for op in &inst.operands {
+                if let X86ISelOperand::Imm(imm) = op {
+                    ops.disp = *imm;
+                    break;
+                }
+            }
+        }
+
+        // Scaled-index memory: [dst/src, base, index, scale, disp]
+        X86Opcode::MovRMSib => {
+            if let Some(op) = inst.operands.first() {
+                ops.dst = resolve_operand(op, alloc);
+            }
+            // TODO: SIB operand resolution requires ISel support for
+            // index/scale operands. For now, these are set via direct
+            // X86InstOperands construction in tests and manual lowering.
+        }
+        X86Opcode::MovMRSib => {
+            if let Some(op) = inst.operands.first() {
+                ops.dst = resolve_operand(op, alloc);
+            }
+            // TODO: SIB operand resolution requires ISel support for
+            // index/scale operands.
+        }
     }
 
     ops
@@ -679,6 +719,12 @@ fn estimate_inst_size(inst: &X86ISelInst) -> usize {
         X86Opcode::MovRM | X86Opcode::MovMR | X86Opcode::AddRM
         | X86Opcode::SubRM | X86Opcode::CmpRM | X86Opcode::Lea => 8,
 
+        // LEA RIP-relative: 7 bytes (REX.W + 8D + ModRM + disp32).
+        X86Opcode::LeaRip => 7,
+
+        // SIB memory: up to 9 bytes (REX.W + opcode + ModRM + SIB + disp32).
+        X86Opcode::MovRMSib | X86Opcode::MovMRSib => 9,
+
         // SSE: 4-5 bytes.
         X86Opcode::Addsd | X86Opcode::Subsd | X86Opcode::Mulsd | X86Opcode::Divsd
         | X86Opcode::Addss | X86Opcode::Subss | X86Opcode::Mulss | X86Opcode::Divss
@@ -688,6 +734,11 @@ fn estimate_inst_size(inst: &X86ISelInst) -> usize {
         // SSE memory: 6-8 bytes.
         X86Opcode::MovsdRM | X86Opcode::MovsdMR
         | X86Opcode::MovssRM | X86Opcode::MovssMR => 8,
+
+        // SSE conversion: 5-6 bytes (prefix + REX.W + 0F + opcode + ModRM).
+        X86Opcode::Cvtsi2sd | X86Opcode::Cvtsd2si
+        | X86Opcode::Cvtsi2ss | X86Opcode::Cvtss2si => 6,
+        X86Opcode::Cvtsd2ss | X86Opcode::Cvtss2sd => 5,
 
         // Default conservative estimate.
         _ => 7,
