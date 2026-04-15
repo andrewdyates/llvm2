@@ -149,6 +149,23 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         // Reference counting: read and write memory (refcount field)
         Retain | Release => MemoryEffect::Store,
 
+        // Atomic loads (load-acquire): memory read with ordering
+        Ldar | Ldarb | Ldarh | Ldaxr => MemoryEffect::Load,
+
+        // Atomic stores (store-release): memory write with ordering
+        Stlr | Stlrb | Stlrh | Stlxr => MemoryEffect::Store,
+
+        // Atomic RMW (LSE): both read and write — classify as Store (conservative)
+        Ldadd | Ldadda | Ldaddal
+        | Ldclr | Ldclral
+        | Ldeor | Ldeoral
+        | Ldset | Ldsetal
+        | Swp | Swpal
+        | Cas | Casa | Casal => MemoryEffect::Store,
+
+        // Barriers: full memory barrier (acts like a call for ordering purposes)
+        Dmb | Dsb | Isb => MemoryEffect::Call,
+
         // Branches: not memory ops. DCE handles branches via InstFlags.
         B | BCond | Bcc | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => MemoryEffect::Pure,
 

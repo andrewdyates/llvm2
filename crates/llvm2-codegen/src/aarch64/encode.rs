@@ -1335,6 +1335,173 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
         }
 
         // =================================================================
+        // Atomic memory operations (ARMv8 + ARMv8.1-a LSE)
+        // =================================================================
+
+        // LDAR Xt, [Xn] — load-acquire register.
+        // Encoding: size(2) 001000 010 11111 1 11111 Rn(5) Rt(5)
+        // size: 10 = 32-bit, 11 = 64-bit (from register class)
+        AArch64Opcode::Ldar => {
+            let sf = sf_from_operand(inst, 0);
+            let size = if sf == 1 { 0b11 } else { 0b10 };
+            let rt = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            Ok(encode_load_acquire(size, rn, rt))
+        }
+
+        // LDARB Wt, [Xn] — load-acquire byte. size=00.
+        AArch64Opcode::Ldarb => {
+            let rt = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            Ok(encode_load_acquire(0b00, rn, rt))
+        }
+
+        // LDARH Wt, [Xn] — load-acquire halfword. size=01.
+        AArch64Opcode::Ldarh => {
+            let rt = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            Ok(encode_load_acquire(0b01, rn, rt))
+        }
+
+        // STLR Xt, [Xn] — store-release register.
+        // Encoding: size(2) 001000 100 11111 1 11111 Rn(5) Rt(5)
+        AArch64Opcode::Stlr => {
+            let sf = sf_from_operand(inst, 0);
+            let size = if sf == 1 { 0b11 } else { 0b10 };
+            let rt = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            Ok(encode_store_release(size, rn, rt))
+        }
+
+        // STLRB Wt, [Xn] — store-release byte. size=00.
+        AArch64Opcode::Stlrb => {
+            let rt = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            Ok(encode_store_release(0b00, rn, rt))
+        }
+
+        // STLRH Wt, [Xn] — store-release halfword. size=01.
+        AArch64Opcode::Stlrh => {
+            let rt = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            Ok(encode_store_release(0b01, rn, rt))
+        }
+
+        // LSE atomic RMW instructions: LDADD, LDCLR, LDEOR, LDSET, SWP
+        // Encoding: size(2) 111 0 00 A R 1 Rs(5) o3(1) opc(3) 00 Rn(5) Rt(5)
+        //
+        // LDADD:  o3=0 opc=000
+        // LDCLR:  o3=0 opc=001
+        // LDEOR:  o3=0 opc=010
+        // LDSET:  o3=0 opc=011
+        // SWP:    o3=1 opc=000
+        //
+        // Ordering variants: base (A=0,R=0), A (A=1,R=0), AL (A=1,R=1)
+        // Operands: [Rs (operand), Rt (old value dest), Rn (address)]
+
+        AArch64Opcode::Ldadd => {
+            encode_lse_atomic(inst, 0, 0b000, 0, 0) // A=0, R=0
+        }
+        AArch64Opcode::Ldadda => {
+            encode_lse_atomic(inst, 0, 0b000, 1, 0) // A=1, R=0
+        }
+        AArch64Opcode::Ldaddal => {
+            encode_lse_atomic(inst, 0, 0b000, 1, 1) // A=1, R=1
+        }
+        AArch64Opcode::Ldclr => {
+            encode_lse_atomic(inst, 0, 0b001, 0, 0)
+        }
+        AArch64Opcode::Ldclral => {
+            encode_lse_atomic(inst, 0, 0b001, 1, 1)
+        }
+        AArch64Opcode::Ldeor => {
+            encode_lse_atomic(inst, 0, 0b010, 0, 0)
+        }
+        AArch64Opcode::Ldeoral => {
+            encode_lse_atomic(inst, 0, 0b010, 1, 1)
+        }
+        AArch64Opcode::Ldset => {
+            encode_lse_atomic(inst, 0, 0b011, 0, 0)
+        }
+        AArch64Opcode::Ldsetal => {
+            encode_lse_atomic(inst, 0, 0b011, 1, 1)
+        }
+        AArch64Opcode::Swp => {
+            encode_lse_atomic(inst, 1, 0b000, 0, 0)
+        }
+        AArch64Opcode::Swpal => {
+            encode_lse_atomic(inst, 1, 0b000, 1, 1)
+        }
+
+        // CAS Rs, Rt, [Xn] — compare and swap.
+        // Encoding: size(2) 001000 1 A 1 Rs(5) o0(1) 11111 Rn(5) Rt(5)
+        // where o0 = R (release bit).
+        // CAS:   A=0, R=0
+        // CASA:  A=1, R=0
+        // CASAL: A=1, R=1
+        // Operands: [Rs (expected/result), Rt (desired), Rn (address)]
+        AArch64Opcode::Cas => {
+            encode_cas(inst, 0, 0) // A=0, R=0
+        }
+        AArch64Opcode::Casa => {
+            encode_cas(inst, 1, 0) // A=1, R=0
+        }
+        AArch64Opcode::Casal => {
+            encode_cas(inst, 1, 1) // A=1, R=1
+        }
+
+        // LDAXR Xt, [Xn] — load-acquire exclusive register (LL/SC).
+        // Encoding: size(2) 001000 010 11111 1 11111 Rn(5) Rt(5)
+        // Same encoding as LDAR but with different bit pattern:
+        // size(2) 001000 0 1 0 Rs(5=11111) o0(1=1) Rt2(5=11111) Rn(5) Rt(5)
+        AArch64Opcode::Ldaxr => {
+            let sf = sf_from_operand(inst, 0);
+            let size = if sf == 1 { 0b11 } else { 0b10 };
+            let rt = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            // size(2) 001000 0 1 0 11111 1 11111 Rn(5) Rt(5)
+            Ok((size << 30) | (0b001000 << 24) | (0 << 23) | (1 << 22) | (0 << 21)
+                | (0b11111 << 16) | (1 << 15) | (0b11111 << 10) | (rn << 5) | rt)
+        }
+
+        // STLXR Ws, Xt, [Xn] — store-release exclusive register (LL/SC).
+        // Encoding: size(2) 001000 0 0 0 Rs(5) 1 11111 Rn(5) Rt(5)
+        // Operands: [Ws (status), Rt (value), Rn (address)]
+        AArch64Opcode::Stlxr => {
+            let sf = sf_from_operand(inst, 1); // size from value register
+            let size = if sf == 1 { 0b11 } else { 0b10 };
+            let rs = preg_hw(inst, 0)?; // status
+            let rt = preg_hw(inst, 1)?; // value
+            let rn = preg_hw(inst, 2)?; // address
+            // size(2) 001000 0 0 0 Rs(5) 1 11111 Rn(5) Rt(5)
+            Ok((size << 30) | (0b001000 << 24) | (0 << 23) | (0 << 22) | (0 << 21)
+                | (rs << 16) | (1 << 15) | (0b11111 << 10) | (rn << 5) | rt)
+        }
+
+        // DMB — data memory barrier.
+        // Encoding: 1101 0101 0000 0011 0011 CRm(4) 1 01 11111
+        // CRm = barrier option (e.g., 0xF=SY, 0xB=ISH, 0x9=ISHLD, 0xA=ISHST)
+        // Operands: [Imm(CRm)]
+        AArch64Opcode::Dmb => {
+            let crm = (imm_val(inst, 0) as u32) & 0xF;
+            Ok(0xD5033000 | (crm << 8) | 0xBF)
+        }
+
+        // DSB — data synchronization barrier.
+        // Encoding: 1101 0101 0000 0011 0011 CRm(4) 1 00 11111
+        AArch64Opcode::Dsb => {
+            let crm = (imm_val(inst, 0) as u32) & 0xF;
+            Ok(0xD5033000 | (crm << 8) | 0x9F)
+        }
+
+        // ISB — instruction synchronization barrier.
+        // Encoding: 1101 0101 0000 0011 0011 CRm(4) 1 10 11111
+        AArch64Opcode::Isb => {
+            let crm = (imm_val(inst, 0) as u32) & 0xF;
+            Ok(0xD5033000 | (crm << 8) | 0xDF)
+        }
+
+        // =================================================================
         // Pseudo-instructions — emit NOP as safe fallback
         // =================================================================
 
@@ -1830,6 +1997,108 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
 // ---------------------------------------------------------------------------
 // FMOV immediate encoding helper
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Atomic encoding helpers
+// ---------------------------------------------------------------------------
+
+/// Encode LDAR (load-acquire): size(2) 001000 010 11111 1 11111 Rn(5) Rt(5).
+///
+/// ARM ARM C6.2.117: LDAR encoding uses the load-acquire ordered access format.
+fn encode_load_acquire(size: u32, rn: u32, rt: u32) -> u32 {
+    // size(2) 001000 1 1 0 11111 1 11111 Rn(5) Rt(5)
+    (size << 30)
+        | (0b001000 << 24)
+        | (1 << 23) // o2 = 1 (ordered)
+        | (1 << 22) // L = 1 (load)
+        | (0 << 21) // o1 = 0
+        | (0b11111 << 16) // Rs = 11111 (not used)
+        | (1 << 15) // o0 = 1
+        | (0b11111 << 10) // Rt2 = 11111 (not used)
+        | (rn << 5)
+        | rt
+}
+
+/// Encode STLR (store-release): size(2) 001000 100 11111 1 11111 Rn(5) Rt(5).
+///
+/// ARM ARM C6.2.260: STLR encoding uses the store-release ordered access format.
+fn encode_store_release(size: u32, rn: u32, rt: u32) -> u32 {
+    // size(2) 001000 1 0 0 11111 1 11111 Rn(5) Rt(5)
+    (size << 30)
+        | (0b001000 << 24)
+        | (1 << 23) // o2 = 1 (ordered)
+        | (0 << 22) // L = 0 (store)
+        | (0 << 21) // o1 = 0
+        | (0b11111 << 16) // Rs = 11111 (not used)
+        | (1 << 15) // o0 = 1
+        | (0b11111 << 10) // Rt2 = 11111 (not used)
+        | (rn << 5)
+        | rt
+}
+
+/// Encode LSE atomic RMW instruction (ARMv8.1-a).
+///
+/// Format: size(2) 111 0 00 A R 1 Rs(5) o3(1) opc(3) 00 Rn(5) Rt(5)
+///
+/// - o3=0, opc=000: LDADD
+/// - o3=0, opc=001: LDCLR
+/// - o3=0, opc=010: LDEOR
+/// - o3=0, opc=011: LDSET
+/// - o3=1, opc=000: SWP
+///
+/// Operands: [Rs (operand), Rt (old value dest), Rn (address)]
+fn encode_lse_atomic(
+    inst: &MachInst,
+    o3: u32,
+    opc: u32,
+    a: u32,
+    r: u32,
+) -> Result<u32, EncodeError> {
+    let sf = sf_from_operand(inst, 1); // size from Rt (result)
+    let size = if sf == 1 { 0b11 } else { 0b10 };
+    let rs = preg_hw(inst, 0)?;
+    let rt = preg_hw(inst, 1)?;
+    let rn = preg_hw(inst, 2)?;
+
+    Ok((size << 30)
+        | (0b111 << 27)
+        | (0 << 26)
+        | (0b00 << 24)
+        | (a << 23)
+        | (r << 22)
+        | (1 << 21)
+        | (rs << 16)
+        | (o3 << 15)
+        | (opc << 12)
+        | (0b00 << 10)
+        | (rn << 5)
+        | rt)
+}
+
+/// Encode CAS (compare and swap, ARMv8.1-a LSE).
+///
+/// Format: size(2) 001000 1 A 1 Rs(5) o0 11111 Rn(5) Rt(5)
+/// where o0 = R (release bit).
+///
+/// Operands: [Rs (expected/result), Rt (desired), Rn (address)]
+fn encode_cas(inst: &MachInst, a: u32, r: u32) -> Result<u32, EncodeError> {
+    let sf = sf_from_operand(inst, 0); // size from Rs
+    let size = if sf == 1 { 0b11 } else { 0b10 };
+    let rs = preg_hw(inst, 0)?;
+    let rt = preg_hw(inst, 1)?;
+    let rn = preg_hw(inst, 2)?;
+
+    Ok((size << 30)
+        | (0b001000 << 24)
+        | (1 << 23)  // o2 = 1
+        | (a << 22)  // A
+        | (1 << 21)  // o1 = 1
+        | (rs << 16)
+        | (r << 15)  // o0 = R
+        | (0b11111 << 10) // Rt2 = 11111 (unused)
+        | (rn << 5)
+        | rt)
+}
 
 /// Encode an f64 value into the 8-bit FMOV immediate format.
 ///

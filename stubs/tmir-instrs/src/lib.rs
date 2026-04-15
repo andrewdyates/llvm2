@@ -102,6 +102,38 @@ pub enum CastOp {
     Bitcast,
 }
 
+/// Memory ordering for atomic operations (matches C++/LLVM orderings).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MemoryOrdering {
+    /// No ordering constraint (not valid for atomics, only for fences).
+    Relaxed,
+    /// Acquire: subsequent reads/writes cannot be reordered before this.
+    Acquire,
+    /// Release: preceding reads/writes cannot be reordered after this.
+    Release,
+    /// Acquire + Release combined.
+    AcqRel,
+    /// Sequential consistency (strongest).
+    SeqCst,
+}
+
+/// Atomic read-modify-write operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AtomicRmwOp {
+    /// Atomic add: *ptr += val.
+    Add,
+    /// Atomic subtract: *ptr -= val.
+    Sub,
+    /// Atomic AND: *ptr &= val.
+    And,
+    /// Atomic OR: *ptr |= val.
+    Or,
+    /// Atomic XOR: *ptr ^= val.
+    Xor,
+    /// Atomic swap: old = *ptr; *ptr = val.
+    Xchg,
+}
+
 /// A single switch case: value -> target block.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SwitchCase {
@@ -168,6 +200,51 @@ pub enum Instr {
     /// Deallocation hint (for verified memory management).
     Dealloc {
         ptr: ValueId,
+    },
+
+    // -- Atomic memory operations --
+
+    /// Atomic load: result = atomic_load(ptr, ordering).
+    /// Provides acquire semantics (or stronger).
+    AtomicLoad {
+        ty: Ty,
+        ptr: ValueId,
+        ordering: MemoryOrdering,
+    },
+
+    /// Atomic store: atomic_store(ptr, value, ordering).
+    /// Provides release semantics (or stronger).
+    AtomicStore {
+        ty: Ty,
+        ptr: ValueId,
+        value: ValueId,
+        ordering: MemoryOrdering,
+    },
+
+    /// Atomic read-modify-write: result (old value) = atomic_rmw(op, ptr, val, ordering).
+    AtomicRmw {
+        op: AtomicRmwOp,
+        ty: Ty,
+        ptr: ValueId,
+        value: ValueId,
+        ordering: MemoryOrdering,
+    },
+
+    /// Compare and swap: (old_value, success) = cmpxchg(ptr, expected, desired, ordering).
+    /// If *ptr == expected, stores desired and returns (expected, true).
+    /// Otherwise returns (old_value, false).
+    CmpXchg {
+        ty: Ty,
+        ptr: ValueId,
+        expected: ValueId,
+        desired: ValueId,
+        success_ordering: MemoryOrdering,
+        failure_ordering: MemoryOrdering,
+    },
+
+    /// Memory fence: enforces ordering constraint without accessing memory.
+    Fence {
+        ordering: MemoryOrdering,
     },
 
     // -- Ownership instructions (tMIR-specific) --
