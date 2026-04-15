@@ -245,6 +245,12 @@ impl RuleProposal {
                 None
             }
             SmtExpr::FPConst { .. } | SmtExpr::UFDecl { .. } => None,
+            SmtExpr::ForAll { lower, upper, body, .. }
+            | SmtExpr::Exists { lower, upper, body, .. } => {
+                Self::find_var_width_in_expr(lower, target)
+                    .or_else(|| Self::find_var_width_in_expr(upper, target))
+                    .or_else(|| Self::find_var_width_in_expr(body, target))
+            }
         }
     }
 }
@@ -752,6 +758,10 @@ fn estimate_expr_cost(expr: &SmtExpr) -> i32 {
         }
         SmtExpr::FPConst { .. } => 0,
         SmtExpr::UFDecl { .. } => 0,
+        SmtExpr::ForAll { lower, upper, body, .. }
+        | SmtExpr::Exists { lower, upper, body, .. } => {
+            5 + estimate_expr_cost(lower) + estimate_expr_cost(upper) + estimate_expr_cost(body)
+        }
     }
 }
 
