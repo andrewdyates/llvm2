@@ -124,9 +124,10 @@ fn cleanup(dir: &Path) {
 // ---------------------------------------------------------------------------
 // Helper: build a "naked" object file (no frame lowering)
 //
-// Frame lowering currently has encoding bugs with STP/LDP pre/post-index
-// forms and MOV X29, SP (see TODO comments below). For truly runnable code,
-// we bypass frame lowering and emit minimal naked functions.
+// For simple leaf functions that don't need a frame, this helper encodes
+// raw instructions directly without prologue/epilogue overhead.
+// For tests that need frame lowering, use Pipeline::encode_and_emit
+// (see test_full_pipeline_frame_lowering_encoding_gaps).
 // ---------------------------------------------------------------------------
 
 /// Encode an IR function into a Mach-O .o file WITHOUT frame lowering.
@@ -135,9 +136,8 @@ fn cleanup(dir: &Path) {
 /// prologue/epilogue. For leaf functions that don't clobber callee-saved
 /// registers and don't use the stack, this is sufficient and correct.
 ///
-/// TODO: Once the frame lowering encoding bugs are fixed (see
-/// test_full_pipeline_add_with_frame_lowering), switch to using
-/// Pipeline::encode_and_emit for all tests.
+/// For full pipeline compilation with frame lowering (prologue/epilogue),
+/// use `Pipeline::encode_and_emit` instead.
 fn encode_naked_to_macho(func: &MachFunction) -> Vec<u8> {
     let code = encode_function(func).expect("encoding should succeed");
     let mut writer = MachOWriter::new();

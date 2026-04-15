@@ -936,7 +936,8 @@ fn test_macho_roundtrip_prologue_epilogue() {
     ).unwrap();
     code.extend_from_slice(&stp.to_le_bytes());
 
-    // MOV X29, SP => ADD X29, SP, #0 is not in our encoder yet, use NOP placeholder
+    // MOV X29, SP => ADD X29, SP, #0 (the pipeline encodes this via AddRI;
+    // this test uses a NOP placeholder since it builds raw bytes directly)
     let nop = 0xD503201Fu32;
     code.extend_from_slice(&nop.to_le_bytes());
 

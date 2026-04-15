@@ -217,13 +217,13 @@ pub fn expand_pseudos(func: &mut IrMachFunction) {
 /// - **Adrp / AddPCRel**: Emit with imm=0; relocations will patch the offset.
 ///   The unified encoder uses the actual immediate, which is wrong for the
 ///   pipeline's relocation-based patching model.
-/// - **BicRR, Csinc, Csinv, Csneg, Movn**: Not yet implemented in the unified
-///   encoder (encode.rs lists them as UnsupportedOpcode). Implemented here
-///   until encode.rs catches up.
-/// - **LdrRO, StrRO**: Integer-only register-offset encoding. The unified
-///   encoder handles FPR paths via encoding_mem; this uses inline encoding
-///   for integer loads/stores which matches the pipeline's needs.
-/// - **LdrGot, LdrTlvp**: Always 64-bit GOT/TLV loads, pipeline-specific.
+/// - **BicRR, Csinc, Csinv, Csneg, Movn**: Also implemented in the unified
+///   encoder (encode.rs). Retained here for pipeline-specific operand
+///   conventions and pre-validation.
+/// - **LdrRO, StrRO**: Register-offset encoding. Also in the unified encoder;
+///   retained here for pipeline-specific integer-only pre-validation.
+/// - **LdrGot, LdrTlvp**: 64-bit GOT/TLV loads. Also in the unified encoder;
+///   retained here for pipeline-specific relocation handling.
 ///
 /// Pre-validates operands (#98, #105) before delegation to catch malformed
 /// instructions early rather than silently encoding wrong values.
@@ -339,9 +339,8 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
         }
 
         // =================================================================
-        // Opcodes not yet in the unified encoder (encode.rs returns
-        // UnsupportedOpcode for these). Keep local implementations
-        // until encode.rs is updated.
+        // Opcodes also available in the unified encoder but retained
+        // here for pipeline-specific operand conventions and pre-validation.
         // =================================================================
         AArch64Opcode::BicRR => {
             // BIC Rd, Rn, Rm = AND Rd, Rn, NOT(Rm)
