@@ -555,6 +555,9 @@ impl core::fmt::Debug for InstFlags {
 /// - `NonZeroDivisor` → eliminate division-by-zero checks
 /// - `ValidShift` → eliminate shift-amount range checks
 /// - `Pure` → aggressive CSE/LICM of proven-pure memory operations
+/// - `Associative` → parallel reduction trees, operation reordering
+/// - `Commutative` → operand canonicalization, parallel reduction
+/// - `Idempotent` → redundant application elimination
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProofAnnotation {
     /// tMIR has proven this arithmetic operation cannot overflow.
@@ -591,6 +594,18 @@ pub enum ProofAnnotation {
     /// CSE purposes: if two loads from the same address exist and the
     /// address is proven pure (immutable), the second load is redundant.
     Pure,
+
+    /// tMIR has proven this operation is associative: (a op b) op c = a op (b op c).
+    /// Enables: parallel reduction trees, operation reordering for vectorization.
+    Associative,
+
+    /// tMIR has proven this operation is commutative: a op b = b op a.
+    /// Enables: operand canonicalization, parallel reduction, vectorization.
+    Commutative,
+
+    /// tMIR has proven this operation is idempotent: f(f(x)) = f(x).
+    /// Enables: redundant application elimination.
+    Idempotent,
 }
 
 impl ProofAnnotation {
@@ -1259,6 +1274,9 @@ mod tests {
             ProofAnnotation::NonZeroDivisor,
             ProofAnnotation::ValidShift,
             ProofAnnotation::Pure,
+            ProofAnnotation::Associative,
+            ProofAnnotation::Commutative,
+            ProofAnnotation::Idempotent,
         ];
         for v in &variants {
             assert_eq!(
