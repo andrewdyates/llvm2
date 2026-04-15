@@ -159,6 +159,12 @@ pub enum ProofCategory {
     /// IV update, idempotence, no-change safety, DCE composition).
     /// Source: `strength_reduce_proofs::all_strength_reduce_proofs()`.
     StrengthReduction,
+
+    /// Compare-and-branch fusion and compare-select combine proofs
+    /// (CBZ/CBNZ/TBZ/TBNZ equivalence, CSEL/CSET/CSINC equivalence,
+    /// condition inversion, diamond safety, flag liveness).
+    /// Source: `cmp_combine_proofs::all_cmp_combine_proofs_with_variants()`.
+    CmpCombine,
 }
 
 impl ProofCategory {
@@ -191,6 +197,7 @@ impl ProofCategory {
             ProofCategory::MachOEmission,
             ProofCategory::LoopOptimization,
             ProofCategory::StrengthReduction,
+            ProofCategory::CmpCombine,
         ]
     }
 
@@ -223,6 +230,7 @@ impl ProofCategory {
             ProofCategory::MachOEmission => "Mach-O Emission",
             ProofCategory::LoopOptimization => "Loop Optimization",
             ProofCategory::StrengthReduction => "Strength Reduction",
+            ProofCategory::CmpCombine => "Cmp Combine",
         }
     }
 }
@@ -444,6 +452,13 @@ fn register_strength_reduce_proofs(proofs: &mut Vec<CategorizedProof>) {
     }
 }
 
+#[inline(never)]
+fn register_cmp_combine_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::cmp_combine_proofs::all_cmp_combine_proofs_with_variants() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::CmpCombine });
+    }
+}
+
 impl ProofDatabase {
     /// Construct the database by collecting all proofs from all registries.
     ///
@@ -463,6 +478,7 @@ impl ProofDatabase {
         register_target_proofs(&mut proofs);
         register_emission_proofs(&mut proofs);
         register_strength_reduce_proofs(&mut proofs);
+        register_cmp_combine_proofs(&mut proofs);
         ProofDatabase { proofs }
     }
 
@@ -810,8 +826,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            26,
-            "expected 26 categories, got {}",
+            27,
+            "expected 27 categories, got {}",
             categories.len()
         );
     }

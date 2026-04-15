@@ -116,6 +116,7 @@ pub mod frame_proofs;
 pub mod macho_proofs;
 pub mod loop_opt_proofs;
 pub mod strength_reduce_proofs;
+pub mod cmp_combine_proofs;
 pub mod proof_database;
 pub mod verification_runner;
 pub mod function_verifier;
