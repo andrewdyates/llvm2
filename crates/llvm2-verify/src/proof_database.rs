@@ -154,17 +154,14 @@ pub enum ProofCategory {
     /// Source: `loop_opt_proofs::all_loop_opt_proofs()`.
     LoopOptimization,
 
-    /// Strength reduction pass correctness proofs (multiply-to-shift, multiply-to-add,
-    /// multiply-to-sub-shift, multiply-to-add-shift, division-to-shift, modulo-to-mask,
-    /// IV update, idempotence, no-change safety, DCE composition).
-    /// Source: `strength_reduce_proofs::all_strength_reduce_proofs()`.
+    /// Strength reduction pass correctness proofs.
     StrengthReduction,
 
-    /// Compare-and-branch fusion and compare-select combine proofs
-    /// (CBZ/CBNZ/TBZ/TBNZ equivalence, CSEL/CSET/CSINC equivalence,
-    /// condition inversion, diamond safety, flag liveness).
-    /// Source: `cmp_combine_proofs::all_cmp_combine_proofs_with_variants()`.
+    /// Compare-and-branch fusion and compare-select combine proofs.
     CmpCombine,
+
+    /// Global Value Numbering correctness proofs.
+    Gvn,
 }
 
 impl ProofCategory {
@@ -198,6 +195,7 @@ impl ProofCategory {
             ProofCategory::LoopOptimization,
             ProofCategory::StrengthReduction,
             ProofCategory::CmpCombine,
+            ProofCategory::Gvn,
         ]
     }
 
@@ -231,6 +229,7 @@ impl ProofCategory {
             ProofCategory::LoopOptimization => "Loop Optimization",
             ProofCategory::StrengthReduction => "Strength Reduction",
             ProofCategory::CmpCombine => "Cmp Combine",
+            ProofCategory::Gvn => "GVN",
         }
     }
 }
@@ -459,6 +458,13 @@ fn register_cmp_combine_proofs(proofs: &mut Vec<CategorizedProof>) {
     }
 }
 
+#[inline(never)]
+fn register_gvn_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::gvn_proofs::all_gvn_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Gvn });
+    }
+}
+
 impl ProofDatabase {
     /// Construct the database by collecting all proofs from all registries.
     ///
@@ -479,6 +485,7 @@ impl ProofDatabase {
         register_emission_proofs(&mut proofs);
         register_strength_reduce_proofs(&mut proofs);
         register_cmp_combine_proofs(&mut proofs);
+        register_gvn_proofs(&mut proofs);
         ProofDatabase { proofs }
     }
 
@@ -826,8 +833,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            27,
-            "expected 27 categories, got {}",
+            28,
+            "expected 28 categories, got {}",
             categories.len()
         );
     }
