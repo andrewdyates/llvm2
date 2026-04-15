@@ -128,6 +128,20 @@ pub enum ProofCategory {
     /// Constant materialization proofs (MOVZ, MOVZ+MOVK, ORR logical imm, MOVN).
     /// Source: `const_materialize_proofs::all_const_materialize_proofs_with_variants()`.
     ConstantMaterialization,
+
+    /// Address mode formation proofs (base+imm, base+reg, scaled offsets, writeback).
+    /// Source: `addr_mode_proofs::all_addr_mode_proofs()`.
+    AddressMode,
+
+    /// Frame index elimination correctness proofs (offset computation, range checks,
+    /// alignment, callee-save non-overlap, slot distinctness).
+    /// Source: `frame_proofs::all_frame_proofs()`.
+    FrameLayout,
+
+    /// Instruction scheduling correctness proofs (dependency preservation,
+    /// memory ordering, control flow, topological validity, reordering freedom).
+    /// Source: `scheduler_proofs::all_scheduler_proofs()`.
+    InstructionScheduling,
 }
 
 impl ProofCategory {
@@ -154,6 +168,9 @@ impl ProofCategory {
             ProofCategory::RegAlloc,
             ProofCategory::BitwiseShift,
             ProofCategory::ConstantMaterialization,
+            ProofCategory::AddressMode,
+            ProofCategory::FrameLayout,
+            ProofCategory::InstructionScheduling,
         ]
     }
 
@@ -180,6 +197,9 @@ impl ProofCategory {
             ProofCategory::RegAlloc => "Register Allocation",
             ProofCategory::BitwiseShift => "Bitwise/Shift",
             ProofCategory::ConstantMaterialization => "Constant Materialization",
+            ProofCategory::AddressMode => "Address Mode",
+            ProofCategory::FrameLayout => "Frame Layout",
+            ProofCategory::InstructionScheduling => "Instruction Scheduling",
         }
     }
 }
@@ -384,6 +404,23 @@ impl ProofDatabase {
         // Constant materialization proofs (MOVZ, MOVZ+MOVK, ORR, MOVN)
         for p in crate::const_materialize_proofs::all_const_materialize_proofs_with_variants() {
             proofs.push(CategorizedProof { obligation: p, category: ProofCategory::ConstantMaterialization });
+        }
+
+        // Address mode formation proofs (base+imm, base+reg, scaled offsets, writeback)
+        for p in crate::addr_mode_proofs::all_addr_mode_proofs() {
+            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::AddressMode });
+        }
+
+        // Frame index elimination correctness proofs (offset computation, range checks,
+        // alignment, callee-save non-overlap, slot distinctness)
+        for p in crate::frame_proofs::all_frame_proofs() {
+            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::FrameLayout });
+        }
+
+        // Instruction scheduling correctness proofs (dependency preservation,
+        // memory ordering, control flow, topological validity, reordering freedom)
+        for p in crate::scheduler_proofs::all_scheduler_proofs() {
+            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::InstructionScheduling });
         }
 
         ProofDatabase { proofs }
@@ -733,8 +770,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            19,
-            "expected 19 categories, got {}",
+            23,
+            "expected 23 categories, got {}",
             categories.len()
         );
     }
