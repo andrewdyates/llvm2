@@ -63,6 +63,43 @@ pub enum ArgLocation {
 }
 
 // ---------------------------------------------------------------------------
+// Aggregate classification result
+// ---------------------------------------------------------------------------
+
+/// Result of classifying an aggregate or variadic argument for the ABI.
+///
+/// Unlike `ArgLocation` which is used during full parameter list classification
+/// (with register allocation state), `ClassifyResult` describes the *category*
+/// of passing convention for a single type, independent of register allocation.
+/// This is useful for callers that need to know the passing strategy before
+/// doing full argument lowering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClassifyResult {
+    /// Passed in one or more general-purpose registers.
+    /// `regs` contains placeholder registers (e.g., X0/X1) -- actual register
+    /// assignment depends on the full parameter list context.
+    InRegs { regs: Vec<PReg> },
+    /// Passed on the stack at the given offset with the given size and alignment.
+    OnStack { offset: i64, size: u32, align: u32 },
+    /// Passed indirectly via a pointer in `ptr_reg`.
+    /// Caller allocates memory; callee accesses via the pointer.
+    Indirect { ptr_reg: PReg },
+    /// Homogeneous Floating-point Aggregate: 1-4 same-type FP members
+    /// passed in consecutive V registers.
+    Hfa { base_ty: HfaBaseType, count: usize, first_reg: PReg },
+}
+
+/// The base floating-point element type of an HFA (Homogeneous Floating-point
+/// Aggregate). Per AAPCS64, only F32 and F64 are valid HFA element types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HfaBaseType {
+    /// 32-bit float (float / f32)
+    F32,
+    /// 64-bit float (double / f64)
+    F64,
+}
+
+// ---------------------------------------------------------------------------
 // Register arrays (static, following LLVM AArch64ISelLowering.cpp)
 // ---------------------------------------------------------------------------
 
@@ -636,6 +673,87 @@ impl AppleAArch64ABI {
             })
             .max()
             .unwrap_or(0)
+    }
+
+    // -----------------------------------------------------------------------
+    // Standalone classification helpers (ClassifyResult API)
+    // -----------------------------------------------------------------------
+
+    /// Classify how an aggregate type is passed as a parameter.
+    ///
+    /// This performs type-level classification without consuming register
+    /// allocation state. The returned `ClassifyResult` uses placeholder
+    /// registers (X0/X1 for GPR, V0 for FPR) to indicate the *kind* of
+    /// passing convention. Actual register assignment happens during full
+    /// parameter list classification via `classify_params()`.
+    ///
+    /// Rules (Apple AArch64 / AAPCS64):
+    /// - HFA (1-4 same FP fields) -> `Hfa` (consecutive V registers)
+    /// - Aggregate <= 8 bytes -> `InRegs` (one GPR)
+    /// - Aggregate 9-16 bytes -> `InRegs` (two GPRs)
+    /// - Aggregate > 16 bytes -> `Indirect` (pointer in GPR)
+    ///
+    /// Reference: AAPCS64 sec. 6.4.2, Apple ARM64 ABI documentation
+    pub fn classify_aggregate(ty: &Type) -> ClassifyResult {
+        // Check for HFA first (takes priority over size-based classification).
+        if let Some((base_ty, count)) = Self::classify_hfa(ty) {
+            return ClassifyResult::Hfa {
+                base_ty,
+                count,
+                first_reg: gpr::V0,
+            };
+        }
+
+        // Non-HFA aggregate: size-based classification.
+        match ty.bytes() {
+            0..=8 => ClassifyResult::InRegs {
+                regs: vec![gpr::X0],
+            },
+            9..=16 => ClassifyResult::InRegs {
+                regs: vec![gpr::X0, gpr::X1],
+            },
+            _ => ClassifyResult::Indirect { ptr_reg: gpr::X0 },
+        }
+    }
+
+    /// Classify a single variadic argument (Apple AArch64 ABI).
+    ///
+    /// On Apple arm64, ALL variadic arguments are passed on the stack,
+    /// regardless of type. Each argument occupies at least 8 bytes and is
+    /// 8-byte aligned. This differs from standard AAPCS64 which allows
+    /// variadic args in registers.
+    ///
+    /// Returns `(classification, next_stack_offset)` so callers can chain
+    /// multiple variadic argument classifications.
+    ///
+    /// Reference: Apple ARM64 Function Calling Conventions, "Variadic Functions"
+    pub fn classify_variadic(ty: &Type, stack_offset: i64) -> (ClassifyResult, i64) {
+        let offset = align_up(stack_offset, 8);
+        let size = ty.bytes().max(8);
+        let next_offset = offset + align_up(size as i64, 8);
+
+        (
+            ClassifyResult::OnStack {
+                offset,
+                size,
+                align: 8,
+            },
+            next_offset,
+        )
+    }
+
+    /// Public wrapper around `detect_hfa` that returns `HfaBaseType` instead
+    /// of `Type`.
+    ///
+    /// Returns `Some((base_type, count))` if the type is a Homogeneous
+    /// Floating-point Aggregate with 1-4 members of the same FP type,
+    /// `None` otherwise.
+    pub fn classify_hfa(ty: &Type) -> Option<(HfaBaseType, usize)> {
+        Self::detect_hfa(ty).and_then(|(base_ty, count)| match base_ty {
+            Type::F32 => Some((HfaBaseType::F32, count)),
+            Type::F64 => Some((HfaBaseType::F64, count)),
+            _ => None,
+        })
     }
 }
 
@@ -2480,5 +2598,385 @@ mod tests {
         assert_eq!(Type::V128.align(), 16);
         assert!(!Type::V128.is_aggregate());
         assert!(Type::V128.is_scalar());
+    }
+
+    // ===================================================================
+    // ClassifyResult API tests
+    // ===================================================================
+
+    /// Helper: assert a classify_variadic result is OnStack with expected values.
+    fn assert_variadic_stack(
+        result: (ClassifyResult, i64),
+        expected_offset: i64,
+        expected_size: u32,
+        expected_next: i64,
+    ) {
+        let (classify, next) = result;
+        assert_eq!(
+            classify,
+            ClassifyResult::OnStack {
+                offset: expected_offset,
+                size: expected_size,
+                align: 8,
+            }
+        );
+        assert_eq!(next, expected_next);
+    }
+
+    // --- ClassifyResult construction and equality ---
+
+    #[test]
+    fn classify_result_in_regs_construction_and_equality() {
+        let lhs = ClassifyResult::InRegs {
+            regs: vec![gpr::X0, gpr::X1],
+        };
+        let rhs = ClassifyResult::InRegs {
+            regs: vec![gpr::X0, gpr::X1],
+        };
+        assert_eq!(lhs, rhs);
+    }
+
+    #[test]
+    fn classify_result_on_stack_construction_and_equality() {
+        let lhs = ClassifyResult::OnStack {
+            offset: 16,
+            size: 8,
+            align: 8,
+        };
+        let rhs = ClassifyResult::OnStack {
+            offset: 16,
+            size: 8,
+            align: 8,
+        };
+        assert_eq!(lhs, rhs);
+    }
+
+    #[test]
+    fn classify_result_indirect_construction_and_equality() {
+        let lhs = ClassifyResult::Indirect { ptr_reg: gpr::X0 };
+        let rhs = ClassifyResult::Indirect { ptr_reg: gpr::X0 };
+        assert_eq!(lhs, rhs);
+    }
+
+    #[test]
+    fn classify_result_hfa_construction_and_equality() {
+        let lhs = ClassifyResult::Hfa {
+            base_ty: HfaBaseType::F32,
+            count: 4,
+            first_reg: gpr::V0,
+        };
+        let rhs = ClassifyResult::Hfa {
+            base_ty: HfaBaseType::F32,
+            count: 4,
+            first_reg: gpr::V0,
+        };
+        assert_eq!(lhs, rhs);
+    }
+
+    // --- classify_aggregate tests ---
+
+    #[test]
+    fn classify_aggregate_small_struct_in_one_gpr() {
+        // struct { i32, i16 } = 8 bytes -> InRegs(X0)
+        let ty = Type::Struct(vec![Type::I32, Type::I16]);
+        assert_eq!(
+            AppleAArch64ABI::classify_aggregate(&ty),
+            ClassifyResult::InRegs {
+                regs: vec![gpr::X0],
+            }
+        );
+    }
+
+    #[test]
+    fn classify_aggregate_medium_struct_in_two_gprs() {
+        // struct { i64, i32 } = 16 bytes -> InRegs(X0, X1)
+        let ty = Type::Struct(vec![Type::I64, Type::I32]);
+        assert_eq!(
+            AppleAArch64ABI::classify_aggregate(&ty),
+            ClassifyResult::InRegs {
+                regs: vec![gpr::X0, gpr::X1],
+            }
+        );
+    }
+
+    #[test]
+    fn classify_aggregate_large_struct_indirect() {
+        // struct { i64, i64, i64 } = 24 bytes -> Indirect(X0)
+        let ty = Type::Struct(vec![Type::I64, Type::I64, Type::I64]);
+        assert_eq!(
+            AppleAArch64ABI::classify_aggregate(&ty),
+            ClassifyResult::Indirect { ptr_reg: gpr::X0 }
+        );
+    }
+
+    #[test]
+    fn classify_aggregate_hfa_struct() {
+        // struct { f32, f32 } -> HFA(F32, 2, V0)
+        let ty = Type::Struct(vec![Type::F32, Type::F32]);
+        assert_eq!(
+            AppleAArch64ABI::classify_aggregate(&ty),
+            ClassifyResult::Hfa {
+                base_ty: HfaBaseType::F32,
+                count: 2,
+                first_reg: gpr::V0,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_aggregate_empty_struct() {
+        // struct {} = 0 bytes -> InRegs(X0) (0 is <= 8)
+        let ty = Type::Struct(vec![]);
+        assert_eq!(
+            AppleAArch64ABI::classify_aggregate(&ty),
+            ClassifyResult::InRegs {
+                regs: vec![gpr::X0],
+            }
+        );
+    }
+
+    #[test]
+    fn classify_aggregate_single_field_struct() {
+        // struct { i64 } = 8 bytes -> InRegs(X0)
+        let ty = Type::Struct(vec![Type::I64]);
+        assert_eq!(
+            AppleAArch64ABI::classify_aggregate(&ty),
+            ClassifyResult::InRegs {
+                regs: vec![gpr::X0],
+            }
+        );
+    }
+
+    #[test]
+    fn classify_aggregate_nested_struct() {
+        // struct { struct { i32, i16 }, i8 } -> 12 bytes -> InRegs(X0, X1)
+        let inner = Type::Struct(vec![Type::I32, Type::I16]);
+        let ty = Type::Struct(vec![inner, Type::I8]);
+        assert_eq!(
+            AppleAArch64ABI::classify_aggregate(&ty),
+            ClassifyResult::InRegs {
+                regs: vec![gpr::X0, gpr::X1],
+            }
+        );
+    }
+
+    #[test]
+    fn classify_aggregate_hfa_array() {
+        // f64[3] -> HFA(F64, 3, V0)
+        let ty = Type::Array(Box::new(Type::F64), 3);
+        assert_eq!(
+            AppleAArch64ABI::classify_aggregate(&ty),
+            ClassifyResult::Hfa {
+                base_ty: HfaBaseType::F64,
+                count: 3,
+                first_reg: gpr::V0,
+            }
+        );
+    }
+
+    // --- classify_variadic tests ---
+
+    #[test]
+    fn classify_variadic_i32_goes_on_stack() {
+        assert_variadic_stack(AppleAArch64ABI::classify_variadic(&Type::I32, 0), 0, 8, 8);
+    }
+
+    #[test]
+    fn classify_variadic_i64_goes_on_stack() {
+        assert_variadic_stack(AppleAArch64ABI::classify_variadic(&Type::I64, 0), 0, 8, 8);
+    }
+
+    #[test]
+    fn classify_variadic_f32_goes_on_stack() {
+        assert_variadic_stack(AppleAArch64ABI::classify_variadic(&Type::F32, 0), 0, 8, 8);
+    }
+
+    #[test]
+    fn classify_variadic_f64_goes_on_stack() {
+        assert_variadic_stack(AppleAArch64ABI::classify_variadic(&Type::F64, 0), 0, 8, 8);
+    }
+
+    #[test]
+    fn classify_variadic_v128_goes_on_stack() {
+        assert_variadic_stack(AppleAArch64ABI::classify_variadic(&Type::V128, 0), 0, 16, 16);
+    }
+
+    #[test]
+    fn classify_variadic_small_struct_goes_on_stack() {
+        let ty = Type::Struct(vec![Type::I32, Type::I16]);
+        assert_variadic_stack(AppleAArch64ABI::classify_variadic(&ty, 0), 0, 8, 8);
+    }
+
+    #[test]
+    fn classify_variadic_large_struct_goes_on_stack() {
+        let ty = Type::Struct(vec![Type::I64, Type::I64, Type::I64]);
+        assert_variadic_stack(AppleAArch64ABI::classify_variadic(&ty, 0), 0, 24, 24);
+    }
+
+    #[test]
+    fn classify_variadic_aligns_incoming_offset() {
+        // stack_offset=5 -> aligned to 8, then 8-byte I32 slot
+        assert_variadic_stack(AppleAArch64ABI::classify_variadic(&Type::I32, 5), 8, 8, 16);
+    }
+
+    #[test]
+    fn classify_variadic_empty_struct_promotes_to_eight_bytes() {
+        let ty = Type::Struct(vec![]);
+        assert_variadic_stack(AppleAArch64ABI::classify_variadic(&ty, 0), 0, 8, 8);
+    }
+
+    #[test]
+    fn classify_variadic_chains_offsets() {
+        // Chain: I32 at offset 0, then V128 at next offset
+        let (first, next) = AppleAArch64ABI::classify_variadic(&Type::I32, 0);
+        assert_eq!(
+            first,
+            ClassifyResult::OnStack {
+                offset: 0,
+                size: 8,
+                align: 8,
+            }
+        );
+        let (second, final_next) = AppleAArch64ABI::classify_variadic(&Type::V128, next);
+        assert_eq!(
+            second,
+            ClassifyResult::OnStack {
+                offset: 8,
+                size: 16,
+                align: 8,
+            }
+        );
+        assert_eq!(final_next, 24);
+    }
+
+    // --- classify_hfa tests ---
+
+    #[test]
+    fn classify_hfa_one_f32_field() {
+        let ty = Type::Struct(vec![Type::F32]);
+        assert_eq!(
+            AppleAArch64ABI::classify_hfa(&ty),
+            Some((HfaBaseType::F32, 1))
+        );
+    }
+
+    #[test]
+    fn classify_hfa_two_f32_fields() {
+        let ty = Type::Struct(vec![Type::F32, Type::F32]);
+        assert_eq!(
+            AppleAArch64ABI::classify_hfa(&ty),
+            Some((HfaBaseType::F32, 2))
+        );
+    }
+
+    #[test]
+    fn classify_hfa_three_f32_fields_array() {
+        let ty = Type::Array(Box::new(Type::F32), 3);
+        assert_eq!(
+            AppleAArch64ABI::classify_hfa(&ty),
+            Some((HfaBaseType::F32, 3))
+        );
+    }
+
+    #[test]
+    fn classify_hfa_four_f32_fields_nested() {
+        let ty = Type::Struct(vec![
+            Type::Struct(vec![Type::F32, Type::F32]),
+            Type::Struct(vec![Type::F32, Type::F32]),
+        ]);
+        assert_eq!(
+            AppleAArch64ABI::classify_hfa(&ty),
+            Some((HfaBaseType::F32, 4))
+        );
+    }
+
+    #[test]
+    fn classify_hfa_one_f64_field() {
+        let ty = Type::Struct(vec![Type::F64]);
+        assert_eq!(
+            AppleAArch64ABI::classify_hfa(&ty),
+            Some((HfaBaseType::F64, 1))
+        );
+    }
+
+    #[test]
+    fn classify_hfa_two_f64_fields() {
+        let ty = Type::Struct(vec![Type::F64, Type::F64]);
+        assert_eq!(
+            AppleAArch64ABI::classify_hfa(&ty),
+            Some((HfaBaseType::F64, 2))
+        );
+    }
+
+    #[test]
+    fn classify_hfa_three_f64_fields_nested() {
+        // struct { f64, f64[2] } -> 3x F64 HFA
+        let ty = Type::Struct(vec![Type::F64, Type::Array(Box::new(Type::F64), 2)]);
+        assert_eq!(
+            AppleAArch64ABI::classify_hfa(&ty),
+            Some((HfaBaseType::F64, 3))
+        );
+    }
+
+    #[test]
+    fn classify_hfa_four_f64_fields() {
+        let ty = Type::Array(Box::new(Type::F64), 4);
+        assert_eq!(
+            AppleAArch64ABI::classify_hfa(&ty),
+            Some((HfaBaseType::F64, 4))
+        );
+    }
+
+    #[test]
+    fn classify_hfa_mixed_fields_not_hfa() {
+        // struct { f32, f64 } -> NOT HFA (mixed FP types)
+        let ty = Type::Struct(vec![Type::F32, Type::F64]);
+        assert_eq!(AppleAArch64ABI::classify_hfa(&ty), None);
+    }
+
+    #[test]
+    fn classify_hfa_array_of_structs() {
+        // [struct { f32 }; 4] -> 4x F32 HFA
+        let elem = Type::Struct(vec![Type::F32]);
+        let ty = Type::Array(Box::new(elem), 4);
+        assert_eq!(
+            AppleAArch64ABI::classify_hfa(&ty),
+            Some((HfaBaseType::F32, 4))
+        );
+    }
+
+    #[test]
+    fn classify_hfa_nested_structs() {
+        // struct { struct { f64 }, struct { f64 } } -> 2x F64
+        let ty = Type::Struct(vec![
+            Type::Struct(vec![Type::F64]),
+            Type::Struct(vec![Type::F64]),
+        ]);
+        assert_eq!(
+            AppleAArch64ABI::classify_hfa(&ty),
+            Some((HfaBaseType::F64, 2))
+        );
+    }
+
+    #[test]
+    fn classify_hfa_zero_size_array_is_not_hfa() {
+        let ty = Type::Array(Box::new(Type::F32), 0);
+        assert_eq!(AppleAArch64ABI::classify_hfa(&ty), None);
+    }
+
+    #[test]
+    fn classify_hfa_five_field_struct_is_not_hfa() {
+        let ty = Type::Struct(vec![Type::F32; 5]);
+        assert_eq!(AppleAArch64ABI::classify_hfa(&ty), None);
+    }
+
+    #[test]
+    fn classify_hfa_nested_mixed_struct_is_not_hfa() {
+        // struct { struct { f32 }, struct { f64 } } -> NOT HFA (mixed)
+        let ty = Type::Struct(vec![
+            Type::Struct(vec![Type::F32]),
+            Type::Struct(vec![Type::F64]),
+        ]);
+        assert_eq!(AppleAArch64ABI::classify_hfa(&ty), None);
     }
 }
