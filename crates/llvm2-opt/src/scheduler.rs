@@ -91,7 +91,7 @@ pub fn opcode_latency(opcode: AArch64Opcode) -> (u32, ExecutionPort) {
         MovR | MovI | Movz | Movn | Movk | MOVWrr | MOVXrr | MOVZWi | MOVZXi => {
             (1, ExecutionPort::IntAlu)
         }
-        Sxtw | Uxtw | Sxtb | Sxth | Ubfm | Sbfm | Bfm => (1, ExecutionPort::IntAlu),
+        Sxtw | Uxtw | Sxtb | Sxth | Uxtb | Uxth | Ubfm | Sbfm | Bfm => (1, ExecutionPort::IntAlu),
         Adrp | AddPCRel => (1, ExecutionPort::IntAlu),
         AddsRR | AddsRI | SubsRR | SubsRI => (1, ExecutionPort::IntAlu),
 

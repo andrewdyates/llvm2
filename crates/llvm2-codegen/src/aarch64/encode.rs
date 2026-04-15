@@ -877,6 +877,38 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
                 | rd)
         }
 
+        // UXTB Wd, Wn = UBFM Wd, Wn, #0, #7
+        // Zero-extend byte: clear bits [31:8], keep bits [7:0].
+        AArch64Opcode::Uxtb => {
+            let rd = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            // sf=0, opc=10(UBFM), N=0, immr=0, imms=7
+            Ok((0u32 << 31)
+                | (0b10 << 29)
+                | (0b100110 << 23)
+                | (0 << 22) // N=0 (32-bit)
+                | (0 << 16) // immr=0
+                | (7 << 10) // imms=7
+                | (rn << 5)
+                | rd)
+        }
+
+        // UXTH Wd, Wn = UBFM Wd, Wn, #0, #15
+        // Zero-extend halfword: clear bits [31:16], keep bits [15:0].
+        AArch64Opcode::Uxth => {
+            let rd = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            // sf=0, opc=10(UBFM), N=0, immr=0, imms=15
+            Ok((0u32 << 31)
+                | (0b10 << 29)
+                | (0b100110 << 23)
+                | (0 << 22) // N=0 (32-bit)
+                | (0 << 16) // immr=0
+                | (15 << 10) // imms=15
+                | (rn << 5)
+                | rd)
+        }
+
         // =================================================================
         // Address generation
         // =================================================================
@@ -2884,6 +2916,8 @@ mod tests {
             (AArch64Opcode::Uxtw, vec![preg(X0), preg(X1)]),
             (AArch64Opcode::Sxtb, vec![preg(X0), preg(X1)]),
             (AArch64Opcode::Sxth, vec![preg(X0), preg(X1)]),
+            (AArch64Opcode::Uxtb, vec![preg(W0), preg(W1)]),
+            (AArch64Opcode::Uxth, vec![preg(W0), preg(W1)]),
             (AArch64Opcode::Ubfm, vec![preg(X0), preg(X1), imm(0), imm(7)]),
             (AArch64Opcode::Sbfm, vec![preg(X0), preg(X1), imm(0), imm(7)]),
             (AArch64Opcode::Bfm, vec![preg(X0), preg(X1), imm(0), imm(7)]),

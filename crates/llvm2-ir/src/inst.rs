@@ -151,6 +151,12 @@ pub enum AArch64Opcode {
     Uxtw,
     Sxtb,
     Sxth,
+    /// UXTB Wd, Wn — zero-extend byte to 32-bit (alias: AND Wd, Wn, #0xFF).
+    /// Encoded as UBFM Wd, Wn, #0, #7.
+    Uxtb,
+    /// UXTH Wd, Wn — zero-extend halfword to 32-bit (alias: AND Wd, Wn, #0xFFFF).
+    /// Encoded as UBFM Wd, Wn, #0, #15.
+    Uxth,
 
     // -- Bitfield operations --
     /// UBFM Rd, Rn, #immr, #imms — unsigned bitfield move.

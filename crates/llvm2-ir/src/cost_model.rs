@@ -168,8 +168,8 @@ impl AppleSiliconCostModel {
             MOVZWi | MOVZXi   => (1, m4_int_tp),
 
             // ===== Extension / bitfield (1-cycle, ALU) =====
-            // SXTW, UXTW, SXTB, SXTH are aliases for SBFM/UBFM.
-            Sxtw | Uxtw | Sxtb | Sxth => (1, m4_int_tp),
+            // SXTW, UXTW, SXTB, SXTH, UXTB, UXTH are aliases for SBFM/UBFM.
+            Sxtw | Uxtw | Sxtb | Sxth | Uxtb | Uxth => (1, m4_int_tp),
             Ubfm | Sbfm | Bfm         => (1, m4_int_tp),
 
             // ===== Address generation (1-cycle) =====
@@ -1741,6 +1741,7 @@ mod tests {
             // Extension
             AArch64Opcode::Sxtw, AArch64Opcode::Uxtw,
             AArch64Opcode::Sxtb, AArch64Opcode::Sxth,
+            AArch64Opcode::Uxtb, AArch64Opcode::Uxth,
             AArch64Opcode::Ubfm, AArch64Opcode::Sbfm, AArch64Opcode::Bfm,
             // Address
             AArch64Opcode::Adrp, AArch64Opcode::AddPCRel,

@@ -110,7 +110,7 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         | MOVWrr | MOVXrr | MOVZWi | MOVZXi => MemoryEffect::Pure,
 
         // Extension
-        Sxtw | Uxtw | Sxtb | Sxth => MemoryEffect::Pure,
+        Sxtw | Uxtw | Sxtb | Sxth | Uxtb | Uxth => MemoryEffect::Pure,
 
         // Bitfield operations
         Ubfm | Sbfm | Bfm => MemoryEffect::Pure,
