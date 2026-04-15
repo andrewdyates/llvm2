@@ -343,6 +343,38 @@ pub enum SmtExpr {
     /// This is not an expression per se but a declaration node used in
     /// query generation to emit the function signature.
     UFDecl { name: String, arg_sorts: Vec<SmtSort>, ret_sort: SmtSort },
+
+    // -- Bounded quantifiers --
+
+    /// `(forall ((var (_ BitVec w))) (=> (and (bvuge var lo) (bvult var hi)) body))`
+    ///
+    /// Bounded universal quantifier: for all values of `var` in `[lower, upper)`,
+    /// `body` holds. The bound variable has bitvector width `var_width`.
+    ///
+    /// Concrete evaluation: unrolls the quantifier for small ranges (upper - lower <= 256)
+    /// and checks that `body` evaluates to true for every value in the range.
+    ForAll {
+        var: String,
+        var_width: u32,
+        lower: Box<SmtExpr>,
+        upper: Box<SmtExpr>,
+        body: Box<SmtExpr>,
+    },
+
+    /// `(exists ((var (_ BitVec w))) (and (bvuge var lo) (bvult var hi) body))`
+    ///
+    /// Bounded existential quantifier: there exists a value of `var` in `[lower, upper)`
+    /// such that `body` holds. The bound variable has bitvector width `var_width`.
+    ///
+    /// Concrete evaluation: unrolls the quantifier for small ranges (upper - lower <= 256)
+    /// and checks that `body` evaluates to true for at least one value in the range.
+    Exists {
+        var: String,
+        var_width: u32,
+        lower: Box<SmtExpr>,
+        upper: Box<SmtExpr>,
+        body: Box<SmtExpr>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -713,6 +745,54 @@ impl SmtExpr {
         SmtExpr::UFDecl { name: name.into(), arg_sorts, ret_sort }
     }
 
+    // -- Bounded quantifier constructors --
+
+    /// Bounded universal quantifier: `forall var in [lower, upper). body`.
+    ///
+    /// The bound variable has bitvector width `var_width`. During concrete evaluation,
+    /// the quantifier is unrolled: for each value `v` in `[lower, upper)`, `body` is
+    /// evaluated with `var` bound to `v`. All must be true for the result to be true.
+    ///
+    /// Maximum unrolling bound: 256 iterations. Exceeding this returns an eval error.
+    pub fn forall(
+        var: impl Into<String>,
+        var_width: u32,
+        lower: Self,
+        upper: Self,
+        body: Self,
+    ) -> Self {
+        SmtExpr::ForAll {
+            var: var.into(),
+            var_width,
+            lower: Box::new(lower),
+            upper: Box::new(upper),
+            body: Box::new(body),
+        }
+    }
+
+    /// Bounded existential quantifier: `exists var in [lower, upper). body`.
+    ///
+    /// The bound variable has bitvector width `var_width`. During concrete evaluation,
+    /// the quantifier is unrolled: for each value `v` in `[lower, upper)`, `body` is
+    /// evaluated with `var` bound to `v`. At least one must be true for the result to be true.
+    ///
+    /// Maximum unrolling bound: 256 iterations. Exceeding this returns an eval error.
+    pub fn exists(
+        var: impl Into<String>,
+        var_width: u32,
+        lower: Self,
+        upper: Self,
+        body: Self,
+    ) -> Self {
+        SmtExpr::Exists {
+            var: var.into(),
+            var_width,
+            lower: Box::new(lower),
+            upper: Box::new(upper),
+            body: Box::new(body),
+        }
+    }
+
     /// Return the bitvector width of this expression, or an error for Bool-sorted expressions.
     pub fn try_bv_width(&self) -> Result<u32, SmtError> {
         match self {
@@ -759,7 +839,9 @@ impl SmtExpr {
             | SmtExpr::And { .. }
             | SmtExpr::Or { .. }
             | SmtExpr::FPEq { .. }
-            | SmtExpr::FPLt { .. } => Err(SmtError::BoolHasNoWidth),
+            | SmtExpr::FPLt { .. }
+            | SmtExpr::ForAll { .. }
+            | SmtExpr::Exists { .. } => Err(SmtError::BoolHasNoWidth),
             // FP / array / UF decl nodes have no BV width.
             SmtExpr::FPAdd { .. }
             | SmtExpr::FPSub { .. }
@@ -801,7 +883,9 @@ impl SmtExpr {
             | SmtExpr::And { .. }
             | SmtExpr::Or { .. }
             | SmtExpr::FPEq { .. }
-            | SmtExpr::FPLt { .. } => SmtSort::Bool,
+            | SmtExpr::FPLt { .. }
+            | SmtExpr::ForAll { .. }
+            | SmtExpr::Exists { .. } => SmtSort::Bool,
             // Floating-point expressions
             SmtExpr::FPAdd { lhs, .. }
             | SmtExpr::FPSub { lhs, .. }
@@ -913,6 +997,19 @@ impl SmtExpr {
                 }
             }
             SmtExpr::UFDecl { .. } => {}
+            SmtExpr::ForAll { var, lower, upper, body, .. }
+            | SmtExpr::Exists { var, lower, upper, body, .. } => {
+                lower.collect_vars(vars);
+                upper.collect_vars(vars);
+                // Collect vars from body, but the bound variable is not free.
+                let mut body_vars = Vec::new();
+                body.collect_vars(&mut body_vars);
+                for v in body_vars {
+                    if v != *var {
+                        vars.push(v);
+                    }
+                }
+            }
         }
     }
 }
@@ -1380,6 +1477,56 @@ impl SmtExpr {
                     "cannot evaluate UF declaration '{}'", name
                 )))
             }
+
+            // -- Bounded quantifier evaluation (loop unrolling) --
+
+            SmtExpr::ForAll { var, var_width, lower, upper, body } => {
+                let lo = lower.try_eval(env)?.as_u64();
+                let hi = upper.try_eval(env)?.as_u64();
+                if hi <= lo {
+                    // Empty range: vacuously true.
+                    return Ok(EvalResult::Bool(true));
+                }
+                let count = hi - lo;
+                if count > 256 {
+                    return Err(SmtError::EvalError(format!(
+                        "forall range too large for unrolling: {} (max 256)", count
+                    )));
+                }
+                let mut local_env = env.clone();
+                for i in lo..hi {
+                    local_env.insert(var.clone(), mask(i, *var_width));
+                    let result = body.try_eval(&local_env)?;
+                    if !result.as_bool() {
+                        return Ok(EvalResult::Bool(false));
+                    }
+                }
+                Ok(EvalResult::Bool(true))
+            }
+
+            SmtExpr::Exists { var, var_width, lower, upper, body } => {
+                let lo = lower.try_eval(env)?.as_u64();
+                let hi = upper.try_eval(env)?.as_u64();
+                if hi <= lo {
+                    // Empty range: vacuously false.
+                    return Ok(EvalResult::Bool(false));
+                }
+                let count = hi - lo;
+                if count > 256 {
+                    return Err(SmtError::EvalError(format!(
+                        "exists range too large for unrolling: {} (max 256)", count
+                    )));
+                }
+                let mut local_env = env.clone();
+                for i in lo..hi {
+                    local_env.insert(var.clone(), mask(i, *var_width));
+                    let result = body.try_eval(&local_env)?;
+                    if result.as_bool() {
+                        return Ok(EvalResult::Bool(true));
+                    }
+                }
+                Ok(EvalResult::Bool(false))
+            }
         }
     }
 
@@ -1536,6 +1683,23 @@ impl fmt::Display for SmtExpr {
                     write!(f, "{}", sort)?;
                 }
                 write!(f, ") {})", ret_sort)
+            }
+            // Bounded quantifiers: emit SMT-LIB2 with range predicate as guard.
+            // ForAll: (forall ((var (_ BitVec w))) (=> (and (bvuge var lo) (bvult var hi)) body))
+            SmtExpr::ForAll { var, var_width, lower, upper, body } => {
+                write!(
+                    f,
+                    "(forall (({} (_ BitVec {}))) (=> (and (bvuge {} {}) (bvult {} {})) {}))",
+                    var, var_width, var, lower, var, upper, body
+                )
+            }
+            // Exists: (exists ((var (_ BitVec w))) (and (bvuge var lo) (bvult var hi) body))
+            SmtExpr::Exists { var, var_width, lower, upper, body } => {
+                write!(
+                    f,
+                    "(exists (({} (_ BitVec {}))) (and (bvuge {} {}) (bvult {} {}) {}))",
+                    var, var_width, var, lower, var, upper, body
+                )
             }
         }
     }
@@ -2595,5 +2759,166 @@ mod tests {
         assert_eq!(sign_extend128(u128::MAX, 128), -1i128);
         // Zero width
         assert_eq!(sign_extend128(0xFF, 0), 0i128);
+    }
+
+    // -----------------------------------------------------------------------
+    // Bounded quantifier tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_forall_all_true() {
+        // ForAll i in [0, 4): i < 4 (always true in unsigned 8-bit)
+        let body = SmtExpr::var("i", 8).bvult(SmtExpr::bv_const(4, 8));
+        let expr = SmtExpr::forall("i", 8, SmtExpr::bv_const(0, 8), SmtExpr::bv_const(4, 8), body);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(true));
+    }
+
+    #[test]
+    fn test_forall_one_false() {
+        // ForAll i in [0, 4): i < 3 (false when i=3)
+        let body = SmtExpr::var("i", 8).bvult(SmtExpr::bv_const(3, 8));
+        let expr = SmtExpr::forall("i", 8, SmtExpr::bv_const(0, 8), SmtExpr::bv_const(4, 8), body);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(false));
+    }
+
+    #[test]
+    fn test_forall_empty_range() {
+        // ForAll i in [5, 3): body — empty range is vacuously true.
+        let body = SmtExpr::bool_const(false);
+        let expr = SmtExpr::forall("i", 8, SmtExpr::bv_const(5, 8), SmtExpr::bv_const(3, 8), body);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(true));
+    }
+
+    #[test]
+    fn test_exists_one_true() {
+        // Exists i in [0, 4): i == 2 (true for i=2)
+        let body = SmtExpr::var("i", 8).eq_expr(SmtExpr::bv_const(2, 8));
+        let expr = SmtExpr::exists("i", 8, SmtExpr::bv_const(0, 8), SmtExpr::bv_const(4, 8), body);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(true));
+    }
+
+    #[test]
+    fn test_exists_none_true() {
+        // Exists i in [0, 4): i == 10 (false for all i in [0,4))
+        let body = SmtExpr::var("i", 8).eq_expr(SmtExpr::bv_const(10, 8));
+        let expr = SmtExpr::exists("i", 8, SmtExpr::bv_const(0, 8), SmtExpr::bv_const(4, 8), body);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(false));
+    }
+
+    #[test]
+    fn test_exists_empty_range() {
+        // Exists i in [5, 3): body — empty range is vacuously false.
+        let body = SmtExpr::bool_const(true);
+        let expr = SmtExpr::exists("i", 8, SmtExpr::bv_const(5, 8), SmtExpr::bv_const(3, 8), body);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(false));
+    }
+
+    #[test]
+    fn test_forall_with_array() {
+        // ForAll i in [0, 3): select(store(store(store(const(0), 0, 42), 1, 42), 2, 42), i) == 42
+        let arr = SmtExpr::const_array(SmtSort::BitVec(8), SmtExpr::bv_const(0, 8));
+        let arr = SmtExpr::store(arr, SmtExpr::bv_const(0, 8), SmtExpr::bv_const(42, 8));
+        let arr = SmtExpr::store(arr, SmtExpr::bv_const(1, 8), SmtExpr::bv_const(42, 8));
+        let arr = SmtExpr::store(arr, SmtExpr::bv_const(2, 8), SmtExpr::bv_const(42, 8));
+        let body = SmtExpr::select(arr, SmtExpr::var("i", 8))
+            .eq_expr(SmtExpr::bv_const(42, 8));
+        let expr = SmtExpr::forall("i", 8, SmtExpr::bv_const(0, 8), SmtExpr::bv_const(3, 8), body);
+        let result = expr.try_eval(&HashMap::new()).unwrap();
+        assert_eq!(result, EvalResult::Bool(true));
+    }
+
+    #[test]
+    fn test_forall_with_env() {
+        // ForAll i in [0, n): select(arr, i) == val
+        // Test with external variable n=2
+        let arr = SmtExpr::const_array(SmtSort::BitVec(8), SmtExpr::bv_const(0xFF, 8));
+        let body = SmtExpr::select(arr, SmtExpr::var("i", 8))
+            .eq_expr(SmtExpr::bv_const(0xFF, 8));
+        let expr = SmtExpr::forall(
+            "i", 8,
+            SmtExpr::bv_const(0, 8),
+            SmtExpr::var("n", 8),
+            body,
+        );
+        let result = expr.try_eval(&env(&[("n", 5)])).unwrap();
+        assert_eq!(result, EvalResult::Bool(true));
+    }
+
+    #[test]
+    fn test_forall_range_too_large() {
+        let body = SmtExpr::bool_const(true);
+        let expr = SmtExpr::forall("i", 32, SmtExpr::bv_const(0, 32), SmtExpr::bv_const(1000, 32), body);
+        let result = expr.try_eval(&HashMap::new());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_forall_sort_is_bool() {
+        let body = SmtExpr::bool_const(true);
+        let expr = SmtExpr::forall("i", 8, SmtExpr::bv_const(0, 8), SmtExpr::bv_const(1, 8), body);
+        assert_eq!(expr.sort(), SmtSort::Bool);
+    }
+
+    #[test]
+    fn test_exists_sort_is_bool() {
+        let body = SmtExpr::bool_const(true);
+        let expr = SmtExpr::exists("i", 8, SmtExpr::bv_const(0, 8), SmtExpr::bv_const(1, 8), body);
+        assert_eq!(expr.sort(), SmtSort::Bool);
+    }
+
+    #[test]
+    fn test_forall_free_vars() {
+        // ForAll i in [0, n): body(i, x)
+        // Free vars: n, x (not i)
+        let body = SmtExpr::var("i", 8).bvadd(SmtExpr::var("x", 8))
+            .eq_expr(SmtExpr::bv_const(0, 8));
+        let expr = SmtExpr::forall(
+            "i", 8,
+            SmtExpr::bv_const(0, 8),
+            SmtExpr::var("n", 8),
+            body,
+        );
+        let vars = expr.free_vars();
+        assert!(vars.contains(&"n".to_string()));
+        assert!(vars.contains(&"x".to_string()));
+        assert!(!vars.contains(&"i".to_string()));
+    }
+
+    #[test]
+    fn test_forall_display() {
+        let body = SmtExpr::var("i", 32).bvult(SmtExpr::var("n", 32));
+        let expr = SmtExpr::forall(
+            "i", 32,
+            SmtExpr::bv_const(0, 32),
+            SmtExpr::bv_const(10, 32),
+            body,
+        );
+        let s = format!("{}", expr);
+        assert!(s.contains("forall"));
+        assert!(s.contains("(_ BitVec 32)"));
+        assert!(s.contains("bvuge"));
+        assert!(s.contains("bvult"));
+    }
+
+    #[test]
+    fn test_exists_display() {
+        let body = SmtExpr::var("i", 8).eq_expr(SmtExpr::bv_const(5, 8));
+        let expr = SmtExpr::exists(
+            "i", 8,
+            SmtExpr::bv_const(0, 8),
+            SmtExpr::bv_const(10, 8),
+            body,
+        );
+        let s = format!("{}", expr);
+        assert!(s.contains("exists"));
+        assert!(s.contains("(_ BitVec 8)"));
+        assert!(s.contains("bvuge"));
+        assert!(s.contains("bvult"));
     }
 }

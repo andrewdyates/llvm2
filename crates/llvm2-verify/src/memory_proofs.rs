@@ -1350,7 +1350,263 @@ pub fn all_write_combining_proofs() -> Vec<ProofObligation> {
     ]
 }
 
-/// All array-based memory proofs (41 total).
+// ---------------------------------------------------------------------------
+// Proof obligations: Array range proofs (bounded quantifier)
+// ---------------------------------------------------------------------------
+
+/// Encode a byte-level memset: write `byte_val` to addresses `[base, base+count)`.
+///
+/// Builds:
+/// ```text
+/// store(store(store(mem, base, val), base+1, val), ..., base+count-1, val)
+/// ```
+fn encode_memset(mem: &SmtExpr, base: &SmtExpr, byte_val: &SmtExpr, count: u32) -> SmtExpr {
+    let mut current_mem = mem.clone();
+    for i in 0..count {
+        let addr = if i == 0 {
+            base.clone()
+        } else {
+            base.clone().bvadd(SmtExpr::bv_const(i as u64, 64))
+        };
+        current_mem = SmtExpr::store(current_mem, addr, byte_val.clone());
+    }
+    current_mem
+}
+
+/// Proof: after memset(base, val, N), all bytes in [base, base+N) equal val.
+///
+/// Uses a bounded ForAll quantifier to verify:
+/// ```text
+/// forall i in [0, N): select(memset(mem, base, val, N), base+i) == val
+/// ```
+///
+/// This proves that a concrete loop-based memset correctly fills all bytes.
+pub fn proof_memset_correctness(count: u32) -> ProofObligation {
+    let mem = zeroed_memory();
+    let base = SmtExpr::bv_const(0x1000, 64); // fixed base for concrete eval
+    let val = SmtExpr::bv_const(0xAB, 8);
+
+    let mem_after = encode_memset(&mem, &base, &val, count);
+
+    // ForAll i in [0, count): select(mem_after, base+i) == val
+    let body = SmtExpr::select(
+        mem_after.clone(),
+        SmtExpr::bv_const(0x1000, 64).bvadd(SmtExpr::var("i", 64)),
+    ).eq_expr(SmtExpr::bv_const(0xAB, 8));
+
+    let quantified = SmtExpr::forall(
+        "i", 64,
+        SmtExpr::bv_const(0, 64),
+        SmtExpr::bv_const(count as u64, 64),
+        body,
+    );
+
+    ProofObligation {
+        name: format!("Memset_{}B: all bytes in [base, base+{}) == val", count, count),
+        tmir_expr: SmtExpr::bool_const(true),
+        aarch64_expr: quantified,
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: memset does not modify bytes outside the target range.
+///
+/// Verifies that `select(memset(mem, base, val, N), base + N + offset) == 0`
+/// for addresses past the memset region (initial memory is zeroed).
+pub fn proof_memset_non_interference(count: u32, check_offset: u64) -> ProofObligation {
+    let mem = zeroed_memory();
+    let base = SmtExpr::bv_const(0x1000, 64);
+    let val = SmtExpr::bv_const(0xAB, 8);
+
+    let mem_after = encode_memset(&mem, &base, &val, count);
+
+    // Select at base + count + check_offset (outside the memset range)
+    let out_of_range_addr = SmtExpr::bv_const(0x1000 + count as u64 + check_offset, 64);
+    let loaded = SmtExpr::select(mem_after, out_of_range_addr);
+
+    ProofObligation {
+        name: format!(
+            "Memset_{}B_NonInterference: byte at base+{}+{} unchanged",
+            count, count, check_offset
+        ),
+        tmir_expr: SmtExpr::bv_const(0, 8), // original zeroed memory value
+        aarch64_expr: loaded,
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Encode a byte-level memcpy: copy `count` bytes from `src` to `dst` in `mem`.
+///
+/// Builds a sequence of select-then-store operations:
+/// ```text
+/// store(mem, dst+i, select(mem, src+i)) for i in 0..count
+/// ```
+fn encode_memcpy(
+    mem: &SmtExpr,
+    dst: &SmtExpr,
+    src: &SmtExpr,
+    count: u32,
+) -> SmtExpr {
+    let mut current_mem = mem.clone();
+    for i in 0..count {
+        let src_addr = if i == 0 {
+            src.clone()
+        } else {
+            src.clone().bvadd(SmtExpr::bv_const(i as u64, 64))
+        };
+        let dst_addr = if i == 0 {
+            dst.clone()
+        } else {
+            dst.clone().bvadd(SmtExpr::bv_const(i as u64, 64))
+        };
+        let byte_val = SmtExpr::select(mem.clone(), src_addr);
+        current_mem = SmtExpr::store(current_mem, dst_addr, byte_val);
+    }
+    current_mem
+}
+
+/// Proof: after memcpy(dst, src, N), all bytes in [dst, dst+N) equal the
+/// corresponding bytes in [src, src+N) of the original memory.
+///
+/// Uses a bounded ForAll quantifier:
+/// ```text
+/// forall i in [0, N): select(memcpy(mem, dst, src, N), dst+i) == select(mem, src+i)
+/// ```
+///
+/// Precondition: src and dst regions do not overlap (src + N <= dst or dst + N <= src).
+pub fn proof_memcpy_correctness(count: u32) -> ProofObligation {
+    let mem = symbolic_memory("mem_default");
+    let src = SmtExpr::bv_const(0x1000, 64);
+    let dst = SmtExpr::bv_const(0x2000, 64); // non-overlapping
+
+    let mem_after = encode_memcpy(&mem, &dst, &src, count);
+
+    // ForAll i in [0, count): select(mem_after, dst+i) == select(mem_orig, src+i)
+    let body = SmtExpr::select(
+        mem_after.clone(),
+        SmtExpr::bv_const(0x2000, 64).bvadd(SmtExpr::var("i", 64)),
+    ).eq_expr(SmtExpr::select(
+        mem.clone(),
+        SmtExpr::bv_const(0x1000, 64).bvadd(SmtExpr::var("i", 64)),
+    ));
+
+    let quantified = SmtExpr::forall(
+        "i", 64,
+        SmtExpr::bv_const(0, 64),
+        SmtExpr::bv_const(count as u64, 64),
+        body,
+    );
+
+    ProofObligation {
+        name: format!("Memcpy_{}B: dst[i] == src[i] for all i in [0, {})", count, count),
+        tmir_expr: SmtExpr::bool_const(true),
+        aarch64_expr: quantified,
+        inputs: vec![
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: memcpy preserves the source region (non-overlapping case).
+///
+/// After memcpy, the source bytes are unchanged:
+/// ```text
+/// forall i in [0, N): select(memcpy(mem, dst, src, N), src+i) == select(mem, src+i)
+/// ```
+pub fn proof_memcpy_source_preserved(count: u32) -> ProofObligation {
+    let mem = symbolic_memory("mem_default");
+    let src = SmtExpr::bv_const(0x1000, 64);
+    let dst = SmtExpr::bv_const(0x2000, 64);
+
+    let mem_after = encode_memcpy(&mem, &dst, &src, count);
+
+    let body = SmtExpr::select(
+        mem_after.clone(),
+        SmtExpr::bv_const(0x1000, 64).bvadd(SmtExpr::var("i", 64)),
+    ).eq_expr(SmtExpr::select(
+        mem.clone(),
+        SmtExpr::bv_const(0x1000, 64).bvadd(SmtExpr::var("i", 64)),
+    ));
+
+    let quantified = SmtExpr::forall(
+        "i", 64,
+        SmtExpr::bv_const(0, 64),
+        SmtExpr::bv_const(count as u64, 64),
+        body,
+    );
+
+    ProofObligation {
+        name: format!("Memcpy_{}B_SourcePreserved: src unchanged after copy", count),
+        tmir_expr: SmtExpr::bool_const(true),
+        aarch64_expr: quantified,
+        inputs: vec![
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: buffer initialization — zeroed memory has all bytes == 0 in range.
+///
+/// ```text
+/// forall i in [0, N): select(zeroed_memory, base+i) == 0
+/// ```
+pub fn proof_buffer_init_zero(count: u32) -> ProofObligation {
+    let mem = zeroed_memory();
+    let base = SmtExpr::bv_const(0x1000, 64);
+
+    let body = SmtExpr::select(
+        mem.clone(),
+        base.clone().bvadd(SmtExpr::var("i", 64)),
+    ).eq_expr(SmtExpr::bv_const(0, 8));
+
+    let quantified = SmtExpr::forall(
+        "i", 64,
+        SmtExpr::bv_const(0, 64),
+        SmtExpr::bv_const(count as u64, 64),
+        body,
+    );
+
+    ProofObligation {
+        name: format!("BufferInitZero_{}B: all bytes zero in [base, base+{})", count, count),
+        tmir_expr: SmtExpr::bool_const(true),
+        aarch64_expr: quantified,
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// All array range proofs using bounded quantifiers.
+pub fn all_array_range_proofs() -> Vec<ProofObligation> {
+    vec![
+        // Memset correctness
+        proof_memset_correctness(4),
+        proof_memset_correctness(8),
+        proof_memset_correctness(16),
+        // Memset non-interference
+        proof_memset_non_interference(4, 0),
+        proof_memset_non_interference(8, 4),
+        // Memcpy correctness
+        proof_memcpy_correctness(4),
+        proof_memcpy_correctness(8),
+        // Memcpy source preservation
+        proof_memcpy_source_preserved(4),
+        proof_memcpy_source_preserved(8),
+        // Buffer initialization
+        proof_buffer_init_zero(8),
+        proof_buffer_init_zero(16),
+    ]
+}
+
+/// All array-based memory proofs.
 pub fn all_memory_proofs() -> Vec<ProofObligation> {
     let mut proofs = Vec::new();
     proofs.extend(all_load_proofs());
@@ -1362,6 +1618,7 @@ pub fn all_memory_proofs() -> Vec<ProofObligation> {
     proofs.extend(all_forwarding_proofs());
     proofs.extend(all_subword_proofs());
     proofs.extend(all_write_combining_proofs());
+    proofs.extend(all_array_range_proofs());
     proofs
 }
 
@@ -2198,5 +2455,102 @@ mod tests {
         assert!(smt2.contains("(declare-const value (_ BitVec 32))"));
         assert!(smt2.contains("(check-sat)"));
         assert!(smt2.contains("(assert"));
+    }
+
+    // -------------------------------------------------------------------
+    // Array range proofs (bounded quantifier)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_memset_correctness_4() {
+        assert_valid(&proof_memset_correctness(4));
+    }
+
+    #[test]
+    fn test_proof_memset_correctness_8() {
+        assert_valid(&proof_memset_correctness(8));
+    }
+
+    #[test]
+    fn test_proof_memset_correctness_16() {
+        assert_valid(&proof_memset_correctness(16));
+    }
+
+    #[test]
+    fn test_proof_memset_non_interference() {
+        assert_valid(&proof_memset_non_interference(4, 0));
+        assert_valid(&proof_memset_non_interference(8, 4));
+    }
+
+    #[test]
+    fn test_proof_memcpy_correctness_4() {
+        assert_valid(&proof_memcpy_correctness(4));
+    }
+
+    #[test]
+    fn test_proof_memcpy_correctness_8() {
+        assert_valid(&proof_memcpy_correctness(8));
+    }
+
+    #[test]
+    fn test_proof_memcpy_source_preserved_4() {
+        assert_valid(&proof_memcpy_source_preserved(4));
+    }
+
+    #[test]
+    fn test_proof_memcpy_source_preserved_8() {
+        assert_valid(&proof_memcpy_source_preserved(8));
+    }
+
+    #[test]
+    fn test_proof_buffer_init_zero() {
+        assert_valid(&proof_buffer_init_zero(8));
+        assert_valid(&proof_buffer_init_zero(16));
+    }
+
+    #[test]
+    fn test_all_array_range_proofs() {
+        for obligation in all_array_range_proofs() {
+            assert_valid(&obligation);
+        }
+    }
+
+    /// Negative test: memset should NOT make bytes outside the range equal to val.
+    #[test]
+    fn test_memset_wrong_range_detected() {
+        let mem = zeroed_memory();
+        let base = SmtExpr::bv_const(0x1000, 64);
+        let val = SmtExpr::bv_const(0xAB, 8);
+
+        // Memset 4 bytes
+        let mem_after = encode_memset(&mem, &base, &val, 4);
+
+        // Claim ALL bytes in [0, 8) are 0xAB — wrong, only [0, 4) are.
+        let body = SmtExpr::select(
+            mem_after.clone(),
+            SmtExpr::bv_const(0x1000, 64).bvadd(SmtExpr::var("i", 64)),
+        ).eq_expr(SmtExpr::bv_const(0xAB, 8));
+
+        let quantified = SmtExpr::forall(
+            "i", 64,
+            SmtExpr::bv_const(0, 64),
+            SmtExpr::bv_const(8, 64), // checking too many bytes
+            body,
+        );
+
+        let obligation = ProofObligation {
+            name: "WRONG: memset 4 bytes, claim 8 bytes set".to_string(),
+            tmir_expr: SmtExpr::bool_const(true),
+            aarch64_expr: quantified,
+            inputs: vec![],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let result = verify_memory_proof(&obligation);
+        match result {
+            VerificationResult::Invalid { .. } => {} // expected
+            other => panic!("Expected Invalid for wrong memset range, got {:?}", other),
+        }
     }
 }

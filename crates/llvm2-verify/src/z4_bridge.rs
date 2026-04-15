@@ -245,6 +245,12 @@ fn infer_logic_walk(expr: &SmtExpr, has_array: &mut bool, has_fp: &mut bool, has
             infer_logic_walk(else_expr, has_array, has_fp, has_uf);
         }
         SmtExpr::Var { .. } | SmtExpr::BvConst { .. } | SmtExpr::BoolConst(_) => {}
+        SmtExpr::ForAll { lower, upper, body, .. }
+        | SmtExpr::Exists { lower, upper, body, .. } => {
+            infer_logic_walk(lower, has_array, has_fp, has_uf);
+            infer_logic_walk(upper, has_array, has_fp, has_uf);
+            infer_logic_walk(body, has_array, has_fp, has_uf);
+        }
     }
 }
 
