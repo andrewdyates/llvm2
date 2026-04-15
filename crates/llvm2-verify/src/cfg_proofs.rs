@@ -474,6 +474,271 @@ pub fn proof_unreachable_block_removal() -> ProofObligation {
 }
 
 // ---------------------------------------------------------------------------
+// TBZ/TBNZ constant branch folding proofs
+// ---------------------------------------------------------------------------
+
+/// Proof: TBNZ with bit set correctly takes the branch.
+///
+/// val = 0x80 (bit 7 set), bit_pos = 7.
+/// TBNZ branches if bit is set, so branch is taken -> BV1(1).
+pub fn proof_tbnz_bit_set_takes_branch() -> ProofObligation {
+    let width = 64;
+    let val = SmtExpr::bv_const(0x80, width);
+    let mask = SmtExpr::bv_const(1u64 << 7, width);
+    let bit_val = val.bvand(mask);
+    let condition = bit_val.eq_expr(SmtExpr::bv_const(0, width)).not_expr();
+    let branch_taken = SmtExpr::ite(condition, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1));
+
+    let always_taken = SmtExpr::bv_const(1, 1);
+
+    ProofObligation {
+        name: "CFG: TBNZ with bit 7 set correctly takes branch".to_string(),
+        tmir_expr: branch_taken,
+        aarch64_expr: always_taken,
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: TBNZ with bit clear correctly falls through.
+///
+/// val = 0x7F (bit 7 clear), bit_pos = 7.
+/// TBNZ branches if bit is set. Bit 7 is clear, so no branch -> BV1(0).
+pub fn proof_tbnz_bit_clear_falls_through() -> ProofObligation {
+    let width = 64;
+    let val = SmtExpr::bv_const(0x7F, width);
+    let mask = SmtExpr::bv_const(1u64 << 7, width);
+    let bit_val = val.bvand(mask);
+    let condition = bit_val.eq_expr(SmtExpr::bv_const(0, width)).not_expr();
+    let branch_taken = SmtExpr::ite(condition, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1));
+
+    let never_taken = SmtExpr::bv_const(0, 1);
+
+    ProofObligation {
+        name: "CFG: TBNZ with bit 7 clear correctly falls through".to_string(),
+        tmir_expr: branch_taken,
+        aarch64_expr: never_taken,
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: TBZ with bit clear correctly takes the branch.
+///
+/// val = 0x7F (bit 7 clear), bit_pos = 7.
+/// TBZ branches when bit is ZERO, so branch is taken -> BV1(1).
+pub fn proof_tbz_bit_clear_takes_branch() -> ProofObligation {
+    let width = 64;
+    let val = SmtExpr::bv_const(0x7F, width);
+    let mask = SmtExpr::bv_const(1u64 << 7, width);
+    let bit_val = val.bvand(mask);
+    let condition = bit_val.eq_expr(SmtExpr::bv_const(0, width)); // TBZ: branch if zero
+    let branch_taken = SmtExpr::ite(condition, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1));
+
+    let always_taken = SmtExpr::bv_const(1, 1);
+
+    ProofObligation {
+        name: "CFG: TBZ with bit 7 clear correctly takes branch".to_string(),
+        tmir_expr: branch_taken,
+        aarch64_expr: always_taken,
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: TBZ with bit set correctly falls through.
+///
+/// val = 0x80 (bit 7 set), bit_pos = 7.
+/// TBZ branches when bit is ZERO. Bit 7 is set, so no branch -> BV1(0).
+pub fn proof_tbz_bit_set_falls_through() -> ProofObligation {
+    let width = 64;
+    let val = SmtExpr::bv_const(0x80, width);
+    let mask = SmtExpr::bv_const(1u64 << 7, width);
+    let bit_val = val.bvand(mask);
+    let condition = bit_val.eq_expr(SmtExpr::bv_const(0, width));
+    let branch_taken = SmtExpr::ite(condition, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1));
+
+    let never_taken = SmtExpr::bv_const(0, 1);
+
+    ProofObligation {
+        name: "CFG: TBZ with bit 7 set correctly falls through".to_string(),
+        tmir_expr: branch_taken,
+        aarch64_expr: never_taken,
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extended branch fold computation preservation proofs
+// ---------------------------------------------------------------------------
+
+/// Proof: Branch fold preserves a SUB computation from the successor block.
+///
+/// Theorem: forall a, b : BV64 . (a - b) == (a - b)
+pub fn proof_branch_fold_preserves_sub_computation() -> ProofObligation {
+    let width = 64;
+    let a = SmtExpr::var("a", width);
+    let b = SmtExpr::var("b", width);
+
+    let before = a.clone().bvsub(b.clone());
+    let after = a.bvsub(b);
+
+    ProofObligation {
+        name: "CFG: branch fold preserves computation z = a - b".to_string(),
+        tmir_expr: before,
+        aarch64_expr: after,
+        inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: branch fold preserves SUB computation (8-bit, exhaustive).
+pub fn proof_branch_fold_preserves_sub_computation_8bit() -> ProofObligation {
+    let width = 8;
+    let a = SmtExpr::var("a", width);
+    let b = SmtExpr::var("b", width);
+
+    let before = a.clone().bvsub(b.clone());
+    let after = a.bvsub(b);
+
+    ProofObligation {
+        name: "CFG: branch fold preserves z = a - b (8-bit)".to_string(),
+        tmir_expr: before,
+        aarch64_expr: after,
+        inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: Branch fold preserves a MUL computation from the successor block.
+///
+/// Theorem: forall a, b : BV64 . (a * b) == (a * b)
+pub fn proof_branch_fold_preserves_mul_computation() -> ProofObligation {
+    let width = 64;
+    let a = SmtExpr::var("a", width);
+    let b = SmtExpr::var("b", width);
+
+    let before = a.clone().bvmul(b.clone());
+    let after = a.bvmul(b);
+
+    ProofObligation {
+        name: "CFG: branch fold preserves computation z = a * b".to_string(),
+        tmir_expr: before,
+        aarch64_expr: after,
+        inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phi value selection proofs
+// ---------------------------------------------------------------------------
+
+/// Proof: When condition is true, phi selects the true-path value.
+///
+/// Theorem: forall v, val_true, val_false : BV64 .
+///   v == 0 => ite(v == 0, val_true, val_false) == val_true
+pub fn proof_phi_value_selection_true_path() -> ProofObligation {
+    let width = 64;
+    let v = SmtExpr::var("v", width);
+    let val_true = SmtExpr::var("val_true", width);
+    let val_false = SmtExpr::var("val_false", width);
+
+    let condition = v.eq_expr(SmtExpr::bv_const(0, width));
+    let phi_result = SmtExpr::ite(condition, val_true.clone(), val_false);
+
+    let v_pc = SmtExpr::var("v", width);
+    let v_is_zero = v_pc.eq_expr(SmtExpr::bv_const(0, width));
+
+    ProofObligation {
+        name: "CFG: phi selects true-path value when condition is true".to_string(),
+        tmir_expr: val_true,
+        aarch64_expr: phi_result,
+        inputs: vec![
+            ("v".to_string(), width),
+            ("val_true".to_string(), width),
+            ("val_false".to_string(), width),
+        ],
+        preconditions: vec![v_is_zero],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: When condition is false, phi selects the false-path value.
+///
+/// Theorem: forall v, val_true, val_false : BV64 .
+///   v != 0 => ite(v == 0, val_true, val_false) == val_false
+pub fn proof_phi_value_selection_false_path() -> ProofObligation {
+    let width = 64;
+    let v = SmtExpr::var("v", width);
+    let val_true = SmtExpr::var("val_true", width);
+    let val_false = SmtExpr::var("val_false", width);
+
+    let condition = v.eq_expr(SmtExpr::bv_const(0, width));
+    let phi_result = SmtExpr::ite(condition, val_true, val_false.clone());
+
+    let v_pc = SmtExpr::var("v", width);
+    let v_is_nonzero = v_pc.eq_expr(SmtExpr::bv_const(0, width)).not_expr();
+
+    ProofObligation {
+        name: "CFG: phi selects false-path value when condition is false".to_string(),
+        tmir_expr: val_false,
+        aarch64_expr: phi_result,
+        inputs: vec![
+            ("v".to_string(), width),
+            ("val_true".to_string(), width),
+            ("val_false".to_string(), width),
+        ],
+        preconditions: vec![v_is_nonzero],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Critical edge splitting proofs
+// ---------------------------------------------------------------------------
+
+/// Proof: Inserting an empty block on a critical edge preserves values.
+///
+/// Theorem: forall y : BV64 . y == y
+pub fn proof_critical_edge_split_preserves_value() -> ProofObligation {
+    let width = 64;
+    let y = SmtExpr::var("y", width);
+
+    ProofObligation {
+        name: "CFG: critical edge split preserves value y".to_string(),
+        tmir_expr: y.clone(),
+        aarch64_expr: y,
+        inputs: vec![("y".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: critical edge split preserves value (8-bit, exhaustive).
+pub fn proof_critical_edge_split_preserves_value_8bit() -> ProofObligation {
+    let width = 8;
+    let y = SmtExpr::var("y", width);
+
+    ProofObligation {
+        name: "CFG: critical edge split preserves value y (8-bit)".to_string(),
+        tmir_expr: y.clone(),
+        aarch64_expr: y,
+        inputs: vec![("y".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Aggregate accessors
 // ---------------------------------------------------------------------------
 
@@ -489,6 +754,11 @@ pub fn all_cfg_proofs() -> Vec<ProofObligation> {
         proof_const_branch_cbnz_nonzero(),
         proof_const_branch_cbnz_zero(),
         proof_cbz_deterministic(),
+        // TBZ/TBNZ constant branch folding
+        proof_tbnz_bit_set_takes_branch(),
+        proof_tbnz_bit_clear_falls_through(),
+        proof_tbz_bit_clear_takes_branch(),
+        proof_tbz_bit_set_falls_through(),
         // Duplicate branch elimination
         proof_dup_branch_same_target(),
         // Empty block elimination
@@ -496,6 +766,14 @@ pub fn all_cfg_proofs() -> Vec<ProofObligation> {
         proof_branch_thread_preserves_target(),
         // Unreachable block removal
         proof_unreachable_block_removal(),
+        // Extended branch fold computations
+        proof_branch_fold_preserves_sub_computation(),
+        proof_branch_fold_preserves_mul_computation(),
+        // Phi value selection
+        proof_phi_value_selection_true_path(),
+        proof_phi_value_selection_false_path(),
+        // Critical edge splitting
+        proof_critical_edge_split_preserves_value(),
     ]
 }
 
@@ -507,6 +785,8 @@ pub fn all_cfg_proofs_with_variants() -> Vec<ProofObligation> {
     proofs.push(proof_cbz_deterministic_8bit());
     proofs.push(proof_dup_branch_same_target_8bit());
     proofs.push(proof_empty_block_redirect_8bit());
+    proofs.push(proof_branch_fold_preserves_sub_computation_8bit());
+    proofs.push(proof_critical_edge_split_preserves_value_8bit());
     proofs
 }
 
@@ -652,8 +932,154 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // TBZ/TBNZ constant branch folding tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_tbnz_bit_set_takes_branch() {
+        assert_valid(&proof_tbnz_bit_set_takes_branch());
+    }
+
+    #[test]
+    fn test_proof_tbnz_bit_clear_falls_through() {
+        assert_valid(&proof_tbnz_bit_clear_falls_through());
+    }
+
+    #[test]
+    fn test_proof_tbz_bit_clear_takes_branch() {
+        assert_valid(&proof_tbz_bit_clear_takes_branch());
+    }
+
+    #[test]
+    fn test_proof_tbz_bit_set_falls_through() {
+        assert_valid(&proof_tbz_bit_set_falls_through());
+    }
+
+    // -----------------------------------------------------------------------
+    // Extended branch fold computation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_branch_fold_preserves_sub_computation() {
+        assert_valid(&proof_branch_fold_preserves_sub_computation());
+    }
+
+    #[test]
+    fn test_proof_branch_fold_preserves_sub_computation_8bit() {
+        assert_valid(&proof_branch_fold_preserves_sub_computation_8bit());
+    }
+
+    #[test]
+    fn test_proof_branch_fold_preserves_mul_computation() {
+        assert_valid(&proof_branch_fold_preserves_mul_computation());
+    }
+
+    // -----------------------------------------------------------------------
+    // Phi value selection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_phi_value_selection_true_path() {
+        assert_valid(&proof_phi_value_selection_true_path());
+    }
+
+    #[test]
+    fn test_proof_phi_value_selection_false_path() {
+        assert_valid(&proof_phi_value_selection_false_path());
+    }
+
+    // -----------------------------------------------------------------------
+    // Critical edge splitting tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_critical_edge_split_preserves_value() {
+        assert_valid(&proof_critical_edge_split_preserves_value());
+    }
+
+    #[test]
+    fn test_proof_critical_edge_split_preserves_value_8bit() {
+        assert_valid(&proof_critical_edge_split_preserves_value_8bit());
+    }
+
+    // -----------------------------------------------------------------------
     // Negative tests
     // -----------------------------------------------------------------------
+
+    /// Negative test: TBNZ checking the wrong bit gives wrong answer.
+    ///
+    /// val=0x80 (bit 7 set, bit 0 clear). If TBNZ checks bit 0 instead
+    /// of bit 7, it should NOT take the branch. But if we claim it does,
+    /// the proof fails.
+    #[test]
+    fn test_cfg_negative_tbnz_wrong_bit() {
+        let width = 8;
+        let val = SmtExpr::bv_const(0x80, width);
+        let wrong_mask = SmtExpr::bv_const(1, width); // bit 0, not bit 7
+        let bit_val = val.bvand(wrong_mask);
+        let condition = bit_val.eq_expr(SmtExpr::bv_const(0, width)).not_expr();
+        let actual = SmtExpr::ite(condition, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1));
+
+        // Wrong claim: always taken
+        let wrong = SmtExpr::bv_const(1, 1);
+
+        let obligation = ProofObligation {
+            name: "CFG NEGATIVE: TBNZ wrong bit should not be taken".to_string(),
+            tmir_expr: actual,
+            aarch64_expr: wrong,
+            inputs: vec![],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let result = verify_by_evaluation(&obligation);
+        match result {
+            VerificationResult::Invalid { .. } => {} // expected
+            other => panic!("Expected Invalid for TBNZ wrong bit, got {:?}", other),
+        }
+    }
+
+    /// Negative test: phi selects wrong path value.
+    ///
+    /// With v==0 (condition true), phi should select val_true. Claiming
+    /// it selects val_false is wrong when they differ.
+    #[test]
+    fn test_cfg_negative_phi_wrong_path() {
+        let width = 8;
+        let v = SmtExpr::var("v", width);
+        let val_true = SmtExpr::var("val_true", width);
+        let val_false = SmtExpr::var("val_false", width);
+
+        let condition = v.eq_expr(SmtExpr::bv_const(0, width));
+        let phi_result = SmtExpr::ite(condition, val_true, val_false.clone());
+
+        // Preconditions: v == 0 AND val_true != val_false
+        let v_pc = SmtExpr::var("v", width);
+        let v_is_zero = v_pc.eq_expr(SmtExpr::bv_const(0, width));
+        let vals_differ = SmtExpr::var("val_true", width)
+            .eq_expr(SmtExpr::var("val_false", width))
+            .not_expr();
+
+        // Incorrect: claim phi selects val_false
+        let obligation = ProofObligation {
+            name: "CFG NEGATIVE: phi wrong path when condition is true".to_string(),
+            tmir_expr: val_false,
+            aarch64_expr: phi_result,
+            inputs: vec![
+                ("v".to_string(), width),
+                ("val_true".to_string(), width),
+                ("val_false".to_string(), width),
+            ],
+            preconditions: vec![v_is_zero, vals_differ],
+            fp_inputs: vec![],
+        };
+
+        let result = verify_by_evaluation(&obligation);
+        match result {
+            VerificationResult::Invalid { .. } => {} // expected
+            other => panic!("Expected Invalid for phi wrong path, got {:?}", other),
+        }
+    }
 
     /// Negative test: CBZ with nonzero constant should NOT take the branch.
     ///

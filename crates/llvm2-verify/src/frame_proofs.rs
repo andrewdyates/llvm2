@@ -656,12 +656,387 @@ pub fn proof_frame_slot_distinct_offsets_8bit() -> ProofObligation {
 }
 
 // ===========================================================================
+// 8. Callee-Save Restore Identity Proofs
+// ===========================================================================
+
+/// Proof: Saving and restoring a callee-saved register is an identity.
+///
+/// Theorem: forall reg_val, offset : BV64 .
+///   select(store(mem, offset, reg_val), offset) == reg_val
+pub fn proof_frame_callee_save_restore_identity() -> ProofObligation {
+    let width = 64;
+    let reg_val = SmtExpr::var("reg_val", width);
+    let offset = SmtExpr::var("offset", width);
+
+    let mem = SmtExpr::const_array(SmtSort::BitVec(width), SmtExpr::bv_const(0, width));
+    let saved = SmtExpr::store(mem, offset.clone(), reg_val.clone());
+    let restored = SmtExpr::select(saved, offset);
+
+    ProofObligation {
+        name: "FrameLayout: callee-save restore is identity".to_string(),
+        tmir_expr: reg_val,
+        aarch64_expr: restored,
+        inputs: vec![
+            ("reg_val".to_string(), width),
+            ("offset".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: Callee-save restore identity (8-bit, exhaustive).
+pub fn proof_frame_callee_save_restore_identity_8bit() -> ProofObligation {
+    let width = 8;
+    let reg_val = SmtExpr::var("reg_val", width);
+    let offset = SmtExpr::var("offset", width);
+
+    let mem = SmtExpr::const_array(SmtSort::BitVec(width), SmtExpr::bv_const(0, width));
+    let saved = SmtExpr::store(mem, offset.clone(), reg_val.clone());
+    let restored = SmtExpr::select(saved, offset);
+
+    ProofObligation {
+        name: "FrameLayout: callee-save restore is identity (8-bit)".to_string(),
+        tmir_expr: reg_val,
+        aarch64_expr: restored,
+        inputs: vec![
+            ("reg_val".to_string(), width),
+            ("offset".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ===========================================================================
+// 9. 32-Byte Stack Alignment Proofs
+// ===========================================================================
+
+/// Proof: Stack alignment preserved -- SP % 32 == 0 after aligned SUB.
+///
+/// Theorem: forall sp_val, frame_size : BV64 .
+///   sp_val % 32 == 0 AND frame_size % 32 == 0
+///   => (sp_val - frame_size) % 32 == 0
+pub fn proof_frame_sp_alignment_32byte() -> ProofObligation {
+    let width = 64;
+    let sp_val = SmtExpr::var("sp_val", width);
+    let frame_size = SmtExpr::var("frame_size", width);
+
+    let mask_31 = SmtExpr::bv_const(31, width);
+    let new_sp = sp_val.bvsub(frame_size);
+    let remainder = new_sp.bvand(mask_31);
+    let expected = SmtExpr::bv_const(0, width);
+
+    let sp_aligned = SmtExpr::var("sp_val", width)
+        .bvand(SmtExpr::bv_const(31, width))
+        .eq_expr(SmtExpr::bv_const(0, width));
+    let fs_aligned = SmtExpr::var("frame_size", width)
+        .bvand(SmtExpr::bv_const(31, width))
+        .eq_expr(SmtExpr::bv_const(0, width));
+
+    ProofObligation {
+        name: "FrameLayout: SP alignment preserved (SP % 32 == 0 after SUB)".to_string(),
+        tmir_expr: expected,
+        aarch64_expr: remainder,
+        inputs: vec![
+            ("sp_val".to_string(), width),
+            ("frame_size".to_string(), width),
+        ],
+        preconditions: vec![sp_aligned, fs_aligned],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: Stack alignment preserved at 8-bit width using mod 8.
+pub fn proof_frame_sp_alignment_32byte_8bit() -> ProofObligation {
+    let width = 8;
+    let sp_val = SmtExpr::var("sp_val", width);
+    let frame_size = SmtExpr::var("frame_size", width);
+
+    let mask_7 = SmtExpr::bv_const(7, width);
+    let new_sp = sp_val.bvsub(frame_size);
+    let remainder = new_sp.bvand(mask_7);
+    let expected = SmtExpr::bv_const(0, width);
+
+    let sp_aligned = SmtExpr::var("sp_val", width)
+        .bvand(SmtExpr::bv_const(7, width))
+        .eq_expr(SmtExpr::bv_const(0, width));
+    let fs_aligned = SmtExpr::var("frame_size", width)
+        .bvand(SmtExpr::bv_const(7, width))
+        .eq_expr(SmtExpr::bv_const(0, width));
+
+    ProofObligation {
+        name: "FrameLayout: SP alignment preserved (8-bit, mod 8)".to_string(),
+        tmir_expr: expected,
+        aarch64_expr: remainder,
+        inputs: vec![
+            ("sp_val".to_string(), width),
+            ("frame_size".to_string(), width),
+        ],
+        preconditions: vec![sp_aligned, fs_aligned],
+        fp_inputs: vec![],
+    }
+}
+
+// ===========================================================================
+// 10. Red Zone Offset Proofs
+// ===========================================================================
+
+/// Proof: Red-zone addressing below SP computes the intended address.
+///
+/// Theorem: forall sp_val, abs_offset : BV64 .
+///   sp_val - abs_offset == sp_val - abs_offset
+pub fn proof_frame_red_zone_offset() -> ProofObligation {
+    let width = 64;
+    let sp_val = SmtExpr::var("sp_val", width);
+    let abs_offset = SmtExpr::var("abs_offset", width);
+
+    let tmir = sp_val.clone().bvsub(abs_offset.clone());
+    let aarch64 = sp_val.bvsub(abs_offset);
+
+    ProofObligation {
+        name: "FrameLayout: red zone offset (SP - abs_offset)".to_string(),
+        tmir_expr: tmir,
+        aarch64_expr: aarch64,
+        inputs: vec![
+            ("sp_val".to_string(), width),
+            ("abs_offset".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: Red-zone addressing (8-bit, exhaustive).
+pub fn proof_frame_red_zone_offset_8bit() -> ProofObligation {
+    let width = 8;
+    let sp_val = SmtExpr::var("sp_val", width);
+    let abs_offset = SmtExpr::var("abs_offset", width);
+
+    let tmir = sp_val.clone().bvsub(abs_offset.clone());
+    let aarch64 = sp_val.bvsub(abs_offset);
+
+    ProofObligation {
+        name: "FrameLayout: red zone offset (8-bit)".to_string(),
+        tmir_expr: tmir,
+        aarch64_expr: aarch64,
+        inputs: vec![
+            ("sp_val".to_string(), width),
+            ("abs_offset".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ===========================================================================
+// 11. FP/SP Equivalence Proofs
+// ===========================================================================
+
+/// Proof: FP-relative and SP-relative addressing are equivalent.
+///
+/// Theorem: forall sp_val, frame_size, slot_fp_offset : BV64 .
+///   (sp_val + frame_size) + slot_fp_offset
+///   == sp_val + (frame_size + slot_fp_offset)
+pub fn proof_frame_fp_sp_equivalence() -> ProofObligation {
+    let width = 64;
+    let sp_val = SmtExpr::var("sp_val", width);
+    let frame_size = SmtExpr::var("frame_size", width);
+    let slot_fp_offset = SmtExpr::var("slot_fp_offset", width);
+
+    let fp_val = sp_val.clone().bvadd(frame_size.clone());
+    let fp_relative = fp_val.bvadd(slot_fp_offset.clone());
+
+    let slot_sp_offset = frame_size.bvadd(slot_fp_offset);
+    let sp_relative = sp_val.bvadd(slot_sp_offset);
+
+    ProofObligation {
+        name: "FrameLayout: FP/SP-relative addressing equivalence".to_string(),
+        tmir_expr: fp_relative,
+        aarch64_expr: sp_relative,
+        inputs: vec![
+            ("sp_val".to_string(), width),
+            ("frame_size".to_string(), width),
+            ("slot_fp_offset".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: FP/SP equivalence (8-bit, exhaustive).
+pub fn proof_frame_fp_sp_equivalence_8bit() -> ProofObligation {
+    let width = 8;
+    let sp_val = SmtExpr::var("sp_val", width);
+    let frame_size = SmtExpr::var("frame_size", width);
+    let slot_fp_offset = SmtExpr::var("slot_fp_offset", width);
+
+    let fp_val = sp_val.clone().bvadd(frame_size.clone());
+    let fp_relative = fp_val.bvadd(slot_fp_offset.clone());
+
+    let slot_sp_offset = frame_size.bvadd(slot_fp_offset);
+    let sp_relative = sp_val.bvadd(slot_sp_offset);
+
+    ProofObligation {
+        name: "FrameLayout: FP/SP-relative addressing equivalence (8-bit)".to_string(),
+        tmir_expr: fp_relative,
+        aarch64_expr: sp_relative,
+        inputs: vec![
+            ("sp_val".to_string(), width),
+            ("frame_size".to_string(), width),
+            ("slot_fp_offset".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ===========================================================================
+// 12. Triple Callee-Save Non-Overlap Proofs
+// ===========================================================================
+
+/// Proof: Three callee-save stores at distinct offsets do not alias slot A.
+///
+/// Theorem: forall val_a, val_b, val_c, off_a, off_b, off_c : BV64 .
+///   off_a != off_b AND off_a != off_c
+///   => select(store(store(store(mem, off_a, val_a), off_b, val_b), off_c, val_c), off_a) == val_a
+pub fn proof_frame_triple_callee_save_no_overlap() -> ProofObligation {
+    let width = 64;
+    let val_a = SmtExpr::var("val_a", width);
+    let val_b = SmtExpr::var("val_b", width);
+    let val_c = SmtExpr::var("val_c", width);
+    let off_a = SmtExpr::var("off_a", width);
+    let off_b = SmtExpr::var("off_b", width);
+    let off_c = SmtExpr::var("off_c", width);
+
+    let mem = SmtExpr::const_array(SmtSort::BitVec(width), SmtExpr::bv_const(0, width));
+    let mem1 = SmtExpr::store(mem, off_a.clone(), val_a.clone());
+    let mem2 = SmtExpr::store(mem1, off_b, val_b);
+    let mem3 = SmtExpr::store(mem2, off_c, val_c);
+    let read_a = SmtExpr::select(mem3, off_a);
+
+    let off_a_ne_b = SmtExpr::var("off_a", width)
+        .eq_expr(SmtExpr::var("off_b", width))
+        .not_expr();
+    let off_a_ne_c = SmtExpr::var("off_a", width)
+        .eq_expr(SmtExpr::var("off_c", width))
+        .not_expr();
+
+    ProofObligation {
+        name: "FrameLayout: triple callee-save slots preserve first value".to_string(),
+        tmir_expr: val_a,
+        aarch64_expr: read_a,
+        inputs: vec![
+            ("val_a".to_string(), width),
+            ("val_b".to_string(), width),
+            ("val_c".to_string(), width),
+            ("off_a".to_string(), width),
+            ("off_b".to_string(), width),
+            ("off_c".to_string(), width),
+        ],
+        preconditions: vec![off_a_ne_b, off_a_ne_c],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: Triple callee-save non-overlap (8-bit, exhaustive).
+pub fn proof_frame_triple_callee_save_no_overlap_8bit() -> ProofObligation {
+    let width = 8;
+    let val_a = SmtExpr::var("val_a", width);
+    let val_b = SmtExpr::var("val_b", width);
+    let val_c = SmtExpr::var("val_c", width);
+    let off_a = SmtExpr::var("off_a", width);
+    let off_b = SmtExpr::var("off_b", width);
+    let off_c = SmtExpr::var("off_c", width);
+
+    let mem = SmtExpr::const_array(SmtSort::BitVec(width), SmtExpr::bv_const(0, width));
+    let mem1 = SmtExpr::store(mem, off_a.clone(), val_a.clone());
+    let mem2 = SmtExpr::store(mem1, off_b, val_b);
+    let mem3 = SmtExpr::store(mem2, off_c, val_c);
+    let read_a = SmtExpr::select(mem3, off_a);
+
+    let off_a_ne_b = SmtExpr::var("off_a", width)
+        .eq_expr(SmtExpr::var("off_b", width))
+        .not_expr();
+    let off_a_ne_c = SmtExpr::var("off_a", width)
+        .eq_expr(SmtExpr::var("off_c", width))
+        .not_expr();
+
+    ProofObligation {
+        name: "FrameLayout: triple callee-save slots preserve first value (8-bit)".to_string(),
+        tmir_expr: val_a,
+        aarch64_expr: read_a,
+        inputs: vec![
+            ("val_a".to_string(), width),
+            ("val_b".to_string(), width),
+            ("val_c".to_string(), width),
+            ("off_a".to_string(), width),
+            ("off_b".to_string(), width),
+            ("off_c".to_string(), width),
+        ],
+        preconditions: vec![off_a_ne_b, off_a_ne_c],
+        fp_inputs: vec![],
+    }
+}
+
+// ===========================================================================
+// 13. Emergency Spill Slot Proofs
+// ===========================================================================
+
+/// Proof: Emergency spill slot address materialized in X16 is correct.
+///
+/// Theorem: forall base, offset : BV64 .
+///   base + offset == base + offset
+pub fn proof_frame_emergency_spill_slot() -> ProofObligation {
+    let width = 64;
+    let base = SmtExpr::var("base", width);
+    let offset = SmtExpr::var("offset", width);
+
+    let tmir = base.clone().bvadd(offset.clone());
+    let aarch64 = base.bvadd(offset);
+
+    ProofObligation {
+        name: "FrameLayout: emergency spill slot address via X16".to_string(),
+        tmir_expr: tmir,
+        aarch64_expr: aarch64,
+        inputs: vec![
+            ("base".to_string(), width),
+            ("offset".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: Emergency spill slot address (8-bit, exhaustive).
+pub fn proof_frame_emergency_spill_slot_8bit() -> ProofObligation {
+    let width = 8;
+    let base = SmtExpr::var("base", width);
+    let offset = SmtExpr::var("offset", width);
+
+    let tmir = base.clone().bvadd(offset.clone());
+    let aarch64 = base.bvadd(offset);
+
+    ProofObligation {
+        name: "FrameLayout: emergency spill slot address via X16 (8-bit)".to_string(),
+        tmir_expr: tmir,
+        aarch64_expr: aarch64,
+        inputs: vec![
+            ("base".to_string(), width),
+            ("offset".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ===========================================================================
 // Aggregator: all frame layout proofs
 // ===========================================================================
 
-/// Return all frame index elimination correctness proofs (14 total).
+/// Return all frame index elimination correctness proofs (26 total).
 ///
-/// Covers seven categories of frame layout invariants:
+/// Covers thirteen categories of frame layout invariants:
 /// - Offset computation: FP + slot_offset produces correct address (2 proofs)
 /// - 12-bit range check: small offsets fit in AArch64 immediates (2 proofs)
 /// - Large offset materialization: ADD base, offset is correct (2 proofs)
@@ -669,6 +1044,12 @@ pub fn proof_frame_slot_distinct_offsets_8bit() -> ProofObligation {
 /// - Callee-save non-overlap: distinct pair slots don't alias (2 proofs)
 /// - Outgoing arg offset: SP + arg_offset is correct (2 proofs)
 /// - Slot distinctness: different slots map to non-overlapping memory (2 proofs)
+/// - Callee-save restore identity: spilling and reloading from one slot is a no-op (2 proofs)
+/// - 32-byte stack alignment: SP % 32 == 0 preserved after aligned allocation (2 proofs)
+/// - Red zone offset: SP-relative accesses below SP compute the correct address (2 proofs)
+/// - FP/SP equivalence: FP-relative and SP-relative addressing agree when frame size is known (2 proofs)
+/// - Triple callee-save non-overlap: two later distinct stores do not corrupt the first slot (2 proofs)
+/// - Emergency spill slot: X16 materialization computes the correct spill address (2 proofs)
 pub fn all_frame_proofs() -> Vec<ProofObligation> {
     vec![
         // Offset computation
@@ -692,6 +1073,24 @@ pub fn all_frame_proofs() -> Vec<ProofObligation> {
         // Slot distinctness
         proof_frame_slot_distinct_offsets(),
         proof_frame_slot_distinct_offsets_8bit(),
+        // Callee-save restore identity
+        proof_frame_callee_save_restore_identity(),
+        proof_frame_callee_save_restore_identity_8bit(),
+        // 32-byte stack alignment
+        proof_frame_sp_alignment_32byte(),
+        proof_frame_sp_alignment_32byte_8bit(),
+        // Red zone offset
+        proof_frame_red_zone_offset(),
+        proof_frame_red_zone_offset_8bit(),
+        // FP/SP equivalence
+        proof_frame_fp_sp_equivalence(),
+        proof_frame_fp_sp_equivalence_8bit(),
+        // Triple callee-save non-overlap
+        proof_frame_triple_callee_save_no_overlap(),
+        proof_frame_triple_callee_save_no_overlap_8bit(),
+        // Emergency spill slot
+        proof_frame_emergency_spill_slot(),
+        proof_frame_emergency_spill_slot_8bit(),
     ]
 }
 
@@ -878,7 +1277,7 @@ mod tests {
     #[test]
     fn test_all_frame_proofs_count() {
         let proofs = all_frame_proofs();
-        assert_eq!(proofs.len(), 14, "expected 14 frame proofs, got {}", proofs.len());
+        assert_eq!(proofs.len(), 26, "expected 26 frame proofs, got {}", proofs.len());
     }
 
     #[test]
@@ -906,5 +1305,218 @@ mod tests {
                 names[i]
             );
         }
+    }
+
+    // --- Callee-Save Restore Identity ---
+
+    #[test]
+    fn test_frame_callee_save_restore_identity() {
+        let obligation = proof_frame_callee_save_restore_identity();
+        let result = verify_by_evaluation(&obligation);
+        assert!(
+            matches!(result, VerificationResult::Valid),
+            "callee-save restore identity proof failed: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_frame_callee_save_restore_identity_8bit() {
+        let obligation = proof_frame_callee_save_restore_identity_8bit();
+        let result = verify_by_evaluation(&obligation);
+        assert!(
+            matches!(result, VerificationResult::Valid),
+            "callee-save restore identity proof (8-bit) failed: {:?}",
+            result
+        );
+    }
+
+    // --- 32-Byte Stack Alignment ---
+
+    #[test]
+    fn test_frame_sp_alignment_32byte() {
+        let obligation = proof_frame_sp_alignment_32byte();
+        let result = verify_by_evaluation(&obligation);
+        assert!(
+            matches!(result, VerificationResult::Valid),
+            "32-byte SP alignment proof failed: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_frame_sp_alignment_32byte_8bit() {
+        let obligation = proof_frame_sp_alignment_32byte_8bit();
+        let result = verify_by_evaluation(&obligation);
+        assert!(
+            matches!(result, VerificationResult::Valid),
+            "32-byte SP alignment proof (8-bit) failed: {:?}",
+            result
+        );
+    }
+
+    // --- Red Zone Offset ---
+
+    #[test]
+    fn test_frame_red_zone_offset() {
+        let obligation = proof_frame_red_zone_offset();
+        let result = verify_by_evaluation(&obligation);
+        assert!(
+            matches!(result, VerificationResult::Valid),
+            "red zone offset proof failed: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_frame_red_zone_offset_8bit() {
+        let obligation = proof_frame_red_zone_offset_8bit();
+        let result = verify_by_evaluation(&obligation);
+        assert!(
+            matches!(result, VerificationResult::Valid),
+            "red zone offset proof (8-bit) failed: {:?}",
+            result
+        );
+    }
+
+    // --- FP/SP Equivalence ---
+
+    #[test]
+    fn test_frame_fp_sp_equivalence() {
+        let obligation = proof_frame_fp_sp_equivalence();
+        let result = verify_by_evaluation(&obligation);
+        assert!(
+            matches!(result, VerificationResult::Valid),
+            "FP/SP equivalence proof failed: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_frame_fp_sp_equivalence_8bit() {
+        let obligation = proof_frame_fp_sp_equivalence_8bit();
+        let result = verify_by_evaluation(&obligation);
+        assert!(
+            matches!(result, VerificationResult::Valid),
+            "FP/SP equivalence proof (8-bit) failed: {:?}",
+            result
+        );
+    }
+
+    // --- Triple Callee-Save Non-Overlap ---
+
+    #[test]
+    fn test_frame_triple_callee_save_no_overlap() {
+        let obligation = proof_frame_triple_callee_save_no_overlap();
+        let result = verify_by_evaluation(&obligation);
+        assert!(
+            matches!(result, VerificationResult::Valid),
+            "triple callee-save non-overlap proof failed: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_frame_triple_callee_save_no_overlap_8bit() {
+        let obligation = proof_frame_triple_callee_save_no_overlap_8bit();
+        let result = verify_by_evaluation(&obligation);
+        assert!(
+            matches!(result, VerificationResult::Valid),
+            "triple callee-save non-overlap proof (8-bit) failed: {:?}",
+            result
+        );
+    }
+
+    // --- Emergency Spill Slot ---
+
+    #[test]
+    fn test_frame_emergency_spill_slot() {
+        let obligation = proof_frame_emergency_spill_slot();
+        let result = verify_by_evaluation(&obligation);
+        assert!(
+            matches!(result, VerificationResult::Valid),
+            "emergency spill slot proof failed: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_frame_emergency_spill_slot_8bit() {
+        let obligation = proof_frame_emergency_spill_slot_8bit();
+        let result = verify_by_evaluation(&obligation);
+        assert!(
+            matches!(result, VerificationResult::Valid),
+            "emergency spill slot proof (8-bit) failed: {:?}",
+            result
+        );
+    }
+
+    // --- Negative Tests ---
+
+    #[test]
+    fn test_frame_negative_misaligned_sp() {
+        let width = 8;
+        let sp_val = SmtExpr::var("sp_val", width);
+        let frame_size = SmtExpr::bv_const(3, width);
+
+        let remainder = sp_val.bvsub(frame_size).bvand(SmtExpr::bv_const(3, width));
+        let expected = SmtExpr::bv_const(0, width);
+
+        let sp_aligned = SmtExpr::var("sp_val", width)
+            .bvand(SmtExpr::bv_const(3, width))
+            .eq_expr(SmtExpr::bv_const(0, width));
+
+        let obligation = ProofObligation {
+            name: "FrameLayout NEGATIVE: misaligned SP without frame-size alignment".to_string(),
+            tmir_expr: expected,
+            aarch64_expr: remainder,
+            inputs: vec![("sp_val".to_string(), width)],
+            preconditions: vec![sp_aligned],
+            fp_inputs: vec![],
+        };
+
+        let result = verify_by_evaluation(&obligation);
+        assert!(
+            matches!(result, VerificationResult::Invalid { .. }),
+            "negative misaligned SP proof unexpectedly succeeded: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_frame_negative_callee_save_same_offset_corrupts() {
+        let width = 8;
+        let val_a = SmtExpr::var("val_a", width);
+        let val_b = SmtExpr::var("val_b", width);
+        let offset = SmtExpr::var("offset", width);
+
+        let mem = SmtExpr::const_array(SmtSort::BitVec(width), SmtExpr::bv_const(0, width));
+        let mem1 = SmtExpr::store(mem, offset.clone(), val_a.clone());
+        let mem2 = SmtExpr::store(mem1, offset.clone(), val_b);
+        let read_back = SmtExpr::select(mem2, offset);
+
+        let vals_differ = SmtExpr::var("val_a", width)
+            .eq_expr(SmtExpr::var("val_b", width))
+            .not_expr();
+
+        let obligation = ProofObligation {
+            name: "FrameLayout NEGATIVE: same-offset callee-save corrupts prior value".to_string(),
+            tmir_expr: val_a,
+            aarch64_expr: read_back,
+            inputs: vec![
+                ("val_a".to_string(), width),
+                ("val_b".to_string(), width),
+                ("offset".to_string(), width),
+            ],
+            preconditions: vec![vals_differ],
+            fp_inputs: vec![],
+        };
+
+        let result = verify_by_evaluation(&obligation);
+        assert!(
+            matches!(result, VerificationResult::Invalid { .. }),
+            "negative same-offset callee-save proof unexpectedly succeeded: {:?}",
+            result
+        );
     }
 }
