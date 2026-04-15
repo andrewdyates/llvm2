@@ -188,6 +188,12 @@ pub enum ProofCategory {
     /// UXTH, UXTW, AND masking, roundtrip, idempotence).
     /// Source: `ext_trunc_proofs::all_ext_trunc_proofs()`.
     ExtensionTruncation,
+
+    /// Atomic memory operation proofs (LDAR/STLR load-acquire/store-release,
+    /// LDADD/LDSET/LDEOR/SWP/LDCLR read-modify-write, CAS compare-and-swap,
+    /// DMB fence ordering, SUB via NEG+LDADD, AND via MVN+LDCLR equivalences).
+    /// Source: `atomic_proofs::all_atomic_proofs()`.
+    AtomicOperations,
 }
 
 impl ProofCategory {
@@ -227,6 +233,7 @@ impl ProofCategory {
             ProofCategory::IfConversion,
             ProofCategory::FpConversion,
             ProofCategory::ExtensionTruncation,
+            ProofCategory::AtomicOperations,
         ]
     }
 
@@ -266,6 +273,7 @@ impl ProofCategory {
             ProofCategory::IfConversion => "If-Conversion",
             ProofCategory::FpConversion => "FP Conversion",
             ProofCategory::ExtensionTruncation => "Extension/Truncation",
+            ProofCategory::AtomicOperations => "Atomic Operations",
         }
     }
 }
@@ -532,6 +540,13 @@ fn register_ext_trunc_proofs(proofs: &mut Vec<CategorizedProof>) {
     }
 }
 
+#[inline(never)]
+fn register_atomic_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::atomic_proofs::all_atomic_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::AtomicOperations });
+    }
+}
+
 impl ProofDatabase {
     /// Construct the database by collecting all proofs from all registries.
     ///
@@ -557,6 +572,7 @@ impl ProofDatabase {
         register_if_convert_proofs(&mut proofs);
         register_fp_convert_proofs(&mut proofs);
         register_ext_trunc_proofs(&mut proofs);
+        register_atomic_proofs(&mut proofs);
         ProofDatabase { proofs }
     }
 
@@ -913,8 +929,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            33,
-            "expected 33 categories, got {}",
+            34,
+            "expected 34 categories, got {}",
             categories.len()
         );
     }
