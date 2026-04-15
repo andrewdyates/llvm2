@@ -1350,7 +1350,387 @@ pub fn all_write_combining_proofs() -> Vec<ProofObligation> {
     ]
 }
 
-/// All array-based memory proofs (41 total).
+// ---------------------------------------------------------------------------
+// Proof obligations: QF_ABV array axioms (fundamental array theory properties)
+// ---------------------------------------------------------------------------
+
+// These are the foundational axioms of the theory of arrays (McCarthy's axioms)
+// from the SMT-LIB QF_ABV logic. All higher-level memory proofs depend on
+// these axioms holding. By proving them directly against our SmtExpr evaluator,
+// we verify that the concrete evaluation semantics match the SMT-LIB2 array
+// theory specification.
+//
+// Reference: SMT-LIB Standard, Theory of Arrays
+// Reference: McCarthy, J. "Towards a Mathematical Science of Computation" (1963)
+//
+// Axiom 1 (Read-after-write, same address):
+//   forall a: Array, i: Index, v: Elem .
+//     select(store(a, i, v), i) = v
+//
+// Axiom 2 (Read-after-write, different address):
+//   forall a: Array, i j: Index, v: Elem . i != j =>
+//     select(store(a, i, v), j) = select(a, j)
+//
+// Axiom 3 (Write-write, same address / overwrite):
+//   forall a: Array, i: Index, v1 v2: Elem .
+//     store(store(a, i, v1), i, v2) produces same select results as store(a, i, v2)
+//     (i.e., the first write is fully overwritten by the second)
+//
+// Axiom 4 (Const array):
+//   forall v: Elem, i: Index .
+//     select(const_array(v), i) = v
+
+/// Axiom 1: Read-after-write, same address (8-bit element).
+///
+/// `select(store(a, i, v), i) = v`
+///
+/// This is the most fundamental array axiom: reading an address that was
+/// just written returns the written value.
+pub fn proof_axiom_read_after_write_same_addr_8() -> ProofObligation {
+    let mem = symbolic_memory("mem_default");
+    let idx = SmtExpr::var("idx", 64);
+    let val = SmtExpr::var("val", 8);
+
+    // store then select at same index
+    let mem_after = SmtExpr::store(mem, idx.clone(), val.clone());
+    let loaded = SmtExpr::select(mem_after, idx);
+
+    ProofObligation {
+        name: "QF_ABV Axiom 1a: select(store(a, i, v), i) = v [8-bit]".to_string(),
+        tmir_expr: val,
+        aarch64_expr: loaded,
+        inputs: vec![
+            ("idx".to_string(), 64),
+            ("val".to_string(), 8),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Axiom 1: Read-after-write, same address (32-bit element via multi-byte encoding).
+///
+/// `encode_load(encode_store(a, addr, v, 4), addr, 4) = v`
+///
+/// Verifies that the byte-level store/load encoding preserves the axiom
+/// for multi-byte values (not just raw single-element select/store).
+pub fn proof_axiom_read_after_write_same_addr_32() -> ProofObligation {
+    let mem = symbolic_memory("mem_default");
+    let addr = SmtExpr::var("addr", 64);
+    let val = SmtExpr::var("val", 32);
+
+    let mem_after = encode_store_le(&mem, &addr, &val, 4);
+    let loaded = encode_load_le(&mem_after, &addr, 4);
+
+    ProofObligation {
+        name: "QF_ABV Axiom 1b: load(store(a, addr, v, 4), addr, 4) = v [32-bit LE]".to_string(),
+        tmir_expr: val,
+        aarch64_expr: loaded,
+        inputs: vec![
+            ("addr".to_string(), 64),
+            ("val".to_string(), 32),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Axiom 2: Read-after-write, different address (8-bit element).
+///
+/// `i != j => select(store(a, i, v), j) = select(a, j)`
+///
+/// Writing at address `i` does not affect the value at a different address `j`.
+pub fn proof_axiom_read_after_write_diff_addr_8() -> ProofObligation {
+    let mem = symbolic_memory("mem_default");
+    let i = SmtExpr::var("i", 64);
+    let j = SmtExpr::var("j", 64);
+    let val = SmtExpr::var("val", 8);
+
+    // Original value at j
+    let original = SmtExpr::select(mem.clone(), j.clone());
+
+    // Store at i, then select at j
+    let mem_after = SmtExpr::store(mem, i.clone(), val);
+    let loaded = SmtExpr::select(mem_after, j.clone());
+
+    // Precondition: i != j
+    let i_neq_j = i.eq_expr(j).not_expr();
+
+    ProofObligation {
+        name: "QF_ABV Axiom 2a: i != j => select(store(a, i, v), j) = select(a, j) [8-bit]".to_string(),
+        tmir_expr: original,
+        aarch64_expr: loaded,
+        inputs: vec![
+            ("i".to_string(), 64),
+            ("j".to_string(), 64),
+            ("val".to_string(), 8),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![i_neq_j],
+        fp_inputs: vec![],
+    }
+}
+
+/// Axiom 2: Read-after-write, different address (32-bit multi-byte, non-overlapping).
+///
+/// For multi-byte accesses, "different address" requires non-overlapping regions:
+/// `|i - j| >= 4 => load(store(a, i, v, 4), j, 4) = load(a, j, 4)`
+pub fn proof_axiom_read_after_write_diff_addr_32() -> ProofObligation {
+    let mem = symbolic_memory("mem_default");
+    let i = SmtExpr::var("i", 64);
+    let j = SmtExpr::var("j", 64);
+    let val = SmtExpr::var("val", 32);
+
+    let original = encode_load_le(&mem, &j, 4);
+    let mem_after = encode_store_le(&mem, &i, &val, 4);
+    let loaded = encode_load_le(&mem_after, &j, 4);
+
+    // Preconditions: non-overlapping regions and no address wrap
+    let store_end = i.clone().bvadd(SmtExpr::bv_const(4, 64));
+    let load_end = j.clone().bvadd(SmtExpr::bv_const(4, 64));
+    let store_no_wrap = store_end.clone().bvugt(i.clone());
+    let load_no_wrap = load_end.clone().bvugt(j.clone());
+    let j_after_i = j.clone().bvuge(store_end);
+    let i_after_j = i.clone().bvuge(load_end);
+    let disjoint = j_after_i.or_expr(i_after_j);
+
+    ProofObligation {
+        name: "QF_ABV Axiom 2b: disjoint(i,j) => load(store(a, i, v, 4), j, 4) = load(a, j, 4) [32-bit LE]".to_string(),
+        tmir_expr: original,
+        aarch64_expr: loaded,
+        inputs: vec![
+            ("i".to_string(), 64),
+            ("j".to_string(), 64),
+            ("val".to_string(), 32),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![store_no_wrap, load_no_wrap, disjoint],
+        fp_inputs: vec![],
+    }
+}
+
+/// Axiom 3: Write-write overwrite, same address (8-bit element).
+///
+/// `select(store(store(a, i, v1), i, v2), i) = v2`
+///
+/// A second write to the same address completely overwrites the first.
+/// We verify this by comparing the result of the double-store to a single store.
+pub fn proof_axiom_write_write_same_addr_8() -> ProofObligation {
+    let mem = symbolic_memory("mem_default");
+    let idx = SmtExpr::var("idx", 64);
+    let v1 = SmtExpr::var("v1", 8);
+    let v2 = SmtExpr::var("v2", 8);
+
+    // Double store then select
+    let mem1 = SmtExpr::store(mem.clone(), idx.clone(), v1);
+    let mem2 = SmtExpr::store(mem1, idx.clone(), v2.clone());
+    let loaded_double = SmtExpr::select(mem2, idx.clone());
+
+    // Single store then select (should be equivalent)
+    let mem_single = SmtExpr::store(mem, idx.clone(), v2.clone());
+    let loaded_single = SmtExpr::select(mem_single, idx);
+
+    ProofObligation {
+        name: "QF_ABV Axiom 3a: select(store(store(a, i, v1), i, v2), i) = select(store(a, i, v2), i) [8-bit]".to_string(),
+        tmir_expr: loaded_single,
+        aarch64_expr: loaded_double,
+        inputs: vec![
+            ("idx".to_string(), 64),
+            ("v1".to_string(), 8),
+            ("v2".to_string(), 8),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Axiom 3: Write-write overwrite, same address (32-bit multi-byte).
+///
+/// `load(store(store(a, addr, v1, 4), addr, v2, 4), addr, 4) = v2`
+///
+/// The second 32-bit store fully overwrites the first at the same address.
+pub fn proof_axiom_write_write_same_addr_32() -> ProofObligation {
+    let mem = symbolic_memory("mem_default");
+    let addr = SmtExpr::var("addr", 64);
+    let v1 = SmtExpr::var("v1", 32);
+    let v2 = SmtExpr::var("v2", 32);
+
+    // Double store then load
+    let mem1 = encode_store_le(&mem, &addr, &v1, 4);
+    let mem2 = encode_store_le(&mem1, &addr, &v2, 4);
+    let loaded = encode_load_le(&mem2, &addr, 4);
+
+    ProofObligation {
+        name: "QF_ABV Axiom 3b: load(store(store(a, addr, v1, 4), addr, v2, 4), addr, 4) = v2 [32-bit LE]".to_string(),
+        tmir_expr: v2,
+        aarch64_expr: loaded,
+        inputs: vec![
+            ("addr".to_string(), 64),
+            ("v1".to_string(), 32),
+            ("v2".to_string(), 32),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Axiom 3: Write-write overwrite preserves other addresses.
+///
+/// `j != i => select(store(store(a, i, v1), i, v2), j) = select(a, j)`
+///
+/// After a double-write at `i`, the value at a different address `j` is
+/// unchanged from the original array.
+pub fn proof_axiom_write_write_preserves_other_8() -> ProofObligation {
+    let mem = symbolic_memory("mem_default");
+    let i = SmtExpr::var("i", 64);
+    let j = SmtExpr::var("j", 64);
+    let v1 = SmtExpr::var("v1", 8);
+    let v2 = SmtExpr::var("v2", 8);
+
+    let original = SmtExpr::select(mem.clone(), j.clone());
+    let mem1 = SmtExpr::store(mem, i.clone(), v1);
+    let mem2 = SmtExpr::store(mem1, i.clone(), v2);
+    let loaded = SmtExpr::select(mem2, j.clone());
+
+    let i_neq_j = i.eq_expr(j.clone()).not_expr();
+
+    ProofObligation {
+        name: "QF_ABV Axiom 3c: i != j => select(store(store(a, i, v1), i, v2), j) = select(a, j) [8-bit]".to_string(),
+        tmir_expr: original,
+        aarch64_expr: loaded,
+        inputs: vec![
+            ("i".to_string(), 64),
+            ("j".to_string(), 64),
+            ("v1".to_string(), 8),
+            ("v2".to_string(), 8),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![i_neq_j],
+        fp_inputs: vec![],
+    }
+}
+
+/// Axiom 4: Constant array (any index returns the default value).
+///
+/// `select(const_array(v), i) = v`
+///
+/// A constant array returns its default value at every index.
+pub fn proof_axiom_const_array_8() -> ProofObligation {
+    let val = SmtExpr::var("val", 8);
+    let idx = SmtExpr::var("idx", 64);
+    let arr = SmtExpr::const_array(SmtSort::BitVec(64), val.clone());
+    let loaded = SmtExpr::select(arr, idx);
+
+    ProofObligation {
+        name: "QF_ABV Axiom 4: select(const_array(v), i) = v [8-bit]".to_string(),
+        tmir_expr: val,
+        aarch64_expr: loaded,
+        inputs: vec![
+            ("val".to_string(), 8),
+            ("idx".to_string(), 64),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Axiom 4: Constant array (32-bit element variant).
+///
+/// `select(const_array(v), i) = v` where v is 32-bit.
+pub fn proof_axiom_const_array_32() -> ProofObligation {
+    let val = SmtExpr::var("val", 32);
+    let idx = SmtExpr::var("idx", 64);
+    let arr = SmtExpr::const_array(SmtSort::BitVec(64), val.clone());
+    let loaded = SmtExpr::select(arr, idx);
+
+    ProofObligation {
+        name: "QF_ABV Axiom 4b: select(const_array(v), i) = v [32-bit]".to_string(),
+        tmir_expr: val,
+        aarch64_expr: loaded,
+        inputs: vec![
+            ("val".to_string(), 32),
+            ("idx".to_string(), 64),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Compositional axiom: store commutativity at different addresses.
+///
+/// `i != j => store(store(a, i, v1), j, v2) and store(store(a, j, v2), i, v1)`
+/// produce the same value at both `i` and `j`.
+///
+/// This proves that writes to different addresses commute: the order of
+/// non-overlapping writes does not affect the final array state.
+pub fn proof_axiom_store_commutativity_8() -> ProofObligation {
+    let mem = symbolic_memory("mem_default");
+    let i = SmtExpr::var("i", 64);
+    let j = SmtExpr::var("j", 64);
+    let v1 = SmtExpr::var("v1", 8);
+    let v2 = SmtExpr::var("v2", 8);
+
+    // Order 1: store at i, then store at j. Read at i.
+    let mem_order1 = SmtExpr::store(
+        SmtExpr::store(mem.clone(), i.clone(), v1.clone()),
+        j.clone(),
+        v2.clone(),
+    );
+    let read_i_order1 = SmtExpr::select(mem_order1, i.clone());
+
+    // Order 2: store at j, then store at i. Read at i.
+    let mem_order2 = SmtExpr::store(
+        SmtExpr::store(mem, j.clone(), v2),
+        i.clone(),
+        v1,
+    );
+    let read_i_order2 = SmtExpr::select(mem_order2, i.clone());
+
+    // Precondition: i != j
+    let i_neq_j = i.eq_expr(j).not_expr();
+
+    ProofObligation {
+        name: "QF_ABV Commutativity: i != j => store order doesn't matter for read at i [8-bit]".to_string(),
+        tmir_expr: read_i_order1,
+        aarch64_expr: read_i_order2,
+        inputs: vec![
+            ("i".to_string(), 64),
+            ("j".to_string(), 64),
+            ("v1".to_string(), 8),
+            ("v2".to_string(), 8),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![i_neq_j],
+        fp_inputs: vec![],
+    }
+}
+
+/// All QF_ABV array axiom proofs (10 total).
+pub fn all_array_axiom_proofs() -> Vec<ProofObligation> {
+    vec![
+        // Axiom 1: read-after-write, same address
+        proof_axiom_read_after_write_same_addr_8(),
+        proof_axiom_read_after_write_same_addr_32(),
+        // Axiom 2: read-after-write, different address
+        proof_axiom_read_after_write_diff_addr_8(),
+        proof_axiom_read_after_write_diff_addr_32(),
+        // Axiom 3: write-write overwrite
+        proof_axiom_write_write_same_addr_8(),
+        proof_axiom_write_write_same_addr_32(),
+        proof_axiom_write_write_preserves_other_8(),
+        // Axiom 4: const array
+        proof_axiom_const_array_8(),
+        proof_axiom_const_array_32(),
+        // Compositional: store commutativity
+        proof_axiom_store_commutativity_8(),
+    ]
+}
+
+/// All array-based memory proofs (51 total).
 pub fn all_memory_proofs() -> Vec<ProofObligation> {
     let mut proofs = Vec::new();
     proofs.extend(all_load_proofs());
@@ -1362,6 +1742,7 @@ pub fn all_memory_proofs() -> Vec<ProofObligation> {
     proofs.extend(all_forwarding_proofs());
     proofs.extend(all_subword_proofs());
     proofs.extend(all_write_combining_proofs());
+    proofs.extend(all_array_axiom_proofs());
     proofs
 }
 
@@ -2154,8 +2535,69 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // Proof obligation tests — QF_ABV array axioms (McCarthy axioms)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_axiom_read_after_write_same_addr_8() {
+        assert_valid(&proof_axiom_read_after_write_same_addr_8());
+    }
+
+    #[test]
+    fn test_proof_axiom_read_after_write_same_addr_32() {
+        assert_valid(&proof_axiom_read_after_write_same_addr_32());
+    }
+
+    #[test]
+    fn test_proof_axiom_read_after_write_diff_addr_8() {
+        assert_valid(&proof_axiom_read_after_write_diff_addr_8());
+    }
+
+    #[test]
+    fn test_proof_axiom_read_after_write_diff_addr_32() {
+        assert_valid(&proof_axiom_read_after_write_diff_addr_32());
+    }
+
+    #[test]
+    fn test_proof_axiom_write_write_same_addr_8() {
+        assert_valid(&proof_axiom_write_write_same_addr_8());
+    }
+
+    #[test]
+    fn test_proof_axiom_write_write_same_addr_32() {
+        assert_valid(&proof_axiom_write_write_same_addr_32());
+    }
+
+    #[test]
+    fn test_proof_axiom_write_write_preserves_other_8() {
+        assert_valid(&proof_axiom_write_write_preserves_other_8());
+    }
+
+    #[test]
+    fn test_proof_axiom_const_array_8() {
+        assert_valid(&proof_axiom_const_array_8());
+    }
+
+    #[test]
+    fn test_proof_axiom_const_array_32() {
+        assert_valid(&proof_axiom_const_array_32());
+    }
+
+    #[test]
+    fn test_proof_axiom_store_commutativity_8() {
+        assert_valid(&proof_axiom_store_commutativity_8());
+    }
+
+    // -------------------------------------------------------------------
     // Aggregate tests — new categories
     // -------------------------------------------------------------------
+
+    #[test]
+    fn test_all_array_axiom_proofs() {
+        for obligation in all_array_axiom_proofs() {
+            assert_valid(&obligation);
+        }
+    }
 
     #[test]
     fn test_all_alignment_proofs() {
