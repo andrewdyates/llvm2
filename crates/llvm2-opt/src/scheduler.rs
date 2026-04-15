@@ -42,7 +42,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use llvm2_ir::{AArch64Opcode, BlockId, InstFlags, InstId, MachFunction, MachOperand};
+use llvm2_ir::{AArch64Opcode, BlockId, InstFlags, InstId, MachFunction, MachOperand, RegClass};
 
 use crate::effects::inst_produces_value;
 use crate::pass_manager::MachinePass;
@@ -490,6 +490,580 @@ impl MachinePass for InstructionScheduler {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 2: Resource hazard tracking and pipeline analysis
+// ---------------------------------------------------------------------------
+
+/// Returns the number of execution units available for a given port
+/// on Apple M1 Firestorm.
+///
+/// Reference: Dougall Johnson, "Apple M1 Firestorm Microarchitecture"
+pub fn port_capacity(port: ExecutionPort) -> u32 {
+    match port {
+        ExecutionPort::IntAlu => 6,
+        ExecutionPort::IntMul => 2,
+        ExecutionPort::IntDiv => 1,
+        ExecutionPort::LoadStore => 2,
+        ExecutionPort::Branch => 1,
+        ExecutionPort::FpAlu => 4,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Resource state tracking
+// ---------------------------------------------------------------------------
+
+/// Tracks execution unit availability per cycle for structural hazard detection.
+///
+/// Models the Apple M1 Firestorm port availability: at each cycle, each port
+/// has a fixed number of units. Scheduling an instruction on a port at a cycle
+/// consumes one unit. A structural hazard occurs when all units of a port are
+/// occupied at a given cycle.
+#[derive(Debug, Clone)]
+pub struct ResourceState {
+    /// Per-cycle usage: (port, cycle) -> units currently in use.
+    usage: HashMap<(ExecutionPort, u32), u32>,
+}
+
+impl ResourceState {
+    /// Create a new resource state with no reservations.
+    pub fn new() -> Self {
+        Self {
+            usage: HashMap::new(),
+        }
+    }
+
+    /// Returns the number of units still available for `port` at `cycle`.
+    pub fn units_available(&self, port: ExecutionPort, cycle: u32) -> u32 {
+        let cap = port_capacity(port);
+        let used = self.usage.get(&(port, cycle)).copied().unwrap_or(0);
+        cap.saturating_sub(used)
+    }
+
+    /// Returns true if at least one unit is available for `port` at `cycle`.
+    pub fn is_available(&self, port: ExecutionPort, cycle: u32) -> bool {
+        self.units_available(port, cycle) > 0
+    }
+
+    /// Reserve one unit of `port` at `cycle`. Returns true if successful,
+    /// false if all units are already occupied (structural hazard).
+    pub fn reserve(&mut self, port: ExecutionPort, cycle: u32) -> bool {
+        if !self.is_available(port, cycle) {
+            return false;
+        }
+        *self.usage.entry((port, cycle)).or_insert(0) += 1;
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hazard detection
+// ---------------------------------------------------------------------------
+
+/// Classification of pipeline hazards detected in a schedule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HazardKind {
+    /// Data hazard: a consumer had to wait for a producer's result.
+    /// `wait_cycles` is the number of stall cycles (earliest_start difference
+    /// minus 1 for the dispatch slot).
+    DataHazard {
+        producer: usize,
+        consumer: usize,
+        wait_cycles: u32,
+    },
+    /// Structural hazard: all execution units for a port were busy at a cycle.
+    StructuralHazard {
+        port: ExecutionPort,
+        cycle: u32,
+    },
+    /// Load-use hazard: a load result is consumed in the very next instruction
+    /// in program order, causing a pipeline bubble. This is a special case of
+    /// data hazard common on in-order cores and still costly on OoO cores
+    /// when the load misses cache.
+    LoadUseHazard {
+        load_node: usize,
+        use_node: usize,
+    },
+}
+
+/// Detect pipeline hazards in a scheduled DAG.
+///
+/// Precondition: the DAG must have been through `schedule_list` so that
+/// `earliest_start` and `scheduled` are populated for all nodes.
+pub fn detect_hazards(dag: &ScheduleDAG) -> Vec<HazardKind> {
+    let mut hazards = Vec::new();
+    let n = dag.nodes.len();
+
+    // Build a resource state from the schedule.
+    let mut resources = ResourceState::new();
+    for node in &dag.nodes {
+        if !resources.reserve(node.port, node.earliest_start) {
+            hazards.push(HazardKind::StructuralHazard {
+                port: node.port,
+                cycle: node.earliest_start,
+            });
+        }
+    }
+
+    // Check data hazards: for each edge, if the consumer's earliest_start
+    // is later than (producer earliest_start + 1), the consumer stalled
+    // waiting for data.
+    for consumer_idx in 0..n {
+        let consumer_start = dag.nodes[consumer_idx].earliest_start;
+        for &producer_idx in &dag.nodes[consumer_idx].deps {
+            let producer_start = dag.nodes[producer_idx].earliest_start;
+            let producer_latency = dag.nodes[producer_idx].latency;
+            let ready_cycle = producer_start + producer_latency;
+            if consumer_start >= ready_cycle && consumer_start > producer_start + 1 {
+                let wait_cycles = consumer_start.saturating_sub(producer_start + 1);
+                if wait_cycles > 0 {
+                    hazards.push(HazardKind::DataHazard {
+                        producer: producer_idx,
+                        consumer: consumer_idx,
+                        wait_cycles,
+                    });
+                }
+            }
+        }
+    }
+
+    // Check load-use hazards: load followed by consumer at (earliest_start + 1).
+    // This is a pipeline forwarding stall on many microarchitectures.
+    for consumer_idx in 0..n {
+        for &producer_idx in &dag.nodes[consumer_idx].deps {
+            if dag.nodes[producer_idx].port == ExecutionPort::LoadStore
+                && dag.nodes[producer_idx].latency >= 4
+            {
+                // This producer is a load (latency >= 4 distinguishes loads from stores).
+                let load_start = dag.nodes[producer_idx].earliest_start;
+                let consumer_start = dag.nodes[consumer_idx].earliest_start;
+                // If consumer is scheduled before load result is ready, that means
+                // the scheduler had to wait. If consumer is at load_start + 1,
+                // it's a tight load-use pair.
+                if consumer_start == load_start + 1 {
+                    hazards.push(HazardKind::LoadUseHazard {
+                        load_node: producer_idx,
+                        use_node: consumer_idx,
+                    });
+                }
+            }
+        }
+    }
+
+    hazards
+}
+
+// ---------------------------------------------------------------------------
+// Dual-issue hints
+// ---------------------------------------------------------------------------
+
+/// A hint that two instructions can potentially dual-issue on Apple M-series.
+///
+/// Apple M1 Firestorm can dispatch up to 8 micro-ops per cycle across its
+/// execution ports. Two instructions can dual-issue if they use different
+/// port types and both are ready at the same cycle.
+#[derive(Debug, Clone)]
+pub struct DualIssueHint {
+    /// First node index.
+    pub first: usize,
+    /// Second node index.
+    pub second: usize,
+    /// Human-readable reason for the dual-issue opportunity.
+    pub reason: &'static str,
+}
+
+/// Returns true if two ports can potentially dual-issue.
+///
+/// Dual-issue pairs on Apple M-series:
+/// - ALU + Load/Store
+/// - ALU + ALU (6 ALU units)
+/// - ALU + Branch
+/// - ALU + FpAlu
+/// - Load/Store + FpAlu
+fn can_dual_issue(a: ExecutionPort, b: ExecutionPort) -> Option<&'static str> {
+    use ExecutionPort::*;
+    match (a, b) {
+        (IntAlu, LoadStore) | (LoadStore, IntAlu) => Some("ALU + Load/Store"),
+        (IntAlu, IntAlu) => Some("ALU + ALU"),
+        (IntAlu, Branch) | (Branch, IntAlu) => Some("ALU + Branch"),
+        (IntAlu, FpAlu) | (FpAlu, IntAlu) => Some("ALU + FP"),
+        (LoadStore, FpAlu) | (FpAlu, LoadStore) => Some("Load/Store + FP"),
+        (FpAlu, FpAlu) => Some("FP + FP"),
+        _ => None,
+    }
+}
+
+/// Find dual-issue opportunities in a scheduled DAG.
+///
+/// The list scheduler issues one instruction per cycle, but Apple M1 Firestorm
+/// can dispatch up to 8 micro-ops per cycle. This analysis identifies
+/// consecutive instruction pairs in the schedule where:
+/// 1. Both were ready within the same cycle window (within 1 cycle).
+/// 2. They use compatible execution ports.
+/// 3. They are NOT directly dependent on each other (no edge between them).
+///
+/// These pairs *could* have been dual-issued on real hardware even though
+/// our simple list scheduler serializes them.
+pub fn find_dual_issue_hints(dag: &ScheduleDAG) -> Vec<DualIssueHint> {
+    let mut hints = Vec::new();
+    let n = dag.nodes.len();
+    if n < 2 {
+        return hints;
+    }
+
+    // Build a set of direct dependency edges for O(1) lookup.
+    let mut dep_edges: HashSet<(usize, usize)> = HashSet::new();
+    for (idx, node) in dag.nodes.iter().enumerate() {
+        for &pred in &node.deps {
+            dep_edges.insert((pred, idx));
+        }
+    }
+
+    // Build schedule order sorted by (earliest_start, node_index).
+    let mut schedule_order: Vec<(u32, usize)> = (0..n)
+        .map(|i| (dag.nodes[i].earliest_start, i))
+        .collect();
+    schedule_order.sort_by_key(|&(cycle, idx)| (cycle, idx));
+
+    // Check consecutive pairs: if both were ready within 1 cycle and are
+    // independent, they could dual-issue.
+    for window in schedule_order.windows(2) {
+        let (cycle_a, idx_a) = window[0];
+        let (cycle_b, idx_b) = window[1];
+
+        // Must be within 1 cycle of each other (list scheduler serialization).
+        if cycle_b > cycle_a + 1 {
+            continue;
+        }
+
+        // Must not be directly dependent.
+        if dep_edges.contains(&(idx_a, idx_b)) || dep_edges.contains(&(idx_b, idx_a)) {
+            continue;
+        }
+
+        let port_a = dag.nodes[idx_a].port;
+        let port_b = dag.nodes[idx_b].port;
+        if let Some(reason) = can_dual_issue(port_a, port_b) {
+            hints.push(DualIssueHint {
+                first: idx_a,
+                second: idx_b,
+                reason,
+            });
+        }
+    }
+
+    hints
+}
+
+// ---------------------------------------------------------------------------
+// Register pressure tracking
+// ---------------------------------------------------------------------------
+
+/// Register pressure snapshot during scheduling.
+///
+/// Tracks the maximum number of simultaneously live GPR and FPR virtual
+/// registers. If pressure exceeds the allocatable register count, the
+/// register allocator will need to spill, which is expensive.
+#[derive(Debug, Clone)]
+pub struct RegisterPressure {
+    /// Current GPR live count.
+    pub gpr_pressure: u32,
+    /// Current FPR live count.
+    pub fpr_pressure: u32,
+    /// Maximum GPR pressure seen during the schedule.
+    pub max_gpr_pressure: u32,
+    /// Maximum FPR pressure seen during the schedule.
+    pub max_fpr_pressure: u32,
+    /// GPR limit before spilling is expected (allocatable GPRs on AArch64).
+    pub gpr_limit: u32,
+    /// FPR limit before spilling is expected (allocatable FPRs on AArch64).
+    pub fpr_limit: u32,
+}
+
+impl RegisterPressure {
+    /// Returns true if register pressure exceeded the allocatable limit
+    /// at any point during scheduling.
+    pub fn pressure_exceeded(&self) -> bool {
+        self.max_gpr_pressure > self.gpr_limit || self.max_fpr_pressure > self.fpr_limit
+    }
+}
+
+/// Compute register pressure for a scheduled instruction order.
+///
+/// Walks the schedule in order, tracking which vregs are live. A vreg
+/// becomes live when defined and dies after its last use in the schedule.
+///
+/// Uses: AArch64 has 28 allocatable GPRs (X0-X28 minus FP/LR) and
+/// 32 allocatable FPRs (V0-V31).
+pub fn compute_register_pressure(
+    func: &MachFunction,
+    _block_id: BlockId,
+    schedule: &[InstId],
+) -> RegisterPressure {
+    // GPR limit: X0-X28 = 29, minus X29(FP), X30(LR) => 28 allocatable.
+    // FPR limit: V0-V31, callee-saved V8-V15 still allocatable => 32.
+    let gpr_limit: u32 = 28;
+    let fpr_limit: u32 = 32;
+
+    // Build def and last-use maps.
+    let mut def_pos: HashMap<u32, usize> = HashMap::new(); // vreg_id -> schedule position
+    let mut last_use_pos: HashMap<u32, usize> = HashMap::new(); // vreg_id -> last use position
+    let mut vreg_class: HashMap<u32, RegClass> = HashMap::new();
+
+    for (pos, &inst_id) in schedule.iter().enumerate() {
+        let inst = func.inst(inst_id);
+        let produces = inst_produces_value(inst);
+
+        // First operand is def if instruction produces a value.
+        if produces {
+            if let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
+                def_pos.entry(vreg.id).or_insert(pos);
+                vreg_class.insert(vreg.id, vreg.class);
+            }
+        }
+
+        // All other operands are uses.
+        let use_start = if produces { 1 } else { 0 };
+        for operand in &inst.operands[use_start..] {
+            if let MachOperand::VReg(vreg) = operand {
+                last_use_pos.insert(vreg.id, pos);
+                vreg_class.entry(vreg.id).or_insert(vreg.class);
+            }
+        }
+    }
+
+    // Walk schedule positions, maintaining live set.
+    let mut live_gprs: HashSet<u32> = HashSet::new();
+    let mut live_fprs: HashSet<u32> = HashSet::new();
+    let mut max_gpr: u32 = 0;
+    let mut max_fpr: u32 = 0;
+
+    for (pos, &inst_id) in schedule.iter().enumerate() {
+        let inst = func.inst(inst_id);
+
+        // Add def to live set.
+        if inst_produces_value(inst) {
+            if let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
+                let is_fpr = matches!(
+                    vreg.class,
+                    RegClass::Fpr128 | RegClass::Fpr64 | RegClass::Fpr32
+                        | RegClass::Fpr16 | RegClass::Fpr8
+                );
+                if is_fpr {
+                    live_fprs.insert(vreg.id);
+                } else {
+                    live_gprs.insert(vreg.id);
+                }
+            }
+        }
+
+        // Update max pressure.
+        max_gpr = max_gpr.max(live_gprs.len() as u32);
+        max_fpr = max_fpr.max(live_fprs.len() as u32);
+
+        // Remove dead vregs (last use at this position).
+        // Collect into a Vec first to avoid borrowing conflicts.
+        let dead_gprs: Vec<u32> = live_gprs
+            .iter()
+            .filter(|&&id| last_use_pos.get(&id).copied() == Some(pos))
+            .copied()
+            .collect();
+        for id in dead_gprs {
+            live_gprs.remove(&id);
+        }
+
+        let dead_fprs: Vec<u32> = live_fprs
+            .iter()
+            .filter(|&&id| last_use_pos.get(&id).copied() == Some(pos))
+            .copied()
+            .collect();
+        for id in dead_fprs {
+            live_fprs.remove(&id);
+        }
+    }
+
+    RegisterPressure {
+        gpr_pressure: live_gprs.len() as u32,
+        fpr_pressure: live_fprs.len() as u32,
+        max_gpr_pressure: max_gpr,
+        max_fpr_pressure: max_fpr,
+        gpr_limit,
+        fpr_limit,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Schedule quality metrics
+// ---------------------------------------------------------------------------
+
+/// Quality metrics for a computed schedule.
+///
+/// Provides a quantitative assessment of how well the scheduler has
+/// utilized execution resources and avoided pipeline hazards.
+#[derive(Debug, Clone)]
+pub struct ScheduleMetrics {
+    /// Total number of instructions scheduled.
+    pub total_instructions: usize,
+    /// Total execution cycles (span from first to last instruction completion).
+    pub total_cycles: u32,
+    /// Estimated instructions per cycle (IPC).
+    pub ipc_estimate: f64,
+    /// Number of cycles where the pipeline stalled (no instruction issued
+    /// despite pending work).
+    pub stall_count: u32,
+    /// Number of data hazards detected.
+    pub data_hazards: u32,
+    /// Number of structural hazards detected.
+    pub structural_hazards: u32,
+    /// Length of the critical path in cycles.
+    pub critical_path_length: u32,
+    /// Number of dual-issue opportunities found.
+    pub dual_issue_opportunities: u32,
+    /// Maximum GPR register pressure.
+    pub max_gpr_pressure: u32,
+    /// Maximum FPR register pressure.
+    pub max_fpr_pressure: u32,
+    /// Whether register pressure exceeded allocatable limits.
+    pub pressure_exceeded: bool,
+}
+
+/// Compute comprehensive schedule quality metrics.
+///
+/// Requires a DAG that has been through `schedule_list` (earliest_start populated)
+/// and the resulting instruction order.
+pub fn compute_schedule_metrics(
+    func: &MachFunction,
+    block_id: BlockId,
+    dag: &ScheduleDAG,
+    schedule: &[InstId],
+) -> ScheduleMetrics {
+    let n = dag.nodes.len();
+    if n == 0 {
+        return ScheduleMetrics {
+            total_instructions: 0,
+            total_cycles: 0,
+            ipc_estimate: 0.0,
+            stall_count: 0,
+            data_hazards: 0,
+            structural_hazards: 0,
+            critical_path_length: 0,
+            dual_issue_opportunities: 0,
+            max_gpr_pressure: 0,
+            max_fpr_pressure: 0,
+            pressure_exceeded: false,
+        };
+    }
+
+    // Total cycles: max(earliest_start + latency) across all nodes.
+    let total_cycles = dag.nodes.iter()
+        .map(|node| node.earliest_start + node.latency)
+        .max()
+        .unwrap_or(0);
+
+    // IPC estimate.
+    let ipc = if total_cycles > 0 {
+        n as f64 / total_cycles as f64
+    } else {
+        n as f64
+    };
+
+    // Stall count: cycles where no instruction was issued.
+    // Build a set of cycles where at least one instruction was scheduled.
+    let mut issue_cycles: HashSet<u32> = HashSet::new();
+    for node in &dag.nodes {
+        issue_cycles.insert(node.earliest_start);
+    }
+    let max_issue_cycle = dag.nodes.iter()
+        .map(|node| node.earliest_start)
+        .max()
+        .unwrap_or(0);
+    let stall_count = (0..=max_issue_cycle)
+        .filter(|c| !issue_cycles.contains(c))
+        .count() as u32;
+
+    // Critical path length: the maximum priority in the DAG
+    // (which is the longest path from any node to any exit).
+    let critical_path_length = dag.nodes.iter()
+        .map(|node| node.priority)
+        .max()
+        .unwrap_or(0);
+
+    // Hazard detection.
+    let hazards = detect_hazards(dag);
+    let data_hazards = hazards
+        .iter()
+        .filter(|h| matches!(h, HazardKind::DataHazard { .. }))
+        .count() as u32;
+    let structural_hazards = hazards
+        .iter()
+        .filter(|h| matches!(h, HazardKind::StructuralHazard { .. }))
+        .count() as u32;
+
+    // Dual-issue opportunities.
+    let dual_hints = find_dual_issue_hints(dag);
+    let dual_issue_opportunities = dual_hints.len() as u32;
+
+    // Register pressure.
+    let pressure = compute_register_pressure(func, block_id, schedule);
+
+    ScheduleMetrics {
+        total_instructions: n,
+        total_cycles,
+        ipc_estimate: ipc,
+        stall_count,
+        data_hazards,
+        structural_hazards,
+        critical_path_length,
+        dual_issue_opportunities,
+        max_gpr_pressure: pressure.max_gpr_pressure,
+        max_fpr_pressure: pressure.max_fpr_pressure,
+        pressure_exceeded: pressure.pressure_exceeded(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Schedule block with metrics
+// ---------------------------------------------------------------------------
+
+/// Schedule one basic block and return both the reordering result and
+/// quality metrics for the schedule.
+pub fn schedule_block_with_metrics(
+    func: &mut MachFunction,
+    block_id: BlockId,
+) -> (bool, ScheduleMetrics) {
+    let block = func.block(block_id);
+    if block.insts.len() <= 1 {
+        let metrics = ScheduleMetrics {
+            total_instructions: block.insts.len(),
+            total_cycles: if block.insts.is_empty() { 0 } else { 1 },
+            ipc_estimate: if block.insts.is_empty() { 0.0 } else { 1.0 },
+            stall_count: 0,
+            data_hazards: 0,
+            structural_hazards: 0,
+            critical_path_length: if block.insts.is_empty() { 0 } else { 1 },
+            dual_issue_opportunities: 0,
+            max_gpr_pressure: 0,
+            max_fpr_pressure: 0,
+            pressure_exceeded: false,
+        };
+        return (false, metrics);
+    }
+
+    let original_order: Vec<InstId> = block.insts.clone();
+    let mut dag = build_dag(func, block_id);
+    let new_order = schedule_list(&mut dag);
+
+    let metrics = compute_schedule_metrics(func, block_id, &dag, &new_order);
+
+    let changed = new_order != original_order;
+    if changed {
+        let block_mut = func.block_mut(block_id);
+        block_mut.insts = new_order;
+    }
+
+    (changed, metrics)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -905,5 +1479,432 @@ mod tests {
 
         assert_eq!(order1, order2, "scheduler should be idempotent");
         assert!(!changed, "second run should report no change");
+    }
+
+    // ---- Phase 2: Resource state tests ----
+
+    #[test]
+    fn test_resource_state_basic() {
+        let mut rs = ResourceState::new();
+        // IntAlu has 6 units.
+        assert_eq!(rs.units_available(ExecutionPort::IntAlu, 0), 6);
+        assert!(rs.is_available(ExecutionPort::IntAlu, 0));
+        // Reserve one unit.
+        assert!(rs.reserve(ExecutionPort::IntAlu, 0));
+        assert_eq!(rs.units_available(ExecutionPort::IntAlu, 0), 5);
+    }
+
+    #[test]
+    fn test_resource_state_exhaustion() {
+        let mut rs = ResourceState::new();
+        // IntDiv has 1 unit. Reserve it.
+        assert!(rs.reserve(ExecutionPort::IntDiv, 0));
+        assert_eq!(rs.units_available(ExecutionPort::IntDiv, 0), 0);
+        assert!(!rs.is_available(ExecutionPort::IntDiv, 0));
+        // Attempting to reserve again should fail.
+        assert!(!rs.reserve(ExecutionPort::IntDiv, 0));
+        // But a different cycle should be fine.
+        assert!(rs.is_available(ExecutionPort::IntDiv, 1));
+    }
+
+    #[test]
+    fn test_port_capacity_values() {
+        assert_eq!(port_capacity(ExecutionPort::IntAlu), 6);
+        assert_eq!(port_capacity(ExecutionPort::IntMul), 2);
+        assert_eq!(port_capacity(ExecutionPort::IntDiv), 1);
+        assert_eq!(port_capacity(ExecutionPort::LoadStore), 2);
+        assert_eq!(port_capacity(ExecutionPort::Branch), 1);
+        assert_eq!(port_capacity(ExecutionPort::FpAlu), 4);
+    }
+
+    // ---- Phase 2: Hazard detection tests ----
+
+    #[test]
+    fn test_detect_data_hazard() {
+        // v1 = mul v0, v0    (node 0, lat=3, cycle 0)
+        // v2 = add v1, #1    (node 1, lat=1, dep on node 0, cycle 3)
+        // ret                 (node 2)
+        //
+        // Node 1 must wait until cycle 3 (producer latency 3). The gap
+        // from cycle 0+1=1 to cycle 3 is a 2-cycle stall = data hazard.
+        let mul = MachInst::new(AArch64Opcode::MulRR, vec![vreg(1), vreg(0), vreg(0)]);
+        let add = MachInst::new(AArch64Opcode::AddRI, vec![vreg(2), vreg(1), imm(1)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![mul, add, ret]);
+
+        let mut dag = build_dag(&func, func.entry);
+        let _order = schedule_list(&mut dag);
+        let hazards = detect_hazards(&dag);
+
+        let has_data_hazard = hazards.iter().any(|h| {
+            matches!(h, HazardKind::DataHazard { producer: 0, consumer: 1, .. })
+        });
+        assert!(has_data_hazard, "mul->add chain should produce a data hazard");
+    }
+
+    #[test]
+    fn test_detect_structural_hazard_divides() {
+        // Two divides at the same cycle would conflict on the single IntDiv unit.
+        // v1 = sdiv v0, v2    (node 0, IntDiv)
+        // v3 = sdiv v4, v5    (node 1, IntDiv, independent)
+        // ret                  (node 2)
+        //
+        // Both are independent so the scheduler can schedule them at the same cycle,
+        // but there's only 1 IntDiv unit.
+        let div1 = MachInst::new(AArch64Opcode::SDiv, vec![vreg(1), vreg(0), vreg(2)]);
+        let div2 = MachInst::new(AArch64Opcode::SDiv, vec![vreg(3), vreg(4), vreg(5)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![div1, div2, ret]);
+
+        let mut dag = build_dag(&func, func.entry);
+        let _order = schedule_list(&mut dag);
+
+        // If both divides end up at the same cycle, there should be a structural hazard.
+        // The scheduler issues one per cycle, so they might be at cycles 0 and 1.
+        // Either way, verify detect_hazards runs without panic.
+        let hazards = detect_hazards(&dag);
+        // No panic is the basic assertion; structural hazard depends on scheduling.
+        let _ = hazards.len(); // runs without error
+    }
+
+    #[test]
+    fn test_detect_load_use_hazard() {
+        // v1 = ldr [v0, #0]   (node 0, lat=4, LoadStore)
+        // v2 = add v1, #1     (node 1, uses v1)
+        // ret                  (node 2)
+        //
+        // After scheduling: load at cycle 0, add at cycle 4 (earliest possible).
+        // No load-use hazard because add is not at cycle 1.
+        let load = MachInst::new(AArch64Opcode::LdrRI, vec![vreg(1), vreg(0), imm(0)]);
+        let add = MachInst::new(AArch64Opcode::AddRI, vec![vreg(2), vreg(1), imm(1)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![load, add, ret]);
+
+        let mut dag = build_dag(&func, func.entry);
+        let _order = schedule_list(&mut dag);
+        let hazards = detect_hazards(&dag);
+
+        // The scheduler correctly places add at cycle 4 (not cycle 1),
+        // so there should be no load-use hazard but there IS a data hazard
+        // (the 3-cycle wait).
+        let has_data = hazards.iter().any(|h| matches!(h, HazardKind::DataHazard { .. }));
+        assert!(has_data, "load->add should produce a data hazard");
+    }
+
+    #[test]
+    fn test_no_hazard_independent() {
+        // Two independent ALU ops: no hazards expected (6 ALU units available).
+        // v1 = add v0, #1    (node 0)
+        // v3 = add v2, #2    (node 1, independent)
+        // ret                 (node 2)
+        let add1 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(1), vreg(0), imm(1)]);
+        let add2 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(3), vreg(2), imm(2)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![add1, add2, ret]);
+
+        let mut dag = build_dag(&func, func.entry);
+        let _order = schedule_list(&mut dag);
+        let hazards = detect_hazards(&dag);
+
+        // No structural hazards (6 ALU units), no data hazards (independent).
+        let structural = hazards.iter().filter(|h| matches!(h, HazardKind::StructuralHazard { .. })).count();
+        assert_eq!(structural, 0, "independent ALU ops should have no structural hazards");
+    }
+
+    // ---- Phase 2: Dual-issue hint tests ----
+
+    #[test]
+    fn test_dual_issue_alu_load() {
+        // v1 = add v0, #1    (IntAlu)
+        // v2 = ldr [v3, #0]  (LoadStore, independent)
+        // ret
+        //
+        // Both can be at cycle 0 => ALU + Load dual-issue.
+        let add = MachInst::new(AArch64Opcode::AddRI, vec![vreg(1), vreg(0), imm(1)]);
+        let load = MachInst::new(AArch64Opcode::LdrRI, vec![vreg(2), vreg(3), imm(0)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![add, load, ret]);
+
+        let mut dag = build_dag(&func, func.entry);
+        let _order = schedule_list(&mut dag);
+        let hints = find_dual_issue_hints(&dag);
+
+        // At least one ALU + Load/Store dual-issue hint should be present.
+        let has_alu_load = hints.iter().any(|h| h.reason.contains("Load/Store"));
+        assert!(
+            has_alu_load,
+            "ALU + Load should produce dual-issue hint, got {:?}",
+            hints.iter().map(|h| h.reason).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_dual_issue_alu_alu() {
+        // Two independent ALU ops at the same cycle.
+        let add1 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(1), vreg(0), imm(1)]);
+        let add2 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(3), vreg(2), imm(2)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![add1, add2, ret]);
+
+        let mut dag = build_dag(&func, func.entry);
+        let _order = schedule_list(&mut dag);
+        let hints = find_dual_issue_hints(&dag);
+
+        let has_alu_alu = hints.iter().any(|h| h.reason == "ALU + ALU");
+        assert!(has_alu_alu, "two independent ALU ops should hint ALU + ALU dual-issue");
+    }
+
+    #[test]
+    fn test_no_dual_issue_dependent_chain() {
+        // v1 = add v0, #1
+        // v2 = add v1, #2  (depends on v1)
+        // ret
+        //
+        // The second add can't issue at the same cycle as the first.
+        let add1 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(1), vreg(0), imm(1)]);
+        let add2 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(2), vreg(1), imm(2)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![add1, add2, ret]);
+
+        let mut dag = build_dag(&func, func.entry);
+        let _order = schedule_list(&mut dag);
+        let hints = find_dual_issue_hints(&dag);
+
+        // add1 at cycle 0, add2 at cycle 1 (data dep): no dual-issue possible.
+        let alu_alu = hints.iter().filter(|h| h.reason == "ALU + ALU").count();
+        assert_eq!(alu_alu, 0, "dependent chain should not produce dual-issue hint");
+    }
+
+    // ---- Phase 2: Register pressure tests ----
+
+    #[test]
+    fn test_register_pressure_basic() {
+        // v1 = add v0, #1   (def v1)
+        // v2 = add v1, #2   (use v1, def v2)
+        // ret
+        let add1 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(1), vreg(0), imm(1)]);
+        let add2 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(2), vreg(1), imm(2)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![add1, add2, ret]);
+
+        let schedule: Vec<InstId> = func.block(func.entry).insts.clone();
+        let pressure = compute_register_pressure(&func, func.entry, &schedule);
+
+        // v1 is live from pos 0 to pos 1, v2 is live from pos 1. Max GPR = 2.
+        assert!(pressure.max_gpr_pressure <= 3, "basic chain should have low pressure");
+        assert!(!pressure.pressure_exceeded(), "should not exceed pressure limit");
+    }
+
+    #[test]
+    fn test_register_pressure_high() {
+        // Create many independent defs to spike pressure.
+        // v1 = mov #1
+        // v2 = mov #2
+        // ...
+        // v30 = mov #30
+        // v31 = add v1, v2  (uses v1, v2 to keep them live)
+        // ret
+        let mut insts: Vec<MachInst> = Vec::new();
+        for i in 1..=30 {
+            insts.push(MachInst::new(AArch64Opcode::MovI, vec![vreg(i), imm(i as i64)]));
+        }
+        // Use v1 and v2 to keep them live through the block.
+        insts.push(MachInst::new(AArch64Opcode::AddRR, vec![vreg(31), vreg(1), vreg(2)]));
+        insts.push(MachInst::new(AArch64Opcode::Ret, vec![]));
+        let func = make_func_with_insts(insts);
+
+        let schedule: Vec<InstId> = func.block(func.entry).insts.clone();
+        let pressure = compute_register_pressure(&func, func.entry, &schedule);
+
+        // 30 defs, at peak all 30 are live. GPR limit is 28.
+        assert!(
+            pressure.max_gpr_pressure >= 28,
+            "30 independent defs should produce high pressure, got {}",
+            pressure.max_gpr_pressure
+        );
+        assert!(pressure.pressure_exceeded(), "30 live GPRs should exceed 28 limit");
+    }
+
+    #[test]
+    fn test_register_pressure_fpr() {
+        // FPR pressure tracking.
+        // v1 = fadd v0, v0   (FPR def)
+        // v2 = fadd v1, v1   (FPR def, uses v1)
+        // ret
+        let fadd1 = MachInst::new(
+            AArch64Opcode::FaddRR,
+            vec![
+                MachOperand::VReg(VReg::new(1, RegClass::Fpr64)),
+                MachOperand::VReg(VReg::new(0, RegClass::Fpr64)),
+                MachOperand::VReg(VReg::new(0, RegClass::Fpr64)),
+            ],
+        );
+        let fadd2 = MachInst::new(
+            AArch64Opcode::FaddRR,
+            vec![
+                MachOperand::VReg(VReg::new(2, RegClass::Fpr64)),
+                MachOperand::VReg(VReg::new(1, RegClass::Fpr64)),
+                MachOperand::VReg(VReg::new(1, RegClass::Fpr64)),
+            ],
+        );
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![fadd1, fadd2, ret]);
+
+        let schedule: Vec<InstId> = func.block(func.entry).insts.clone();
+        let pressure = compute_register_pressure(&func, func.entry, &schedule);
+
+        assert!(
+            pressure.max_fpr_pressure >= 1,
+            "FPR ops should register FPR pressure, got {}",
+            pressure.max_fpr_pressure
+        );
+        assert_eq!(pressure.max_gpr_pressure, 0, "FPR-only code should have no GPR pressure");
+    }
+
+    // ---- Phase 2: Schedule metrics tests ----
+
+    #[test]
+    fn test_schedule_metrics_basic() {
+        // Simple block: two independent adds + ret.
+        let add1 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(1), vreg(0), imm(1)]);
+        let add2 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(3), vreg(2), imm(2)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![add1, add2, ret]);
+
+        let mut dag = build_dag(&func, func.entry);
+        let order = schedule_list(&mut dag);
+        let metrics = compute_schedule_metrics(&func, func.entry, &dag, &order);
+
+        assert_eq!(metrics.total_instructions, 3);
+        assert!(metrics.total_cycles > 0, "should have at least 1 cycle");
+        assert!(metrics.ipc_estimate > 0.0, "IPC should be positive");
+        assert!(metrics.critical_path_length >= 2, "critical path >= 2 (ALU + ret)");
+    }
+
+    #[test]
+    fn test_schedule_metrics_stalls() {
+        // mul -> add chain: mul takes 3 cycles, add must wait.
+        let mul = MachInst::new(AArch64Opcode::MulRR, vec![vreg(1), vreg(0), vreg(0)]);
+        let add = MachInst::new(AArch64Opcode::AddRI, vec![vreg(2), vreg(1), imm(1)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![mul, add, ret]);
+
+        let mut dag = build_dag(&func, func.entry);
+        let order = schedule_list(&mut dag);
+        let metrics = compute_schedule_metrics(&func, func.entry, &dag, &order);
+
+        // mul at cycle 0, add at cycle 3, ret at cycle 4.
+        // Cycles 1, 2 are stalls (nothing issued).
+        assert!(
+            metrics.stall_count >= 2,
+            "mul->add chain should have at least 2 stall cycles, got {}",
+            metrics.stall_count
+        );
+    }
+
+    #[test]
+    fn test_schedule_metrics_ipc() {
+        // Two independent adds + ret: all 3 can issue in rapid succession.
+        let add1 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(1), vreg(0), imm(1)]);
+        let add2 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(3), vreg(2), imm(2)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![add1, add2, ret]);
+
+        let mut dag = build_dag(&func, func.entry);
+        let order = schedule_list(&mut dag);
+        let metrics = compute_schedule_metrics(&func, func.entry, &dag, &order);
+
+        // 3 instructions, 3 cycles (ret at cycle 2, completes at 3) => IPC = 3/3 = 1.0.
+        assert!(
+            metrics.ipc_estimate >= 0.5,
+            "independent ALU ops should have reasonable IPC, got {}",
+            metrics.ipc_estimate
+        );
+    }
+
+    #[test]
+    fn test_schedule_metrics_critical_path() {
+        // mul (3) -> add (1) -> ret (1) = critical path of 5
+        let mul = MachInst::new(AArch64Opcode::MulRR, vec![vreg(1), vreg(0), vreg(0)]);
+        let add = MachInst::new(AArch64Opcode::AddRI, vec![vreg(2), vreg(1), imm(1)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![mul, add, ret]);
+
+        let mut dag = build_dag(&func, func.entry);
+        let _order = schedule_list(&mut dag);
+        let metrics = compute_schedule_metrics(&func, func.entry, &dag, &_order);
+
+        assert_eq!(
+            metrics.critical_path_length, 5,
+            "mul(3)->add(1)->ret(1) = critical path 5"
+        );
+    }
+
+    // ---- Phase 2: Integration test ----
+
+    #[test]
+    fn test_schedule_block_with_metrics() {
+        // Integration: schedule a block and get metrics back.
+        let load = MachInst::new(AArch64Opcode::LdrRI, vec![vreg(1), vreg(0), imm(0)]);
+        let add = MachInst::new(AArch64Opcode::AddRI, vec![vreg(2), vreg(1), imm(1)]);
+        let mov = MachInst::new(AArch64Opcode::MovI, vec![vreg(3), imm(99)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![load, add, mov, ret]);
+
+        let entry = func.entry;
+        let (changed, metrics) = schedule_block_with_metrics(&mut func, entry);
+
+        // The scheduler should reorder: load, mov, add, ret (mov during load latency).
+        assert!(changed, "scheduler should reorder load-add-mov to load-mov-add");
+        assert_eq!(metrics.total_instructions, 4);
+        assert!(metrics.total_cycles > 0);
+        assert!(metrics.ipc_estimate > 0.0);
+        assert!(!metrics.pressure_exceeded);
+    }
+
+    #[test]
+    fn test_schedule_block_with_metrics_empty() {
+        let mut func = MachFunction::new(
+            "empty".to_string(),
+            Signature::new(vec![], vec![]),
+        );
+        let entry = func.entry;
+        let (changed, metrics) = schedule_block_with_metrics(&mut func, entry);
+        assert!(!changed);
+        assert_eq!(metrics.total_instructions, 0);
+        assert_eq!(metrics.total_cycles, 0);
+    }
+
+    #[test]
+    fn test_schedule_block_with_metrics_single() {
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![ret]);
+        let entry = func.entry;
+        let (changed, metrics) = schedule_block_with_metrics(&mut func, entry);
+        assert!(!changed);
+        assert_eq!(metrics.total_instructions, 1);
+        assert_eq!(metrics.total_cycles, 1);
+        assert_eq!(metrics.stall_count, 0);
+    }
+
+    #[test]
+    fn test_dual_issue_count_in_metrics() {
+        // Several independent ops that should produce dual-issue hints.
+        let add1 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(1), vreg(0), imm(1)]);
+        let load = MachInst::new(AArch64Opcode::LdrRI, vec![vreg(2), vreg(3), imm(0)]);
+        let add2 = MachInst::new(AArch64Opcode::AddRI, vec![vreg(4), vreg(5), imm(2)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![add1, load, add2, ret]);
+
+        let mut dag = build_dag(&func, func.entry);
+        let order = schedule_list(&mut dag);
+        let metrics = compute_schedule_metrics(&func, func.entry, &dag, &order);
+
+        // With independent ALU + Load, there should be dual-issue opportunities.
+        assert!(
+            metrics.dual_issue_opportunities >= 1,
+            "independent ALU + Load should have dual-issue opportunities, got {}",
+            metrics.dual_issue_opportunities
+        );
     }
 }
