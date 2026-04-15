@@ -18,6 +18,8 @@ pub enum ElfMachine {
     AArch64,
     /// AMD x86-64 architecture.
     X86_64,
+    /// RISC-V 64-bit architecture.
+    Riscv64,
 }
 
 impl ElfMachine {
@@ -26,6 +28,7 @@ impl ElfMachine {
         match self {
             ElfMachine::AArch64 => EM_AARCH64,
             ElfMachine::X86_64 => EM_X86_64,
+            ElfMachine::Riscv64 => EM_RISCV,
         }
     }
 }

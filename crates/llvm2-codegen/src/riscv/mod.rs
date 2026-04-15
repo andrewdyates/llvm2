@@ -26,6 +26,7 @@
 //! Reference: RISC-V Unprivileged ISA Specification (Volume 1, Version 20191213)
 
 pub mod encode;
+pub mod pipeline;
 
 // ---------------------------------------------------------------------------
 // Re-exports
@@ -36,4 +37,11 @@ pub use encode::{
     encode_instruction,
     encode_r_type, encode_i_type, encode_s_type, encode_b_type,
     encode_u_type, encode_j_type,
+};
+pub use pipeline::{
+    RiscVPipeline, RiscVPipelineConfig, RiscVPipelineError,
+    RiscVRegAssignment,
+    RiscVISelFunction, RiscVISelInst, RiscVISelOperand, RiscVISelBlock,
+    build_riscv_add_test_function, build_riscv_const_test_function,
+    riscv_compile_to_bytes, riscv_compile_to_elf,
 };
