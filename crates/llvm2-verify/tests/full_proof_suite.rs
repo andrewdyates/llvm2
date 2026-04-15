@@ -100,18 +100,19 @@ fn full_proof_suite_every_category_populated() {
     let db = ProofDatabase::new();
     let categories = ProofCategory::all_categories();
 
-    // 34 categories: Arithmetic, Division, FloatingPoint, NzcvFlags,
+    // 35 categories: Arithmetic, Division, FloatingPoint, NzcvFlags,
     // Comparison, Branch, Peephole, Optimization, ConstantFolding,
     // CopyPropagation, CseLicm, DeadCodeElimination, CfgSimplification,
     // Memory, NeonLowering, NeonEncoding, Vectorization, AnePrecision,
     // RegAlloc, BitwiseShift, ConstantMaterialization, AddressMode,
     // FrameLayout, InstructionScheduling, MachOEmission, LoopOptimization,
     // StrengthReduction, CmpCombine, Gvn, TailCallOptimization,
-    // IfConversion, FpConversion, ExtensionTruncation, AtomicOperations.
+    // IfConversion, FpConversion, ExtensionTruncation, AtomicOperations,
+    // CallLowering.
     assert_eq!(
         categories.len(),
-        34,
-        "Expected 34 proof categories, got {}",
+        35,
+        "Expected 35 proof categories, got {}",
         categories.len()
     );
 
