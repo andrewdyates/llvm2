@@ -1321,40 +1321,321 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             Ok(encoding::encode_load_store_ui(0b11, 0, 0b01, scaled, rn, rd))
         }
 
-        // Still-unimplemented opcodes from ISel unification (issue #73).
-        AArch64Opcode::AndRI
-        | AArch64Opcode::OrrRI
-        | AArch64Opcode::EorRI
-        | AArch64Opcode::BicRR
-        | AArch64Opcode::Csinc
-        | AArch64Opcode::Csinv
-        | AArch64Opcode::Csneg
-        | AArch64Opcode::Movn
-        | AArch64Opcode::FmovImm => {
-            // TODO(#73): Implement proper encoding for these opcodes.
-            Err(EncodeError::UnsupportedOpcode(inst.opcode))
+        // =================================================================
+        // Logical immediate (ARM ARM C4.1.4 — Logical (immediate))
+        // sf | opc(2) | 100100 | N | immr(6) | imms(6) | Rn(5) | Rd(5)
+        // AND=00, ORR=01, EOR=10
+        // Operands: [Rd, Rn, Imm(N), Imm(immr), Imm(imms)]
+        // =================================================================
+
+        AArch64Opcode::AndRI => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            let n = imm_val(inst, 2) as u32 & 1;
+            let immr = imm_val(inst, 3) as u32 & 0x3F;
+            let imms = imm_val(inst, 4) as u32 & 0x3F;
+            Ok((sf << 31)
+                | (0b00 << 29) // opc = 00 (AND)
+                | (0b100100 << 23)
+                | (n << 22)
+                | (immr << 16)
+                | (imms << 10)
+                | (rn << 5)
+                | rd)
         }
 
-        // LLVM-style typed aliases (used by llvm2-lower isel)
-        AArch64Opcode::MOVWrr
-        | AArch64Opcode::MOVXrr
-        | AArch64Opcode::STRWui
-        | AArch64Opcode::STRXui
-        | AArch64Opcode::STRSui
-        | AArch64Opcode::STRDui
-        | AArch64Opcode::BL
-        | AArch64Opcode::BLR
-        | AArch64Opcode::CMPWrr
-        | AArch64Opcode::CMPXrr
-        | AArch64Opcode::CMPWri
-        | AArch64Opcode::CMPXri
-        | AArch64Opcode::MOVZWi
-        | AArch64Opcode::MOVZXi
-        | AArch64Opcode::Bcc => {
-            // TODO: Map typed aliases to their generic counterparts for encoding.
-            Err(EncodeError::UnsupportedOpcode(inst.opcode))
+        AArch64Opcode::OrrRI => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            let n = imm_val(inst, 2) as u32 & 1;
+            let immr = imm_val(inst, 3) as u32 & 0x3F;
+            let imms = imm_val(inst, 4) as u32 & 0x3F;
+            Ok((sf << 31)
+                | (0b01 << 29) // opc = 01 (ORR)
+                | (0b100100 << 23)
+                | (n << 22)
+                | (immr << 16)
+                | (imms << 10)
+                | (rn << 5)
+                | rd)
+        }
+
+        AArch64Opcode::EorRI => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            let n = imm_val(inst, 2) as u32 & 1;
+            let immr = imm_val(inst, 3) as u32 & 0x3F;
+            let imms = imm_val(inst, 4) as u32 & 0x3F;
+            Ok((sf << 31)
+                | (0b10 << 29) // opc = 10 (EOR)
+                | (0b100100 << 23)
+                | (n << 22)
+                | (immr << 16)
+                | (imms << 10)
+                | (rn << 5)
+                | rd)
+        }
+
+        // =================================================================
+        // BIC — Bitwise AND-NOT (bit clear)
+        // Logical shifted register: opc=00, N=1
+        // =================================================================
+
+        AArch64Opcode::BicRR => {
+            let sf = sf_from_operand(inst, 0);
+            Ok(encoding::encode_logical_shifted_reg(
+                sf, 0b00, 0, 1, preg_hw(inst, 2)?, 0, preg_hw(inst, 1)?, preg_hw(inst, 0)?,
+            ))
+        }
+
+        // =================================================================
+        // Conditional select variants (ARM ARM C6.2)
+        // =================================================================
+
+        // CSINC Xd, Xn, Xm, cond — conditional select increment
+        // ARM ARM: sf | 0 | 0 | 11010100 | Rm | cond | 0 | 1 | Rn | Rd
+        // Operands: [Rd, Rn, Rm, Imm(cond)]
+        AArch64Opcode::Csinc => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            let rm = preg_hw(inst, 2)?;
+            let cond = imm_val(inst, 3) as u32 & 0xF;
+            Ok((sf << 31)
+                | (0b00 << 29)
+                | (0b11010100 << 21)
+                | (rm << 16)
+                | (cond << 12)
+                | (0b01 << 10) // op2 = 01 (CSINC)
+                | (rn << 5)
+                | rd)
+        }
+
+        // CSINV Xd, Xn, Xm, cond — conditional select invert
+        // ARM ARM: sf | 1 | 0 | 11010100 | Rm | cond | 0 | 0 | Rn | Rd
+        // Operands: [Rd, Rn, Rm, Imm(cond)]
+        AArch64Opcode::Csinv => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            let rm = preg_hw(inst, 2)?;
+            let cond = imm_val(inst, 3) as u32 & 0xF;
+            Ok((sf << 31)
+                | (0b10 << 29) // op = 1, S = 0
+                | (0b11010100 << 21)
+                | (rm << 16)
+                | (cond << 12)
+                | (0b00 << 10) // op2 = 00 (CSINV)
+                | (rn << 5)
+                | rd)
+        }
+
+        // CSNEG Xd, Xn, Xm, cond — conditional select negate
+        // ARM ARM: sf | 1 | 0 | 11010100 | Rm | cond | 0 | 1 | Rn | Rd
+        // Operands: [Rd, Rn, Rm, Imm(cond)]
+        AArch64Opcode::Csneg => {
+            let sf = sf_from_operand(inst, 0);
+            let rd = preg_hw(inst, 0)?;
+            let rn = preg_hw(inst, 1)?;
+            let rm = preg_hw(inst, 2)?;
+            let cond = imm_val(inst, 3) as u32 & 0xF;
+            Ok((sf << 31)
+                | (0b10 << 29) // op = 1, S = 0
+                | (0b11010100 << 21)
+                | (rm << 16)
+                | (cond << 12)
+                | (0b01 << 10) // op2 = 01 (CSNEG)
+                | (rn << 5)
+                | rd)
+        }
+
+        // =================================================================
+        // MOVN — Move Wide with NOT
+        // ARM ARM: sf | 00 | 100101 | hw | imm16 | Rd
+        // opc = 00 for MOVN
+        // Operands: [Rd, Imm(imm16)] or [Rd, Imm(imm16), Imm(hw_shift)]
+        // =================================================================
+
+        AArch64Opcode::Movn => {
+            let sf = sf_from_operand(inst, 0);
+            let imm16 = imm_val(inst, 1) as u32 & 0xFFFF;
+            // Optional hw (shift) from operand 2 (used by const_materialize)
+            let hw = if inst.operands.len() > 2 {
+                (imm_val(inst, 2) as u32 / 16) & 0b11
+            } else {
+                0
+            };
+            Ok(encoding::encode_move_wide(sf, 0b00, hw, imm16, preg_hw(inst, 0)?))
+        }
+
+        // =================================================================
+        // FMOV immediate — move FP immediate to FPR
+        // ARM ARM C7.2.132: 0 | 0 | 0 | 11110 | ftype(2) | 1 | imm8 | 100 | 00000 | Rd
+        // ftype: 00=single(S), 01=double(D), 11=half(H)
+        // Operands: [PReg(Rd), FImm(value)]
+        // =================================================================
+
+        AArch64Opcode::FmovImm => {
+            let rd = preg_hw(inst, 0)?;
+            let fp_size = fp_size_from_inst(inst);
+            let ftype = match fp_size {
+                FpSize::Single => 0b00u32,
+                FpSize::Double => 0b01u32,
+                FpSize::Half => 0b11u32,
+            };
+            // Extract the FImm value and encode as 8-bit immediate
+            let imm8 = match inst.operands.get(1) {
+                Some(MachOperand::FImm(v)) => encode_fmov_imm8(*v),
+                Some(MachOperand::Imm(v)) => (*v as u32) & 0xFF,
+                _ => 0,
+            };
+            Ok((0b00011110u32 << 24)
+                | (ftype << 22)
+                | (1 << 21)
+                | (imm8 << 13)
+                | (0b100 << 10)
+                | (0b00000 << 5)
+                | rd)
+        }
+
+        // =================================================================
+        // LLVM-style typed aliases — delegate to generic encoders
+        // =================================================================
+
+        // MOVWrr → MOV Wd, Wn (32-bit); MOVXrr → MOV Xd, Xn (64-bit)
+        AArch64Opcode::MOVWrr | AArch64Opcode::MOVXrr => {
+            let sf = sf_from_operand(inst, 0);
+            let is_sp_source = matches!(
+                inst.operands.get(1),
+                Some(MachOperand::Special(SpecialReg::SP))
+            );
+            if is_sp_source {
+                Ok(encoding::encode_add_sub_imm(
+                    sf, 0, 0, 0, 0, 31, preg_hw(inst, 0)?,
+                ))
+            } else {
+                Ok(encoding::encode_logical_shifted_reg(
+                    sf, 0b01, 0, 0, preg_hw(inst, 1)?, 0, 31, preg_hw(inst, 0)?,
+                ))
+            }
+        }
+
+        // STR typed aliases — delegate to StrRI encoding
+        AArch64Opcode::STRWui => {
+            let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
+            let scaled = (offset / 4) as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b10, 0, 0b00, scaled, preg_hw(inst, 1)?, preg_hw(inst, 0)?))
+        }
+
+        AArch64Opcode::STRXui => {
+            let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
+            let scaled = (offset / 8) as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b11, 0, 0b00, scaled, preg_hw(inst, 1)?, preg_hw(inst, 0)?))
+        }
+
+        AArch64Opcode::STRSui => {
+            let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
+            let scaled = (offset / 4) as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b10, 1, 0b00, scaled, preg_hw(inst, 1)?, preg_hw(inst, 0)?))
+        }
+
+        AArch64Opcode::STRDui => {
+            let offset = if inst.operands.len() > 2 { imm_val(inst, 2) } else { 0 };
+            let scaled = (offset / 8) as u32 & 0xFFF;
+            Ok(encoding::encode_load_store_ui(0b11, 1, 0b00, scaled, preg_hw(inst, 1)?, preg_hw(inst, 0)?))
+        }
+
+        // BL (LLVM alias) → Bl encoding
+        AArch64Opcode::BL => {
+            let offset = imm_val(inst, 0) as u32 & 0x3FFFFFF;
+            Ok(encoding::encode_uncond_branch(1, offset))
+        }
+
+        // BLR (LLVM alias) → Blr encoding
+        AArch64Opcode::BLR => {
+            Ok(encoding::encode_branch_reg(0b0001, preg_hw(inst, 0)?))
+        }
+
+        // CMP register aliases
+        AArch64Opcode::CMPWrr | AArch64Opcode::CMPXrr => {
+            let sf = sf_from_operand(inst, 0);
+            Ok(encoding::encode_add_sub_shifted_reg(
+                sf, 1, 1, 0, preg_hw(inst, 1)?, 0, preg_hw(inst, 0)?, 31,
+            ))
+        }
+
+        // CMP immediate aliases
+        AArch64Opcode::CMPWri | AArch64Opcode::CMPXri => {
+            let sf = sf_from_operand(inst, 0);
+            let imm = imm_val(inst, 1) as u32 & 0xFFF;
+            Ok(encoding::encode_add_sub_imm(
+                sf, 1, 1, 0, imm, preg_hw(inst, 0)?, 31,
+            ))
+        }
+
+        // MOVZ typed aliases
+        AArch64Opcode::MOVZWi | AArch64Opcode::MOVZXi => {
+            let sf = sf_from_operand(inst, 0);
+            let imm16 = imm_val(inst, 1) as u32 & 0xFFFF;
+            Ok(encoding::encode_move_wide(sf, 0b10, 0, imm16, preg_hw(inst, 0)?))
+        }
+
+        // Bcc (LLVM alias) → BCond encoding
+        AArch64Opcode::Bcc => {
+            let cond = imm_val(inst, 0) as u32 & 0xF;
+            let offset = if inst.operands.len() > 1 {
+                imm_val(inst, 1) as u32 & 0x7FFFF
+            } else {
+                0
+            };
+            Ok(encoding::encode_cond_branch(offset, cond))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// FMOV immediate encoding helper
+// ---------------------------------------------------------------------------
+
+/// Encode an f64 value into the 8-bit FMOV immediate format.
+///
+/// ARM ARM C5.6.5: The 8-bit immediate `abcdefgh` encodes:
+///   value = (-1)^a * 2^(NOT(b).ccc - 3) * 1.defgh
+///
+/// where the mantissa `1.defgh` uses 4 fraction bits.
+///
+/// Only a small subset of FP values are representable. If the value is not
+/// exactly representable, returns 0 (which encodes +2.0).
+fn encode_fmov_imm8(value: f64) -> u32 {
+    let bits = value.to_bits();
+
+    // Extract sign, exponent, mantissa from f64
+    let sign = ((bits >> 63) & 1) as u32;
+    let exp = ((bits >> 52) & 0x7FF) as i32;
+    let frac = bits & 0x000F_FFFF_FFFF_FFFF;
+
+    // Only the top 4 bits of the mantissa can be non-zero
+    if frac & 0x0000_FFFF_FFFF_FFFF != 0 {
+        return 0;
+    }
+
+    let top4 = ((frac >> 48) & 0xF) as u32;
+
+    // Exponent must be in range: biased [1020, 1027] for f64 (bias=1023)
+    // This maps to unbiased [-3, +4]
+    if exp < 1020 || exp > 1027 {
+        return 0;
+    }
+
+    // The 3-bit exponent encoding: biased_3 = exp - 1020, range [0, 7]
+    let biased_3 = (exp - 1020) as u32;
+    // bit 6 = NOT(biased_3[2]), bits 5:4 = biased_3[1:0]
+    let not_b = ((biased_3 >> 2) ^ 1) & 1;
+
+    (sign << 7) | (not_b << 6) | ((biased_3 & 0b11) << 4) | top4
 }
 
 // ---------------------------------------------------------------------------
@@ -3576,5 +3857,604 @@ mod tests {
         let inst = mk(AArch64Opcode::SubsRR, vec![preg(X0), preg(X1), preg(X2)]);
         let enc = encode_instruction(&inst).unwrap();
         assert_eq!(enc, 0xEB020020, "SUBS X0, X1, X2 = {enc:#010X}");
+    }
+
+    // ===================================================================
+    // Tests for newly-implemented opcodes (issue #187)
+    // ===================================================================
+
+    // --- BIC (Bitwise AND-NOT) ---
+    // ARM ARM C6.2.38: sf|00|01010|shift(2)|1|Rm|imm6|Rn|Rd
+    // BIC = AND with N=1 (inverted Rm)
+
+    #[test]
+    fn test_bic_x0_x1_x2() {
+        // BIC X0, X1, X2
+        // sf=1, opc=00, shift=00, N=1, Rm=2, imm6=0, Rn=1, Rd=0
+        // 1_00_01010_00_1_00010_000000_00001_00000
+        // = 0x8A220020
+        let inst = mk(AArch64Opcode::BicRR, vec![preg(X0), preg(X1), preg(X2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_logical_shifted_reg(1, 0b00, 0, 1, 2, 0, 1, 0);
+        assert_eq!(enc, direct, "BIC X0, X1, X2: unified={enc:#010X}, direct={direct:#010X}");
+        assert_eq!(enc, 0x8A220020, "BIC X0, X1, X2 ARM ARM = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_bic_w0_w1_w2() {
+        // BIC W0, W1, W2 (32-bit)
+        let inst = mk(AArch64Opcode::BicRR, vec![preg(W0), preg(W1), preg(W2)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let direct = encoding::encode_logical_shifted_reg(0, 0b00, 0, 1, 2, 0, 1, 0);
+        assert_eq!(enc, direct, "BIC W0, W1, W2 = {enc:#010X}");
+    }
+
+    // --- CSINC (Conditional Select Increment) ---
+    // ARM ARM C6.2.78: sf|00|11010100|Rm|cond|01|Rn|Rd
+
+    #[test]
+    fn test_csinc_x0_x1_x2_eq() {
+        // CSINC X0, X1, X2, EQ
+        // sf=1, op=0, S=0, 11010100, Rm=2, cond=0000(EQ), op2=01, Rn=1, Rd=0
+        // 1_00_11010100_00010_0000_01_00001_00000
+        let inst = mk(AArch64Opcode::Csinc, vec![preg(X0), preg(X1), preg(X2), imm(0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b11010100 << 21)
+            | (2 << 16)
+            | (0b0000 << 12) // EQ
+            | (0b01 << 10)
+            | (1 << 5);
+        assert_eq!(enc, expected, "CSINC X0, X1, X2, EQ = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_csinc_w0_w1_w2_ne() {
+        // CSINC W0, W1, W2, NE (32-bit)
+        // sf=0, cond=0001(NE), op2=01
+        let inst = mk(AArch64Opcode::Csinc, vec![preg(W0), preg(W1), preg(W2), imm(1)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (0b11010100u32 << 21)
+            | (2 << 16)
+            | (0b0001 << 12) // NE
+            | (0b01 << 10)
+            | (1 << 5);
+        assert_eq!(enc, expected, "CSINC W0, W1, W2, NE = {enc:#010X}");
+    }
+
+    // --- CSINV (Conditional Select Invert) ---
+    // ARM ARM C6.2.79: sf|10|11010100|Rm|cond|00|Rn|Rd
+
+    #[test]
+    fn test_csinv_x0_x1_x2_eq() {
+        // CSINV X0, X1, X2, EQ
+        // sf=1, op=1, S=0, 11010100, Rm=2, cond=0000(EQ), op2=00, Rn=1, Rd=0
+        let inst = mk(AArch64Opcode::Csinv, vec![preg(X0), preg(X1), preg(X2), imm(0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b10 << 29) // op=1, S=0
+            | (0b11010100 << 21)
+            | (2 << 16)
+            | (0b0000 << 12) // EQ
+            | (0b00 << 10) // op2=00
+            | (1 << 5);
+        assert_eq!(enc, expected, "CSINV X0, X1, X2, EQ = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_csinv_w0_w1_w2_lt() {
+        // CSINV W0, W1, W2, LT (32-bit)
+        // sf=0, cond=1011(LT)
+        let inst = mk(AArch64Opcode::Csinv, vec![preg(W0), preg(W1), preg(W2), imm(0b1011)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (0b10u32 << 29)
+            | (0b11010100 << 21)
+            | (2 << 16)
+            | (0b1011 << 12) // LT
+            | (0b00 << 10)
+            | (1 << 5);
+        assert_eq!(enc, expected, "CSINV W0, W1, W2, LT = {enc:#010X}");
+    }
+
+    // --- CSNEG (Conditional Select Negate) ---
+    // ARM ARM C6.2.81: sf|10|11010100|Rm|cond|01|Rn|Rd
+
+    #[test]
+    fn test_csneg_x0_x1_x2_eq() {
+        // CSNEG X0, X1, X2, EQ
+        // sf=1, op=1, S=0, 11010100, Rm=2, cond=0000(EQ), op2=01, Rn=1, Rd=0
+        let inst = mk(AArch64Opcode::Csneg, vec![preg(X0), preg(X1), preg(X2), imm(0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b10 << 29) // op=1, S=0
+            | (0b11010100 << 21)
+            | (2 << 16)
+            | (0b0000 << 12) // EQ
+            | (0b01 << 10) // op2=01
+            | (1 << 5);
+        assert_eq!(enc, expected, "CSNEG X0, X1, X2, EQ = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_csneg_w0_w1_w2_ge() {
+        // CSNEG W0, W1, W2, GE
+        // sf=0, cond=1010(GE)
+        let inst = mk(AArch64Opcode::Csneg, vec![preg(W0), preg(W1), preg(W2), imm(0b1010)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (0b10u32 << 29)
+            | (0b11010100 << 21)
+            | (2 << 16)
+            | (0b1010 << 12) // GE
+            | (0b01 << 10)
+            | (1 << 5);
+        assert_eq!(enc, expected, "CSNEG W0, W1, W2, GE = {enc:#010X}");
+    }
+
+    // --- MOVN (Move Wide with NOT) ---
+    // ARM ARM C6.2.208: sf|00|100101|hw|imm16|Rd
+
+    #[test]
+    fn test_movn_x0_0() {
+        // MOVN X0, #0 — encodes -1 (all ones)
+        // sf=1, opc=00, hw=0, imm16=0, Rd=0
+        // 1_00_100101_00_0000000000000000_00000
+        // = 0x92800000
+        let inst = mk(AArch64Opcode::Movn, vec![preg(X0), imm(0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!(enc, 0x92800000, "MOVN X0, #0 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_movn_x0_0xffff() {
+        // MOVN X0, #0xFFFF — encodes ~0xFFFF = 0xFFFFFFFFFFFF0000
+        let inst = mk(AArch64Opcode::Movn, vec![preg(X0), imm(0xFFFF)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = encoding::encode_move_wide(1, 0b00, 0, 0xFFFF, 0);
+        assert_eq!(enc, expected, "MOVN X0, #0xFFFF = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_movn_w0_42() {
+        // MOVN W0, #42
+        // sf=0, opc=00, hw=0, imm16=42, Rd=0
+        let inst = mk(AArch64Opcode::Movn, vec![preg(W0), imm(42)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = encoding::encode_move_wide(0, 0b00, 0, 42, 0);
+        assert_eq!(enc, expected, "MOVN W0, #42 = {enc:#010X}");
+    }
+
+    // --- Logical immediate (AND/ORR/EOR) ---
+    // ARM ARM C4.1.4: sf|opc(2)|100100|N|immr(6)|imms(6)|Rn(5)|Rd(5)
+    // AND=00, ORR=01, EOR=10
+
+    #[test]
+    fn test_and_ri_x0_x1() {
+        // AND X0, X1, #<bitmask>
+        // Operands: [Rd=X0, Rn=X1, N=1, immr=0, imms=7]
+        // This encodes AND X0, X1, #0xFF (byte mask)
+        // sf=1, opc=00, 100100, N=1, immr=000000, imms=000111, Rn=1, Rd=0
+        // 1_00_100100_1_000000_000111_00001_00000
+        let inst = mk(AArch64Opcode::AndRI, vec![preg(X0), preg(X1), imm(1), imm(0), imm(7)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b00 << 29)
+            | (0b100100 << 23)
+            | (1 << 22) // N=1
+            | (0 << 16) // immr=0
+            | (7 << 10) // imms=7
+            | (1 << 5)  // Rn=1
+            | 0;         // Rd=0
+        assert_eq!(enc, expected, "AND X0, X1, #0xFF = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_orr_ri_x0_xzr() {
+        // ORR X0, XZR, #<bitmask> — materialize bitmask constant
+        // Operands: [Rd=X0, Rn=XZR, N=0, immr=0, imms=0]
+        // sf=1, opc=01, 100100, N=0, immr=0, imms=0, Rn=31, Rd=0
+        let inst = mk(
+            AArch64Opcode::OrrRI,
+            vec![preg(X0), MachOperand::Special(SpecialReg::XZR), imm(0), imm(0), imm(0)],
+        );
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b01 << 29) // ORR
+            | (0b100100 << 23)
+            | (0 << 22) // N=0
+            | (0 << 16) // immr=0
+            | (0 << 10) // imms=0
+            | (31 << 5) // Rn=XZR
+            | 0;         // Rd=0
+        assert_eq!(enc, expected, "ORR X0, XZR, #imm = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_eor_ri_x0_x1() {
+        // EOR X0, X1, #<bitmask>
+        // Operands: [Rd=X0, Rn=X1, N=1, immr=16, imms=31]
+        // sf=1, opc=10, 100100, N=1, immr=010000, imms=011111, Rn=1, Rd=0
+        let inst = mk(AArch64Opcode::EorRI, vec![preg(X0), preg(X1), imm(1), imm(16), imm(31)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (1u32 << 31)
+            | (0b10 << 29) // EOR
+            | (0b100100 << 23)
+            | (1 << 22) // N=1
+            | (16 << 16) // immr=16
+            | (31 << 10) // imms=31
+            | (1 << 5)  // Rn=1
+            | 0;         // Rd=0
+        assert_eq!(enc, expected, "EOR X0, X1, #imm = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_and_ri_w0_w1_32bit() {
+        // AND W0, W1, #0xF (32-bit)
+        // sf=0, opc=00, N=0 (must be 0 for 32-bit), immr=0, imms=3
+        let inst = mk(AArch64Opcode::AndRI, vec![preg(W0), preg(W1), imm(0), imm(0), imm(3)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (0b00u32 << 29)
+            | (0b100100 << 23)
+            | (0 << 22) // N=0
+            | (0 << 16) // immr=0
+            | (3 << 10) // imms=3
+            | (1 << 5)  // Rn=1
+            | 0;
+        assert_eq!(enc, expected, "AND W0, W1, #0xF = {enc:#010X}");
+    }
+
+    // --- FMOV immediate ---
+    // ARM ARM C7.2.132: 0|0|0|11110|ftype(2)|1|imm8|100|00000|Rd
+
+    #[test]
+    fn test_fmov_imm_2_0_single() {
+        // FMOV S0, #2.0
+        // ftype=00 (single), imm8 encodes 2.0
+        // 2.0 = sign=0, exp=128(biased)=1024(f64), mantissa=0
+        // For f64: exp=1024 -> biased_3 = 1024-1020 = 4 = 0b100
+        // NOT(b) = NOT(1) = 0, ccc[1:0] = 00
+        // imm8 = 0_0_00_0000 = 0x00
+        let inst = mk(AArch64Opcode::FmovImm, vec![preg(S0), MachOperand::FImm(2.0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        // ftype=00, imm8=0x00
+        let expected = (0b00011110u32 << 24)
+            | (0b00 << 22) // ftype=single
+            | (1 << 21)
+            | (0x00 << 13) // imm8
+            | (0b100 << 10)
+            | 0; // Rd=S0
+        assert_eq!(enc, expected, "FMOV S0, #2.0 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_fmov_imm_1_0_double() {
+        // FMOV D0, #1.0
+        // 1.0f64: sign=0, exp=1023(biased), frac=0
+        // biased_3 = 1023-1020 = 3 = 0b011
+        // NOT(b) = NOT(0) = 1, ccc[1:0] = 11
+        // imm8 = 0_1_11_0000 = 0x70
+        let inst = mk(AArch64Opcode::FmovImm, vec![preg(D0), MachOperand::FImm(1.0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (0b00011110u32 << 24)
+            | (0b01 << 22) // ftype=double
+            | (1 << 21)
+            | (0x70u32 << 13) // imm8 = 0b01110000
+            | (0b100 << 10)
+            | 0; // Rd=D0
+        assert_eq!(enc, expected, "FMOV D0, #1.0 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_fmov_imm_neg_1_0() {
+        // FMOV D0, #-1.0
+        // -1.0f64: sign=1, exp=1023, frac=0
+        // biased_3 = 3 => NOT(b)=1, cc=11
+        // imm8 = 1_1_11_0000 = 0xF0
+        let inst = mk(AArch64Opcode::FmovImm, vec![preg(D0), MachOperand::FImm(-1.0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (0b00011110u32 << 24)
+            | (0b01 << 22) // ftype=double
+            | (1 << 21)
+            | (0xF0u32 << 13) // imm8 = 0b11110000
+            | (0b100 << 10)
+            | 0;
+        assert_eq!(enc, expected, "FMOV D0, #-1.0 = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_fmov_imm_0_5() {
+        // FMOV D0, #0.5
+        // 0.5f64: sign=0, exp=1022, frac=0
+        // biased_3 = 1022-1020 = 2 = 0b010
+        // NOT(b) = NOT(0) = 1, cc = 10
+        // imm8 = 0_1_10_0000 = 0x60
+        let inst = mk(AArch64Opcode::FmovImm, vec![preg(D0), MachOperand::FImm(0.5)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = (0b00011110u32 << 24)
+            | (0b01 << 22)
+            | (1 << 21)
+            | (0x60u32 << 13)
+            | (0b100 << 10)
+            | 0;
+        assert_eq!(enc, expected, "FMOV D0, #0.5 = {enc:#010X}");
+    }
+
+    // --- MOVN with hw_shift (from const_materialize) ---
+
+    #[test]
+    fn test_movn_with_hw_shift() {
+        // MOVN X0, #0x1234, LSL #16
+        // Operands: [Rd=X0, Imm(0x1234), Imm(16)]
+        // hw = 16/16 = 1
+        let inst = mk(AArch64Opcode::Movn, vec![preg(X0), imm(0x1234), imm(16)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = encoding::encode_move_wide(1, 0b00, 1, 0x1234, 0);
+        assert_eq!(enc, expected, "MOVN X0, #0x1234, LSL#16 = {enc:#010X}");
+    }
+
+    // --- CSEL already tested above, but verify relationship with CSINC ---
+
+    #[test]
+    fn test_csel_vs_csinc_encoding_diff() {
+        // CSEL and CSINC differ only in op2 bits [11:10]
+        // CSEL: op2=00, CSINC: op2=01
+        let csel = mk(AArch64Opcode::Csel, vec![preg(X0), preg(X1), preg(X2), imm(0)]);
+        let csinc = mk(AArch64Opcode::Csinc, vec![preg(X0), preg(X1), preg(X2), imm(0)]);
+        let enc_sel = encode_instruction(&csel).unwrap();
+        let enc_inc = encode_instruction(&csinc).unwrap();
+        // The only difference should be in bits 11:10
+        assert_eq!(enc_sel & !0xC00, enc_inc & !0xC00,
+            "CSEL and CSINC should differ only in op2 bits");
+        assert_eq!((enc_sel >> 10) & 0b11, 0b00, "CSEL op2 = 00");
+        assert_eq!((enc_inc >> 10) & 0b11, 0b01, "CSINC op2 = 01");
+    }
+
+    // --- CSINV vs CSNEG encoding difference ---
+
+    #[test]
+    fn test_csinv_vs_csneg_encoding_diff() {
+        // CSINV and CSNEG share sf|10|11010100 prefix and differ in op2
+        // CSINV: op2=00, CSNEG: op2=01
+        let csinv = mk(AArch64Opcode::Csinv, vec![preg(X0), preg(X1), preg(X2), imm(0)]);
+        let csneg = mk(AArch64Opcode::Csneg, vec![preg(X0), preg(X1), preg(X2), imm(0)]);
+        let enc_inv = encode_instruction(&csinv).unwrap();
+        let enc_neg = encode_instruction(&csneg).unwrap();
+        assert_eq!(enc_inv & !0xC00, enc_neg & !0xC00,
+            "CSINV and CSNEG should differ only in op2 bits");
+        assert_eq!((enc_inv >> 10) & 0b11, 0b00, "CSINV op2 = 00");
+        assert_eq!((enc_neg >> 10) & 0b11, 0b01, "CSNEG op2 = 01");
+    }
+
+    // --- LLVM-style typed alias tests ---
+
+    #[test]
+    fn test_movwrr_alias() {
+        // MOVWrr W0, W1 — should encode same as MovR with 32-bit regs
+        let alias = mk(AArch64Opcode::MOVWrr, vec![preg(W0), preg(W1)]);
+        let generic = mk(AArch64Opcode::MovR, vec![preg(W0), preg(W1)]);
+        assert_eq!(
+            encode_instruction(&alias).unwrap(),
+            encode_instruction(&generic).unwrap(),
+            "MOVWrr should match MovR for W registers"
+        );
+    }
+
+    #[test]
+    fn test_movxrr_alias() {
+        // MOVXrr X0, X1
+        let alias = mk(AArch64Opcode::MOVXrr, vec![preg(X0), preg(X1)]);
+        let generic = mk(AArch64Opcode::MovR, vec![preg(X0), preg(X1)]);
+        assert_eq!(
+            encode_instruction(&alias).unwrap(),
+            encode_instruction(&generic).unwrap(),
+            "MOVXrr should match MovR for X registers"
+        );
+    }
+
+    #[test]
+    fn test_bl_alias() {
+        // BL (typed) should match Bl
+        let alias = mk(AArch64Opcode::BL, vec![imm(100)]);
+        let generic = mk(AArch64Opcode::Bl, vec![imm(100)]);
+        assert_eq!(
+            encode_instruction(&alias).unwrap(),
+            encode_instruction(&generic).unwrap(),
+            "BL alias should match Bl"
+        );
+    }
+
+    #[test]
+    fn test_blr_alias() {
+        // BLR (typed) should match Blr
+        let alias = mk(AArch64Opcode::BLR, vec![preg(X0)]);
+        let generic = mk(AArch64Opcode::Blr, vec![preg(X0)]);
+        assert_eq!(
+            encode_instruction(&alias).unwrap(),
+            encode_instruction(&generic).unwrap(),
+            "BLR alias should match Blr"
+        );
+    }
+
+    #[test]
+    fn test_cmpwrr_alias() {
+        // CMPWrr W0, W1 should match CmpRR with 32-bit regs
+        let alias = mk(AArch64Opcode::CMPWrr, vec![preg(W0), preg(W1)]);
+        let generic = mk(AArch64Opcode::CmpRR, vec![preg(W0), preg(W1)]);
+        assert_eq!(
+            encode_instruction(&alias).unwrap(),
+            encode_instruction(&generic).unwrap(),
+            "CMPWrr should match CmpRR"
+        );
+    }
+
+    #[test]
+    fn test_cmpxrr_alias() {
+        let alias = mk(AArch64Opcode::CMPXrr, vec![preg(X0), preg(X1)]);
+        let generic = mk(AArch64Opcode::CmpRR, vec![preg(X0), preg(X1)]);
+        assert_eq!(
+            encode_instruction(&alias).unwrap(),
+            encode_instruction(&generic).unwrap(),
+            "CMPXrr should match CmpRR"
+        );
+    }
+
+    #[test]
+    fn test_cmpwri_alias() {
+        let alias = mk(AArch64Opcode::CMPWri, vec![preg(W0), imm(42)]);
+        let generic = mk(AArch64Opcode::CmpRI, vec![preg(W0), imm(42)]);
+        assert_eq!(
+            encode_instruction(&alias).unwrap(),
+            encode_instruction(&generic).unwrap(),
+            "CMPWri should match CmpRI"
+        );
+    }
+
+    #[test]
+    fn test_cmpxri_alias() {
+        let alias = mk(AArch64Opcode::CMPXri, vec![preg(X0), imm(42)]);
+        let generic = mk(AArch64Opcode::CmpRI, vec![preg(X0), imm(42)]);
+        assert_eq!(
+            encode_instruction(&alias).unwrap(),
+            encode_instruction(&generic).unwrap(),
+            "CMPXri should match CmpRI"
+        );
+    }
+
+    #[test]
+    fn test_movzwi_alias() {
+        let alias = mk(AArch64Opcode::MOVZWi, vec![preg(W0), imm(0x1234)]);
+        let generic = mk(AArch64Opcode::Movz, vec![preg(W0), imm(0x1234)]);
+        assert_eq!(
+            encode_instruction(&alias).unwrap(),
+            encode_instruction(&generic).unwrap(),
+            "MOVZWi should match Movz"
+        );
+    }
+
+    #[test]
+    fn test_movzxi_alias() {
+        let alias = mk(AArch64Opcode::MOVZXi, vec![preg(X0), imm(0x5678)]);
+        let generic = mk(AArch64Opcode::Movz, vec![preg(X0), imm(0x5678)]);
+        assert_eq!(
+            encode_instruction(&alias).unwrap(),
+            encode_instruction(&generic).unwrap(),
+            "MOVZXi should match Movz"
+        );
+    }
+
+    #[test]
+    fn test_bcc_alias() {
+        // Bcc with cond=EQ, offset=2
+        let alias = mk(AArch64Opcode::Bcc, vec![imm(0), imm(2)]);
+        let generic = mk(AArch64Opcode::BCond, vec![imm(0), imm(2)]);
+        assert_eq!(
+            encode_instruction(&alias).unwrap(),
+            encode_instruction(&generic).unwrap(),
+            "Bcc should match BCond"
+        );
+    }
+
+    #[test]
+    fn test_strwui_alias() {
+        // STRWui W0, [X1, #4] — 32-bit store unsigned offset
+        // size=10, V=0, opc=00, imm12=4/4=1
+        let inst = mk(AArch64Opcode::STRWui, vec![preg(W0), preg(X1), imm(4)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = encoding::encode_load_store_ui(0b10, 0, 0b00, 1, 1, 0);
+        assert_eq!(enc, expected, "STRWui W0, [X1, #4] = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_strxui_alias() {
+        // STRXui X0, [X1, #8] — 64-bit store unsigned offset
+        // size=11, V=0, opc=00, imm12=8/8=1
+        let inst = mk(AArch64Opcode::STRXui, vec![preg(X0), preg(X1), imm(8)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = encoding::encode_load_store_ui(0b11, 0, 0b00, 1, 1, 0);
+        assert_eq!(enc, expected, "STRXui X0, [X1, #8] = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_strsui_alias() {
+        // STRSui S0, [X1, #4] — 32-bit FP store unsigned offset
+        // size=10, V=1, opc=00, imm12=4/4=1
+        let inst = mk(AArch64Opcode::STRSui, vec![preg(S0), preg(X1), imm(4)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = encoding::encode_load_store_ui(0b10, 1, 0b00, 1, 1, 0);
+        assert_eq!(enc, expected, "STRSui S0, [X1, #4] = {enc:#010X}");
+    }
+
+    #[test]
+    fn test_strdui_alias() {
+        // STRDui D0, [X1, #8] — 64-bit FP store unsigned offset
+        // size=11, V=1, opc=00, imm12=8/8=1
+        let inst = mk(AArch64Opcode::STRDui, vec![preg(D0), preg(X1), imm(8)]);
+        let enc = encode_instruction(&inst).unwrap();
+        let expected = encoding::encode_load_store_ui(0b11, 1, 0b00, 1, 1, 0);
+        assert_eq!(enc, expected, "STRDui D0, [X1, #8] = {enc:#010X}");
+    }
+
+    // --- encode_fmov_imm8 unit tests ---
+
+    #[test]
+    fn test_encode_fmov_imm8_1_0() {
+        // 1.0 = 0x3FF0_0000_0000_0000
+        // exp=1023, biased_3=3=0b011, NOT(b)=1, cc=11, frac_top4=0
+        // imm8 = 0_1_11_0000 = 0x70
+        assert_eq!(encode_fmov_imm8(1.0), 0x70);
+    }
+
+    #[test]
+    fn test_encode_fmov_imm8_2_0() {
+        // 2.0 = 0x4000_0000_0000_0000
+        // exp=1024, biased_3=4=0b100, NOT(b)=0, cc=00, frac_top4=0
+        // imm8 = 0_0_00_0000 = 0x00
+        assert_eq!(encode_fmov_imm8(2.0), 0x00);
+    }
+
+    #[test]
+    fn test_encode_fmov_imm8_0_5() {
+        // 0.5 = 0x3FE0_0000_0000_0000
+        // exp=1022, biased_3=2=0b010, NOT(b)=1, cc=10, frac_top4=0
+        // imm8 = 0_1_10_0000 = 0x60
+        assert_eq!(encode_fmov_imm8(0.5), 0x60);
+    }
+
+    #[test]
+    fn test_encode_fmov_imm8_neg_1_0() {
+        // -1.0: sign=1
+        // imm8 = 1_1_11_0000 = 0xF0
+        assert_eq!(encode_fmov_imm8(-1.0), 0xF0);
+    }
+
+    #[test]
+    fn test_encode_fmov_imm8_1_5() {
+        // 1.5 = 0x3FF8_0000_0000_0000
+        // exp=1023, biased_3=3, NOT(b)=1, cc=11, frac_top4=0b1000=8
+        // imm8 = 0_1_11_1000 = 0x78
+        assert_eq!(encode_fmov_imm8(1.5), 0x78);
+    }
+
+    // --- ARM ARM cross-check: logical immediate fixed bits ---
+
+    #[test]
+    fn test_logical_imm_fixed_bits() {
+        // Bits 28:23 must be 100100 for logical immediate
+        let inst = mk(AArch64Opcode::AndRI, vec![preg(X0), preg(X1), imm(0), imm(0), imm(0)]);
+        let enc = encode_instruction(&inst).unwrap();
+        assert_eq!((enc >> 23) & 0x3F, 0b100100, "Logical imm fixed bits 28:23 = 100100");
+    }
+
+    #[test]
+    fn test_logical_imm_opc_differentiation() {
+        // AND=00, ORR=01, EOR=10 in bits 30:29
+        let and_inst = mk(AArch64Opcode::AndRI, vec![preg(X0), preg(X1), imm(0), imm(0), imm(0)]);
+        let orr_inst = mk(AArch64Opcode::OrrRI, vec![preg(X0), preg(X1), imm(0), imm(0), imm(0)]);
+        let eor_inst = mk(AArch64Opcode::EorRI, vec![preg(X0), preg(X1), imm(0), imm(0), imm(0)]);
+        let enc_and = encode_instruction(&and_inst).unwrap();
+        let enc_orr = encode_instruction(&orr_inst).unwrap();
+        let enc_eor = encode_instruction(&eor_inst).unwrap();
+        assert_eq!((enc_and >> 29) & 0b11, 0b00, "AND opc = 00");
+        assert_eq!((enc_orr >> 29) & 0b11, 0b01, "ORR opc = 01");
+        assert_eq!((enc_eor >> 29) & 0b11, 0b10, "EOR opc = 10");
     }
 }
