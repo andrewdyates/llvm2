@@ -26,6 +26,7 @@ pub mod macho;
 pub mod metal_emitter;
 pub mod pipeline;
 pub mod relax;
+pub mod riscv;
 pub mod target;
 pub mod unwind;
 pub mod x86_64;
