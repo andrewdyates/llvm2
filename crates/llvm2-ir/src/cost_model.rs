@@ -249,6 +249,29 @@ impl AppleSiliconCostModel {
             FmovGprFpr  => (3, 2.0),
             FmovFprGpr  => (3, 2.0),
 
+            // ===== NEON SIMD (vector) =====
+            // Firestorm NEON: 2-cycle latency for integer ADD/SUB, 3-cycle MUL.
+            // FP: 3-cycle FADD/FSUB, 4-cycle FMUL, ~10-cycle FDIV.
+            // 2 NEON execution units, throughput ~2 vec ops/cycle.
+            NeonAddV  => (2, 2.0),
+            NeonSubV  => (2, 2.0),
+            NeonMulV  => (3, 2.0),
+            NeonFaddV => (3, 2.0),
+            NeonFsubV => (3, 2.0),
+            NeonFmulV => (4, 2.0),
+            NeonFdivV => (10, 0.5),
+            // Logic ops: 1-2 cycle latency
+            NeonAndV | NeonOrrV | NeonEorV | NeonBicV | NeonNotV => (1, 2.0),
+            // Compare: 2 cycles
+            NeonCmeqV | NeonCmgtV | NeonCmgeV => (2, 2.0),
+            // DUP/INS/MOVI: 2-3 cycle latency
+            NeonDupElem | NeonDupGen => (2, 2.0),
+            NeonInsGen => (3, 1.0),
+            NeonMovi   => (2, 2.0),
+            // SIMD loads: 4-cycle L1 hit, stores: 1-cycle dispatch
+            NeonLd1Post => (4, 2.0),
+            NeonSt1Post => (1, 2.0),
+
             // ===== Pseudo-instructions (no execution cost) =====
             Phi | StackAlloc | Copy | Nop => (0, f64::INFINITY),
 

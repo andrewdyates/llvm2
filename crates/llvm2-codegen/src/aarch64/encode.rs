@@ -19,6 +19,7 @@ use llvm2_ir::regs::{preg_class, RegClass, SpecialReg};
 use super::encoding;
 use super::encoding_fp::{self, FpArithOp, FpCmpOp, FpConvOp, FpSize};
 use super::encoding_mem;
+use super::encoding_neon;
 
 use thiserror::Error;
 
@@ -46,6 +47,8 @@ pub enum EncodeError {
     MemEncode(#[from] encoding_mem::EncodeError),
     #[error("FP encoding error: {0}")]
     FpEncode(#[from] encoding_fp::FpEncodeError),
+    #[error("NEON encoding error: {0}")]
+    NeonEncode(#[from] encoding_neon::NeonEncodeError),
     #[error("unsupported FP size {size:?} for opcode {opcode:?}")]
     UnsupportedFpSize {
         opcode: AArch64Opcode,
@@ -1124,6 +1127,214 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
         }
 
         // =================================================================
+        // NEON SIMD (vector) instructions
+        // =================================================================
+
+        // Integer vector arithmetic: ADD, SUB, MUL
+        AArch64Opcode::NeonAddV => {
+            let arr = neon_arrangement(inst);
+            let enc = encoding_neon::encode_int_vec3_same(
+                arr, encoding_neon::IntVec3Op::Add,
+                preg_hw(inst, 2)? as u8, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        AArch64Opcode::NeonSubV => {
+            let arr = neon_arrangement(inst);
+            let enc = encoding_neon::encode_int_vec3_same(
+                arr, encoding_neon::IntVec3Op::Sub,
+                preg_hw(inst, 2)? as u8, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        AArch64Opcode::NeonMulV => {
+            let arr = neon_arrangement(inst);
+            let enc = encoding_neon::encode_int_vec3_same(
+                arr, encoding_neon::IntVec3Op::Mul,
+                preg_hw(inst, 2)? as u8, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // FP vector arithmetic: FADD, FSUB, FMUL, FDIV
+        AArch64Opcode::NeonFaddV => {
+            let fp_arr = neon_fp_arrangement(inst);
+            let enc = encoding_neon::encode_fp_vec3_same(
+                fp_arr, encoding_neon::FpVec3Op::Fadd,
+                preg_hw(inst, 2)? as u8, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        AArch64Opcode::NeonFsubV => {
+            let fp_arr = neon_fp_arrangement(inst);
+            let enc = encoding_neon::encode_fp_vec3_same(
+                fp_arr, encoding_neon::FpVec3Op::Fsub,
+                preg_hw(inst, 2)? as u8, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        AArch64Opcode::NeonFmulV => {
+            let fp_arr = neon_fp_arrangement(inst);
+            let enc = encoding_neon::encode_fp_vec3_same(
+                fp_arr, encoding_neon::FpVec3Op::Fmul,
+                preg_hw(inst, 2)? as u8, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        AArch64Opcode::NeonFdivV => {
+            let fp_arr = neon_fp_arrangement(inst);
+            let enc = encoding_neon::encode_fp_vec3_same(
+                fp_arr, encoding_neon::FpVec3Op::Fdiv,
+                preg_hw(inst, 2)? as u8, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // Vector logic: AND, ORR, EOR, BIC
+        AArch64Opcode::NeonAndV => {
+            let q = neon_q_bit(inst);
+            let enc = encoding_neon::encode_vec_logic(
+                q, encoding_neon::VecLogicOp::And,
+                preg_hw(inst, 2)? as u8, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        AArch64Opcode::NeonOrrV => {
+            let q = neon_q_bit(inst);
+            let enc = encoding_neon::encode_vec_logic(
+                q, encoding_neon::VecLogicOp::Orr,
+                preg_hw(inst, 2)? as u8, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        AArch64Opcode::NeonEorV => {
+            let q = neon_q_bit(inst);
+            let enc = encoding_neon::encode_vec_logic(
+                q, encoding_neon::VecLogicOp::Eor,
+                preg_hw(inst, 2)? as u8, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        AArch64Opcode::NeonBicV => {
+            let q = neon_q_bit(inst);
+            let enc = encoding_neon::encode_vec_logic(
+                q, encoding_neon::VecLogicOp::Bic,
+                preg_hw(inst, 2)? as u8, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // Vector NOT
+        AArch64Opcode::NeonNotV => {
+            let q = neon_q_bit(inst);
+            let enc = encoding_neon::encode_vec_not(
+                q, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // Vector compare: CMEQ, CMGT, CMGE
+        AArch64Opcode::NeonCmeqV => {
+            let arr = neon_arrangement(inst);
+            let enc = encoding_neon::encode_int_vec3_same(
+                arr, encoding_neon::IntVec3Op::Cmeq,
+                preg_hw(inst, 2)? as u8, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        AArch64Opcode::NeonCmgtV => {
+            let arr = neon_arrangement(inst);
+            let enc = encoding_neon::encode_int_vec3_same(
+                arr, encoding_neon::IntVec3Op::Cmgt,
+                preg_hw(inst, 2)? as u8, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        AArch64Opcode::NeonCmgeV => {
+            let arr = neon_arrangement(inst);
+            let enc = encoding_neon::encode_int_vec3_same(
+                arr, encoding_neon::IntVec3Op::Cmge,
+                preg_hw(inst, 2)? as u8, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // DUP (element): duplicate one vector lane to all lanes
+        // Operands: [Vd, Vn, Imm(lane), Imm(element_size)]
+        AArch64Opcode::NeonDupElem => {
+            let q = neon_q_bit(inst);
+            let lane = imm_val(inst, 2) as u8;
+            let elem = neon_element_size(inst, 3);
+            let enc = encoding_neon::encode_dup_element(
+                q, elem, lane, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // DUP (general): duplicate GPR to all vector lanes
+        // Operands: [Vd, Rn, Imm(element_size)]
+        AArch64Opcode::NeonDupGen => {
+            let q = neon_q_bit(inst);
+            let elem = neon_element_size(inst, 2);
+            let enc = encoding_neon::encode_dup_general(
+                q, elem, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // INS (general): insert GPR into vector lane
+        // Operands: [Vd, Rn, Imm(lane), Imm(element_size)]
+        AArch64Opcode::NeonInsGen => {
+            let lane = imm_val(inst, 2) as u8;
+            let elem = neon_element_size(inst, 3);
+            let enc = encoding_neon::encode_ins_general(
+                elem, lane, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // MOVI: move immediate to vector (byte form)
+        // Operands: [Vd, Imm(imm8)]
+        AArch64Opcode::NeonMovi => {
+            let q = neon_q_bit(inst);
+            let imm8 = imm_val(inst, 1) as u8;
+            let enc = encoding_neon::encode_movi_byte(
+                q, imm8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // LD1 post-index: SIMD load 1 register
+        // Operands: [Vt, Xn, Imm(arrangement)]
+        AArch64Opcode::NeonLd1Post => {
+            let arr = neon_arrangement(inst);
+            let enc = encoding_neon::encode_ld1_post_imm(
+                arr, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // ST1 post-index: SIMD store 1 register
+        // Operands: [Vt, Xn, Imm(arrangement)]
+        AArch64Opcode::NeonSt1Post => {
+            let arr = neon_arrangement(inst);
+            let enc = encoding_neon::encode_st1_post_imm(
+                arr, preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // =================================================================
         // Pseudo-instructions — emit NOP as safe fallback
         // =================================================================
 
@@ -1696,6 +1907,87 @@ fn fp_size_from_source(inst: &MachInst, idx: usize) -> FpSize {
     match inst.operands.get(idx) {
         Some(MachOperand::PReg(p)) => fp_size_from_preg_class(preg_class(*p)),
         _ => FpSize::Double,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NEON helpers
+// ---------------------------------------------------------------------------
+
+/// Arrangement encoding convention for NEON instructions:
+///
+/// The last `Imm` operand of three-register NEON instructions encodes
+/// the vector arrangement as a small integer:
+///   0 = 8B, 1 = 16B, 2 = 4H, 3 = 8H, 4 = 2S, 5 = 4S, 6 = 2D
+///
+/// For instructions with only register operands (logic/NOT), the arrangement
+/// is inferred from the register class (V registers = Q=1, default 128-bit).
+fn neon_arrangement(inst: &MachInst) -> encoding_neon::VectorArrangement {
+    // Check last operand for arrangement encoding
+    let arr_idx = inst.operands.len().saturating_sub(1);
+    let arr_val = imm_val(inst, arr_idx) as u32;
+    match arr_val {
+        0 => encoding_neon::VectorArrangement::B8,
+        1 => encoding_neon::VectorArrangement::B16,
+        2 => encoding_neon::VectorArrangement::H4,
+        3 => encoding_neon::VectorArrangement::H8,
+        4 => encoding_neon::VectorArrangement::S2,
+        5 => encoding_neon::VectorArrangement::S4,
+        6 => encoding_neon::VectorArrangement::D2,
+        _ => encoding_neon::VectorArrangement::S4, // default: 4S
+    }
+}
+
+/// FP arrangement for NEON FP instructions.
+///
+/// Convention: last Imm operand encodes arrangement:
+///   0 = 2S, 1 = 4S, 2 = 2D
+fn neon_fp_arrangement(inst: &MachInst) -> encoding_neon::FpVectorArrangement {
+    let arr_idx = inst.operands.len().saturating_sub(1);
+    let arr_val = imm_val(inst, arr_idx) as u32;
+    match arr_val {
+        0 => encoding_neon::FpVectorArrangement::S2,
+        1 => encoding_neon::FpVectorArrangement::S4,
+        2 => encoding_neon::FpVectorArrangement::D2,
+        _ => encoding_neon::FpVectorArrangement::S4, // default: 4S
+    }
+}
+
+/// Extract the Q bit for NEON logic/move instructions.
+///
+/// For logic instructions that don't carry arrangement in their operands,
+/// infer from the register class: V registers (Fpr128) = Q=1 (128-bit).
+fn neon_q_bit(inst: &MachInst) -> u32 {
+    // Check if last operand is an Imm encoding Q directly
+    let last_idx = inst.operands.len().saturating_sub(1);
+    match inst.operands.get(last_idx) {
+        Some(MachOperand::Imm(v)) => {
+            // For logic: 0 = 8B(Q=0), 1 = 16B(Q=1)
+            if *v == 0 { 0 } else { 1 }
+        }
+        _ => {
+            // Infer from register class: V registers are 128-bit (Q=1)
+            match inst.operands.first() {
+                Some(MachOperand::PReg(p)) => {
+                    if preg_class(*p) == RegClass::Fpr128 { 1 } else { 0 }
+                }
+                _ => 1, // default to Q=1 (128-bit)
+            }
+        }
+    }
+}
+
+/// Extract element size from an Imm operand at `idx`.
+///
+/// Convention: 1=B, 2=H, 4=S, 8=D
+fn neon_element_size(inst: &MachInst, idx: usize) -> encoding_neon::ElementSize {
+    let val = imm_val(inst, idx) as u32;
+    match val {
+        1 => encoding_neon::ElementSize::B,
+        2 => encoding_neon::ElementSize::H,
+        4 => encoding_neon::ElementSize::S,
+        8 => encoding_neon::ElementSize::D,
+        _ => encoding_neon::ElementSize::S, // default: 32-bit
     }
 }
 
