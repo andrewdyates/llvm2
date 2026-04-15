@@ -61,6 +61,7 @@ pub mod dce;
 pub mod dom;
 pub mod effects;
 pub mod licm;
+pub mod loop_unroll;
 pub mod loops;
 pub mod pass_manager;
 pub mod passes;
@@ -68,6 +69,7 @@ pub mod peephole;
 pub mod pipeline;
 pub mod proof_opts;
 pub mod scheduler;
+pub mod strength_reduce;
 pub mod vectorize;
 
 // Re-export the most important types at crate root.

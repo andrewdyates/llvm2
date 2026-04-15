@@ -31,9 +31,11 @@ use crate::copy_prop::CopyPropagation;
 use crate::cse::CommonSubexprElim;
 use crate::dce::DeadCodeElimination;
 use crate::licm::LoopInvariantCodeMotion;
+use crate::loop_unroll::LoopUnroll;
 use crate::pass_manager::{PassManager, PassStats};
 use crate::peephole::Peephole;
 use crate::proof_opts::ProofOptimization;
+use crate::strength_reduce::StrengthReduction;
 
 /// Optimization level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,18 +79,21 @@ impl OptimizationPipeline {
             OptLevel::O2 | OptLevel::Os => {
                 // Standard: full pipeline with proof-consuming opts + CSE and LICM.
                 // Proof opts run first: they eliminate checks that DCE/peephole
-                // can then clean up further. Address mode formation runs after
-                // peephole to fold ADD+LDR/STR into richer addressing modes.
-                // CmpBranchFusion runs after CmpSelectCombine to fuse remaining
-                // CMP/TST + BCond pairs into CBZ/CBNZ/TBZ/TBNZ.
-                // CFG simplification runs last to clean up branches left dead
-                // by prior passes.
+                // can then clean up further. Loop optimizations (strength
+                // reduction, unrolling) run after LICM to benefit from hoisted
+                // invariants. Address mode formation runs after peephole to
+                // fold ADD+LDR/STR into richer addressing modes. CmpBranchFusion
+                // runs after CmpSelectCombine to fuse remaining CMP/TST + BCond
+                // pairs into CBZ/CBNZ/TBZ/TBNZ. CFG simplification runs last
+                // to clean up branches left dead by prior passes.
                 PassManager::new()
                     .with_pass(Box::new(ProofOptimization::new()))
                     .with_pass(Box::new(ConstantFolding))
                     .with_pass(Box::new(CopyPropagation))
                     .with_pass(Box::new(CommonSubexprElim))
                     .with_pass(Box::new(LoopInvariantCodeMotion))
+                    .with_pass(Box::new(StrengthReduction))
+                    .with_pass(Box::new(LoopUnroll))
                     .with_pass(Box::new(Peephole))
                     .with_pass(Box::new(AddrModeFormation))
                     .with_pass(Box::new(CmpSelectCombine))
@@ -98,15 +103,18 @@ impl OptimizationPipeline {
             }
             OptLevel::O3 => {
                 // Aggressive: full pipeline with proof-consuming opts (will be iterated).
-                // Address mode formation runs after peephole, before DCE.
-                // CmpSelect combines run after addr-mode, before DCE.
-                // CmpBranchFusion fuses CMP/TST + BCond into CBZ/CBNZ/TBZ/TBNZ.
+                // Loop optimizations run after LICM. Address mode formation
+                // runs after peephole, before DCE. CmpSelect combines run
+                // after addr-mode, before DCE. CmpBranchFusion fuses
+                // CMP/TST + BCond into CBZ/CBNZ/TBZ/TBNZ.
                 PassManager::new()
                     .with_pass(Box::new(ProofOptimization::new()))
                     .with_pass(Box::new(ConstantFolding))
                     .with_pass(Box::new(CopyPropagation))
                     .with_pass(Box::new(CommonSubexprElim))
                     .with_pass(Box::new(LoopInvariantCodeMotion))
+                    .with_pass(Box::new(StrengthReduction))
+                    .with_pass(Box::new(LoopUnroll))
                     .with_pass(Box::new(Peephole))
                     .with_pass(Box::new(AddrModeFormation))
                     .with_pass(Box::new(CmpSelectCombine))
@@ -219,7 +227,9 @@ mod tests {
     fn test_o3_iterates() {
         let pipeline = OptimizationPipeline::new(OptLevel::O3);
         let pm = pipeline.build_pass_manager();
-        // 11 passes: proof-opts + const-fold + copy-prop + cse + licm + peephole + addr-mode + cmp-select + cmp-branch-fusion + dce + cfg-simplify
-        assert_eq!(pm.num_passes(), 11);
+        // 13 passes: proof-opts + const-fold + copy-prop + cse + licm +
+        // strength-reduce + loop-unroll + peephole + addr-mode + cmp-select +
+        // cmp-branch-fusion + dce + cfg-simplify
+        assert_eq!(pm.num_passes(), 13);
     }
 }
