@@ -31,6 +31,7 @@ use crate::copy_prop::CopyPropagation;
 use crate::cse::CommonSubexprElim;
 use crate::dce::DeadCodeElimination;
 use crate::gvn::GlobalValueNumbering;
+use crate::if_convert::IfConversion;
 use crate::licm::LoopInvariantCodeMotion;
 use crate::loop_unroll::LoopUnroll;
 use crate::pass_manager::{PassManager, PassStats};
@@ -100,6 +101,7 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(Peephole))
                     .with_pass(Box::new(AddrModeFormation))
                     .with_pass(Box::new(CmpSelectCombine))
+                    .with_pass(Box::new(IfConversion))
                     .with_pass(Box::new(CmpBranchFusion))
                     .with_pass(Box::new(TailCallOptimization))
                     .with_pass(Box::new(DeadCodeElimination))
@@ -109,10 +111,11 @@ impl OptimizationPipeline {
                 // Aggressive: full pipeline with proof-consuming opts (will be iterated).
                 // Loop optimizations run after LICM. Address mode formation
                 // runs after peephole, before DCE. CmpSelect combines run
-                // after addr-mode, before DCE. CmpBranchFusion fuses
-                // CMP/TST + BCond into CBZ/CBNZ/TBZ/TBNZ. Tail call
-                // optimization runs after other opts to see the final call
-                // pattern before DCE cleans up.
+                // after addr-mode, before DCE. IfConversion handles general
+                // diamond/triangle patterns after CmpSelectCombine's narrow
+                // cases. CmpBranchFusion fuses CMP/TST + BCond into
+                // CBZ/CBNZ/TBZ/TBNZ. Tail call optimization runs after other
+                // opts to see the final call pattern before DCE cleans up.
                 PassManager::new()
                     .with_pass(Box::new(ProofOptimization::new()))
                     .with_pass(Box::new(ConstantFolding))
@@ -125,6 +128,7 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(Peephole))
                     .with_pass(Box::new(AddrModeFormation))
                     .with_pass(Box::new(CmpSelectCombine))
+                    .with_pass(Box::new(IfConversion))
                     .with_pass(Box::new(CmpBranchFusion))
                     .with_pass(Box::new(TailCallOptimization))
                     .with_pass(Box::new(DeadCodeElimination))
@@ -235,9 +239,9 @@ mod tests {
     fn test_o3_iterates() {
         let pipeline = OptimizationPipeline::new(OptLevel::O3);
         let pm = pipeline.build_pass_manager();
-        // 15 passes: proof-opts + const-fold + copy-prop + cse + gvn + licm +
+        // 16 passes: proof-opts + const-fold + copy-prop + cse + gvn + licm +
         // strength-reduce + loop-unroll + peephole + addr-mode + cmp-select +
-        // cmp-branch-fusion + tail-call + dce + cfg-simplify
-        assert_eq!(pm.num_passes(), 15);
+        // if-convert + cmp-branch-fusion + tail-call + dce + cfg-simplify
+        assert_eq!(pm.num_passes(), 16);
     }
 }
