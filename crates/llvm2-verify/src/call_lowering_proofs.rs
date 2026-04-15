@@ -1164,6 +1164,12 @@ mod tests {
                     obligation.name, counterexample
                 );
             }
+            VerificationResult::Unknown { reason } => {
+                panic!(
+                    "Proof '{}' INCONCLUSIVE: {}",
+                    obligation.name, reason
+                );
+            }
         }
     }
 
@@ -1176,6 +1182,12 @@ mod tests {
                 panic!(
                     "Negative proof '{}' unexpectedly PASSED (expected Invalid)",
                     obligation.name
+                );
+            }
+            VerificationResult::Unknown { reason } => {
+                panic!(
+                    "Negative proof '{}' INCONCLUSIVE (expected Invalid): {}",
+                    obligation.name, reason
                 );
             }
         }
