@@ -178,6 +178,11 @@ pub enum ProofCategory {
     /// If-conversion correctness proofs (diamond/triangle CFG to CSEL/CSINC/CSNEG).
     /// Source: `if_convert_proofs::all_if_convert_proofs_with_variants()`.
     IfConversion,
+
+    /// FP conversion lowering proofs (FCVTZS, FCVTZU, SCVTF, UCVTF, FCVT,
+    /// roundtrip, NaN handling).
+    /// Source: `fp_convert_proofs::all_fp_convert_proofs()`.
+    FpConversion,
 }
 
 impl ProofCategory {
@@ -215,6 +220,7 @@ impl ProofCategory {
             ProofCategory::Gvn,
             ProofCategory::TailCallOptimization,
             ProofCategory::IfConversion,
+            ProofCategory::FpConversion,
         ]
     }
 
@@ -252,6 +258,7 @@ impl ProofCategory {
             ProofCategory::Gvn => "GVN",
             ProofCategory::TailCallOptimization => "Tail Call Optimization",
             ProofCategory::IfConversion => "If-Conversion",
+            ProofCategory::FpConversion => "FP Conversion",
         }
     }
 }
@@ -504,6 +511,13 @@ fn register_if_convert_proofs(proofs: &mut Vec<CategorizedProof>) {
     }
 }
 
+#[inline(never)]
+fn register_fp_convert_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::fp_convert_proofs::all_fp_convert_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::FpConversion });
+    }
+}
+
 impl ProofDatabase {
     /// Construct the database by collecting all proofs from all registries.
     ///
@@ -527,6 +541,7 @@ impl ProofDatabase {
         register_gvn_proofs(&mut proofs);
         register_tco_proofs(&mut proofs);
         register_if_convert_proofs(&mut proofs);
+        register_fp_convert_proofs(&mut proofs);
         ProofDatabase { proofs }
     }
 
@@ -875,8 +890,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            31,
-            "expected 31 categories, got {}",
+            32,
+            "expected 32 categories, got {}",
             categories.len()
         );
     }
