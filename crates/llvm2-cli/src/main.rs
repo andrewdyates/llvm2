@@ -4,7 +4,9 @@
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Usage:
-//   llvm2 input.tmir -o output.o -O2 --target aarch64
+//   llvm2 input.json -o output.o -O2 --target aarch64
+//   llvm2 --input-json module.json -o output.o    (validated JSON wire format)
+//   llvm2 --input-json module.json --emit-json roundtrip.json  (round-trip)
 //   llvm2 --version
 //   llvm2 --help
 
@@ -17,6 +19,7 @@ use clap::Parser;
 use llvm2_codegen::compiler::{Compiler, CompilerConfig, CompilerTraceLevel};
 use llvm2_codegen::pipeline::OptLevel;
 use llvm2_codegen::target::Target;
+use tmir_func::reader;
 
 /// LLVM2 -- verified compiler backend for tMIR.
 ///
@@ -33,8 +36,20 @@ use llvm2_codegen::target::Target;
         Targets: aarch64 (primary), x86-64 (scaffold), riscv64 (scaffold)."
 )]
 struct Cli {
-    /// Input tMIR module file (JSON-serialized tmir_func::Module).
-    input: PathBuf,
+    /// Input tMIR module file (positional, JSON-serialized tmir_func::Module).
+    /// Use --input-json for explicit JSON wire format reading with validation.
+    input: Option<PathBuf>,
+
+    /// Read tMIR module from a JSON wire format file (with structural validation).
+    ///
+    /// This is the recommended way to pass tMIR from external tools.
+    /// The JSON format matches serde serialization of tmir_func::Module.
+    #[arg(long = "input-json", conflicts_with = "input")]
+    input_json: Option<PathBuf>,
+
+    /// Write the parsed tMIR module as JSON to this path (for round-trip testing).
+    #[arg(long = "emit-json")]
+    emit_json: Option<PathBuf>,
 
     /// Output object file path.
     #[arg(short = 'o', long = "output")]
@@ -91,26 +106,68 @@ fn parse_target(s: &str) -> Result<Target, String> {
 fn main() {
     let cli = Cli::parse();
 
-    // Read and deserialize the tMIR module from the input file.
-    let input_bytes = match fs::read(&cli.input) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            eprintln!("llvm2: error: cannot read '{}': {}", cli.input.display(), e);
+    // Determine the input file path.
+    let input_path = match (&cli.input, &cli.input_json) {
+        (Some(p), None) => p.clone(),
+        (None, Some(p)) => p.clone(),
+        (None, None) => {
+            eprintln!("llvm2: error: no input file specified (use positional argument or --input-json)");
             process::exit(1);
+        }
+        (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents this"),
+    };
+
+    // Read and deserialize the tMIR module.
+    // --input-json uses the validated reader; positional uses raw serde.
+    let module: tmir_func::Module = if cli.input_json.is_some() {
+        match reader::read_module_from_json(&input_path) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!(
+                    "llvm2: error: failed to read tMIR JSON from '{}': {}",
+                    input_path.display(),
+                    e
+                );
+                process::exit(1);
+            }
+        }
+    } else {
+        let input_bytes = match fs::read(&input_path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("llvm2: error: cannot read '{}': {}", input_path.display(), e);
+                process::exit(1);
+            }
+        };
+        match serde_json::from_slice(&input_bytes) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!(
+                    "llvm2: error: failed to parse '{}' as tMIR module: {}",
+                    input_path.display(),
+                    e
+                );
+                process::exit(1);
+            }
         }
     };
 
-    let module: tmir_func::Module = match serde_json::from_slice(&input_bytes) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!(
-                "llvm2: error: failed to parse '{}' as tMIR module: {}",
-                cli.input.display(),
-                e
-            );
-            process::exit(1);
+    // Emit JSON round-trip output if requested.
+    if let Some(ref emit_path) = cli.emit_json {
+        match reader::write_module_to_json(&module, emit_path) {
+            Ok(()) => {
+                eprintln!("llvm2: wrote tMIR JSON to {}", emit_path.display());
+            }
+            Err(e) => {
+                eprintln!(
+                    "llvm2: error: failed to write tMIR JSON to '{}': {}",
+                    emit_path.display(),
+                    e
+                );
+                process::exit(1);
+            }
         }
-    };
+    }
 
     // Build compiler configuration from CLI flags.
     let config = CompilerConfig {
@@ -182,7 +239,7 @@ fn main() {
 
     // Determine output path: explicit -o, or derive from input.
     let output_path = cli.output.unwrap_or_else(|| {
-        let mut p = cli.input.clone();
+        let mut p = input_path.clone();
         p.set_extension("o");
         p
     });

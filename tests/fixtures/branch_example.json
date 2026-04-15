@@ -1,0 +1,91 @@
+{
+  "name": "branch_example",
+  "functions": [
+    {
+      "id": 0,
+      "name": "max_i64",
+      "ty": {
+        "params": [
+          { "Int": 64 },
+          { "Int": 64 }
+        ],
+        "returns": [
+          { "Int": 64 }
+        ]
+      },
+      "entry": 0,
+      "blocks": [
+        {
+          "id": 0,
+          "params": [
+            [0, { "Int": 64 }],
+            [1, { "Int": 64 }]
+          ],
+          "body": [
+            {
+              "instr": {
+                "Cmp": {
+                  "op": "Sgt",
+                  "ty": { "Int": 64 },
+                  "lhs": 0,
+                  "rhs": 1
+                }
+              },
+              "results": [2],
+              "proofs": []
+            },
+            {
+              "instr": {
+                "CondBr": {
+                  "cond": 2,
+                  "then_target": 1,
+                  "then_args": [0],
+                  "else_target": 2,
+                  "else_args": [1]
+                }
+              },
+              "results": [],
+              "proofs": []
+            }
+          ]
+        },
+        {
+          "id": 1,
+          "params": [
+            [3, { "Int": 64 }]
+          ],
+          "body": [
+            {
+              "instr": {
+                "Return": {
+                  "values": [3]
+                }
+              },
+              "results": [],
+              "proofs": []
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "params": [
+            [4, { "Int": 64 }]
+          ],
+          "body": [
+            {
+              "instr": {
+                "Return": {
+                  "values": [4]
+                }
+              },
+              "results": [],
+              "proofs": []
+            }
+          ]
+        }
+      ],
+      "proofs": []
+    }
+  ],
+  "structs": []
+}

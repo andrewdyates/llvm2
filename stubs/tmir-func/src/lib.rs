@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 pub mod builder;
+pub mod reader;
 
 use serde::{Deserialize, Serialize};
 use tmir_instrs::InstrNode;

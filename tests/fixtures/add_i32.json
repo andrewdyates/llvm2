@@ -1,0 +1,53 @@
+{
+  "name": "add_example",
+  "functions": [
+    {
+      "id": 0,
+      "name": "add_i32",
+      "ty": {
+        "params": [
+          { "Int": 32 },
+          { "Int": 32 }
+        ],
+        "returns": [
+          { "Int": 32 }
+        ]
+      },
+      "entry": 0,
+      "blocks": [
+        {
+          "id": 0,
+          "params": [
+            [0, { "Int": 32 }],
+            [1, { "Int": 32 }]
+          ],
+          "body": [
+            {
+              "instr": {
+                "BinOp": {
+                  "op": "Add",
+                  "ty": { "Int": 32 },
+                  "lhs": 0,
+                  "rhs": 1
+                }
+              },
+              "results": [2],
+              "proofs": []
+            },
+            {
+              "instr": {
+                "Return": {
+                  "values": [2]
+                }
+              },
+              "results": [],
+              "proofs": []
+            }
+          ]
+        }
+      ],
+      "proofs": []
+    }
+  ],
+  "structs": []
+}
