@@ -11,14 +11,15 @@
 //   5. sum(n: i32) -> i32         — loop with accumulator
 //   6. load_store(p: *mut i32, v: i32) — memory operations
 
-use llvm2_lower::adapter::{translate_function, AdapterError, ProofContext};
+use llvm2_lower::adapter::{translate_function, translate_module, AdapterError, ProofContext};
 use llvm2_lower::function::Function;
 use llvm2_lower::isel::{AArch64Opcode, InstructionSelector, ISelFunction};
-use llvm2_lower::instructions::Block;
+use llvm2_lower::instructions::{Block, Opcode};
 use llvm2_lower::types::Type;
 
-use tmir_func::{Block as TmirBlock, Function as TmirFunction};
-use tmir_instrs::{BinOp, CmpOp, Instr, InstrNode, UnOp};
+use tmir_func::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule};
+use tmir_func::builder::{self, FunctionBuilder};
+use tmir_instrs::{BinOp, CastOp, CmpOp, Instr, InstrNode, SwitchCase, UnOp};
 use tmir_types::{BlockId, FuncId, FuncTy, Ty, ValueId};
 
 // ---------------------------------------------------------------------------
@@ -913,4 +914,1051 @@ fn test_adapter_block_params_for_loop() {
     // Both params should be I32
     assert_eq!(loop_header_block.1.params[0].1, Type::I32);
     assert_eq!(loop_header_block.1.params[1].1, Type::I32);
+}
+
+// ===========================================================================
+// Test 7: Direct function call
+// ===========================================================================
+//
+// fn callee(x: i32) -> i32 { x }
+// fn caller(a: i32) -> i32 { callee(a) }
+//
+// Tests direct call lowering through the adapter and ISel pipeline.
+
+fn build_call_module() -> TmirModule {
+    let callee = TmirFunction {
+        id: FuncId(0),
+        name: "callee".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(32)],
+            returns: vec![Ty::Int(32)],
+        },
+        entry: BlockId(0),
+        blocks: vec![TmirBlock {
+            id: BlockId(0),
+            params: vec![(ValueId(0), Ty::Int(32))],
+            body: vec![InstrNode {
+                instr: Instr::Return {
+                    values: vec![ValueId(0)],
+                },
+                results: vec![],
+                proofs: vec![],
+            }],
+        }],
+        proofs: vec![],
+    };
+
+    let caller = TmirFunction {
+        id: FuncId(1),
+        name: "caller".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(32)],
+            returns: vec![Ty::Int(32)],
+        },
+        entry: BlockId(0),
+        blocks: vec![TmirBlock {
+            id: BlockId(0),
+            params: vec![(ValueId(0), Ty::Int(32))],
+            body: vec![
+                InstrNode {
+                    instr: Instr::Call {
+                        func: FuncId(0),
+                        args: vec![ValueId(0)],
+                        ret_ty: vec![Ty::Int(32)],
+                    },
+                    results: vec![ValueId(1)],
+                    proofs: vec![],
+                },
+                InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(1)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                },
+            ],
+        }],
+        proofs: vec![],
+    };
+
+    TmirModule {
+        name: "call_test".to_string(),
+        functions: vec![callee, caller],
+        structs: vec![],
+    }
+}
+
+#[test]
+fn test_call_adapter() {
+    let module = build_call_module();
+    let results = translate_module(&module).unwrap();
+    assert_eq!(results.len(), 2);
+
+    // callee function
+    let (callee_func, _) = &results[0];
+    assert_eq!(callee_func.name, "callee");
+
+    // caller function
+    let (caller_func, _) = &results[1];
+    assert_eq!(caller_func.name, "caller");
+
+    let entry = &caller_func.blocks[&caller_func.entry_block];
+    // Should have a Call instruction followed by Return
+    assert_eq!(entry.instructions.len(), 2);
+    assert!(
+        matches!(&entry.instructions[0].opcode, Opcode::Call { name } if name == "callee"),
+        "Expected Call to 'callee', got {:?}",
+        entry.instructions[0].opcode
+    );
+}
+
+#[test]
+fn test_call_isel() {
+    let module = build_call_module();
+    let results = translate_module(&module).unwrap();
+
+    // Compile the caller function through ISel
+    let (caller_lir, _) = &results[1];
+    let mut isel =
+        InstructionSelector::new(caller_lir.name.clone(), caller_lir.signature.clone());
+    isel.lower_formal_arguments(&caller_lir.signature, caller_lir.entry_block)
+        .unwrap();
+
+    let mut block_order: Vec<Block> = caller_lir.blocks.keys().copied().collect();
+    block_order.sort_by_key(|b| if *b == caller_lir.entry_block { 0 } else { b.0 + 1 });
+
+    for block_id in &block_order {
+        let bb = &caller_lir.blocks[block_id];
+        isel.select_block(*block_id, &bb.instructions).unwrap();
+    }
+
+    let mfunc = isel.finalize();
+    assert!(
+        has_opcode(&mfunc, AArch64Opcode::Bl),
+        "Expected BL instruction for direct call"
+    );
+    assert!(has_opcode(&mfunc, AArch64Opcode::Ret));
+}
+
+// ===========================================================================
+// Test 8: Switch (multi-way branch)
+// ===========================================================================
+//
+// fn dispatch(x: i32) -> i32 {
+//     match x {
+//         0 => 10,
+//         1 => 20,
+//         _ => 30,
+//     }
+// }
+
+fn build_switch() -> TmirFunction {
+    TmirFunction {
+        id: FuncId(10),
+        name: "dispatch".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(32)],
+            returns: vec![Ty::Int(32)],
+        },
+        entry: BlockId(0),
+        blocks: vec![
+            // block0: entry — switch on x
+            TmirBlock {
+                id: BlockId(0),
+                params: vec![(ValueId(0), Ty::Int(32))],
+                body: vec![InstrNode {
+                    instr: Instr::Switch {
+                        value: ValueId(0),
+                        cases: vec![
+                            SwitchCase {
+                                value: 0,
+                                target: BlockId(1),
+                            },
+                            SwitchCase {
+                                value: 1,
+                                target: BlockId(2),
+                            },
+                        ],
+                        default: BlockId(3),
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                }],
+            },
+            // block1: case 0 -> return 10
+            TmirBlock {
+                id: BlockId(1),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(32),
+                            value: 10,
+                        },
+                        results: vec![ValueId(1)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(1)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // block2: case 1 -> return 20
+            TmirBlock {
+                id: BlockId(2),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(32),
+                            value: 20,
+                        },
+                        results: vec![ValueId(2)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // block3: default -> return 30
+            TmirBlock {
+                id: BlockId(3),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(32),
+                            value: 30,
+                        },
+                        results: vec![ValueId(3)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(3)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+        ],
+        proofs: vec![],
+    }
+}
+
+#[test]
+fn test_switch_adapter() {
+    let func = build_switch();
+    let (lir_func, _) = translate_only(&func).unwrap();
+
+    assert_eq!(lir_func.name, "dispatch");
+    assert_eq!(lir_func.blocks.len(), 4);
+
+    // Entry block should have exactly 1 instruction: Switch
+    let entry = &lir_func.blocks[&lir_func.entry_block];
+    assert_eq!(entry.instructions.len(), 1);
+    match &entry.instructions[0].opcode {
+        Opcode::Switch { cases, default: _ } => {
+            assert_eq!(cases.len(), 2, "Expected 2 switch cases");
+            assert_eq!(cases[0].0, 0);
+            assert_eq!(cases[1].0, 1);
+        }
+        other => panic!("Expected Switch opcode, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_switch_isel() {
+    let func = build_switch();
+    let mfunc = compile_tmir_function(&func);
+
+    assert_eq!(mfunc.blocks.len(), 4);
+
+    // Switch is lowered as a cascading CMP+B.EQ chain.
+    assert!(
+        has_opcode(&mfunc, AArch64Opcode::CmpRR) || has_opcode(&mfunc, AArch64Opcode::CmpRI),
+        "Expected CMP instruction for switch case comparison"
+    );
+    assert!(
+        has_opcode(&mfunc, AArch64Opcode::BCond),
+        "Expected B.EQ for switch case branch"
+    );
+    assert!(
+        count_opcode(&mfunc, AArch64Opcode::Ret) >= 3,
+        "Expected at least 3 RET instructions (case 0, case 1, default)"
+    );
+}
+
+// ===========================================================================
+// Test 9: CallIndirect (indirect function call)
+// ===========================================================================
+//
+// fn call_through_ptr(fn_ptr: *fn(i32) -> i32, arg: i32) -> i32 {
+//     fn_ptr(arg)
+// }
+
+fn build_call_indirect() -> TmirFunction {
+    TmirFunction {
+        id: FuncId(11),
+        name: "call_through_ptr".to_string(),
+        ty: FuncTy {
+            params: vec![
+                Ty::Ptr(Box::new(Ty::Func(FuncTy {
+                    params: vec![Ty::Int(32)],
+                    returns: vec![Ty::Int(32)],
+                }))),
+                Ty::Int(32),
+            ],
+            returns: vec![Ty::Int(32)],
+        },
+        entry: BlockId(0),
+        blocks: vec![TmirBlock {
+            id: BlockId(0),
+            params: vec![
+                (
+                    ValueId(0),
+                    Ty::Ptr(Box::new(Ty::Func(FuncTy {
+                        params: vec![Ty::Int(32)],
+                        returns: vec![Ty::Int(32)],
+                    }))),
+                ),
+                (ValueId(1), Ty::Int(32)),
+            ],
+            body: vec![
+                InstrNode {
+                    instr: Instr::CallIndirect {
+                        callee: ValueId(0),
+                        args: vec![ValueId(1)],
+                        ret_ty: vec![Ty::Int(32)],
+                    },
+                    results: vec![ValueId(2)],
+                    proofs: vec![],
+                },
+                InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(2)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                },
+            ],
+        }],
+        proofs: vec![],
+    }
+}
+
+#[test]
+fn test_call_indirect_adapter() {
+    let func = build_call_indirect();
+    let (lir_func, _) = translate_only(&func).unwrap();
+
+    assert_eq!(lir_func.name, "call_through_ptr");
+
+    let entry = &lir_func.blocks[&lir_func.entry_block];
+    // CallIndirect + Return = 2 instructions
+    assert_eq!(entry.instructions.len(), 2);
+    assert!(
+        matches!(&entry.instructions[0].opcode, Opcode::CallIndirect),
+        "Expected CallIndirect opcode, got {:?}",
+        entry.instructions[0].opcode
+    );
+    // First arg should be the function pointer, second the call arg
+    assert_eq!(
+        entry.instructions[0].args.len(),
+        2,
+        "CallIndirect should have fn_ptr + 1 arg = 2 total args"
+    );
+}
+
+#[test]
+fn test_call_indirect_isel() {
+    let func = build_call_indirect();
+    let mfunc = compile_tmir_function(&func);
+
+    // Indirect call is lowered to BLR on AArch64
+    assert!(
+        has_opcode(&mfunc, AArch64Opcode::Blr),
+        "Expected BLR instruction for indirect call"
+    );
+    assert!(has_opcode(&mfunc, AArch64Opcode::Ret));
+}
+
+// ===========================================================================
+// Test 10: Select (branchless conditional value)
+// ===========================================================================
+//
+// fn abs(x: i32) -> i32 {
+//     let neg = -x;
+//     let is_neg = x < 0;
+//     select(is_neg, neg, x)
+// }
+
+fn build_select() -> TmirFunction {
+    TmirFunction {
+        id: FuncId(12),
+        name: "abs_select".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(32)],
+            returns: vec![Ty::Int(32)],
+        },
+        entry: BlockId(0),
+        blocks: vec![TmirBlock {
+            id: BlockId(0),
+            params: vec![(ValueId(0), Ty::Int(32))],
+            body: vec![
+                // v1 = -x
+                InstrNode {
+                    instr: Instr::UnOp {
+                        op: UnOp::Neg,
+                        ty: Ty::Int(32),
+                        operand: ValueId(0),
+                    },
+                    results: vec![ValueId(1)],
+                    proofs: vec![],
+                },
+                // v2 = const 0
+                InstrNode {
+                    instr: Instr::Const {
+                        ty: Ty::Int(32),
+                        value: 0,
+                    },
+                    results: vec![ValueId(2)],
+                    proofs: vec![],
+                },
+                // v3 = x < 0
+                InstrNode {
+                    instr: Instr::Cmp {
+                        op: CmpOp::Slt,
+                        ty: Ty::Int(32),
+                        lhs: ValueId(0),
+                        rhs: ValueId(2),
+                    },
+                    results: vec![ValueId(3)],
+                    proofs: vec![],
+                },
+                // v4 = select(v3, v1, v0)  — if x<0 then -x else x
+                InstrNode {
+                    instr: Instr::Select {
+                        ty: Ty::Int(32),
+                        cond: ValueId(3),
+                        true_val: ValueId(1),
+                        false_val: ValueId(0),
+                    },
+                    results: vec![ValueId(4)],
+                    proofs: vec![],
+                },
+                InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(4)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                },
+            ],
+        }],
+        proofs: vec![],
+    }
+}
+
+#[test]
+fn test_select_adapter() {
+    let func = build_select();
+    let (lir_func, _) = translate_only(&func).unwrap();
+
+    assert_eq!(lir_func.name, "abs_select");
+    let entry = &lir_func.blocks[&lir_func.entry_block];
+
+    // Should have: Ineg, Iconst(0), Icmp, Iconst(1), Icmp(eq), Select, Return
+    // The Select lowering emits: Iconst(1) + Icmp(eq) + Select = 3 extra instructions
+    assert!(
+        entry.instructions.len() >= 6,
+        "Expected at least 6 instructions for select pattern, got {}",
+        entry.instructions.len()
+    );
+
+    // Find the Select opcode in the instruction stream
+    let has_select = entry
+        .instructions
+        .iter()
+        .any(|inst| matches!(&inst.opcode, Opcode::Select { .. }));
+    assert!(has_select, "Expected Select opcode in instruction stream");
+}
+
+#[test]
+fn test_select_isel() {
+    let func = build_select();
+    let mfunc = compile_tmir_function(&func);
+
+    // Select is lowered to CSEL on AArch64
+    assert!(
+        has_opcode(&mfunc, AArch64Opcode::Csel),
+        "Expected CSEL instruction for Select"
+    );
+    assert!(has_opcode(&mfunc, AArch64Opcode::Ret));
+}
+
+// ===========================================================================
+// Test 11: GetElementPtr (typed pointer arithmetic)
+// ===========================================================================
+//
+// fn array_access(arr: *i32, idx: i32) -> i32 {
+//     *gep(i32, arr, idx, 0)
+// }
+
+fn build_gep() -> TmirFunction {
+    TmirFunction {
+        id: FuncId(13),
+        name: "array_access".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Ptr(Box::new(Ty::Int(32))), Ty::Int(64)],
+            returns: vec![Ty::Int(32)],
+        },
+        entry: BlockId(0),
+        blocks: vec![TmirBlock {
+            id: BlockId(0),
+            params: vec![
+                (ValueId(0), Ty::Ptr(Box::new(Ty::Int(32)))),
+                (ValueId(1), Ty::Int(64)),
+            ],
+            body: vec![
+                // v2 = gep(i32, v0, v1, 0)
+                InstrNode {
+                    instr: Instr::GetElementPtr {
+                        elem_ty: Ty::Int(32),
+                        base: ValueId(0),
+                        index: ValueId(1),
+                        offset: 0,
+                    },
+                    results: vec![ValueId(2)],
+                    proofs: vec![],
+                },
+                // v3 = load(i32, v2)
+                InstrNode {
+                    instr: Instr::Load {
+                        ty: Ty::Int(32),
+                        ptr: ValueId(2),
+                    },
+                    results: vec![ValueId(3)],
+                    proofs: vec![],
+                },
+                InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(3)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                },
+            ],
+        }],
+        proofs: vec![],
+    }
+}
+
+#[test]
+fn test_gep_adapter() {
+    let func = build_gep();
+    let (lir_func, _) = translate_only(&func).unwrap();
+
+    assert_eq!(lir_func.name, "array_access");
+    let entry = &lir_func.blocks[&lir_func.entry_block];
+
+    // GEP for i32 (4 bytes) with offset 0:
+    //   Iconst(4) + Imul(idx, 4) + Iadd(base, mul_result) + Iconst(0) + Iadd(alias) + Load + Return
+    assert!(
+        entry.instructions.len() >= 4,
+        "Expected at least 4 instructions for GEP+Load+Return, got {}",
+        entry.instructions.len()
+    );
+
+    // Should have a Load instruction
+    let has_load = entry
+        .instructions
+        .iter()
+        .any(|inst| matches!(&inst.opcode, Opcode::Load { .. }));
+    assert!(has_load, "Expected Load opcode after GEP");
+}
+
+#[test]
+fn test_gep_isel() {
+    let func = build_gep();
+    let mfunc = compile_tmir_function(&func);
+
+    // GEP lowers to MUL + ADD, then load
+    assert!(
+        has_opcode(&mfunc, AArch64Opcode::LdrRI) || has_opcode(&mfunc, AArch64Opcode::LdrRO),
+        "Expected LDR for load after GEP"
+    );
+    assert!(has_opcode(&mfunc, AArch64Opcode::Ret));
+}
+
+// ===========================================================================
+// Test 12: GEP with non-zero byte offset (struct array access)
+// ===========================================================================
+//
+// fn struct_field_in_array(arr: *{i32, i32}, idx: i64) -> i32 {
+//     // Access arr[idx].field_at_offset_4
+//     let ptr = gep({i32,i32}, arr, idx, 4);
+//     *ptr
+// }
+
+fn build_gep_with_offset() -> TmirFunction {
+    TmirFunction {
+        id: FuncId(14),
+        name: "struct_field_in_array".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Ptr(Box::new(Ty::Int(64))), Ty::Int(64)],
+            returns: vec![Ty::Int(32)],
+        },
+        entry: BlockId(0),
+        blocks: vec![TmirBlock {
+            id: BlockId(0),
+            params: vec![
+                (ValueId(0), Ty::Ptr(Box::new(Ty::Int(64)))),
+                (ValueId(1), Ty::Int(64)),
+            ],
+            body: vec![
+                // v2 = gep(i64, v0, v1, 4) — each element is 8 bytes (i64), offset 4 for second i32 field
+                InstrNode {
+                    instr: Instr::GetElementPtr {
+                        elem_ty: Ty::Int(64),
+                        base: ValueId(0),
+                        index: ValueId(1),
+                        offset: 4,
+                    },
+                    results: vec![ValueId(2)],
+                    proofs: vec![],
+                },
+                InstrNode {
+                    instr: Instr::Load {
+                        ty: Ty::Int(32),
+                        ptr: ValueId(2),
+                    },
+                    results: vec![ValueId(3)],
+                    proofs: vec![],
+                },
+                InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(3)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                },
+            ],
+        }],
+        proofs: vec![],
+    }
+}
+
+#[test]
+fn test_gep_with_offset_adapter() {
+    let func = build_gep_with_offset();
+    let (lir_func, _) = translate_only(&func).unwrap();
+
+    assert_eq!(lir_func.name, "struct_field_in_array");
+    let entry = &lir_func.blocks[&lir_func.entry_block];
+
+    // GEP for i64 (8 bytes) with offset 4:
+    //   Iconst(8) + Imul + Iadd(base, scaled) + Iconst(4) + Iadd(offset) + Load + Return
+    assert!(
+        entry.instructions.len() >= 6,
+        "Expected at least 6 instructions for GEP with offset, got {}",
+        entry.instructions.len()
+    );
+}
+
+#[test]
+fn test_gep_with_offset_isel() {
+    let func = build_gep_with_offset();
+    let mfunc = compile_tmir_function(&func);
+
+    // Should have multiplication (for index scaling) and load
+    assert!(
+        has_opcode(&mfunc, AArch64Opcode::MulRR),
+        "Expected MUL for index scaling in GEP"
+    );
+    assert!(
+        has_opcode(&mfunc, AArch64Opcode::LdrRI) || has_opcode(&mfunc, AArch64Opcode::LdrRO),
+        "Expected LDR for load after GEP"
+    );
+    assert!(has_opcode(&mfunc, AArch64Opcode::Ret));
+}
+
+// ===========================================================================
+// Test 13: Type casts (SExt, ZExt, Trunc)
+// ===========================================================================
+//
+// fn widen_and_narrow(x: i8) -> i8 {
+//     let wide = sext(x, i32);
+//     let narrow = trunc(wide, i8);
+//     narrow
+// }
+
+fn build_cast_chain() -> TmirFunction {
+    TmirFunction {
+        id: FuncId(15),
+        name: "widen_and_narrow".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(8)],
+            returns: vec![Ty::Int(8)],
+        },
+        entry: BlockId(0),
+        blocks: vec![TmirBlock {
+            id: BlockId(0),
+            params: vec![(ValueId(0), Ty::Int(8))],
+            body: vec![
+                // v1 = sext(v0, i8 -> i32)
+                InstrNode {
+                    instr: Instr::Cast {
+                        op: CastOp::SExt,
+                        src_ty: Ty::Int(8),
+                        dst_ty: Ty::Int(32),
+                        operand: ValueId(0),
+                    },
+                    results: vec![ValueId(1)],
+                    proofs: vec![],
+                },
+                // v2 = trunc(v1, i32 -> i8)
+                InstrNode {
+                    instr: Instr::Cast {
+                        op: CastOp::Trunc,
+                        src_ty: Ty::Int(32),
+                        dst_ty: Ty::Int(8),
+                        operand: ValueId(1),
+                    },
+                    results: vec![ValueId(2)],
+                    proofs: vec![],
+                },
+                InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(2)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                },
+            ],
+        }],
+        proofs: vec![],
+    }
+}
+
+#[test]
+fn test_cast_chain_adapter() {
+    let func = build_cast_chain();
+    let (lir_func, _) = translate_only(&func).unwrap();
+
+    assert_eq!(lir_func.name, "widen_and_narrow");
+    let entry = &lir_func.blocks[&lir_func.entry_block];
+    // Sextend + Trunc + Return = 3 instructions
+    assert_eq!(entry.instructions.len(), 3);
+    assert!(matches!(
+        &entry.instructions[0].opcode,
+        Opcode::Sextend { from_ty: Type::I8, to_ty: Type::I32 }
+    ));
+    assert!(matches!(
+        &entry.instructions[1].opcode,
+        Opcode::Trunc { to_ty: Type::I8 }
+    ));
+}
+
+#[test]
+fn test_cast_chain_isel() {
+    let func = build_cast_chain();
+    let mfunc = compile_tmir_function(&func);
+
+    assert!(has_opcode(&mfunc, AArch64Opcode::Ret));
+    assert!(
+        total_insts(&mfunc) >= 3,
+        "Expected at least 3 machine instructions (COPY, SXTB, AND/TRUNC, RET)"
+    );
+}
+
+// ===========================================================================
+// Test 14: Float arithmetic + FP cast
+// ===========================================================================
+//
+// fn float_op(a: f64, b: f64) -> i32 {
+//     let sum = a + b;
+//     fcvt_to_int(sum, i32)
+// }
+
+fn build_float_to_int() -> TmirFunction {
+    TmirFunction {
+        id: FuncId(16),
+        name: "float_to_int".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Float(64), Ty::Float(64)],
+            returns: vec![Ty::Int(32)],
+        },
+        entry: BlockId(0),
+        blocks: vec![TmirBlock {
+            id: BlockId(0),
+            params: vec![(ValueId(0), Ty::Float(64)), (ValueId(1), Ty::Float(64))],
+            body: vec![
+                InstrNode {
+                    instr: Instr::BinOp {
+                        op: BinOp::FAdd,
+                        ty: Ty::Float(64),
+                        lhs: ValueId(0),
+                        rhs: ValueId(1),
+                    },
+                    results: vec![ValueId(2)],
+                    proofs: vec![],
+                },
+                InstrNode {
+                    instr: Instr::Cast {
+                        op: CastOp::FPToSI,
+                        src_ty: Ty::Float(64),
+                        dst_ty: Ty::Int(32),
+                        operand: ValueId(2),
+                    },
+                    results: vec![ValueId(3)],
+                    proofs: vec![],
+                },
+                InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(3)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                },
+            ],
+        }],
+        proofs: vec![],
+    }
+}
+
+#[test]
+fn test_float_to_int_adapter() {
+    let func = build_float_to_int();
+    let (lir_func, _) = translate_only(&func).unwrap();
+
+    assert_eq!(lir_func.name, "float_to_int");
+    assert_eq!(
+        lir_func.signature.params,
+        vec![Type::F64, Type::F64]
+    );
+    assert_eq!(lir_func.signature.returns, vec![Type::I32]);
+
+    let entry = &lir_func.blocks[&lir_func.entry_block];
+    // Fadd + FcvtToInt + Return = 3 instructions
+    assert_eq!(entry.instructions.len(), 3);
+}
+
+#[test]
+fn test_float_to_int_isel() {
+    let func = build_float_to_int();
+    let mfunc = compile_tmir_function(&func);
+
+    assert!(
+        has_opcode(&mfunc, AArch64Opcode::FaddRR),
+        "Expected FADD for f64 addition"
+    );
+    assert!(has_opcode(&mfunc, AArch64Opcode::Ret));
+}
+
+// ===========================================================================
+// Test 15: Builder API usage
+// ===========================================================================
+//
+// Test the tmir-func builder API by constructing a function with it.
+// fn builder_add(a: i32, b: i32) -> i32 { a + b }
+
+#[test]
+fn test_builder_api() {
+    let mut fb = FunctionBuilder::new(
+        FuncId(20),
+        "builder_add".to_string(),
+        vec![Ty::Int(32), Ty::Int(32)],
+        vec![Ty::Int(32)],
+    );
+
+    let (entry_block, params) = fb.entry_block();
+    let a = params[0];
+    let b = params[1];
+    let result = fb.fresh_value();
+
+    fb.add_block(
+        entry_block,
+        vec![(a, Ty::Int(32)), (b, Ty::Int(32))],
+        vec![
+            builder::binop(BinOp::Add, Ty::Int(32), a, b, result),
+            builder::ret(vec![result]),
+        ],
+    );
+
+    let func = fb.build();
+    let (lir_func, _) = translate_only(&func).unwrap();
+
+    assert_eq!(lir_func.name, "builder_add");
+    assert_eq!(lir_func.signature.params, vec![Type::I32, Type::I32]);
+    assert_eq!(lir_func.signature.returns, vec![Type::I32]);
+
+    let entry = &lir_func.blocks[&lir_func.entry_block];
+    assert_eq!(entry.instructions.len(), 2); // Iadd + Return
+}
+
+#[test]
+fn test_builder_api_isel() {
+    let mut fb = FunctionBuilder::new(
+        FuncId(21),
+        "builder_add".to_string(),
+        vec![Ty::Int(32), Ty::Int(32)],
+        vec![Ty::Int(32)],
+    );
+
+    let (entry_block, params) = fb.entry_block();
+    let a = params[0];
+    let b = params[1];
+    let result = fb.fresh_value();
+
+    fb.add_block(
+        entry_block,
+        vec![(a, Ty::Int(32)), (b, Ty::Int(32))],
+        vec![
+            builder::binop(BinOp::Add, Ty::Int(32), a, b, result),
+            builder::ret(vec![result]),
+        ],
+    );
+
+    let func = fb.build();
+    let mfunc = compile_tmir_function(&func);
+
+    assert!(has_opcode(&mfunc, AArch64Opcode::AddRR));
+    assert!(has_opcode(&mfunc, AArch64Opcode::Ret));
+}
+
+// ===========================================================================
+// Test 16: Proof annotations survive adapter translation
+// ===========================================================================
+
+#[test]
+fn test_proof_annotations_survive() {
+    use tmir_types::TmirProof;
+
+    let func = TmirFunction {
+        id: FuncId(22),
+        name: "proven_add".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(32), Ty::Int(32)],
+            returns: vec![Ty::Int(32)],
+        },
+        entry: BlockId(0),
+        blocks: vec![TmirBlock {
+            id: BlockId(0),
+            params: vec![(ValueId(0), Ty::Int(32)), (ValueId(1), Ty::Int(32))],
+            body: vec![
+                InstrNode {
+                    instr: Instr::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::Int(32),
+                        lhs: ValueId(0),
+                        rhs: ValueId(1),
+                    },
+                    results: vec![ValueId(2)],
+                    proofs: vec![TmirProof::NoOverflow { signed: true }],
+                },
+                InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(2)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                },
+            ],
+        }],
+        proofs: vec![TmirProof::Pure],
+    };
+
+    let (_, proof_ctx) = translate_only(&func).unwrap();
+
+    // Function-level proofs
+    assert!(
+        proof_ctx.is_function_pure(),
+        "Function-level Pure proof should survive adapter translation"
+    );
+
+    // Value-level proofs: the result of the add (ValueId(2) -> mapped Value) should have NoOverflow
+    let has_no_overflow = proof_ctx
+        .value_proofs
+        .values()
+        .any(|proofs| proofs.iter().any(|p| matches!(p, llvm2_lower::adapter::Proof::NoOverflow { signed: true })));
+    assert!(
+        has_no_overflow,
+        "NoOverflow proof should be attached to the add result"
+    );
+}
+
+// ===========================================================================
+// Comprehensive: all new programs compile through adapter without errors
+// ===========================================================================
+
+#[test]
+fn test_all_new_programs_adapter_succeeds() {
+    let programs: Vec<(&str, TmirFunction)> = vec![
+        ("dispatch", build_switch()),
+        ("call_through_ptr", build_call_indirect()),
+        ("abs_select", build_select()),
+        ("array_access", build_gep()),
+        ("struct_field_in_array", build_gep_with_offset()),
+        ("widen_and_narrow", build_cast_chain()),
+        ("float_to_int", build_float_to_int()),
+    ];
+
+    for (name, func) in &programs {
+        let result = translate_only(func);
+        assert!(
+            result.is_ok(),
+            "{}: adapter translation failed: {:?}",
+            name,
+            result.err()
+        );
+        let (lir_func, _) = result.unwrap();
+        assert_eq!(lir_func.name, *name);
+        assert!(!lir_func.blocks.is_empty());
+    }
+}
+
+// ===========================================================================
+// Comprehensive: all new single-block programs compile through ISel
+// ===========================================================================
+
+#[test]
+fn test_all_new_single_block_programs_compile() {
+    let programs: Vec<(&str, TmirFunction)> = vec![
+        ("call_through_ptr", build_call_indirect()),
+        ("abs_select", build_select()),
+        ("array_access", build_gep()),
+        ("struct_field_in_array", build_gep_with_offset()),
+        ("widen_and_narrow", build_cast_chain()),
+        ("float_to_int", build_float_to_int()),
+    ];
+
+    for (name, func) in &programs {
+        let mfunc = compile_tmir_function(func);
+        assert!(
+            !mfunc.blocks.is_empty(),
+            "{}: produced empty ISelFunction",
+            name
+        );
+        assert!(
+            total_insts(&mfunc) > 0,
+            "{}: produced no machine instructions",
+            name
+        );
+        assert!(
+            has_opcode(&mfunc, AArch64Opcode::Ret),
+            "{}: missing RET instruction",
+            name
+        );
+    }
 }

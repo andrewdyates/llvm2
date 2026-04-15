@@ -352,6 +352,37 @@ pub enum Instr {
         incoming: Vec<(BlockId, ValueId)>,
     },
 
+    /// Conditional value selection: result = cond ? true_val : false_val.
+    ///
+    /// Unlike CondBr (which is control flow), Select is a value-level operation
+    /// that produces a result without branching. Lowered to CSEL on AArch64.
+    Select {
+        ty: Ty,
+        cond: ValueId,
+        true_val: ValueId,
+        false_val: ValueId,
+    },
+
+    /// Get element pointer: typed pointer arithmetic with stride.
+    ///
+    /// Computes: base + index * sizeof(elem_ty) + byte_offset.
+    /// This is the tMIR equivalent of LLVM's GEP instruction. It differs from
+    /// Index (which is array access returning the element address) by supporting
+    /// an explicit byte offset for struct field access within indexed elements.
+    ///
+    /// Example: accessing arr[i].field_at_offset_8
+    ///   GetElementPtr { elem_ty: StructTy, base: arr_ptr, index: i, offset: 8 }
+    GetElementPtr {
+        /// The element type (determines stride = sizeof(elem_ty)).
+        elem_ty: Ty,
+        /// Base pointer.
+        base: ValueId,
+        /// Index (multiplied by element size).
+        index: ValueId,
+        /// Additional byte offset added after indexing.
+        offset: i32,
+    },
+
     /// No operation (used as placeholder).
     Nop,
 
