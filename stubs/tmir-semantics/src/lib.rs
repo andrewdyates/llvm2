@@ -3,9 +3,28 @@
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
-// This is a development stub. The real tMIR crate (ayates_dbx/tMIR) defines
-// formal semantics for each instruction. This stub provides the trait interface
-// that LLVM2's verification crate (llvm2-verify) will use.
+// STATUS: Development stub. NOT currently imported by any LLVM2 crate.
+//
+// This stub defines the trait interface (`InstrSemantics`) that the real tMIR
+// semantics crate (ayates_dbx/tMIR) will implement. It exists to document the
+// expected API contract for future integration.
+//
+// Currently, LLVM2's verification pipeline uses its own tMIR semantic encoding
+// in `crates/llvm2-verify/src/tmir_semantics.rs`, which encodes tMIR opcodes
+// directly as `SmtExpr` bitvector formulas using llvm2-lower's `Opcode` enum.
+// That approach works because LLVM2 has its own tMIR adapter layer (llvm2-lower)
+// that defines the opcodes and types internally.
+//
+// When the real tMIR repo is integrated:
+//   1. Replace this stub with the real tmir-semantics crate
+//   2. Have llvm2-verify depend on it for the `InstrSemantics` trait
+//   3. Bridge between `InstrSemantics::eval` and the existing `SmtExpr`-based
+//      proof infrastructure in llvm2-verify
+//
+// See also:
+//   - crates/llvm2-verify/src/tmir_semantics.rs (current verification encoder)
+//   - designs/2026-04-13-verification-architecture.md (architecture overview)
+//   - designs/2026-04-13-tmir-integration.md (integration plan)
 
 #![allow(dead_code)]
 

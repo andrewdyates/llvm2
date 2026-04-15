@@ -7,6 +7,16 @@
 // Each tMIR instruction maps to a pure function from input bitvectors
 // to an output bitvector.
 //
+// This is the ACTIVE tMIR semantic encoder used by all verification proofs.
+// It encodes tMIR opcodes (from llvm2-lower's `Opcode` enum) directly as
+// `SmtExpr` bitvector formulas for SMT-based equivalence checking.
+//
+// Note: `stubs/tmir-semantics/` defines a separate `InstrSemantics` trait
+// stub for the eventual real tMIR semantics crate. That stub is not currently
+// used — this module handles all tMIR semantic encoding for verification.
+// When the real tMIR repo integrates, this module may be refactored to use
+// the `InstrSemantics` trait as its semantic source.
+//
 // Reference: designs/2026-04-13-verification-architecture.md, "SMT Encoding:
 // tMIR Instruction Semantics" section.
 

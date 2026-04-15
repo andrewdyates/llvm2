@@ -1,10 +1,22 @@
-// llvm2-codegen/lower.rs - Machine code lowering
+// llvm2-codegen/lower.rs - Machine code lowering (Phase 8: MachIR -> bytes)
 //
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Lowers a post-regalloc IrMachFunction to encoded AArch64 machine code bytes.
 // This is Phase 8 of the pipeline: the final step before Mach-O emission.
+//
+// *** NOT instruction selection. ***
+// Despite the name "lower", this module is unrelated to `llvm2-lower/isel.rs`.
+// The two modules operate at opposite ends of the compilation pipeline:
+//
+//   llvm2-lower/isel.rs   (Phase 1): tMIR SSA IR  -> AArch64 MachIR (VRegs)
+//   llvm2-codegen/lower.rs (Phase 8): AArch64 MachIR (PRegs) -> binary bytes
+//
+// isel.rs performs *instruction selection* — pattern-matching tMIR opcodes to
+// AArch64 instructions with virtual registers. This module performs *machine
+// code emission* — encoding already-selected, register-allocated instructions
+// into their binary representation. There is no code overlap between them.
 //
 // Responsibilities:
 //   1. Expand pseudo-instructions surviving regalloc (PSEUDO_COPY, spills)

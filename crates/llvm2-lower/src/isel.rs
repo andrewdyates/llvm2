@@ -1,7 +1,18 @@
-// llvm2-lower/isel.rs - AArch64 instruction selection
+// llvm2-lower/isel.rs - AArch64 instruction selection (Phase 1: tMIR -> MachIR)
 //
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+//
+// *** This is instruction selection, not machine code emission. ***
+// Despite naming similarity, this module is unrelated to `llvm2-codegen/lower.rs`.
+// The two modules operate at opposite ends of the compilation pipeline:
+//
+//   llvm2-lower/isel.rs   (Phase 1): tMIR SSA IR  -> AArch64 MachIR (VRegs)
+//   llvm2-codegen/lower.rs (Phase 8): AArch64 MachIR (PRegs) -> binary bytes
+//
+// This module matches tMIR opcodes to AArch64 instructions with virtual registers.
+// `lower.rs` encodes already-allocated physical-register instructions into bytes.
+// There is no code overlap between them.
 //
 // Reference: LLVM AArch64ISelLowering.cpp (tree-pattern matching + late combines)
 // Reference: designs/2026-04-12-aarch64-backend.md (two-phase ISel architecture)
