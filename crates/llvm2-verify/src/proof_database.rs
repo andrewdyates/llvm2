@@ -183,6 +183,11 @@ pub enum ProofCategory {
     /// roundtrip, NaN handling).
     /// Source: `fp_convert_proofs::all_fp_convert_proofs()`.
     FpConversion,
+
+    /// Extension and truncation lowering proofs (SXTB, SXTH, SXTW, UXTB,
+    /// UXTH, UXTW, AND masking, roundtrip, idempotence).
+    /// Source: `ext_trunc_proofs::all_ext_trunc_proofs()`.
+    ExtensionTruncation,
 }
 
 impl ProofCategory {
@@ -221,6 +226,7 @@ impl ProofCategory {
             ProofCategory::TailCallOptimization,
             ProofCategory::IfConversion,
             ProofCategory::FpConversion,
+            ProofCategory::ExtensionTruncation,
         ]
     }
 
@@ -259,6 +265,7 @@ impl ProofCategory {
             ProofCategory::TailCallOptimization => "Tail Call Optimization",
             ProofCategory::IfConversion => "If-Conversion",
             ProofCategory::FpConversion => "FP Conversion",
+            ProofCategory::ExtensionTruncation => "Extension/Truncation",
         }
     }
 }
@@ -518,6 +525,13 @@ fn register_fp_convert_proofs(proofs: &mut Vec<CategorizedProof>) {
     }
 }
 
+#[inline(never)]
+fn register_ext_trunc_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::ext_trunc_proofs::all_ext_trunc_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::ExtensionTruncation });
+    }
+}
+
 impl ProofDatabase {
     /// Construct the database by collecting all proofs from all registries.
     ///
@@ -542,6 +556,7 @@ impl ProofDatabase {
         register_tco_proofs(&mut proofs);
         register_if_convert_proofs(&mut proofs);
         register_fp_convert_proofs(&mut proofs);
+        register_ext_trunc_proofs(&mut proofs);
         ProofDatabase { proofs }
     }
 
