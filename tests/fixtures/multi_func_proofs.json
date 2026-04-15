@@ -1,0 +1,159 @@
+{
+  "name": "multi_func_proofs",
+  "functions": [
+    {
+      "id": 0,
+      "name": "pure_add",
+      "ty": {
+        "params": [
+          { "Int": 32 },
+          { "Int": 32 }
+        ],
+        "returns": [
+          { "Int": 32 }
+        ]
+      },
+      "entry": 0,
+      "blocks": [
+        {
+          "id": 0,
+          "params": [
+            [0, { "Int": 32 }],
+            [1, { "Int": 32 }]
+          ],
+          "body": [
+            {
+              "instr": {
+                "BinOp": {
+                  "op": "Add",
+                  "ty": { "Int": 32 },
+                  "lhs": 0,
+                  "rhs": 1
+                }
+              },
+              "results": [2],
+              "proofs": [
+                { "NoOverflow": { "signed": true } },
+                "Commutative",
+                "Associative"
+              ]
+            },
+            {
+              "instr": {
+                "Return": {
+                  "values": [2]
+                }
+              },
+              "results": [],
+              "proofs": []
+            }
+          ]
+        }
+      ],
+      "proofs": ["Pure"]
+    },
+    {
+      "id": 1,
+      "name": "negate_f64",
+      "ty": {
+        "params": [
+          { "Float": 64 }
+        ],
+        "returns": [
+          { "Float": 64 }
+        ]
+      },
+      "entry": 0,
+      "blocks": [
+        {
+          "id": 0,
+          "params": [
+            [0, { "Float": 64 }]
+          ],
+          "body": [
+            {
+              "instr": {
+                "UnOp": {
+                  "op": "FNeg",
+                  "ty": { "Float": 64 },
+                  "operand": 0
+                }
+              },
+              "results": [1],
+              "proofs": []
+            },
+            {
+              "instr": {
+                "Return": {
+                  "values": [1]
+                }
+              },
+              "results": [],
+              "proofs": []
+            }
+          ]
+        }
+      ],
+      "proofs": ["Pure"]
+    },
+    {
+      "id": 2,
+      "name": "load_and_store",
+      "ty": {
+        "params": [
+          { "Ptr": { "Int": 64 } },
+          { "Ptr": { "Int": 64 } }
+        ],
+        "returns": []
+      },
+      "entry": 0,
+      "blocks": [
+        {
+          "id": 0,
+          "params": [
+            [0, { "Ptr": { "Int": 64 } }],
+            [1, { "Ptr": { "Int": 64 } }]
+          ],
+          "body": [
+            {
+              "instr": {
+                "Load": {
+                  "ty": { "Int": 64 },
+                  "ptr": 0
+                }
+              },
+              "results": [2],
+              "proofs": [
+                { "NotNull": { "ptr": 0 } }
+              ]
+            },
+            {
+              "instr": {
+                "Store": {
+                  "ty": { "Int": 64 },
+                  "ptr": 1,
+                  "value": 2
+                }
+              },
+              "results": [],
+              "proofs": [
+                { "NotNull": { "ptr": 1 } }
+              ]
+            },
+            {
+              "instr": {
+                "Return": {
+                  "values": []
+                }
+              },
+              "results": [],
+              "proofs": []
+            }
+          ]
+        }
+      ],
+      "proofs": []
+    }
+  ],
+  "structs": []
+}
