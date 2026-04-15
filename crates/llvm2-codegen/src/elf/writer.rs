@@ -30,6 +30,7 @@
 //! Note: .bss (SHT_NOBITS) has a section header but occupies no file space.
 
 use super::constants::*;
+use super::debug::{DwarfDebugStubs, NoteGnuStack, SectionGroup};
 use super::header::{Elf64Header, ElfMachine};
 use super::reloc::Elf64Rela;
 use super::section::Elf64Shdr;
@@ -219,6 +220,94 @@ impl ElfWriter {
         if section_idx < self.sections.len() {
             self.sections[section_idx].relocations.push(rela);
         }
+    }
+
+    /// Add a generic named section with explicit type, flags, and data.
+    ///
+    /// Returns the 1-based section header table index.
+    pub fn add_section(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        sh_type: u32,
+        sh_flags: u64,
+        align: u64,
+    ) -> u16 {
+        let idx = self.sections.len();
+        self.sections.push(SectionData {
+            name: name.to_string(),
+            data: data.to_vec(),
+            sh_type,
+            sh_flags,
+            align,
+            relocations: Vec::new(),
+        });
+        (idx + 1) as u16
+    }
+
+    /// Add minimal DWARF v5 debug section stubs (.debug_info, .debug_abbrev, .debug_line).
+    ///
+    /// These are minimal but structurally valid headers that tools like `readelf`
+    /// can parse. Returns the 1-based section indices as `(debug_info, debug_abbrev, debug_line)`.
+    pub fn add_debug_sections(&mut self) -> (u16, u16, u16) {
+        let stubs = DwarfDebugStubs::new();
+        let info_idx = self.add_section(
+            DwarfDebugStubs::DEBUG_INFO_NAME,
+            &stubs.debug_info_bytes(),
+            SHT_PROGBITS,
+            0,
+            1,
+        );
+        let abbrev_idx = self.add_section(
+            DwarfDebugStubs::DEBUG_ABBREV_NAME,
+            &stubs.debug_abbrev_bytes(),
+            SHT_PROGBITS,
+            0,
+            1,
+        );
+        let line_idx = self.add_section(
+            DwarfDebugStubs::DEBUG_LINE_NAME,
+            &stubs.debug_line_bytes(),
+            SHT_PROGBITS,
+            0,
+            1,
+        );
+        (info_idx, abbrev_idx, line_idx)
+    }
+
+    /// Add a `.note.GNU-stack` section to mark the stack as non-executable.
+    ///
+    /// Returns the 1-based section header table index.
+    pub fn add_note_gnu_stack(&mut self) -> u16 {
+        let note = NoteGnuStack::new();
+        self.add_section(
+            NoteGnuStack::NAME,
+            &note.section_bytes(),
+            note.section_type(),
+            note.section_flags(),
+            note.section_align(),
+        )
+    }
+
+    /// Add a section group (`.group`) for COMDAT deduplication.
+    ///
+    /// The `member_section_indices` are 1-based section header table indices
+    /// of the sections that belong to this group.
+    ///
+    /// Returns the 1-based section header table index of the `.group` section.
+    pub fn add_section_group(&mut self, member_section_indices: &[u32]) -> u16 {
+        let group = SectionGroup::new(0, 0, member_section_indices.to_vec());
+        let data = group.section_bytes();
+        let idx = self.sections.len();
+        self.sections.push(SectionData {
+            name: SectionGroup::NAME.to_string(),
+            data,
+            sh_type: super::debug::SHT_GROUP,
+            sh_flags: 0,
+            align: SectionGroup::ALIGN,
+            relocations: Vec::new(),
+        });
+        (idx + 1) as u16
     }
 
     /// Produce the complete ELF .o file as a byte vector.
@@ -990,5 +1079,120 @@ mod tests {
         let bytes = writer.write();
         let e_shentsize = read_u16(&bytes, 58);
         assert_eq!(e_shentsize, 64, "section header entry size must be 64");
+    }
+
+    // --- Tests for new debug/metadata section writer methods ---
+
+    #[test]
+    fn test_add_debug_sections() {
+        let mut writer = ElfWriter::new(ElfMachine::AArch64);
+        writer.add_text_section(&[0; 4]);
+        let (info_idx, abbrev_idx, line_idx) = writer.add_debug_sections();
+        // .text=1, .debug_info=2, .debug_abbrev=3, .debug_line=4
+        assert_eq!(info_idx, 2);
+        assert_eq!(abbrev_idx, 3);
+        assert_eq!(line_idx, 4);
+
+        let bytes = writer.write();
+        // null + .text + .debug_info + .debug_abbrev + .debug_line + .symtab + .strtab + .shstrtab = 8
+        let e_shnum = read_u16(&bytes, 60);
+        assert_eq!(e_shnum, 8);
+
+        // Verify .debug_info section data is present in the output.
+        // DWARF v5 debug_info starts with unit_length=8 as a u32 LE.
+        let debug_info_marker = &[8u8, 0, 0, 0, 5, 0]; // unit_length=8, version=5
+        let found = bytes.windows(6).any(|w| w == debug_info_marker);
+        assert!(found, ".debug_info DWARF v5 header should be in output");
+    }
+
+    #[test]
+    fn test_add_note_gnu_stack() {
+        let mut writer = ElfWriter::new(ElfMachine::X86_64);
+        writer.add_text_section(&[0x90; 16]);
+        let stack_idx = writer.add_note_gnu_stack();
+        assert_eq!(stack_idx, 2); // .text=1, .note.GNU-stack=2
+
+        let bytes = writer.write();
+        // null + .text + .note.GNU-stack + .symtab + .strtab + .shstrtab = 6
+        let e_shnum = read_u16(&bytes, 60);
+        assert_eq!(e_shnum, 6);
+
+        // Find the .note.GNU-stack section header and verify its type.
+        let sh_offset = read_u64(&bytes, 40) as usize;
+        // Section 2 is .note.GNU-stack
+        let note_shdr_off = sh_offset + 2 * ELF64_SHDR_SIZE;
+        let note_type = read_u32(&bytes, note_shdr_off + 4);
+        assert_eq!(note_type, SHT_PROGBITS, ".note.GNU-stack must be SHT_PROGBITS");
+        // Flags must be 0 (no SHF_EXECINSTR)
+        let note_flags = read_u64(&bytes, note_shdr_off + 8);
+        assert_eq!(note_flags, 0, ".note.GNU-stack must have no executable flag");
+        // Size must be 0 (empty marker section)
+        let note_size = read_u64(&bytes, note_shdr_off + 32);
+        assert_eq!(note_size, 0, ".note.GNU-stack must be empty");
+    }
+
+    #[test]
+    fn test_add_section_group() {
+        let mut writer = ElfWriter::new(ElfMachine::AArch64);
+        writer.add_text_section(&[0; 8]);
+        writer.add_data_section(&[1, 2, 3, 4]);
+        // Group sections 1 and 2
+        let group_idx = writer.add_section_group(&[1, 2]);
+        assert_eq!(group_idx, 3); // .text=1, .data=2, .group=3
+
+        let bytes = writer.write();
+        // null + .text + .data + .group + .symtab + .strtab + .shstrtab = 7
+        let e_shnum = read_u16(&bytes, 60);
+        assert_eq!(e_shnum, 7);
+
+        // Find the .group section header and verify its type.
+        let sh_offset = read_u64(&bytes, 40) as usize;
+        let group_shdr_off = sh_offset + 3 * ELF64_SHDR_SIZE;
+        let group_type = read_u32(&bytes, group_shdr_off + 4);
+        assert_eq!(group_type, super::super::debug::SHT_GROUP, ".group must be SHT_GROUP");
+
+        // Verify the section data contains GRP_COMDAT flag + member indices
+        let group_offset = read_u64(&bytes, group_shdr_off + 24) as usize;
+        let group_size = read_u64(&bytes, group_shdr_off + 32) as usize;
+        // flag(4) + 2 members(8) = 12 bytes
+        assert_eq!(group_size, 12);
+        let grp_flag = read_u32(&bytes, group_offset);
+        assert_eq!(grp_flag, super::super::debug::GRP_COMDAT);
+        let member0 = read_u32(&bytes, group_offset + 4);
+        assert_eq!(member0, 1, "first member should be section 1");
+        let member1 = read_u32(&bytes, group_offset + 8);
+        assert_eq!(member1, 2, "second member should be section 2");
+    }
+
+    #[test]
+    fn test_add_generic_section() {
+        let mut writer = ElfWriter::new(ElfMachine::AArch64);
+        let rodata = b"Hello, LLVM2!";
+        let idx = writer.add_section(".rodata", rodata, SHT_PROGBITS, SHF_ALLOC, 4);
+        assert_eq!(idx, 1);
+
+        let bytes = writer.write();
+        // The rodata string should appear in the output.
+        let found = bytes.windows(rodata.len()).any(|w| w == rodata);
+        assert!(found, ".rodata data should be in the output");
+    }
+
+    #[test]
+    fn test_full_object_with_debug_and_stack() {
+        let mut writer = ElfWriter::new(ElfMachine::AArch64);
+        // ARM64 NOP = 0xD503201F
+        let nop: Vec<u8> = (0..4).flat_map(|_| 0xD503201Fu32.to_le_bytes()).collect();
+        writer.add_text_section(&nop);
+        writer.add_data_section(&[0xCA, 0xFE]);
+        writer.add_debug_sections();
+        writer.add_note_gnu_stack();
+        writer.add_symbol("main", 1, 0, 16, true, STT_FUNC);
+
+        let bytes = writer.write();
+        assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+        // null + .text + .data + .debug_info + .debug_abbrev + .debug_line
+        //   + .note.GNU-stack + .symtab + .strtab + .shstrtab = 10
+        let e_shnum = read_u16(&bytes, 60);
+        assert_eq!(e_shnum, 10);
     }
 }
