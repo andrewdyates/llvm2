@@ -122,6 +122,7 @@ pub mod gvn_proofs;
 pub mod tco_proofs;
 pub mod if_convert_proofs;
 pub mod fp_convert_proofs;
+pub mod ext_trunc_proofs;
 pub mod proof_database;
 pub mod verification_runner;
 pub mod function_verifier;
