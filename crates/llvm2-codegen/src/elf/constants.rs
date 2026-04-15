@@ -52,6 +52,9 @@ pub const EM_X86_64: u16 = 62;
 /// ARM AARCH64 architecture.
 pub const EM_AARCH64: u16 = 183;
 
+/// RISC-V architecture.
+pub const EM_RISCV: u16 = 243;
+
 // --- Special section indices ---
 
 /// Undefined section index.

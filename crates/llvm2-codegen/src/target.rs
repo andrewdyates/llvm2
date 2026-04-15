@@ -11,6 +11,7 @@
 //! enum variant and implementing the per-target methods.
 
 use llvm2_ir::aarch64_regs;
+use llvm2_ir::riscv_regs;
 use llvm2_ir::x86_64_regs;
 
 /// Supported target architectures.
@@ -56,7 +57,7 @@ impl Target {
         match self {
             Target::X86_64 => x86_64_regs::X86_ARG_GPRS.len(),     // 6 (RDI,RSI,RDX,RCX,R8,R9)
             Target::Aarch64 => aarch64_regs::ARG_GPRS.len(),        // 8 (X0-X7)
-            Target::Riscv64 => 8, // a0-a7 (TODO: define RISC-V regs)
+            Target::Riscv64 => riscv_regs::RISCV_ARG_GPRS.len(), // a0-a7
         }
     }
 
@@ -65,7 +66,7 @@ impl Target {
         match self {
             Target::X86_64 => x86_64_regs::X86_ARG_XMMS.len(),     // 8 (XMM0-XMM7)
             Target::Aarch64 => aarch64_regs::ARG_FPRS.len(),        // 8 (V0-V7)
-            Target::Riscv64 => 8, // fa0-fa7 (TODO: define RISC-V regs)
+            Target::Riscv64 => riscv_regs::RISCV_ARG_FPRS.len(), // fa0-fa7
         }
     }
 
@@ -74,7 +75,7 @@ impl Target {
         match self {
             Target::X86_64 => x86_64_regs::X86_CALLEE_SAVED_GPRS.len(), // 6 (RBX,RBP,R12-R15)
             Target::Aarch64 => aarch64_regs::CALLEE_SAVED_GPRS.len(),    // 10 (X19-X28)
-            Target::Riscv64 => 12, // s0-s11 (TODO: define RISC-V regs)
+            Target::Riscv64 => riscv_regs::RISCV_CALLEE_SAVED_GPRS.len(), // s0-s11
         }
     }
 
@@ -83,7 +84,7 @@ impl Target {
         match self {
             Target::X86_64 => x86_64_regs::X86_ALLOCATABLE_GPRS.len(), // 14
             Target::Aarch64 => aarch64_regs::ALLOCATABLE_GPRS.len(),    // 25
-            Target::Riscv64 => 28, // (TODO: define RISC-V regs)
+            Target::Riscv64 => riscv_regs::RISCV_ALLOCATABLE_GPRS.len(),
         }
     }
 
@@ -252,8 +253,33 @@ mod tests {
     }
 
     #[test]
+    fn test_riscv64_arg_register_counts() {
+        // RISC-V LP64D: 8 GPR args (a0-a7), 8 FPR args (fa0-fa7)
+        assert_eq!(Target::Riscv64.num_arg_gprs(), 8);
+        assert_eq!(Target::Riscv64.num_arg_fprs(), 8);
+    }
+
+    #[test]
+    fn test_riscv64_callee_saved_count() {
+        // RISC-V: s0-s11 = 12
+        assert_eq!(Target::Riscv64.num_callee_saved_gprs(), 12);
+    }
+
+    #[test]
+    fn test_riscv64_allocatable_gprs() {
+        // RISC-V: 32 GPRs - x0/zero - x2/sp - x3/gp - x4/tp = 28
+        assert_eq!(Target::Riscv64.num_allocatable_gprs(), 28);
+    }
+
+    #[test]
+    fn test_riscv64_frame_pointer() {
+        assert!(!Target::Riscv64.requires_frame_pointer());
+    }
+
+    #[test]
     fn test_target_equality() {
         assert_eq!(Target::X86_64, Target::X86_64);
         assert_ne!(Target::X86_64, Target::Aarch64);
+        assert_ne!(Target::Riscv64, Target::Aarch64);
     }
 }

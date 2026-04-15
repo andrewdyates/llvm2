@@ -109,8 +109,9 @@ impl ElfWriter {
     /// (Section 0 is always the null section.)
     pub fn add_text_section(&mut self, code: &[u8]) -> u16 {
         let align = match self.machine {
-            ElfMachine::AArch64 => 4, // ARM64 instructions are 4-byte aligned
-            ElfMachine::X86_64 => 16, // x86-64 typically 16-byte aligned
+            ElfMachine::AArch64 => 4,  // ARM64 instructions are 4-byte aligned
+            ElfMachine::X86_64 => 16,  // x86-64 typically 16-byte aligned
+            ElfMachine::Riscv64 => 4,  // RISC-V instructions are 4-byte aligned
         };
         let idx = self.sections.len();
         self.sections.push(SectionData {
