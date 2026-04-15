@@ -31,6 +31,7 @@
 use crate::smt::{
     SmtExpr, VectorArrangement,
     map_lanes_binary, map_lanes_binary_imm, map_lanes_unary,
+    concat_lanes, lane_insert,
 };
 
 // ---------------------------------------------------------------------------
@@ -148,6 +149,113 @@ pub fn encode_neon_bic(vn: &SmtExpr, vm: &SmtExpr) -> SmtExpr {
     };
     let not_vm = vm.clone().bvxor(all_ones);
     vn.clone().bvand(not_vm)
+}
+
+/// Encode `NOT.16B Vd, Vn` (alias for `MVN`) -- NEON bitwise NOT.
+///
+/// Semantics: `Vd = NOT(Vn)` (full-width bitwise inversion).
+/// Implemented as `bvxor(vn, all_ones)`.
+///
+/// Only valid for 16B/8B arrangements (bitwise on full register).
+/// Reference: ARM DDI 0487, C7.2.210 NOT (vector).
+pub fn encode_neon_not(vn: &SmtExpr) -> SmtExpr {
+    let width = vn.bv_width();
+    let all_ones = if width <= 64 {
+        SmtExpr::bv_const(if width >= 64 { u64::MAX } else { (1u64 << width) - 1 }, width)
+    } else {
+        let lo = SmtExpr::bv_const(u64::MAX, 64);
+        let hi_width = width - 64;
+        let hi = SmtExpr::bv_const(
+            if hi_width >= 64 { u64::MAX } else { (1u64 << hi_width) - 1 },
+            hi_width,
+        );
+        hi.concat(lo)
+    };
+    vn.clone().bvxor(all_ones)
+}
+
+/// Encode `DUP Vd.4S, Wn` -- NEON broadcast scalar to all lanes.
+///
+/// Semantics: for each lane `i`: `Vd[i] = Wn` (zero-extended to lane width).
+/// The scalar value is replicated across all lanes.
+///
+/// Reference: ARM DDI 0487, C7.2.59 DUP (general).
+pub fn encode_neon_dup(
+    arrangement: VectorArrangement,
+    scalar: &SmtExpr,
+) -> SmtExpr {
+    let n = arrangement.lane_count();
+    let lane_bits = arrangement.lane_bits();
+    let lane_val = if scalar.bv_width() > lane_bits {
+        scalar.clone().extract(lane_bits - 1, 0)
+    } else if scalar.bv_width() < lane_bits {
+        // Zero-extend
+        let pad = SmtExpr::bv_const(0, lane_bits - scalar.bv_width());
+        pad.concat(scalar.clone())
+    } else {
+        scalar.clone()
+    };
+    let lanes: Vec<SmtExpr> = (0..n).map(|_| lane_val.clone()).collect();
+    concat_lanes(&lanes, arrangement)
+}
+
+/// Encode `INS Vd.T[idx], Vn.T[0]` -- NEON lane insert.
+///
+/// Semantics: only lane `idx` of `Vd` is modified; other lanes unchanged.
+/// The inserted value comes from `new_lane_val`.
+///
+/// This is a thin wrapper around `lane_insert()` for documentation.
+///
+/// Reference: ARM DDI 0487, C7.2.106 INS (element).
+pub fn encode_neon_ins(
+    vec: &SmtExpr,
+    arrangement: VectorArrangement,
+    idx: u32,
+    new_lane_val: SmtExpr,
+) -> SmtExpr {
+    lane_insert(vec, arrangement, idx, new_lane_val)
+}
+
+/// Encode `CMEQ.<T> Vd, Vn, Vm` -- NEON per-lane equality comparison.
+///
+/// Semantics: for each lane `i`:
+///   `Vd[i] = if Vn[i] == Vm[i] then all_ones else 0`
+///
+/// The result mask is all-ones (0xFF...F) for matching lanes and all-zeros
+/// for non-matching lanes. This is the standard NEON compare behavior.
+///
+/// Reference: ARM DDI 0487, C7.2.29 CMEQ (register).
+pub fn encode_neon_cmeq(
+    arrangement: VectorArrangement,
+    vn: &SmtExpr,
+    vm: &SmtExpr,
+) -> SmtExpr {
+    let lane_bits = arrangement.lane_bits();
+    let all_ones_lane = SmtExpr::bv_const(
+        if lane_bits >= 64 { u64::MAX } else { (1u64 << lane_bits) - 1 },
+        lane_bits,
+    );
+    let zero_lane = SmtExpr::bv_const(0, lane_bits);
+    map_lanes_binary(vn, vm, arrangement, |a, b| {
+        SmtExpr::ite(a.eq_expr(b), all_ones_lane.clone(), zero_lane.clone())
+    })
+}
+
+/// Encode `MOVI Vd.16B, #imm` -- NEON move immediate (byte broadcast).
+///
+/// Semantics: every byte of `Vd` is set to `imm` (8-bit immediate).
+/// For a 128-bit register, this means all 16 bytes are identical.
+/// For a 64-bit register, all 8 bytes are identical.
+///
+/// Reference: ARM DDI 0487, C7.2.206 MOVI.
+pub fn encode_neon_movi(width: u32, imm: u8) -> SmtExpr {
+    let byte_count = width / 8;
+    let byte_val = SmtExpr::bv_const(imm as u64, 8);
+    let mut result = byte_val.clone();
+    for _ in 1..byte_count {
+        result = byte_val.clone().concat(result);
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------

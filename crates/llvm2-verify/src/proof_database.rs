@@ -107,6 +107,10 @@ pub enum ProofCategory {
     /// Source: `neon_lowering_proofs::all_neon_lowering_proofs()`.
     NeonLowering,
 
+    /// NEON encoding correctness proofs (Wave 22 opcodes).
+    /// Source: `neon_encoding_proofs::all_neon_encoding_proofs()`.
+    NeonEncoding,
+
     /// Vectorization proofs (scalar-to-NEON mapping correctness).
     /// Source: `vectorization_proofs::all_vectorization_proofs()`.
     Vectorization,
@@ -183,6 +187,7 @@ impl ProofCategory {
             ProofCategory::CfgSimplification,
             ProofCategory::Memory,
             ProofCategory::NeonLowering,
+            ProofCategory::NeonEncoding,
             ProofCategory::Vectorization,
             ProofCategory::AnePrecision,
             ProofCategory::RegAlloc,
@@ -217,6 +222,7 @@ impl ProofCategory {
             ProofCategory::CfgSimplification => "CFG Simplification",
             ProofCategory::Memory => "Memory",
             ProofCategory::NeonLowering => "NEON Lowering",
+            ProofCategory::NeonEncoding => "NEON Encoding",
             ProofCategory::Vectorization => "Vectorization",
             ProofCategory::AnePrecision => "ANE Precision",
             ProofCategory::RegAlloc => "Register Allocation",
@@ -425,6 +431,9 @@ fn register_backend_proofs(proofs: &mut Vec<CategorizedProof>) {
 fn register_target_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::neon_lowering_proofs::all_neon_lowering_proofs() {
         proofs.push(CategorizedProof { obligation: p, category: ProofCategory::NeonLowering });
+    }
+    for p in crate::neon_encoding_proofs::all_neon_encoding_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::NeonEncoding });
     }
     for p in crate::vectorization_proofs::all_vectorization_proofs() {
         proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Vectorization });
@@ -834,8 +843,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            28,
-            "expected 28 categories, got {}",
+            29,
+            "expected 29 categories, got {}",
             categories.len()
         );
     }
