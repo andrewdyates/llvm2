@@ -95,6 +95,22 @@ pub enum Proof {
     /// Shift amount is within [0, bitwidth).
     /// Enables: skip shift-amount masking.
     ValidShift { amount: ValueId, bitwidth: u16 },
+
+    /// Function or computation has no side effects.
+    /// Enables: aggressive CSE, LICM, GPU/ANE dispatch.
+    Pure,
+
+    /// Operation is associative: (a op b) op c = a op (b op c).
+    /// Enables: parallel reduction, operation reordering.
+    Associative,
+
+    /// Operation is commutative: a op b = b op a.
+    /// Enables: parallel reduction, operand reordering.
+    Commutative,
+
+    /// Operation is idempotent: f(f(x)) = f(x).
+    /// Enables: redundant application elimination.
+    Idempotent,
 }
 
 /// Proof metadata carried through the compilation pipeline.
@@ -106,6 +122,10 @@ pub enum Proof {
 pub struct ProofContext {
     /// Proofs attached to specific internal LIR values (re-keyed from tMIR ValueId).
     pub value_proofs: HashMap<Value, Vec<Proof>>,
+    /// Function-level proofs (apply to the entire function, not individual values).
+    /// These come from tMIR `Function::proofs` and include Pure, Associative,
+    /// Commutative annotations that describe whole-function properties.
+    pub function_proofs: Vec<Proof>,
 }
 
 impl ProofContext {
@@ -163,12 +183,76 @@ impl ProofContext {
             .is_some_and(|proofs| proofs.iter().any(|p| matches!(p, Proof::ValidShift { .. })))
     }
 
+    /// Check if a value has a pure proof (no side effects).
+    pub fn has_pure(&self, val: &Value) -> bool {
+        self.value_proofs
+            .get(val)
+            .is_some_and(|proofs| proofs.iter().any(|p| matches!(p, Proof::Pure)))
+    }
+
+    /// Check if a value has an associative proof.
+    pub fn has_associative(&self, val: &Value) -> bool {
+        self.value_proofs
+            .get(val)
+            .is_some_and(|proofs| proofs.iter().any(|p| matches!(p, Proof::Associative)))
+    }
+
+    /// Check if a value has a commutative proof.
+    pub fn has_commutative(&self, val: &Value) -> bool {
+        self.value_proofs
+            .get(val)
+            .is_some_and(|proofs| proofs.iter().any(|p| matches!(p, Proof::Commutative)))
+    }
+
+    /// Check if a value has an idempotent proof.
+    pub fn has_idempotent(&self, val: &Value) -> bool {
+        self.value_proofs
+            .get(val)
+            .is_some_and(|proofs| proofs.iter().any(|p| matches!(p, Proof::Idempotent)))
+    }
+
     /// Get all proofs attached to a value.
     pub fn proofs_for(&self, val: &Value) -> &[Proof] {
         self.value_proofs
             .get(val)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Add a function-level proof.
+    pub fn add_function_proof(&mut self, proof: Proof) {
+        self.function_proofs.push(proof);
+    }
+
+    /// Check if the function has a pure proof.
+    pub fn is_function_pure(&self) -> bool {
+        self.function_proofs.iter().any(|p| matches!(p, Proof::Pure))
+    }
+
+    /// Check if the function has an associative proof.
+    pub fn is_function_associative(&self) -> bool {
+        self.function_proofs
+            .iter()
+            .any(|p| matches!(p, Proof::Associative))
+    }
+
+    /// Check if the function has a commutative proof.
+    pub fn is_function_commutative(&self) -> bool {
+        self.function_proofs
+            .iter()
+            .any(|p| matches!(p, Proof::Commutative))
+    }
+
+    /// Check if the function has an idempotent proof.
+    pub fn is_function_idempotent(&self) -> bool {
+        self.function_proofs
+            .iter()
+            .any(|p| matches!(p, Proof::Idempotent))
+    }
+
+    /// Get all function-level proofs.
+    pub fn function_proofs(&self) -> &[Proof] {
+        &self.function_proofs
     }
 }
 
@@ -396,6 +480,12 @@ impl<'a> TmirAdapter<'a> {
 
         let mut lir_func = Function::new(func.name.clone(), sig);
         lir_func.entry_block = entry;
+
+        // Extract function-level proof annotations (Pure, Associative, etc.).
+        let func_proofs = extract_function_proofs(func);
+        for proof in func_proofs {
+            self.proof_ctx.add_function_proof(proof);
+        }
 
         // Translate all blocks.
         for tmir_block in func.iter_blocks() {
@@ -1266,35 +1356,53 @@ pub fn translate_function_with_names(
 /// Translates `TmirProof` annotations from the tMIR instruction into
 /// the adapter's internal `Proof` representation. Each proof type maps
 /// directly to an optimization opportunity in downstream passes.
+///
+/// Algebraic properties (Pure, Associative, Commutative, Idempotent) are
+/// extracted at instruction level when attached to individual instructions
+/// (e.g., "this add is associative"). They also appear at function level
+/// via `extract_function_proofs`.
 pub fn extract_proofs(node: &InstrNode) -> Vec<Proof> {
     node.proofs
         .iter()
-        .filter_map(|p| match p {
-            TmirProof::NoOverflow { signed } => Some(Proof::NoOverflow { signed: *signed }),
-            TmirProof::InBounds { base, index } => {
-                Some(Proof::InBounds {
-                    base: *base,
-                    index: *index,
-                })
-            }
-            TmirProof::NotNull { ptr } => Some(Proof::NotNull { ptr: *ptr }),
-            TmirProof::ValidBorrow { borrow } => Some(Proof::ValidBorrow { borrow: *borrow }),
-            TmirProof::InRange { lo, hi } => Some(Proof::InRange { lo: *lo, hi: *hi }),
-            TmirProof::NonZeroDivisor { divisor } => {
-                Some(Proof::NonZeroDivisor { divisor: *divisor })
-            }
-            TmirProof::ValidShift { amount, bitwidth } => {
-                Some(Proof::ValidShift {
-                    amount: *amount,
-                    bitwidth: *bitwidth,
-                })
-            }
-            // Pure, Associative, Commutative are function/subgraph-level proofs,
-            // not instruction-level. They are handled separately by the adapter
-            // when translating function-level proofs.
-            TmirProof::Pure | TmirProof::Associative | TmirProof::Commutative => None,
-        })
+        .filter_map(|p| translate_tmir_proof(p))
         .collect()
+}
+
+/// Extract function-level proof annotations from a tMIR function.
+///
+/// Function-level proofs describe properties of the entire function
+/// (e.g., "this function is pure" or "this function's operation is
+/// commutative"). These are stored in `ProofContext::function_proofs`.
+pub fn extract_function_proofs(func: &TmirFunction) -> Vec<Proof> {
+    func.proofs
+        .iter()
+        .filter_map(|p| translate_tmir_proof(p))
+        .collect()
+}
+
+/// Translate a single TmirProof to the adapter's Proof representation.
+fn translate_tmir_proof(p: &TmirProof) -> Option<Proof> {
+    match p {
+        TmirProof::NoOverflow { signed } => Some(Proof::NoOverflow { signed: *signed }),
+        TmirProof::InBounds { base, index } => Some(Proof::InBounds {
+            base: *base,
+            index: *index,
+        }),
+        TmirProof::NotNull { ptr } => Some(Proof::NotNull { ptr: *ptr }),
+        TmirProof::ValidBorrow { borrow } => Some(Proof::ValidBorrow { borrow: *borrow }),
+        TmirProof::InRange { lo, hi } => Some(Proof::InRange { lo: *lo, hi: *hi }),
+        TmirProof::NonZeroDivisor { divisor } => {
+            Some(Proof::NonZeroDivisor { divisor: *divisor })
+        }
+        TmirProof::ValidShift { amount, bitwidth } => Some(Proof::ValidShift {
+            amount: *amount,
+            bitwidth: *bitwidth,
+        }),
+        TmirProof::Pure => Some(Proof::Pure),
+        TmirProof::Associative => Some(Proof::Associative),
+        TmirProof::Commutative => Some(Proof::Commutative),
+        TmirProof::Idempotent => Some(Proof::Idempotent),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2363,10 +2471,10 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_proofs_skips_function_level_proofs() {
+    fn test_extract_proofs_algebraic_properties() {
         use tmir_types::TmirProof;
-        // Pure, Associative, Commutative are function-level proofs
-        // and should be filtered out by extract_proofs.
+        // Pure, Associative, Commutative, Idempotent are now extracted at
+        // both instruction and function level.
         let node = InstrNode {
             instr: Instr::BinOp {
                 op: BinOp::Add,
@@ -2379,13 +2487,18 @@ mod tests {
                 TmirProof::Pure,
                 TmirProof::Associative,
                 TmirProof::Commutative,
+                TmirProof::Idempotent,
                 TmirProof::NoOverflow { signed: true },
             ],
         };
         let proofs = extract_proofs(&node);
-        // Only NoOverflow should be extracted (Pure/Associative/Commutative filtered)
-        assert_eq!(proofs.len(), 1);
-        assert!(matches!(proofs[0], Proof::NoOverflow { signed: true }));
+        // All five proofs should be extracted.
+        assert_eq!(proofs.len(), 5);
+        assert!(matches!(proofs[0], Proof::Pure));
+        assert!(matches!(proofs[1], Proof::Associative));
+        assert!(matches!(proofs[2], Proof::Commutative));
+        assert!(matches!(proofs[3], Proof::Idempotent));
+        assert!(matches!(proofs[4], Proof::NoOverflow { signed: true }));
     }
 
     #[test]
@@ -2622,7 +2735,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_seven_proof_types_extract_correctly() {
+    fn test_all_eleven_proof_types_extract_correctly() {
         use tmir_types::TmirProof;
         let node = InstrNode {
             instr: Instr::BinOp {
@@ -2650,10 +2763,14 @@ mod tests {
                     bitwidth: 32,
                 },
                 TmirProof::InRange { lo: 0, hi: 100 },
+                TmirProof::Pure,
+                TmirProof::Associative,
+                TmirProof::Commutative,
+                TmirProof::Idempotent,
             ],
         };
         let proofs = extract_proofs(&node);
-        assert_eq!(proofs.len(), 7, "All 7 instruction-level proof types should extract");
+        assert_eq!(proofs.len(), 11, "All 11 proof types should extract");
 
         // Verify each type
         assert!(matches!(proofs[0], Proof::NoOverflow { signed: false }));
@@ -2663,6 +2780,10 @@ mod tests {
         assert!(matches!(proofs[4], Proof::NonZeroDivisor { .. }));
         assert!(matches!(proofs[5], Proof::ValidShift { .. }));
         assert!(matches!(proofs[6], Proof::InRange { lo: 0, hi: 100 }));
+        assert!(matches!(proofs[7], Proof::Pure));
+        assert!(matches!(proofs[8], Proof::Associative));
+        assert!(matches!(proofs[9], Proof::Commutative));
+        assert!(matches!(proofs[10], Proof::Idempotent));
     }
 
     #[test]
@@ -3748,5 +3869,511 @@ mod tests {
                 other => panic!("expected Fcmp, got {:?}", other),
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Function-level proof extraction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_function_proofs_pure() {
+        use tmir_types::TmirProof;
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "pure_fn".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::Int(32)],
+                returns: vec![Ty::Int(32)],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![(ValueId(0), Ty::Int(32))],
+                body: vec![InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(0)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                }],
+            }],
+            proofs: vec![TmirProof::Pure],
+        };
+
+        let (_, proof_ctx) = translate_function(&func, &[]).unwrap();
+        assert!(proof_ctx.is_function_pure());
+        assert!(!proof_ctx.is_function_associative());
+        assert!(!proof_ctx.is_function_commutative());
+    }
+
+    #[test]
+    fn test_extract_function_proofs_algebraic() {
+        use tmir_types::TmirProof;
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "assoc_commut_fn".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::Int(32), Ty::Int(32)],
+                returns: vec![Ty::Int(32)],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![
+                    (ValueId(0), Ty::Int(32)),
+                    (ValueId(1), Ty::Int(32)),
+                ],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::Int(32),
+                            lhs: ValueId(0),
+                            rhs: ValueId(1),
+                        },
+                        results: vec![ValueId(2)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            }],
+            proofs: vec![
+                TmirProof::Pure,
+                TmirProof::Associative,
+                TmirProof::Commutative,
+            ],
+        };
+
+        let (_, proof_ctx) = translate_function(&func, &[]).unwrap();
+        assert!(proof_ctx.is_function_pure());
+        assert!(proof_ctx.is_function_associative());
+        assert!(proof_ctx.is_function_commutative());
+        assert!(!proof_ctx.is_function_idempotent());
+        assert_eq!(proof_ctx.function_proofs().len(), 3);
+    }
+
+    #[test]
+    fn test_extract_function_proofs_idempotent() {
+        use tmir_types::TmirProof;
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "idempotent_fn".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::Int(32)],
+                returns: vec![Ty::Int(32)],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![(ValueId(0), Ty::Int(32))],
+                body: vec![InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(0)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                }],
+            }],
+            proofs: vec![TmirProof::Idempotent],
+        };
+
+        let (_, proof_ctx) = translate_function(&func, &[]).unwrap();
+        assert!(proof_ctx.is_function_idempotent());
+        assert!(!proof_ctx.is_function_pure());
+    }
+
+    #[test]
+    fn test_extract_function_proofs_empty_when_none() {
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "no_proofs_fn".to_string(),
+            ty: FuncTy {
+                params: vec![],
+                returns: vec![],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![],
+                body: vec![InstrNode {
+                    instr: Instr::Return { values: vec![] },
+                    results: vec![],
+                    proofs: vec![],
+                }],
+            }],
+            proofs: vec![],
+        };
+
+        let (_, proof_ctx) = translate_function(&func, &[]).unwrap();
+        assert!(!proof_ctx.is_function_pure());
+        assert!(!proof_ctx.is_function_associative());
+        assert!(!proof_ctx.is_function_commutative());
+        assert!(!proof_ctx.is_function_idempotent());
+        assert!(proof_ctx.function_proofs().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Instruction-level algebraic proof propagation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_instruction_level_pure_propagation() {
+        use tmir_types::TmirProof;
+        // An add instruction with Pure proof annotation: the result value
+        // should have the Pure proof in ProofContext.
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "pure_add".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::Int(32), Ty::Int(32)],
+                returns: vec![Ty::Int(32)],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![
+                    (ValueId(0), Ty::Int(32)),
+                    (ValueId(1), Ty::Int(32)),
+                ],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::Int(32),
+                            lhs: ValueId(0),
+                            rhs: ValueId(1),
+                        },
+                        results: vec![ValueId(2)],
+                        proofs: vec![TmirProof::Pure],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
+
+        let (_, proof_ctx) = translate_function(&func, &[]).unwrap();
+        // Find the internal value for ValueId(2)
+        let val2 = proof_ctx
+            .value_proofs
+            .keys()
+            .find(|v| {
+                proof_ctx
+                    .proofs_for(v)
+                    .iter()
+                    .any(|p| matches!(p, Proof::Pure))
+            });
+        assert!(val2.is_some(), "Result value should have Pure proof");
+        assert!(proof_ctx.has_pure(val2.unwrap()));
+    }
+
+    #[test]
+    fn test_instruction_level_associative_commutative_propagation() {
+        use tmir_types::TmirProof;
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "assoc_commut_add".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::Int(32), Ty::Int(32)],
+                returns: vec![Ty::Int(32)],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![
+                    (ValueId(0), Ty::Int(32)),
+                    (ValueId(1), Ty::Int(32)),
+                ],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::Int(32),
+                            lhs: ValueId(0),
+                            rhs: ValueId(1),
+                        },
+                        results: vec![ValueId(2)],
+                        proofs: vec![
+                            TmirProof::Associative,
+                            TmirProof::Commutative,
+                        ],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
+
+        let (_, proof_ctx) = translate_function(&func, &[]).unwrap();
+        // Find the value with proofs
+        let val = proof_ctx
+            .value_proofs
+            .keys()
+            .find(|v| proof_ctx.has_associative(v))
+            .expect("Should have a value with Associative proof");
+        assert!(proof_ctx.has_associative(val));
+        assert!(proof_ctx.has_commutative(val));
+        assert!(!proof_ctx.has_idempotent(val));
+    }
+
+    #[test]
+    fn test_combined_function_and_instruction_proofs() {
+        use tmir_types::TmirProof;
+        // Function has Pure proof, instruction has Associative + Commutative.
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "combined_proofs".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::Int(32), Ty::Int(32)],
+                returns: vec![Ty::Int(32)],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![
+                    (ValueId(0), Ty::Int(32)),
+                    (ValueId(1), Ty::Int(32)),
+                ],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::Int(32),
+                            lhs: ValueId(0),
+                            rhs: ValueId(1),
+                        },
+                        results: vec![ValueId(2)],
+                        proofs: vec![
+                            TmirProof::Associative,
+                            TmirProof::Commutative,
+                            TmirProof::NoOverflow { signed: false },
+                        ],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            }],
+            proofs: vec![TmirProof::Pure],
+        };
+
+        let (_, proof_ctx) = translate_function(&func, &[]).unwrap();
+
+        // Function-level: Pure
+        assert!(proof_ctx.is_function_pure());
+        assert!(!proof_ctx.is_function_associative());
+
+        // Instruction-level: Associative, Commutative, NoOverflow on result value
+        let val = proof_ctx
+            .value_proofs
+            .keys()
+            .find(|v| proof_ctx.has_associative(v))
+            .expect("Should have value with Associative");
+        assert!(proof_ctx.has_associative(val));
+        assert!(proof_ctx.has_commutative(val));
+        assert!(proof_ctx.has_no_overflow(val));
+        assert!(!proof_ctx.has_pure(val)); // Pure is function-level, not instruction-level here
+    }
+
+    // -----------------------------------------------------------------------
+    // ProofContext query method tests for new proof types
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_context_pure() {
+        let mut ctx = ProofContext::default();
+        let val = Value(42);
+        assert!(!ctx.has_pure(&val));
+        ctx.value_proofs
+            .entry(val)
+            .or_default()
+            .push(Proof::Pure);
+        assert!(ctx.has_pure(&val));
+    }
+
+    #[test]
+    fn test_proof_context_associative() {
+        let mut ctx = ProofContext::default();
+        let val = Value(43);
+        assert!(!ctx.has_associative(&val));
+        ctx.value_proofs
+            .entry(val)
+            .or_default()
+            .push(Proof::Associative);
+        assert!(ctx.has_associative(&val));
+    }
+
+    #[test]
+    fn test_proof_context_commutative() {
+        let mut ctx = ProofContext::default();
+        let val = Value(44);
+        assert!(!ctx.has_commutative(&val));
+        ctx.value_proofs
+            .entry(val)
+            .or_default()
+            .push(Proof::Commutative);
+        assert!(ctx.has_commutative(&val));
+    }
+
+    #[test]
+    fn test_proof_context_idempotent() {
+        let mut ctx = ProofContext::default();
+        let val = Value(45);
+        assert!(!ctx.has_idempotent(&val));
+        ctx.value_proofs
+            .entry(val)
+            .or_default()
+            .push(Proof::Idempotent);
+        assert!(ctx.has_idempotent(&val));
+    }
+
+    #[test]
+    fn test_proof_context_function_proofs() {
+        let mut ctx = ProofContext::default();
+        assert!(!ctx.is_function_pure());
+        assert!(!ctx.is_function_associative());
+        assert!(!ctx.is_function_commutative());
+        assert!(!ctx.is_function_idempotent());
+        assert!(ctx.function_proofs().is_empty());
+
+        ctx.add_function_proof(Proof::Pure);
+        ctx.add_function_proof(Proof::Associative);
+
+        assert!(ctx.is_function_pure());
+        assert!(ctx.is_function_associative());
+        assert!(!ctx.is_function_commutative());
+        assert!(!ctx.is_function_idempotent());
+        assert_eq!(ctx.function_proofs().len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_proofs for Pure/Associative/Commutative/Idempotent individually
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_proofs_pure() {
+        use tmir_types::TmirProof;
+        let node = InstrNode {
+            instr: Instr::Load {
+                ty: Ty::Int(32),
+                ptr: ValueId(0),
+            },
+            results: vec![ValueId(1)],
+            proofs: vec![TmirProof::Pure],
+        };
+        let proofs = extract_proofs(&node);
+        assert_eq!(proofs.len(), 1);
+        assert!(matches!(proofs[0], Proof::Pure));
+    }
+
+    #[test]
+    fn test_extract_proofs_associative() {
+        use tmir_types::TmirProof;
+        let node = InstrNode {
+            instr: Instr::BinOp {
+                op: BinOp::Add,
+                ty: Ty::Int(32),
+                lhs: ValueId(0),
+                rhs: ValueId(1),
+            },
+            results: vec![ValueId(2)],
+            proofs: vec![TmirProof::Associative],
+        };
+        let proofs = extract_proofs(&node);
+        assert_eq!(proofs.len(), 1);
+        assert!(matches!(proofs[0], Proof::Associative));
+    }
+
+    #[test]
+    fn test_extract_proofs_commutative() {
+        use tmir_types::TmirProof;
+        let node = InstrNode {
+            instr: Instr::BinOp {
+                op: BinOp::Mul,
+                ty: Ty::Int(32),
+                lhs: ValueId(0),
+                rhs: ValueId(1),
+            },
+            results: vec![ValueId(2)],
+            proofs: vec![TmirProof::Commutative],
+        };
+        let proofs = extract_proofs(&node);
+        assert_eq!(proofs.len(), 1);
+        assert!(matches!(proofs[0], Proof::Commutative));
+    }
+
+    #[test]
+    fn test_extract_proofs_idempotent() {
+        use tmir_types::TmirProof;
+        let node = InstrNode {
+            instr: Instr::UnOp {
+                op: UnOp::Not,
+                ty: Ty::Int(32),
+                operand: ValueId(0),
+            },
+            results: vec![ValueId(1)],
+            proofs: vec![TmirProof::Idempotent],
+        };
+        let proofs = extract_proofs(&node);
+        assert_eq!(proofs.len(), 1);
+        assert!(matches!(proofs[0], Proof::Idempotent));
+    }
+
+    #[test]
+    fn test_extract_function_proofs_standalone() {
+        use tmir_types::TmirProof;
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "test_fn".to_string(),
+            ty: FuncTy {
+                params: vec![],
+                returns: vec![],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![],
+                body: vec![InstrNode {
+                    instr: Instr::Return { values: vec![] },
+                    results: vec![],
+                    proofs: vec![],
+                }],
+            }],
+            proofs: vec![
+                TmirProof::Pure,
+                TmirProof::Associative,
+                TmirProof::Commutative,
+                TmirProof::Idempotent,
+            ],
+        };
+
+        let proofs = extract_function_proofs(&func);
+        assert_eq!(proofs.len(), 4);
+        assert!(matches!(proofs[0], Proof::Pure));
+        assert!(matches!(proofs[1], Proof::Associative));
+        assert!(matches!(proofs[2], Proof::Commutative));
+        assert!(matches!(proofs[3], Proof::Idempotent));
     }
 }

@@ -175,6 +175,13 @@ impl MachinePass for ProofOptimization {
                             changed = true;
                         }
                     }
+                    // Algebraic property proofs: preserved as metadata for
+                    // downstream passes (vectorizer, parallel reduction).
+                    // The proof_opts pass does not transform these directly
+                    // but they are consumed by vectorize.rs and scheduler.rs.
+                    Some(ProofAnnotation::Associative)
+                    | Some(ProofAnnotation::Commutative)
+                    | Some(ProofAnnotation::Idempotent) => {}
                     None => {}
                 }
             }

@@ -182,4 +182,8 @@ pub enum TmirProof {
     /// Value is within a specific range [lo, hi].
     /// Enables: range-based optimizations (width narrowing, skip sign extension).
     InRange { lo: i128, hi: i128 },
+
+    /// Operation is idempotent: f(f(x)) = f(x).
+    /// Enables: redundant application elimination.
+    Idempotent,
 }
