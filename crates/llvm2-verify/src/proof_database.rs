@@ -307,149 +307,146 @@ pub struct ProofDatabase {
     proofs: Vec<CategorizedProof>,
 }
 
+// ---------------------------------------------------------------------------
+// Proof registration helpers — #[inline(never)] to limit stack frame size
+//
+// Each function registers one category of proofs. By splitting the
+// registration across separate functions, we prevent the compiler from
+// merging all temporaries into a single stack frame in debug builds,
+// which was causing stack overflows. See issue #205.
+// ---------------------------------------------------------------------------
+
+#[inline(never)]
+fn register_arithmetic_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::lowering_proof::all_division_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Division });
+    }
+    let all_arith = crate::lowering_proof::all_arithmetic_proofs();
+    let div_count = crate::lowering_proof::all_division_proofs().len();
+    let arith_take = all_arith.len().saturating_sub(div_count);
+    for p in all_arith.into_iter().take(arith_take) {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Arithmetic });
+    }
+    for p in crate::lowering_proof::all_bitwise_shift_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::BitwiseShift });
+    }
+}
+
+#[inline(never)]
+fn register_fp_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::lowering_proof::all_fp_lowering_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::FloatingPoint });
+    }
+    for p in crate::lowering_proof::all_nzcv_flag_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::NzcvFlags });
+    }
+}
+
+#[inline(never)]
+fn register_comparison_branch_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::lowering_proof::all_comparison_proofs_i32() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Comparison });
+    }
+    for p in crate::lowering_proof::all_comparison_proofs_i64() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Comparison });
+    }
+    for p in crate::lowering_proof::all_branch_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Branch });
+    }
+}
+
+#[inline(never)]
+fn register_peephole_opt_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::peephole_proofs::all_peephole_proofs_with_32bit() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Peephole });
+    }
+    for p in crate::opt_proofs::all_opt_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Optimization });
+    }
+    for p in crate::const_fold_proofs::all_const_fold_proofs_with_variants() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::ConstantFolding });
+    }
+    for p in crate::copy_prop_proofs::all_copy_prop_proofs_with_variants() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::CopyPropagation });
+    }
+}
+
+#[inline(never)]
+fn register_analysis_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::cse_licm_proofs::all_cse_licm_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::CseLicm });
+    }
+    for p in crate::dce_proofs::all_dce_proofs_with_variants() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::DeadCodeElimination });
+    }
+    for p in crate::cfg_proofs::all_cfg_proofs_with_variants() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::CfgSimplification });
+    }
+    for p in crate::memory_proofs::all_memory_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Memory });
+    }
+}
+
+#[inline(never)]
+fn register_backend_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::const_materialize_proofs::all_const_materialize_proofs_with_variants() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::ConstantMaterialization });
+    }
+    for p in crate::addr_mode_proofs::all_addr_mode_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::AddressMode });
+    }
+    for p in crate::frame_proofs::all_frame_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::FrameLayout });
+    }
+    for p in crate::scheduler_proofs::all_scheduler_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::InstructionScheduling });
+    }
+    for p in crate::regalloc_proofs::all_regalloc_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::RegAlloc });
+    }
+}
+
+#[inline(never)]
+fn register_target_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::neon_lowering_proofs::all_neon_lowering_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::NeonLowering });
+    }
+    for p in crate::vectorization_proofs::all_vectorization_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Vectorization });
+    }
+    for p in crate::ane_precision_proofs::all_ane_precision_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::AnePrecision });
+    }
+}
+
+#[inline(never)]
+fn register_emission_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::macho_proofs::all_macho_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::MachOEmission });
+    }
+    for p in crate::loop_opt_proofs::all_loop_opt_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::LoopOptimization });
+    }
+}
+
 impl ProofDatabase {
     /// Construct the database by collecting all proofs from all registries.
+    ///
+    /// Proof registration is split across multiple `#[inline(never)]` helper
+    /// functions to prevent the compiler from accumulating all temporaries
+    /// (SmtExpr trees, Vec buffers, etc.) into a single enormous stack frame
+    /// in debug builds. This was causing stack overflows on the default 8 MB
+    /// test-thread stack. See issue #205.
     pub fn new() -> Self {
         let mut proofs = Vec::new();
-
-        // Arithmetic lowering (I8-I64: add, sub, mul, neg + division)
-        // Note: all_arithmetic_proofs() includes division proofs, so we
-        // separate them by registering division first, then arithmetic
-        // without the division subset.
-        for p in crate::lowering_proof::all_division_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Division });
-        }
-        // Arithmetic minus division: the all_arithmetic_proofs() includes
-        // division, so we take the non-division subset (first 16 of 20).
-        let all_arith = crate::lowering_proof::all_arithmetic_proofs();
-        let div_count = crate::lowering_proof::all_division_proofs().len();
-        let arith_take = all_arith.len().saturating_sub(div_count);
-        for p in all_arith.into_iter().take(arith_take) {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Arithmetic });
-        }
-
-        // Floating-point lowering
-        for p in crate::lowering_proof::all_fp_lowering_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::FloatingPoint });
-        }
-
-        // NZCV flag proofs
-        for p in crate::lowering_proof::all_nzcv_flag_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::NzcvFlags });
-        }
-
-        // Comparison proofs (I32 + I64)
-        for p in crate::lowering_proof::all_comparison_proofs_i32() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Comparison });
-        }
-        for p in crate::lowering_proof::all_comparison_proofs_i64() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Comparison });
-        }
-
-        // Branch proofs (I32 + I64)
-        for p in crate::lowering_proof::all_branch_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Branch });
-        }
-
-        // Peephole proofs (64-bit + 32-bit variants)
-        for p in crate::peephole_proofs::all_peephole_proofs_with_32bit() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Peephole });
-        }
-
-        // Optimization pass proofs
-        for p in crate::opt_proofs::all_opt_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Optimization });
-        }
-
-        // Constant folding proofs (with variants)
-        for p in crate::const_fold_proofs::all_const_fold_proofs_with_variants() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::ConstantFolding });
-        }
-
-        // Copy propagation proofs (with variants)
-        for p in crate::copy_prop_proofs::all_copy_prop_proofs_with_variants() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::CopyPropagation });
-        }
-
-        // CSE/LICM proofs
-        for p in crate::cse_licm_proofs::all_cse_licm_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::CseLicm });
-        }
-
-        // DCE proofs (with variants)
-        for p in crate::dce_proofs::all_dce_proofs_with_variants() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::DeadCodeElimination });
-        }
-
-        // CFG simplification proofs (with variants)
-        for p in crate::cfg_proofs::all_cfg_proofs_with_variants() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::CfgSimplification });
-        }
-
-        // Memory proofs (array-based)
-        for p in crate::memory_proofs::all_memory_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Memory });
-        }
-
-        // NEON lowering proofs
-        for p in crate::neon_lowering_proofs::all_neon_lowering_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::NeonLowering });
-        }
-
-        // Vectorization proofs
-        for p in crate::vectorization_proofs::all_vectorization_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Vectorization });
-        }
-
-        // ANE precision proofs
-        for p in crate::ane_precision_proofs::all_ane_precision_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::AnePrecision });
-        }
-
-        // Register allocation correctness proofs
-        for p in crate::regalloc_proofs::all_regalloc_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::RegAlloc });
-        }
-
-        // Bitwise and shift lowering proofs (I8 exhaustive + I16 statistical)
-        for p in crate::lowering_proof::all_bitwise_shift_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::BitwiseShift });
-        }
-
-        // Constant materialization proofs (MOVZ, MOVZ+MOVK, ORR, MOVN)
-        for p in crate::const_materialize_proofs::all_const_materialize_proofs_with_variants() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::ConstantMaterialization });
-        }
-
-        // Address mode formation proofs (base+imm, base+reg, scaled offsets, writeback)
-        for p in crate::addr_mode_proofs::all_addr_mode_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::AddressMode });
-        }
-
-        // Frame index elimination correctness proofs (offset computation, range checks,
-        // alignment, callee-save non-overlap, slot distinctness)
-        for p in crate::frame_proofs::all_frame_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::FrameLayout });
-        }
-
-        // Instruction scheduling correctness proofs (dependency preservation,
-        // memory ordering, control flow, topological validity, reordering freedom)
-        for p in crate::scheduler_proofs::all_scheduler_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::InstructionScheduling });
-        }
-
-        // Mach-O emission correctness proofs (relocation encoding, symbol binding,
-        // structural invariants)
-        for p in crate::macho_proofs::all_macho_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::MachOEmission });
-        }
-
-        // Loop optimization correctness proofs (loop unrolling, strength reduction,
-        // combined composition, dead IV elimination)
-        for p in crate::loop_opt_proofs::all_loop_opt_proofs() {
-            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::LoopOptimization });
-        }
-
+        register_arithmetic_proofs(&mut proofs);
+        register_fp_proofs(&mut proofs);
+        register_comparison_branch_proofs(&mut proofs);
+        register_peephole_opt_proofs(&mut proofs);
+        register_analysis_proofs(&mut proofs);
+        register_backend_proofs(&mut proofs);
+        register_target_proofs(&mut proofs);
+        register_emission_proofs(&mut proofs);
         ProofDatabase { proofs }
     }
 
