@@ -16,6 +16,7 @@ pub mod compiler;
 pub mod coreml_emitter;
 pub mod dwarf_cfi;
 pub mod dwarf_info;
+pub mod elf;
 pub mod error;
 pub mod exception_handling;
 pub mod frame;
