@@ -1,0 +1,24 @@
+# llvm2-cli - Command-line driver for LLVM2
+#
+# Author: Andrew Yates <ayates@dropbox.com>
+# Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+
+[package]
+name = "llvm2-cli"
+description = "Command-line driver for the LLVM2 verified compiler backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "llvm2"
+path = "src/main.rs"
+
+[dependencies]
+llvm2-codegen = { workspace = true }
+llvm2-ir = { workspace = true }
+tmir-func = { workspace = true }
+serde_json = { workspace = true }
+clap = { version = "4", features = ["derive"] }

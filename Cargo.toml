@@ -13,6 +13,7 @@ members = [
     "crates/llvm2-verify",
     "crates/llvm2-codegen",
     "crates/llvm2-regalloc",
+    "crates/llvm2-cli",
 ]
 
 [workspace.package]
