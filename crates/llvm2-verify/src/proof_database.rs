@@ -142,6 +142,11 @@ pub enum ProofCategory {
     /// memory ordering, control flow, topological validity, reordering freedom).
     /// Source: `scheduler_proofs::all_scheduler_proofs()`.
     InstructionScheduling,
+
+    /// Mach-O emission correctness proofs (relocation encoding, symbol binding,
+    /// structural invariants).
+    /// Source: `macho_proofs::all_macho_proofs()`.
+    MachOEmission,
 }
 
 impl ProofCategory {
@@ -171,6 +176,7 @@ impl ProofCategory {
             ProofCategory::AddressMode,
             ProofCategory::FrameLayout,
             ProofCategory::InstructionScheduling,
+            ProofCategory::MachOEmission,
         ]
     }
 
@@ -200,6 +206,7 @@ impl ProofCategory {
             ProofCategory::AddressMode => "Address Mode",
             ProofCategory::FrameLayout => "Frame Layout",
             ProofCategory::InstructionScheduling => "Instruction Scheduling",
+            ProofCategory::MachOEmission => "Mach-O Emission",
         }
     }
 }
@@ -421,6 +428,12 @@ impl ProofDatabase {
         // memory ordering, control flow, topological validity, reordering freedom)
         for p in crate::scheduler_proofs::all_scheduler_proofs() {
             proofs.push(CategorizedProof { obligation: p, category: ProofCategory::InstructionScheduling });
+        }
+
+        // Mach-O emission correctness proofs (relocation encoding, symbol binding,
+        // structural invariants)
+        for p in crate::macho_proofs::all_macho_proofs() {
+            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::MachOEmission });
         }
 
         ProofDatabase { proofs }
@@ -770,8 +783,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            23,
-            "expected 23 categories, got {}",
+            24,
+            "expected 24 categories, got {}",
             categories.len()
         );
     }
