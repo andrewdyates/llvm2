@@ -36,6 +36,7 @@ use crate::pass_manager::{PassManager, PassStats};
 use crate::peephole::Peephole;
 use crate::proof_opts::ProofOptimization;
 use crate::strength_reduce::StrengthReduction;
+use crate::tail_call::TailCallOptimization;
 
 /// Optimization level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +99,7 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(AddrModeFormation))
                     .with_pass(Box::new(CmpSelectCombine))
                     .with_pass(Box::new(CmpBranchFusion))
+                    .with_pass(Box::new(TailCallOptimization))
                     .with_pass(Box::new(DeadCodeElimination))
                     .with_pass(Box::new(CfgSimplify))
             }
@@ -106,7 +108,9 @@ impl OptimizationPipeline {
                 // Loop optimizations run after LICM. Address mode formation
                 // runs after peephole, before DCE. CmpSelect combines run
                 // after addr-mode, before DCE. CmpBranchFusion fuses
-                // CMP/TST + BCond into CBZ/CBNZ/TBZ/TBNZ.
+                // CMP/TST + BCond into CBZ/CBNZ/TBZ/TBNZ. Tail call
+                // optimization runs after other opts to see the final call
+                // pattern before DCE cleans up.
                 PassManager::new()
                     .with_pass(Box::new(ProofOptimization::new()))
                     .with_pass(Box::new(ConstantFolding))
@@ -119,6 +123,7 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(AddrModeFormation))
                     .with_pass(Box::new(CmpSelectCombine))
                     .with_pass(Box::new(CmpBranchFusion))
+                    .with_pass(Box::new(TailCallOptimization))
                     .with_pass(Box::new(DeadCodeElimination))
                     .with_pass(Box::new(CfgSimplify))
             }
@@ -227,9 +232,9 @@ mod tests {
     fn test_o3_iterates() {
         let pipeline = OptimizationPipeline::new(OptLevel::O3);
         let pm = pipeline.build_pass_manager();
-        // 13 passes: proof-opts + const-fold + copy-prop + cse + licm +
+        // 14 passes: proof-opts + const-fold + copy-prop + cse + licm +
         // strength-reduce + loop-unroll + peephole + addr-mode + cmp-select +
-        // cmp-branch-fusion + dce + cfg-simplify
-        assert_eq!(pm.num_passes(), 13);
+        // cmp-branch-fusion + tail-call + dce + cfg-simplify
+        assert_eq!(pm.num_passes(), 14);
     }
 }
