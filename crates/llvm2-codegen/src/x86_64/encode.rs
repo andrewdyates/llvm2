@@ -203,6 +203,25 @@ impl Sib {
         }
     }
 
+    /// Create a SIB byte for `[base + index * scale]`.
+    ///
+    /// `scale_factor` must be 1, 2, 4, or 8 (encoded as 0, 1, 2, 3).
+    /// `index` must NOT be RSP (encoding 4) -- RSP means "no index" in SIB.
+    pub fn scaled(base: u8, index: u8, scale_factor: u8) -> Self {
+        let scale_bits = match scale_factor {
+            1 => 0,
+            2 => 1,
+            4 => 2,
+            8 => 3,
+            _ => 0, // fallback to scale=1
+        };
+        Self {
+            scale: scale_bits,
+            index: index & 0x7,
+            base: base & 0x7,
+        }
+    }
+
     /// Encode the SIB byte.
     pub fn encode(self) -> u8 {
         (self.scale << 6) | ((self.index & 0x7) << 3) | (self.base & 0x7)
@@ -226,6 +245,10 @@ pub struct X86InstOperands {
     pub src: Option<X86PReg>,
     /// Base register for memory operands.
     pub base: Option<X86PReg>,
+    /// Index register for scaled-index (SIB) addressing.
+    pub index: Option<X86PReg>,
+    /// Scale factor for SIB addressing: 1, 2, 4, or 8.
+    pub scale: u8,
     /// Memory displacement/offset.
     pub disp: i64,
     /// Immediate value (sign-extended to 64 bits).
@@ -241,6 +264,8 @@ impl X86InstOperands {
             dst: None,
             src: None,
             base: None,
+            index: None,
+            scale: 1,
             disp: 0,
             imm: 0,
             cc: None,
@@ -288,6 +313,35 @@ impl X86InstOperands {
         Self {
             dst: Some(reg),
             base: Some(base),
+            disp,
+            ..Self::none()
+        }
+    }
+
+    /// Create operands for a scaled-index memory operand: `[base + index*scale + disp]`.
+    ///
+    /// `scale` must be 1, 2, 4, or 8.
+    pub fn rm_sib(
+        reg: X86PReg,
+        base: X86PReg,
+        index: X86PReg,
+        scale: u8,
+        disp: i64,
+    ) -> Self {
+        Self {
+            dst: Some(reg),
+            base: Some(base),
+            index: Some(index),
+            scale,
+            disp,
+            ..Self::none()
+        }
+    }
+
+    /// Create operands for a RIP-relative LEA: `[RIP + disp32]`.
+    pub fn rip_rel(reg: X86PReg, disp: i64) -> Self {
+        Self {
+            dst: Some(reg),
             disp,
             ..Self::none()
         }
@@ -606,6 +660,68 @@ impl X86Encoder {
             }
             self.emit_imm32(disp as i32);
         }
+    }
+
+    /// Emit ModR/M + SIB + displacement for a scaled-index memory operand.
+    ///
+    /// Encodes `[base + index * scale + disp]` addressing mode.
+    ///
+    /// `reg_or_ext` is the 3-bit value for the ModR/M reg field.
+    /// `base` is the base register.
+    /// `index` is the index register (must NOT be RSP -- hw_enc & 7 == 4).
+    /// `scale` is 1, 2, 4, or 8.
+    /// `disp` is the signed displacement.
+    fn emit_sib_mem_operand(
+        &mut self,
+        reg_or_ext: u8,
+        base: X86PReg,
+        index: X86PReg,
+        scale: u8,
+        disp: i64,
+    ) {
+        let base_enc = base.hw_enc();
+        let base_low3 = base_enc & 0x7;
+        let sib = Sib::scaled(base_enc, index.hw_enc(), scale);
+
+        if disp == 0 && base_low3 != 5 {
+            // mod=00: [base + index*scale]
+            self.emit_modrm(ModRM {
+                mode: 0b00,
+                reg: reg_or_ext & 0x7,
+                rm: 0b100, // SIB follows
+            });
+            self.emit_sib(sib);
+        } else if (-128..=127).contains(&disp) {
+            // mod=01: [base + index*scale + disp8]
+            self.emit_modrm(ModRM {
+                mode: 0b01,
+                reg: reg_or_ext & 0x7,
+                rm: 0b100,
+            });
+            self.emit_sib(sib);
+            self.emit_imm8(disp as i8);
+        } else {
+            // mod=10: [base + index*scale + disp32]
+            self.emit_modrm(ModRM {
+                mode: 0b10,
+                reg: reg_or_ext & 0x7,
+                rm: 0b100,
+            });
+            self.emit_sib(sib);
+            self.emit_imm32(disp as i32);
+        }
+    }
+
+    /// Emit ModR/M for RIP-relative addressing: `[RIP + disp32]`.
+    ///
+    /// Uses ModR/M mod=00, rm=101 which signals RIP-relative in 64-bit mode.
+    fn emit_rip_relative(&mut self, reg_or_ext: u8, disp: i64) {
+        self.emit_modrm(ModRM {
+            mode: 0b00,
+            reg: reg_or_ext & 0x7,
+            rm: 0b101, // RIP-relative
+        });
+        self.emit_imm32(disp as i32);
     }
 
     // -----------------------------------------------------------------------
@@ -972,6 +1088,65 @@ impl X86Encoder {
             }
 
             // =================================================================
+            // LEA RIP-relative
+            // =================================================================
+            // LEA r64, [RIP+disp32]: REX.W + 8D + ModRM(00 reg 101) + disp32
+            X86Opcode::LeaRip => {
+                let dst = self.require_dst(ops, opcode)?;
+                let rex = RexPrefix {
+                    w: true,
+                    r: dst.hw_enc() >= 8,
+                    x: false,
+                    b: false,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0x8D);
+                self.emit_rip_relative(dst.hw_enc(), ops.disp);
+            }
+
+            // =================================================================
+            // Scaled-index (SIB) memory addressing
+            // =================================================================
+            // MOV r64, [base+index*scale+disp]: REX.W + 8B /r + SIB
+            X86Opcode::MovRMSib => {
+                let dst = self.require_dst(ops, opcode)?;
+                let base = ops.base.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands(format!("{:?}: missing base register", opcode))
+                })?;
+                let index = ops.index.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands(format!("{:?}: missing index register", opcode))
+                })?;
+                let rex = RexPrefix {
+                    w: true,
+                    r: dst.hw_enc() >= 8,
+                    x: index.hw_enc() >= 8,
+                    b: base.hw_enc() >= 8,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0x8B);
+                self.emit_sib_mem_operand(dst.hw_enc(), base, index, ops.scale, ops.disp);
+            }
+            // MOV [base+index*scale+disp], r64: REX.W + 89 /r + SIB
+            X86Opcode::MovMRSib => {
+                let src = self.require_dst(ops, opcode)?; // dst field holds src for stores
+                let base = ops.base.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands(format!("{:?}: missing base register", opcode))
+                })?;
+                let index = ops.index.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands(format!("{:?}: missing index register", opcode))
+                })?;
+                let rex = RexPrefix {
+                    w: true,
+                    r: src.hw_enc() >= 8,
+                    x: index.hw_enc() >= 8,
+                    b: base.hw_enc() >= 8,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0x89);
+                self.emit_sib_mem_operand(src.hw_enc(), base, index, ops.scale, ops.disp);
+            }
+
+            // =================================================================
             // MOVZX / MOVSX
             // =================================================================
             // MOVZX r64, r/m8: REX.W + 0F B6 /r (mod=11 for reg-reg)
@@ -1094,6 +1269,80 @@ impl X86Encoder {
             X86Opcode::Ucomiss => {
                 let (dst, src) = self.require_rr(ops, opcode)?;
                 self.encode_sse_rr(0, 0x2E, dst, src);
+            }
+
+            // =================================================================
+            // SSE type conversion
+            // =================================================================
+            // CVTSI2SD xmm, r64: F2 REX.W 0F 2A /r
+            X86Opcode::Cvtsi2sd => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.emit_byte(0xF2);
+                let rex = RexPrefix {
+                    w: true,
+                    r: dst.hw_enc() >= 8,
+                    x: false,
+                    b: src.hw_enc() >= 8,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0x2A);
+                self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
+            }
+            // CVTSD2SI r64, xmm: F2 REX.W 0F 2D /r (truncate)
+            X86Opcode::Cvtsd2si => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.emit_byte(0xF2);
+                let rex = RexPrefix {
+                    w: true,
+                    r: dst.hw_enc() >= 8,
+                    x: false,
+                    b: src.hw_enc() >= 8,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0x2D);
+                self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
+            }
+            // CVTSI2SS xmm, r64: F3 REX.W 0F 2A /r
+            X86Opcode::Cvtsi2ss => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.emit_byte(0xF3);
+                let rex = RexPrefix {
+                    w: true,
+                    r: dst.hw_enc() >= 8,
+                    x: false,
+                    b: src.hw_enc() >= 8,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0x2A);
+                self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
+            }
+            // CVTSS2SI r64, xmm: F3 REX.W 0F 2D /r (truncate)
+            X86Opcode::Cvtss2si => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.emit_byte(0xF3);
+                let rex = RexPrefix {
+                    w: true,
+                    r: dst.hw_enc() >= 8,
+                    x: false,
+                    b: src.hw_enc() >= 8,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0x2D);
+                self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
+            }
+            // CVTSD2SS xmm, xmm: F2 0F 5A /r
+            X86Opcode::Cvtsd2ss => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_sse_rr(0xF2, 0x5A, dst, src);
+            }
+            // CVTSS2SD xmm, xmm: F3 0F 5A /r
+            X86Opcode::Cvtss2sd => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_sse_rr(0xF3, 0x5A, dst, src);
             }
 
             // =================================================================
@@ -2640,5 +2889,290 @@ mod tests {
         // MOVSS XMM8, [RBP+0]: F3 REX.R(44) 0F 10 + ModRM(01 000 101) + disp8(00)
         let bytes = encode(X86Opcode::MovssRM, &X86InstOperands::rm(XMM8, RBP, 0));
         assert_eq!(bytes, vec![0xF3, 0x44, 0x0F, 0x10, 0x45, 0x00]);
+    }
+
+    // -----------------------------------------------------------------------
+    // RIP-relative LEA tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lea_rip_rax_disp0() {
+        // LEA RAX, [RIP+0]: REX.W(48) + 8D + ModRM(00 000 101) + disp32(00000000)
+        let bytes = encode(X86Opcode::LeaRip, &X86InstOperands::rip_rel(RAX, 0));
+        assert_eq!(bytes, vec![0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_lea_rip_rcx_disp256() {
+        // LEA RCX, [RIP+256]: REX.W(48) + 8D + ModRM(00 001 101) + disp32
+        let bytes = encode(X86Opcode::LeaRip, &X86InstOperands::rip_rel(RCX, 256));
+        assert_eq!(bytes, vec![0x48, 0x8D, 0x0D, 0x00, 0x01, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_lea_rip_r8_negative() {
+        // LEA R8, [RIP-16]: REX.WR(4C) + 8D + ModRM(00 000 101) + disp32(F0FFFFFF)
+        let bytes = encode(X86Opcode::LeaRip, &X86InstOperands::rip_rel(R8, -16));
+        assert_eq!(bytes, vec![0x4C, 0x8D, 0x05, 0xF0, 0xFF, 0xFF, 0xFF]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Scaled-index (SIB) memory tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sib_scaled_encode() {
+        // SIB for [RAX + RCX*4]: scale=2(4x), index=RCX(1), base=RAX(0)
+        let sib = Sib::scaled(0, 1, 4);
+        // scale=2(0b10), index=1(0b001), base=0(0b000) -> 10_001_000 = 0x88
+        assert_eq!(sib.encode(), 0x88);
+    }
+
+    #[test]
+    fn test_sib_scaled_encode_scale8() {
+        // SIB for [RBX + RDX*8]: scale=3(8x), index=RDX(2), base=RBX(3)
+        let sib = Sib::scaled(3, 2, 8);
+        // scale=3(0b11), index=2(0b010), base=3(0b011) -> 11_010_011 = 0xD3
+        assert_eq!(sib.encode(), 0xD3);
+    }
+
+    #[test]
+    fn test_mov_rm_sib_rax_rbx_rcx_scale4_nodisp() {
+        // MOV RAX, [RBX + RCX*4]: REX.W(48) + 8B + ModRM(00 000 100) + SIB(10 001 011)
+        // reg=RAX(0), rm=100(SIB), SIB: scale=4(2), index=RCX(1), base=RBX(3)
+        let bytes = encode(
+            X86Opcode::MovRMSib,
+            &X86InstOperands::rm_sib(RAX, RBX, RCX, 4, 0),
+        );
+        assert_eq!(bytes, vec![0x48, 0x8B, 0x04, 0x8B]);
+    }
+
+    #[test]
+    fn test_mov_rm_sib_rax_rbx_rcx_scale4_disp8() {
+        // MOV RAX, [RBX + RCX*4 + 16]: REX.W(48) + 8B + ModRM(01 000 100) + SIB + disp8
+        let bytes = encode(
+            X86Opcode::MovRMSib,
+            &X86InstOperands::rm_sib(RAX, RBX, RCX, 4, 16),
+        );
+        assert_eq!(bytes, vec![0x48, 0x8B, 0x44, 0x8B, 0x10]);
+    }
+
+    #[test]
+    fn test_mov_rm_sib_rax_rbx_rcx_scale8_disp32() {
+        // MOV RAX, [RBX + RCX*8 + 256]: REX.W(48) + 8B + ModRM(10 000 100) + SIB + disp32
+        let bytes = encode(
+            X86Opcode::MovRMSib,
+            &X86InstOperands::rm_sib(RAX, RBX, RCX, 8, 256),
+        );
+        assert_eq!(bytes, vec![0x48, 0x8B, 0x84, 0xCB, 0x00, 0x01, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_mov_rm_sib_r8_r12_r9_scale2() {
+        // MOV R8, [R12 + R9*2]: REX.WRX.B(4F) + 8B + ModRM(00 000 100) + SIB
+        // dst=R8(8, REX.R), base=R12(12, REX.B), index=R9(9, REX.X)
+        let bytes = encode(
+            X86Opcode::MovRMSib,
+            &X86InstOperands::rm_sib(R8, R12, R9, 2, 0),
+        );
+        // REX: W=1, R=1(R8), X=1(R9), B=1(R12) -> 0x4F
+        // ModRM: mod=00, reg=000(R8&7), rm=100(SIB)
+        // SIB: scale=1(2x), index=001(R9&7), base=100(R12&7)
+        assert_eq!(bytes, vec![0x4F, 0x8B, 0x04, 0x4C]);
+    }
+
+    #[test]
+    fn test_mov_mr_sib_store() {
+        // MOV [RBX + RCX*4], RAX: REX.W(48) + 89 + ModRM(00 000 100) + SIB
+        let bytes = encode(
+            X86Opcode::MovMRSib,
+            &X86InstOperands {
+                dst: Some(RAX), // src register stored in dst field for stores
+                base: Some(RBX),
+                index: Some(RCX),
+                scale: 4,
+                disp: 0,
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0x48, 0x89, 0x04, 0x8B]);
+    }
+
+    #[test]
+    fn test_mov_mr_sib_store_disp8() {
+        // MOV [RBX + RDX*8 + 32], RCX: REX.W(48) + 89 + ModRM(01 001 100) + SIB + disp8
+        let bytes = encode(
+            X86Opcode::MovMRSib,
+            &X86InstOperands {
+                dst: Some(RCX),
+                base: Some(RBX),
+                index: Some(RDX),
+                scale: 8,
+                disp: 32,
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0x48, 0x89, 0x4C, 0xD3, 0x20]);
+    }
+
+    // -----------------------------------------------------------------------
+    // SSE conversion instruction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cvtsi2sd_xmm0_rax() {
+        // CVTSI2SD XMM0, RAX: F2 REX.W(48) 0F 2A + ModRM(11 000 000)
+        let bytes = encode(X86Opcode::Cvtsi2sd, &X86InstOperands::rr(XMM0, RAX));
+        assert_eq!(bytes, vec![0xF2, 0x48, 0x0F, 0x2A, 0xC0]);
+    }
+
+    #[test]
+    fn test_cvtsi2sd_xmm8_r15() {
+        // CVTSI2SD XMM8, R15: F2 REX.WRB(4D) 0F 2A + ModRM(11 000 111)
+        let bytes = encode(X86Opcode::Cvtsi2sd, &X86InstOperands::rr(XMM8, R15));
+        assert_eq!(bytes, vec![0xF2, 0x4D, 0x0F, 0x2A, 0xC7]);
+    }
+
+    #[test]
+    fn test_cvtsd2si_rax_xmm0() {
+        // CVTSD2SI RAX, XMM0: F2 REX.W(48) 0F 2D + ModRM(11 000 000)
+        let bytes = encode(X86Opcode::Cvtsd2si, &X86InstOperands::rr(RAX, XMM0));
+        assert_eq!(bytes, vec![0xF2, 0x48, 0x0F, 0x2D, 0xC0]);
+    }
+
+    #[test]
+    fn test_cvtsd2si_r8_xmm15() {
+        // CVTSD2SI R8, XMM15: F2 REX.WRB(4D) 0F 2D + ModRM(11 000 111)
+        let bytes = encode(X86Opcode::Cvtsd2si, &X86InstOperands::rr(R8, XMM15));
+        assert_eq!(bytes, vec![0xF2, 0x4D, 0x0F, 0x2D, 0xC7]);
+    }
+
+    #[test]
+    fn test_cvtsi2ss_xmm0_rax() {
+        // CVTSI2SS XMM0, RAX: F3 REX.W(48) 0F 2A + ModRM(11 000 000)
+        let bytes = encode(X86Opcode::Cvtsi2ss, &X86InstOperands::rr(XMM0, RAX));
+        assert_eq!(bytes, vec![0xF3, 0x48, 0x0F, 0x2A, 0xC0]);
+    }
+
+    #[test]
+    fn test_cvtss2si_rax_xmm0() {
+        // CVTSS2SI RAX, XMM0: F3 REX.W(48) 0F 2D + ModRM(11 000 000)
+        let bytes = encode(X86Opcode::Cvtss2si, &X86InstOperands::rr(RAX, XMM0));
+        assert_eq!(bytes, vec![0xF3, 0x48, 0x0F, 0x2D, 0xC0]);
+    }
+
+    #[test]
+    fn test_cvtsd2ss_xmm0_xmm1() {
+        // CVTSD2SS XMM0, XMM1: F2 0F 5A + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Cvtsd2ss, &X86InstOperands::rr(XMM0, XMM1));
+        assert_eq!(bytes, vec![0xF2, 0x0F, 0x5A, 0xC1]);
+    }
+
+    #[test]
+    fn test_cvtss2sd_xmm0_xmm1() {
+        // CVTSS2SD XMM0, XMM1: F3 0F 5A + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Cvtss2sd, &X86InstOperands::rr(XMM0, XMM1));
+        assert_eq!(bytes, vec![0xF3, 0x0F, 0x5A, 0xC1]);
+    }
+
+    #[test]
+    fn test_cvtsd2ss_xmm8_xmm15() {
+        // CVTSD2SS XMM8, XMM15: F2 REX.RB(45) 0F 5A + ModRM(11 000 111)
+        let bytes = encode(X86Opcode::Cvtsd2ss, &X86InstOperands::rr(XMM8, XMM15));
+        assert_eq!(bytes, vec![0xF2, 0x45, 0x0F, 0x5A, 0xC7]);
+    }
+
+    #[test]
+    fn test_cvtss2sd_xmm8_xmm15() {
+        // CVTSS2SD XMM8, XMM15: F3 REX.RB(45) 0F 5A + ModRM(11 000 111)
+        let bytes = encode(X86Opcode::Cvtss2sd, &X86InstOperands::rr(XMM8, XMM15));
+        assert_eq!(bytes, vec![0xF3, 0x45, 0x0F, 0x5A, 0xC7]);
+    }
+
+    // -----------------------------------------------------------------------
+    // New instruction size tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_new_instruction_sizes_v2() {
+        let mut enc = X86Encoder::new();
+
+        // LEA RIP: REX.W(1) + 8D(1) + ModRM(1) + disp32(4) = 7 bytes
+        let n = enc.encode_instruction(X86Opcode::LeaRip, &X86InstOperands::rip_rel(RAX, 0)).unwrap();
+        assert_eq!(n, 7);
+
+        // CVTSI2SD: F2(1) + REX.W(1) + 0F(1) + 2A(1) + ModRM(1) = 5 bytes
+        let n = enc.encode_instruction(X86Opcode::Cvtsi2sd, &X86InstOperands::rr(XMM0, RAX)).unwrap();
+        assert_eq!(n, 5);
+
+        // CVTSD2SI: F2(1) + REX.W(1) + 0F(1) + 2D(1) + ModRM(1) = 5 bytes
+        let n = enc.encode_instruction(X86Opcode::Cvtsd2si, &X86InstOperands::rr(RAX, XMM0)).unwrap();
+        assert_eq!(n, 5);
+
+        // CVTSD2SS: F2(1) + 0F(1) + 5A(1) + ModRM(1) = 4 bytes
+        let n = enc.encode_instruction(X86Opcode::Cvtsd2ss, &X86InstOperands::rr(XMM0, XMM1)).unwrap();
+        assert_eq!(n, 4);
+
+        // CVTSS2SD: F3(1) + 0F(1) + 5A(1) + ModRM(1) = 4 bytes
+        let n = enc.encode_instruction(X86Opcode::Cvtss2sd, &X86InstOperands::rr(XMM0, XMM1)).unwrap();
+        assert_eq!(n, 4);
+
+        // MovRMSib [base + index*scale]: REX.W(1) + 8B(1) + ModRM(1) + SIB(1) = 4 bytes
+        let n = enc.encode_instruction(
+            X86Opcode::MovRMSib,
+            &X86InstOperands::rm_sib(RAX, RBX, RCX, 4, 0),
+        ).unwrap();
+        assert_eq!(n, 4);
+
+        // MovRMSib [base + index*scale + disp8]: 5 bytes
+        let n = enc.encode_instruction(
+            X86Opcode::MovRMSib,
+            &X86InstOperands::rm_sib(RAX, RBX, RCX, 4, 16),
+        ).unwrap();
+        assert_eq!(n, 5);
+
+        // MovRMSib [base + index*scale + disp32]: 8 bytes
+        let n = enc.encode_instruction(
+            X86Opcode::MovRMSib,
+            &X86InstOperands::rm_sib(RAX, RBX, RCX, 8, 256),
+        ).unwrap();
+        assert_eq!(n, 8);
+    }
+
+    // -----------------------------------------------------------------------
+    // SIB error handling
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mov_rm_sib_missing_base_error() {
+        let mut enc = X86Encoder::new();
+        let ops = X86InstOperands {
+            dst: Some(RAX),
+            index: Some(RCX),
+            scale: 4,
+            ..X86InstOperands::none()
+        };
+        let result = enc.encode_instruction(X86Opcode::MovRMSib, &ops);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mov_rm_sib_missing_index_error() {
+        let mut enc = X86Encoder::new();
+        let ops = X86InstOperands {
+            dst: Some(RAX),
+            base: Some(RBX),
+            scale: 4,
+            ..X86InstOperands::none()
+        };
+        let result = enc.encode_instruction(X86Opcode::MovRMSib, &ops);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_lea_rip_missing_dst_error() {
+        let mut enc = X86Encoder::new();
+        let result = enc.encode_instruction(X86Opcode::LeaRip, &X86InstOperands::none());
+        assert!(result.is_err());
     }
 }

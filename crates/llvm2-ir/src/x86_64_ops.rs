@@ -109,6 +109,17 @@ pub enum X86Opcode {
     Lea,
 
     // =====================================================================
+    // Scaled-index memory addressing (SIB forms)
+    // =====================================================================
+
+    /// MOV r64, [base + index*scale + disp] (scaled-index load)
+    MovRMSib,
+    /// MOV [base + index*scale + disp], r64 (scaled-index store)
+    MovMRSib,
+    /// LEA r64, [RIP + disp32] (RIP-relative, for PIC code)
+    LeaRip,
+
+    // =====================================================================
     // Compare / test
     // =====================================================================
 
@@ -190,6 +201,23 @@ pub enum X86Opcode {
     Setcc,
 
     // =====================================================================
+    // SSE type conversion
+    // =====================================================================
+
+    /// CVTSI2SD xmm, r64 (convert signed int64 to scalar double)
+    Cvtsi2sd,
+    /// CVTSD2SI r64, xmm (convert scalar double to signed int64, truncate)
+    Cvtsd2si,
+    /// CVTSI2SS xmm, r64 (convert signed int64 to scalar single)
+    Cvtsi2ss,
+    /// CVTSS2SI r64, xmm (convert scalar single to signed int64, truncate)
+    Cvtss2si,
+    /// CVTSD2SS xmm, xmm (convert scalar double to scalar single)
+    Cvtsd2ss,
+    /// CVTSS2SD xmm, xmm (convert scalar single to scalar double)
+    Cvtss2sd,
+
+    // =====================================================================
     // Bit manipulation
     // =====================================================================
 
@@ -243,10 +271,10 @@ impl X86Opcode {
             Ret => InstFlags::IS_RETURN.union(InstFlags::IS_TERMINATOR),
 
             // Memory loads
-            MovRM | MovsdRM | MovssRM | AddRM | SubRM | CmpRM => InstFlags::READS_MEMORY,
+            MovRM | MovsdRM | MovssRM | AddRM | SubRM | CmpRM | MovRMSib => InstFlags::READS_MEMORY,
 
             // Memory stores
-            MovMR | MovsdMR | MovssMR => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
+            MovMR | MovsdMR | MovssMR | MovMRSib => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Compare/test (set RFLAGS = side effect)
             CmpRR | CmpRI | TestRR | TestRI | Ucomisd | Ucomiss => InstFlags::HAS_SIDE_EFFECTS,
@@ -423,7 +451,7 @@ mod tests {
 
     #[test]
     fn memory_load_opcodes() {
-        for op in &[X86Opcode::MovRM, X86Opcode::MovsdRM, X86Opcode::MovssRM] {
+        for op in &[X86Opcode::MovRM, X86Opcode::MovsdRM, X86Opcode::MovssRM, X86Opcode::MovRMSib] {
             let flags = op.default_flags();
             assert!(flags.contains(InstFlags::READS_MEMORY), "{:?}", op);
             assert!(!flags.contains(InstFlags::WRITES_MEMORY), "{:?}", op);
@@ -432,7 +460,7 @@ mod tests {
 
     #[test]
     fn memory_store_opcodes() {
-        for op in &[X86Opcode::MovMR, X86Opcode::MovsdMR, X86Opcode::MovssMR] {
+        for op in &[X86Opcode::MovMR, X86Opcode::MovsdMR, X86Opcode::MovssMR, X86Opcode::MovMRSib] {
             let flags = op.default_flags();
             assert!(flags.contains(InstFlags::WRITES_MEMORY), "{:?}", op);
             assert!(flags.contains(InstFlags::HAS_SIDE_EFFECTS), "{:?}", op);
@@ -462,7 +490,7 @@ mod tests {
             X86Opcode::ShrRR, X86Opcode::ShrRI,
             X86Opcode::SarRR, X86Opcode::SarRI,
             X86Opcode::MovRR, X86Opcode::MovRI,
-            X86Opcode::Movzx, X86Opcode::Movsx, X86Opcode::Lea,
+            X86Opcode::Movzx, X86Opcode::Movsx, X86Opcode::Lea, X86Opcode::LeaRip,
             X86Opcode::Addsd, X86Opcode::Subsd,
             X86Opcode::Mulsd, X86Opcode::Divsd,
             X86Opcode::MovsdRR,
@@ -470,6 +498,10 @@ mod tests {
             X86Opcode::Addss, X86Opcode::Subss,
             X86Opcode::Mulss, X86Opcode::Divss,
             X86Opcode::MovssRR,
+            // SSE type conversion
+            X86Opcode::Cvtsi2sd, X86Opcode::Cvtsd2si,
+            X86Opcode::Cvtsi2ss, X86Opcode::Cvtss2si,
+            X86Opcode::Cvtsd2ss, X86Opcode::Cvtss2sd,
             // Conditional move, SETcc, bit manipulation
             X86Opcode::Cmovcc, X86Opcode::Setcc,
             X86Opcode::Bsf, X86Opcode::Bsr,
