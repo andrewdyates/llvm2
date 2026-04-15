@@ -49,6 +49,8 @@ pub mod regs;
 pub mod trace;
 pub mod type_hierarchy;
 pub mod types;
+pub mod riscv_ops;
+pub mod riscv_regs;
 pub mod x86_64_ops;
 pub mod x86_64_regs;
 
@@ -67,5 +69,7 @@ pub use provenance::{
     PassId, ProvenanceEntry, ProvenanceMap, ProvenanceStats, ProvenanceStatus, TmirInstId,
     TransformKind, TransformRecord,
 };
+pub use riscv_ops::RiscVOpcode;
+pub use riscv_regs::{RiscVPReg, RiscVRegClass};
 pub use x86_64_ops::{X86CondCode, X86Opcode};
 pub use x86_64_regs::{X86PReg, X86RegClass};
