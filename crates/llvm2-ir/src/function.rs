@@ -207,6 +207,100 @@ impl StackSlot {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Exception handling metadata
+// ---------------------------------------------------------------------------
+
+/// Landing pad entry in the function's exception handling table.
+///
+/// Records the block offset of a landing pad and its catch/cleanup behavior.
+/// Populated during ISel from `Invoke` / `LandingPad` instructions and
+/// consumed by LSDA generation in the codegen pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LandingPadEntry {
+    /// Block ID of the landing pad block.
+    pub block: BlockId,
+    /// Byte offset of the landing pad from function start (filled after layout).
+    pub offset: u32,
+    /// Type indices this landing pad catches. 0 = catch-all.
+    pub catch_type_indices: Vec<u32>,
+    /// Whether this landing pad runs cleanup (destructors/drops).
+    pub is_cleanup: bool,
+}
+
+/// Call site entry mapping a PC range to a landing pad.
+///
+/// Each entry describes a region of code (typically surrounding a `BL`
+/// instruction from an `Invoke`) that may throw, and the landing pad that
+/// should handle exceptions from that region.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EhCallSiteEntry {
+    /// Block ID containing the invoke / call site.
+    pub call_block: BlockId,
+    /// Byte offset of the call site region start (filled after layout).
+    pub start_offset: u32,
+    /// Length of the call site region in bytes (filled after layout).
+    pub length: u32,
+    /// Block ID of the landing pad (None = exception propagates to caller).
+    pub landing_pad_block: Option<BlockId>,
+    /// 1-based index into the action table (0 = cleanup-only).
+    pub action_index: u32,
+}
+
+/// Exception handling metadata for a function.
+///
+/// Collected during ISel and consumed by the codegen pipeline to generate
+/// the LSDA (Language-Specific Data Area) in the `__gcc_except_tab` section.
+///
+/// This is the IR-level representation that bridges the gap between
+/// ISel-level EH instructions (Invoke/LandingPad/Resume) and the
+/// codegen-level LSDA generation (`llvm2_codegen::exception_handling`).
+#[derive(Debug, Clone, Default)]
+pub struct ExceptionHandlingMetadata {
+    /// Personality function symbol name (e.g., "__gxx_personality_v0").
+    /// `None` for functions without exception handling.
+    pub personality: Option<String>,
+    /// Landing pad entries.
+    pub landing_pads: Vec<LandingPadEntry>,
+    /// Call site entries (invoke regions mapped to landing pads).
+    pub call_sites: Vec<EhCallSiteEntry>,
+    /// Type indices for the action/type table. These are opaque references
+    /// to type descriptors; the linker resolves them to actual typeinfo symbols.
+    pub type_indices: Vec<u32>,
+}
+
+impl ExceptionHandlingMetadata {
+    /// Create a new empty EH metadata.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns true if this function has exception handling metadata.
+    pub fn has_eh_info(&self) -> bool {
+        self.personality.is_some() || !self.landing_pads.is_empty()
+    }
+
+    /// Add a landing pad entry.
+    pub fn add_landing_pad(&mut self, entry: LandingPadEntry) {
+        self.landing_pads.push(entry);
+    }
+
+    /// Add a call site entry.
+    pub fn add_call_site(&mut self, entry: EhCallSiteEntry) {
+        self.call_sites.push(entry);
+    }
+
+    /// Add a type index. Returns the 1-based index.
+    pub fn add_type_index(&mut self, type_index: u32) -> u32 {
+        if let Some(pos) = self.type_indices.iter().position(|&ti| ti == type_index) {
+            (pos + 1) as u32
+        } else {
+            self.type_indices.push(type_index);
+            self.type_indices.len() as u32
+        }
+    }
+}
+
 /// A complete machine-level function, ready for register allocation and encoding.
 #[derive(Debug, Clone)]
 pub struct MachFunction {
@@ -226,6 +320,10 @@ pub struct MachFunction {
     pub next_vreg: u32,
     /// Stack slots allocated by this function.
     pub stack_slots: Vec<StackSlot>,
+    /// Exception handling metadata (landing pads, call sites, personality).
+    /// Populated during ISel for functions that contain invoke/landingpad
+    /// instructions. Consumed by the codegen pipeline to generate the LSDA.
+    pub eh_metadata: ExceptionHandlingMetadata,
 }
 
 impl MachFunction {
@@ -242,6 +340,7 @@ impl MachFunction {
             entry: BlockId(0),
             next_vreg: 0,
             stack_slots: Vec::new(),
+            eh_metadata: ExceptionHandlingMetadata::new(),
         }
     }
 
@@ -728,5 +827,104 @@ mod tests {
         assert!(!func.inst(add_id).is_return());
         assert!(func.inst(ret_id).is_return());
         assert_eq!(ss, crate::types::StackSlotId(0));
+    }
+
+    // ---- ExceptionHandlingMetadata tests ----
+
+    #[test]
+    fn eh_metadata_default_is_empty() {
+        let eh = ExceptionHandlingMetadata::new();
+        assert!(!eh.has_eh_info());
+        assert!(eh.personality.is_none());
+        assert!(eh.landing_pads.is_empty());
+        assert!(eh.call_sites.is_empty());
+        assert!(eh.type_indices.is_empty());
+    }
+
+    #[test]
+    fn eh_metadata_has_eh_info_with_personality() {
+        let mut eh = ExceptionHandlingMetadata::new();
+        eh.personality = Some("__gxx_personality_v0".to_string());
+        assert!(eh.has_eh_info());
+    }
+
+    #[test]
+    fn eh_metadata_has_eh_info_with_landing_pad() {
+        let mut eh = ExceptionHandlingMetadata::new();
+        eh.add_landing_pad(LandingPadEntry {
+            block: BlockId(1),
+            offset: 0x40,
+            catch_type_indices: vec![1],
+            is_cleanup: false,
+        });
+        assert!(eh.has_eh_info());
+    }
+
+    #[test]
+    fn eh_metadata_add_type_index_deduplicates() {
+        let mut eh = ExceptionHandlingMetadata::new();
+        let idx1 = eh.add_type_index(42);
+        assert_eq!(idx1, 1);
+        let idx2 = eh.add_type_index(99);
+        assert_eq!(idx2, 2);
+        // Adding 42 again should return the same index.
+        let idx3 = eh.add_type_index(42);
+        assert_eq!(idx3, 1);
+        assert_eq!(eh.type_indices.len(), 2);
+    }
+
+    #[test]
+    fn eh_metadata_add_call_site() {
+        let mut eh = ExceptionHandlingMetadata::new();
+        eh.add_call_site(EhCallSiteEntry {
+            call_block: BlockId(0),
+            start_offset: 0x10,
+            length: 0x08,
+            landing_pad_block: Some(BlockId(1)),
+            action_index: 1,
+        });
+        assert_eq!(eh.call_sites.len(), 1);
+        assert_eq!(eh.call_sites[0].start_offset, 0x10);
+    }
+
+    #[test]
+    fn machfunction_has_default_eh_metadata() {
+        let func = MachFunction::new(
+            "test".to_string(),
+            Signature::new(vec![], vec![]),
+        );
+        assert!(!func.eh_metadata.has_eh_info());
+    }
+
+    #[test]
+    fn machfunction_eh_metadata_roundtrip() {
+        let mut func = MachFunction::new(
+            "with_eh".to_string(),
+            Signature::new(vec![Type::I64], vec![Type::I64]),
+        );
+
+        func.eh_metadata.personality = Some("__rust_eh_personality".to_string());
+        func.eh_metadata.add_landing_pad(LandingPadEntry {
+            block: BlockId(1),
+            offset: 0x80,
+            catch_type_indices: Vec::new(),
+            is_cleanup: true,
+        });
+        func.eh_metadata.add_call_site(EhCallSiteEntry {
+            call_block: BlockId(0),
+            start_offset: 0,
+            length: 0x20,
+            landing_pad_block: Some(BlockId(1)),
+            action_index: 0,
+        });
+
+        assert!(func.eh_metadata.has_eh_info());
+        assert_eq!(
+            func.eh_metadata.personality.as_deref(),
+            Some("__rust_eh_personality")
+        );
+        assert_eq!(func.eh_metadata.landing_pads.len(), 1);
+        assert!(func.eh_metadata.landing_pads[0].is_cleanup);
+        assert_eq!(func.eh_metadata.call_sites.len(), 1);
     }
 }
