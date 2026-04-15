@@ -111,6 +111,7 @@ pub mod ane_precision_proofs;
 pub mod regalloc_proofs;
 pub mod proof_database;
 pub mod verification_runner;
+pub mod function_verifier;
 
 pub use verify::{VerificationResult, VerificationReport, ProofResult, Verifier, VerificationStrength};
 pub use lowering_proof::{ProofObligation, verify_by_evaluation, verify_by_evaluation_with_config,
@@ -123,3 +124,5 @@ pub use rule_discovery::{RuleDiscovery, RuleProposal, RuleResult, RuleDatabase, 
 pub use proof_database::{ProofDatabase, ProofCategory, CategorizedProof, ProofSummary};
 pub use verification_runner::{VerificationRunner, VerificationRunReport, VerificationRunResult,
     CategoryBreakdown, FailedProofDetail};
+pub use function_verifier::{FunctionVerifier, FunctionVerificationReport, InstructionVerificationResult,
+    InstructionReport, verify_function};
