@@ -183,6 +183,12 @@ pub enum ProofCategory {
     /// roundtrip, NaN handling).
     /// Source: `fp_convert_proofs::all_fp_convert_proofs()`.
     FpConversion,
+
+    /// Atomic memory operation proofs (LDAR/STLR load-acquire/store-release,
+    /// LDADD/LDSET/LDEOR/SWP/LDCLR read-modify-write, CAS compare-and-swap,
+    /// DMB fence ordering, SUB via NEG+LDADD, AND via MVN+LDCLR equivalences).
+    /// Source: `atomic_proofs::all_atomic_proofs()`.
+    AtomicOperations,
 }
 
 impl ProofCategory {
@@ -221,6 +227,7 @@ impl ProofCategory {
             ProofCategory::TailCallOptimization,
             ProofCategory::IfConversion,
             ProofCategory::FpConversion,
+            ProofCategory::AtomicOperations,
         ]
     }
 
@@ -259,6 +266,7 @@ impl ProofCategory {
             ProofCategory::TailCallOptimization => "Tail Call Optimization",
             ProofCategory::IfConversion => "If-Conversion",
             ProofCategory::FpConversion => "FP Conversion",
+            ProofCategory::AtomicOperations => "Atomic Operations",
         }
     }
 }
@@ -518,6 +526,13 @@ fn register_fp_convert_proofs(proofs: &mut Vec<CategorizedProof>) {
     }
 }
 
+#[inline(never)]
+fn register_atomic_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::atomic_proofs::all_atomic_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::AtomicOperations });
+    }
+}
+
 impl ProofDatabase {
     /// Construct the database by collecting all proofs from all registries.
     ///
@@ -542,6 +557,7 @@ impl ProofDatabase {
         register_tco_proofs(&mut proofs);
         register_if_convert_proofs(&mut proofs);
         register_fp_convert_proofs(&mut proofs);
+        register_atomic_proofs(&mut proofs);
         ProofDatabase { proofs }
     }
 
@@ -890,7 +906,7 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            32,
+            33,
             "expected 32 categories, got {}",
             categories.len()
         );
