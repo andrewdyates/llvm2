@@ -2041,6 +2041,311 @@ pub fn all_load_store_proofs() -> Vec<ProofObligation> {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// I8 bitwise/shift lowering proofs (exhaustive — all 2^16 or 2^8 combos)
+// ---------------------------------------------------------------------------
+
+/// Build the proof obligation for: `tMIR::Band(I8, a, b) -> AND (8-bit)`
+///
+/// On AArch64, 8-bit operations are performed in 32-bit W registers.
+/// The proof verifies semantic equivalence at the 8-bit bitvector level.
+pub fn proof_band_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "Band_I8 -> AND (8-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Band, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: a.bvand(b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bor(I8, a, b) -> OR (8-bit)`
+pub fn proof_bor_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "Bor_I8 -> OR (8-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Bor, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: a.bvor(b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bxor(I8, a, b) -> XOR (8-bit)`
+pub fn proof_bxor_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "Bxor_I8 -> XOR (8-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Bxor, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: a.bvxor(b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bnot(I8, a) -> NOT (8-bit)`
+///
+/// MVN on AArch64 is `ORN Rd, XZR, Rm` = bitwise complement.
+pub fn proof_bnot_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bnot;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let all_ones = SmtExpr::bv_const(mask(u64::MAX, 8), 8);
+
+    ProofObligation {
+        name: "Bnot_I8 -> NOT (8-bit)".to_string(),
+        tmir_expr: encode_tmir_bnot(Type::I8, a.clone()),
+        aarch64_expr: a.bvxor(all_ones),
+        inputs: vec![("a".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Ishl(I8, a, b) -> SHL (8-bit)`
+pub fn proof_ishl_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "Ishl_I8 -> SHL (8-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Ishl, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: a.bvshl(b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Ushr(I8, a, b) -> LSR (8-bit)`
+pub fn proof_ushr_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "Ushr_I8 -> LSR (8-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Ushr, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: a.bvlshr(b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Sshr(I8, a, b) -> ASR (8-bit)`
+pub fn proof_sshr_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "Sshr_I8 -> ASR (8-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Sshr, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: a.bvashr(b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// I16 bitwise/shift lowering proofs (statistical — edge cases + random sampling)
+// ---------------------------------------------------------------------------
+
+/// Build the proof obligation for: `tMIR::Band(I16, a, b) -> AND (16-bit)`
+///
+/// On AArch64, 16-bit operations are performed in 32-bit W registers.
+/// The proof verifies semantic equivalence at the 16-bit bitvector level.
+pub fn proof_band_i16() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+    let b = SmtExpr::var("b", 16);
+
+    ProofObligation {
+        name: "Band_I16 -> AND (16-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Band, Type::I16, a.clone(), b.clone()),
+        aarch64_expr: a.bvand(b),
+        inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bor(I16, a, b) -> OR (16-bit)`
+pub fn proof_bor_i16() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+    let b = SmtExpr::var("b", 16);
+
+    ProofObligation {
+        name: "Bor_I16 -> OR (16-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Bor, Type::I16, a.clone(), b.clone()),
+        aarch64_expr: a.bvor(b),
+        inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bxor(I16, a, b) -> XOR (16-bit)`
+pub fn proof_bxor_i16() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+    let b = SmtExpr::var("b", 16);
+
+    ProofObligation {
+        name: "Bxor_I16 -> XOR (16-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Bxor, Type::I16, a.clone(), b.clone()),
+        aarch64_expr: a.bvxor(b),
+        inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bnot(I16, a) -> NOT (16-bit)`
+pub fn proof_bnot_i16() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bnot;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+    let all_ones = SmtExpr::bv_const(mask(u64::MAX, 16), 16);
+
+    ProofObligation {
+        name: "Bnot_I16 -> NOT (16-bit)".to_string(),
+        tmir_expr: encode_tmir_bnot(Type::I16, a.clone()),
+        aarch64_expr: a.bvxor(all_ones),
+        inputs: vec![("a".to_string(), 16)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Ishl(I16, a, b) -> SHL (16-bit)`
+pub fn proof_ishl_i16() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+    let b = SmtExpr::var("b", 16);
+
+    ProofObligation {
+        name: "Ishl_I16 -> SHL (16-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Ishl, Type::I16, a.clone(), b.clone()),
+        aarch64_expr: a.bvshl(b),
+        inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Ushr(I16, a, b) -> LSR (16-bit)`
+pub fn proof_ushr_i16() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+    let b = SmtExpr::var("b", 16);
+
+    ProofObligation {
+        name: "Ushr_I16 -> LSR (16-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Ushr, Type::I16, a.clone(), b.clone()),
+        aarch64_expr: a.bvlshr(b),
+        inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Sshr(I16, a, b) -> ASR (16-bit)`
+pub fn proof_sshr_i16() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+    let b = SmtExpr::var("b", 16);
+
+    ProofObligation {
+        name: "Sshr_I16 -> ASR (16-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Sshr, Type::I16, a.clone(), b.clone()),
+        aarch64_expr: a.bvashr(b),
+        inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Return all bitwise and shift lowering proofs (I8 + I16, 14 total).
+///
+/// Covers: AND, OR, XOR, NOT, SHL, LSR, ASR at both I8 (exhaustive) and
+/// I16 (statistical) widths.
+pub fn all_bitwise_shift_proofs() -> Vec<ProofObligation> {
+    vec![
+        // I8 (exhaustive verification -- all 2^16 or 2^8 input combos tested)
+        proof_band_i8(),
+        proof_bor_i8(),
+        proof_bxor_i8(),
+        proof_bnot_i8(),
+        proof_ishl_i8(),
+        proof_ushr_i8(),
+        proof_sshr_i8(),
+        // I16 (statistical verification -- edge cases + random sampling)
+        proof_band_i16(),
+        proof_bor_i16(),
+        proof_bxor_i16(),
+        proof_bnot_i16(),
+        proof_ishl_i16(),
+        proof_ushr_i16(),
+        proof_sshr_i16(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3074,6 +3379,102 @@ mod tests {
             obligation.inputs.iter().any(|(name, _)| name == "base"),
             "Store proof should have 'base' input"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // I8 bitwise/shift proofs (exhaustive -- all 2^16 or 2^8 combos)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_band_i8() {
+        assert_valid(&proof_band_i8());
+    }
+
+    #[test]
+    fn test_proof_bor_i8() {
+        assert_valid(&proof_bor_i8());
+    }
+
+    #[test]
+    fn test_proof_bxor_i8() {
+        assert_valid(&proof_bxor_i8());
+    }
+
+    #[test]
+    fn test_proof_bnot_i8() {
+        assert_valid(&proof_bnot_i8());
+    }
+
+    #[test]
+    fn test_proof_ishl_i8() {
+        assert_valid(&proof_ishl_i8());
+    }
+
+    #[test]
+    fn test_proof_ushr_i8() {
+        assert_valid(&proof_ushr_i8());
+    }
+
+    #[test]
+    fn test_proof_sshr_i8() {
+        assert_valid(&proof_sshr_i8());
+    }
+
+    // -----------------------------------------------------------------------
+    // I16 bitwise/shift proofs (statistical -- edge cases + random sampling)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_band_i16() {
+        assert_valid(&proof_band_i16());
+    }
+
+    #[test]
+    fn test_proof_bor_i16() {
+        assert_valid(&proof_bor_i16());
+    }
+
+    #[test]
+    fn test_proof_bxor_i16() {
+        assert_valid(&proof_bxor_i16());
+    }
+
+    #[test]
+    fn test_proof_bnot_i16() {
+        assert_valid(&proof_bnot_i16());
+    }
+
+    #[test]
+    fn test_proof_ishl_i16() {
+        assert_valid(&proof_ishl_i16());
+    }
+
+    #[test]
+    fn test_proof_ushr_i16() {
+        assert_valid(&proof_ushr_i16());
+    }
+
+    #[test]
+    fn test_proof_sshr_i16() {
+        assert_valid(&proof_sshr_i16());
+    }
+
+    // -----------------------------------------------------------------------
+    // Aggregate bitwise/shift proof test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_all_bitwise_shift_proofs() {
+        for obligation in all_bitwise_shift_proofs() {
+            assert_valid(&obligation);
+        }
+    }
+
+    /// Verify that the bitwise/shift collection has the expected count.
+    #[test]
+    fn test_bitwise_shift_proof_count() {
+        let proofs = all_bitwise_shift_proofs();
+        assert_eq!(proofs.len(), 14, "Expected 14 bitwise/shift proofs (7 ops x 2 widths), got {}", proofs.len());
     }
 
     /// Negative test: load at different offsets should not be equivalent.
