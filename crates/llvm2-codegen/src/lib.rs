@@ -39,7 +39,7 @@ pub use error::CodegenError;
 pub use metal_emitter::{MetalOutput, MetalEmitError, NamedKernel, emit_metal_kernels};
 pub use pipeline::{
     Pipeline, PipelineConfig, PipelineError, DispatchVerifyMode,
-    compile_to_object, generate_cpu_only_plan,
+    compile_to_object, generate_cpu_only_plan, generate_lsda_for_function,
     CoreMLOutput, emit_coreml_program,
 };
 pub use lower::LowerError;

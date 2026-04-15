@@ -528,6 +528,66 @@ pub fn encode_function(func: &IrMachFunction) -> Result<Vec<u8>, PipelineError> 
 }
 
 // ---------------------------------------------------------------------------
+// LSDA generation from EH metadata
+// ---------------------------------------------------------------------------
+
+/// Generate LSDA bytes from a function's exception handling metadata.
+///
+/// Bridges `llvm2_ir::ExceptionHandlingMetadata` to the codegen-level
+/// `exception_handling::ExceptionTable` and serializes it to the binary
+/// LSDA format. Returns `None` if the function has no EH info.
+///
+/// This must be called after code layout (so block byte offsets are known)
+/// and before Mach-O emission (so the LSDA bytes can be placed in the
+/// `__gcc_except_tab` section).
+pub fn generate_lsda_for_function(func: &IrMachFunction) -> Option<Vec<u8>> {
+    let eh = &func.eh_metadata;
+    if !eh.has_eh_info() {
+        return None;
+    }
+
+    use crate::exception_handling::{
+        build_exception_table_from_pads, generate_lsda, LandingPadDesc,
+    };
+
+    let personality = eh.personality.as_deref().unwrap_or("__gxx_personality_v0");
+
+    // Convert IR-level landing pad entries to codegen-level descriptors.
+    let landing_pad_descs: Vec<LandingPadDesc> = eh
+        .landing_pads
+        .iter()
+        .map(|lp| LandingPadDesc {
+            landing_pad_offset: lp.offset,
+            catch_type_indices: lp.catch_type_indices.clone(),
+            is_cleanup: lp.is_cleanup,
+        })
+        .collect();
+
+    // Convert call site entries to (start, length, lp_offset) tuples.
+    let call_site_ranges: Vec<(u32, u32, u32)> = eh
+        .call_sites
+        .iter()
+        .map(|cs| {
+            let lp_offset = cs.landing_pad_block
+                .and_then(|lp_block| {
+                    eh.landing_pads.iter().find(|lp| lp.block == lp_block)
+                })
+                .map(|lp| lp.offset)
+                .unwrap_or(0);
+            (cs.start_offset, cs.length, lp_offset)
+        })
+        .collect();
+
+    let table = build_exception_table_from_pads(
+        personality,
+        &landing_pad_descs,
+        &call_site_ranges,
+    );
+    let lsda_bytes = generate_lsda(&table);
+    Some(lsda_bytes)
+}
+
+// ---------------------------------------------------------------------------
 // Pipeline — main entry point
 // ---------------------------------------------------------------------------
 
@@ -606,8 +666,12 @@ impl Pipeline {
         // Phase 8: Encoding
         let code = encode_function(&ir_func)?;
 
-        // Phase 9: Mach-O Emission (with compact unwind from frame layout)
-        let obj_bytes = self.emit_macho(&ir_func.name, &code, Some(&frame_layout));
+        // Phase 8.5: LSDA Generation — generate the Language-Specific Data
+        // Area from EH metadata (call sites, landing pads, type table).
+        let lsda = generate_lsda_for_function(&ir_func);
+
+        // Phase 9: Mach-O Emission (with compact unwind + LSDA)
+        let obj_bytes = self.emit_macho(&ir_func.name, &code, Some(&frame_layout), lsda.as_deref());
 
         Ok(obj_bytes)
     }
@@ -641,8 +705,11 @@ impl Pipeline {
         // Phase 8: Encoding
         let code = encode_function(ir_func)?;
 
-        // Phase 9: Mach-O Emission (with compact unwind from frame layout)
-        let obj_bytes = self.emit_macho(&ir_func.name, &code, Some(&frame_layout));
+        // Phase 8.5: LSDA Generation
+        let lsda = generate_lsda_for_function(ir_func);
+
+        // Phase 9: Mach-O Emission (with compact unwind + LSDA)
+        let obj_bytes = self.emit_macho(&ir_func.name, &code, Some(&frame_layout), lsda.as_deref());
 
         Ok(obj_bytes)
     }
@@ -661,8 +728,11 @@ impl Pipeline {
         // Phase 8: Encoding
         let code = encode_function(ir_func)?;
 
-        // Phase 9: Mach-O Emission (with compact unwind from frame layout)
-        let obj_bytes = self.emit_macho(&ir_func.name, &code, Some(&frame_layout));
+        // Phase 8.5: LSDA Generation
+        let lsda = generate_lsda_for_function(ir_func);
+
+        // Phase 9: Mach-O Emission (with compact unwind + LSDA)
+        let obj_bytes = self.emit_macho(&ir_func.name, &code, Some(&frame_layout), lsda.as_deref());
 
         Ok(obj_bytes)
     }
@@ -846,6 +916,11 @@ impl Pipeline {
     /// emitted containing a single compact unwind entry for the function.
     /// This is required by macOS for backtraces, profilers, and exception handling.
     ///
+    /// When `lsda_bytes` is provided, a `__TEXT,__gcc_except_tab` section is
+    /// emitted containing the LSDA (Language-Specific Data Area) for exception
+    /// handling. The personality routine reads this data to dispatch exceptions
+    /// to the correct landing pad.
+    ///
     /// When `self.config.emit_debug` is true, DWARF debug sections are also
     /// emitted (`__DWARF,__debug_info`, `__debug_abbrev`, `__debug_str`,
     /// `__debug_line`).
@@ -854,8 +929,10 @@ impl Pipeline {
         func_name: &str,
         code: &[u8],
         frame_layout: Option<&crate::frame::FrameLayout>,
+        lsda_bytes: Option<&[u8]>,
     ) -> Vec<u8> {
         use crate::macho::MachOWriter;
+        use crate::macho::constants::S_REGULAR;
         use crate::unwind::{CompactUnwindEntry, CompactUnwindSection, add_compact_unwind_to_writer};
 
         let mut writer = MachOWriter::new();
@@ -865,6 +942,20 @@ impl Pipeline {
         let symbol_name = format!("_{}", func_name);
         // Section index 1 = __text (first section, 1-based).
         writer.add_symbol(&symbol_name, 1, 0, true);
+
+        // Emit LSDA (__gcc_except_tab) section for exception handling.
+        // This section contains the LSDA referenced by the compact unwind
+        // entry's LSDA pointer. It must appear in __TEXT to be PC-relative
+        // addressable on AArch64 macOS.
+        if let Some(lsda) = lsda_bytes {
+            writer.add_custom_section(
+                b"__gcc_except_tab",
+                b"__TEXT",
+                lsda,
+                2, // 2^2 = 4-byte alignment (matching LLVM)
+                S_REGULAR,
+            );
+        }
 
         // Emit compact unwind section if we have frame layout information.
         if let Some(layout) = frame_layout {
@@ -2982,5 +3073,199 @@ mod coreml_dispatch_tests {
         let output = emit_coreml_program(&plan, &graph).unwrap();
         assert_eq!(output.estimated_latency_us, 1,
             "Latency should be clamped to minimum 1 us");
+    }
+}
+
+// ===========================================================================
+// Exception handling pipeline integration tests
+// ===========================================================================
+
+#[cfg(test)]
+mod eh_pipeline_tests {
+    use super::*;
+    use llvm2_ir::function::{
+        MachFunction as IrMachFunction, Signature as IrSignature, Type,
+        LandingPadEntry, EhCallSiteEntry,
+    };
+    use llvm2_ir::types::BlockId;
+
+    #[test]
+    fn generate_lsda_for_function_no_eh_returns_none() {
+        let func = build_add_test_function();
+        assert!(generate_lsda_for_function(&func).is_none());
+    }
+
+    #[test]
+    fn generate_lsda_for_function_with_cleanup() {
+        let sig = IrSignature::new(vec![Type::I64], vec![Type::I64]);
+        let mut func = IrMachFunction::new("with_cleanup".to_string(), sig);
+
+        // Set up EH metadata: one cleanup landing pad.
+        func.eh_metadata.personality = Some("__rust_eh_personality".to_string());
+        func.eh_metadata.add_landing_pad(LandingPadEntry {
+            block: BlockId(1),
+            offset: 0x40,
+            catch_type_indices: Vec::new(),
+            is_cleanup: true,
+        });
+        func.eh_metadata.add_call_site(EhCallSiteEntry {
+            call_block: BlockId(0),
+            start_offset: 0x00,
+            length: 0x20,
+            landing_pad_block: Some(BlockId(1)),
+            action_index: 0,
+        });
+
+        let lsda = generate_lsda_for_function(&func);
+        assert!(lsda.is_some(), "Function with EH metadata should produce LSDA");
+
+        let lsda_bytes = lsda.unwrap();
+        // LSDA must start with LPStart encoding (0xFF = omit).
+        assert_eq!(lsda_bytes[0], 0xFF, "LPStart encoding should be DW_EH_PE_omit");
+        // Must have at least the minimal header.
+        assert!(lsda_bytes.len() > 4, "LSDA should have header + call site table");
+    }
+
+    #[test]
+    fn generate_lsda_for_function_with_typed_catch() {
+        let sig = IrSignature::new(vec![Type::I64], vec![Type::I64]);
+        let mut func = IrMachFunction::new("with_catch".to_string(), sig);
+
+        // Set up EH metadata: one typed catch landing pad.
+        func.eh_metadata.personality = Some("__gxx_personality_v0".to_string());
+        func.eh_metadata.add_landing_pad(LandingPadEntry {
+            block: BlockId(2),
+            offset: 0x80,
+            catch_type_indices: vec![1],
+            is_cleanup: false,
+        });
+        func.eh_metadata.add_call_site(EhCallSiteEntry {
+            call_block: BlockId(0),
+            start_offset: 0x10,
+            length: 0x08,
+            landing_pad_block: Some(BlockId(2)),
+            action_index: 1,
+        });
+        func.eh_metadata.add_type_index(1);
+
+        let lsda = generate_lsda_for_function(&func);
+        assert!(lsda.is_some());
+
+        let lsda_bytes = lsda.unwrap();
+        assert_eq!(lsda_bytes[0], 0xFF); // LPStart = omit
+        // TType encoding should NOT be omit (we have typed catch).
+        assert_ne!(lsda_bytes[1], 0xFF, "TType should not be omit when catch types exist");
+    }
+
+    #[test]
+    fn pipeline_encode_and_emit_with_eh_metadata() {
+        // Build a simple function with physical registers (post-regalloc state)
+        // and attach EH metadata.
+        let mut func = build_add_test_function();
+
+        // Attach cleanup EH metadata.
+        func.eh_metadata.personality = Some("__rust_eh_personality".to_string());
+        func.eh_metadata.add_landing_pad(LandingPadEntry {
+            block: BlockId(0),
+            offset: 0x08, // 2 instructions in = 8 bytes
+            catch_type_indices: Vec::new(),
+            is_cleanup: true,
+        });
+        func.eh_metadata.add_call_site(EhCallSiteEntry {
+            call_block: BlockId(0),
+            start_offset: 0x00,
+            length: 0x04,
+            landing_pad_block: Some(BlockId(0)),
+            action_index: 0,
+        });
+
+        let pipeline = Pipeline::new(PipelineConfig {
+            opt_level: OptLevel::O0,
+            emit_debug: false,
+            verify_dispatch: DispatchVerifyMode::Off,
+            verify: false,
+            enable_post_ra_opt: false,
+        });
+
+        let obj_bytes = pipeline.encode_and_emit(&mut func).unwrap();
+
+        // The Mach-O should contain the __gcc_except_tab section name somewhere.
+        let section_name = b"__gcc_except_tab";
+        let found = obj_bytes.windows(section_name.len())
+            .any(|w| w == section_name);
+        assert!(found, "Mach-O output should contain __gcc_except_tab section");
+    }
+
+    #[test]
+    fn pipeline_encode_and_emit_no_eh_no_except_tab() {
+        // A function WITHOUT EH metadata should NOT have __gcc_except_tab.
+        let mut func = build_add_test_function();
+
+        let pipeline = Pipeline::new(PipelineConfig {
+            opt_level: OptLevel::O0,
+            emit_debug: false,
+            verify_dispatch: DispatchVerifyMode::Off,
+            verify: false,
+            enable_post_ra_opt: false,
+        });
+
+        let obj_bytes = pipeline.encode_and_emit(&mut func).unwrap();
+
+        let section_name = b"__gcc_except_tab";
+        let found = obj_bytes.windows(section_name.len())
+            .any(|w| w == section_name);
+        assert!(!found, "Mach-O without EH should not have __gcc_except_tab");
+    }
+
+    #[test]
+    fn generate_lsda_for_function_multiple_call_sites() {
+        let sig = IrSignature::new(vec![Type::I64], vec![Type::I64]);
+        let mut func = IrMachFunction::new("multi_invoke".to_string(), sig);
+
+        // Two landing pads: one catch, one cleanup.
+        func.eh_metadata.personality = Some("__gxx_personality_v0".to_string());
+        func.eh_metadata.add_landing_pad(LandingPadEntry {
+            block: BlockId(3),
+            offset: 0x80,
+            catch_type_indices: vec![1],
+            is_cleanup: false,
+        });
+        func.eh_metadata.add_landing_pad(LandingPadEntry {
+            block: BlockId(4),
+            offset: 0xC0,
+            catch_type_indices: Vec::new(),
+            is_cleanup: true,
+        });
+
+        // Three call sites: two with landing pads, one without.
+        func.eh_metadata.add_call_site(EhCallSiteEntry {
+            call_block: BlockId(0),
+            start_offset: 0x00,
+            length: 0x10,
+            landing_pad_block: Some(BlockId(3)),
+            action_index: 1,
+        });
+        func.eh_metadata.add_call_site(EhCallSiteEntry {
+            call_block: BlockId(1),
+            start_offset: 0x10,
+            length: 0x08,
+            landing_pad_block: Some(BlockId(4)),
+            action_index: 0,
+        });
+        func.eh_metadata.add_call_site(EhCallSiteEntry {
+            call_block: BlockId(2),
+            start_offset: 0x18,
+            length: 0x04,
+            landing_pad_block: None,
+            action_index: 0,
+        });
+
+        let lsda = generate_lsda_for_function(&func);
+        assert!(lsda.is_some());
+
+        let lsda_bytes = lsda.unwrap();
+        // With multiple call sites, the LSDA should be substantially larger than
+        // the minimal header.
+        assert!(lsda_bytes.len() > 20, "Multi-call-site LSDA should be >20 bytes, got {}", lsda_bytes.len());
     }
 }
