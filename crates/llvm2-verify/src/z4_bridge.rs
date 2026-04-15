@@ -40,6 +40,7 @@
 //! [`SmtExpr`]: crate::smt::SmtExpr
 
 use crate::lowering_proof::ProofObligation;
+use crate::proof_database::{ProofDatabase, ProofCategory};
 use crate::smt::{SmtExpr, SmtSort, RoundingMode};
 #[cfg(feature = "z4")]
 compile_error!(
@@ -50,6 +51,7 @@ compile_error!(
 #[cfg(feature = "z4")]
 use std::collections::HashMap;
 use std::fmt;
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Z4Result
@@ -1026,6 +1028,248 @@ impl fmt::Display for VerificationSummary {
             "{}/{} verified, {} failed, {} timeouts, {} errors",
             self.verified, self.total, self.failed, self.timeouts, self.errors
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// z3/z4 availability check
+// ---------------------------------------------------------------------------
+
+/// Check whether a z3 or z4 solver binary is available on the system.
+///
+/// Returns `true` if at least one solver binary (z3 or z4) can be found
+/// in PATH. Useful for tests and the verification runner to gracefully
+/// degrade when no solver is installed.
+pub fn z3_available() -> bool {
+    !find_solver_binary().is_empty()
+}
+
+// ---------------------------------------------------------------------------
+// ProofDatabaseZ4Report: comprehensive z3/z4 verification of ProofDatabase
+// ---------------------------------------------------------------------------
+
+/// Per-category breakdown of z3/z4 verification results.
+#[derive(Debug, Clone)]
+pub struct Z4CategoryBreakdown {
+    /// The proof category.
+    pub category: ProofCategory,
+    /// Total proofs in this category.
+    pub total: usize,
+    /// Number verified (UNSAT).
+    pub verified: usize,
+    /// Number that found counterexamples (SAT).
+    pub failed: usize,
+    /// Number that timed out.
+    pub timeouts: usize,
+    /// Number that had errors.
+    pub errors: usize,
+}
+
+/// Comprehensive report from verifying every proof in a [`ProofDatabase`]
+/// through a z3/z4 SMT solver.
+///
+/// Unlike [`VerificationSummary`] (which covers only arithmetic/NZCV/peephole),
+/// this report covers the ENTIRE proof database across all categories.
+#[derive(Debug, Clone)]
+pub struct ProofDatabaseZ4Report {
+    /// Per-proof results: (name, category, result).
+    pub results: Vec<(String, ProofCategory, Z4Result)>,
+    /// Total wall-clock time for the verification run.
+    pub total_duration: Duration,
+}
+
+impl ProofDatabaseZ4Report {
+    /// Total number of proofs checked.
+    pub fn total(&self) -> usize {
+        self.results.len()
+    }
+
+    /// Number of proofs verified (UNSAT).
+    pub fn verified(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|(_, _, r)| matches!(r, Z4Result::Verified))
+            .count()
+    }
+
+    /// Number of proofs that found counterexamples (SAT).
+    pub fn failed(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|(_, _, r)| matches!(r, Z4Result::CounterExample(_)))
+            .count()
+    }
+
+    /// Number of proofs that timed out.
+    pub fn timeouts(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|(_, _, r)| matches!(r, Z4Result::Timeout))
+            .count()
+    }
+
+    /// Number of proofs that had errors.
+    pub fn errors(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|(_, _, r)| matches!(r, Z4Result::Error(_)))
+            .count()
+    }
+
+    /// Returns true if every proof was verified.
+    pub fn all_verified(&self) -> bool {
+        self.results
+            .iter()
+            .all(|(_, _, r)| matches!(r, Z4Result::Verified))
+    }
+
+    /// Per-category breakdown of results.
+    pub fn by_category(&self) -> Vec<Z4CategoryBreakdown> {
+        ProofCategory::all_categories()
+            .iter()
+            .filter_map(|cat| {
+                let cat_results: Vec<&(String, ProofCategory, Z4Result)> = self
+                    .results
+                    .iter()
+                    .filter(|(_, c, _)| c == cat)
+                    .collect();
+                if cat_results.is_empty() {
+                    return None;
+                }
+                let total = cat_results.len();
+                let verified = cat_results
+                    .iter()
+                    .filter(|(_, _, r)| matches!(r, Z4Result::Verified))
+                    .count();
+                let failed = cat_results
+                    .iter()
+                    .filter(|(_, _, r)| matches!(r, Z4Result::CounterExample(_)))
+                    .count();
+                let timeouts = cat_results
+                    .iter()
+                    .filter(|(_, _, r)| matches!(r, Z4Result::Timeout))
+                    .count();
+                let errors = cat_results
+                    .iter()
+                    .filter(|(_, _, r)| matches!(r, Z4Result::Error(_)))
+                    .count();
+                Some(Z4CategoryBreakdown {
+                    category: *cat,
+                    total,
+                    verified,
+                    failed,
+                    timeouts,
+                    errors,
+                })
+            })
+            .collect()
+    }
+
+    /// Details of all non-verified proofs (counterexamples, timeouts, errors).
+    ///
+    /// Returns `(name, category, detail_string)` for each proof that is
+    /// NOT `Verified`.
+    pub fn failed_details(&self) -> Vec<(String, ProofCategory, String)> {
+        self.results
+            .iter()
+            .filter_map(|(name, cat, result)| match result {
+                Z4Result::Verified => None,
+                Z4Result::CounterExample(cex) => {
+                    let detail = format!(
+                        "COUNTEREXAMPLE: {}",
+                        cex.iter()
+                            .map(|(n, v)| format!("{} = {:#x}", n, v))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    Some((name.clone(), *cat, detail))
+                }
+                Z4Result::Timeout => Some((name.clone(), *cat, "TIMEOUT".to_string())),
+                Z4Result::Error(msg) => Some((name.clone(), *cat, format!("ERROR: {}", msg))),
+            })
+            .collect()
+    }
+}
+
+impl fmt::Display for ProofDatabaseZ4Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "ProofDatabase z3/z4 Verification Report")?;
+        writeln!(f, "========================================")?;
+        writeln!(f)?;
+
+        let status = if self.all_verified() { "PASS" } else { "FAIL" };
+        writeln!(
+            f,
+            "Result: {} ({}/{} verified, {} failed, {} timeouts, {} errors)",
+            status,
+            self.verified(),
+            self.total(),
+            self.failed(),
+            self.timeouts(),
+            self.errors()
+        )?;
+        writeln!(f, "Duration: {:.3}s", self.total_duration.as_secs_f64())?;
+        writeln!(f)?;
+
+        writeln!(f, "Per-category breakdown:")?;
+        for bd in &self.by_category() {
+            let cat_status = if bd.failed == 0 && bd.timeouts == 0 && bd.errors == 0 {
+                "OK"
+            } else {
+                "FAIL"
+            };
+            writeln!(
+                f,
+                "  {:25} {:>4}/{:>4} verified  [{:>4}]",
+                bd.category.name(),
+                bd.verified,
+                bd.total,
+                cat_status,
+            )?;
+        }
+
+        let failures = self.failed_details();
+        if !failures.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "Non-verified proofs ({}):", failures.len())?;
+            for (name, cat, detail) in &failures {
+                writeln!(f, "  [{}] {} -- {}", cat.name(), name, detail)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Verify every proof in a [`ProofDatabase`] through a z3/z4 SMT solver.
+///
+/// This is the comprehensive integration point: it takes the full proof
+/// database and verifies each obligation by piping SMT-LIB2 to the solver
+/// CLI, returning a [`ProofDatabaseZ4Report`] with per-proof and per-category
+/// results.
+///
+/// # Graceful degradation
+///
+/// If no solver binary is available, every proof result will be
+/// `Z4Result::Error("No SMT solver found...")`. Use [`z3_available()`] to
+/// check before calling.
+pub fn verify_proof_database_with_z4(
+    db: &ProofDatabase,
+    config: &Z4Config,
+) -> ProofDatabaseZ4Report {
+    let start = Instant::now();
+    let all = db.all();
+    let mut results = Vec::with_capacity(all.len());
+
+    for cp in all {
+        let result = verify_with_cli(&cp.obligation, config);
+        results.push((cp.obligation.name.clone(), cp.category, result));
+    }
+
+    let total_duration = start.elapsed();
+    ProofDatabaseZ4Report {
+        results,
+        total_duration,
     }
 }
 
@@ -2462,5 +2706,118 @@ mod tests {
                 result
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // z3_available() tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_z3_available_consistent_with_find_solver_binary() {
+        let available = z3_available();
+        let solver = find_solver_binary();
+        assert_eq!(available, !solver.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // ProofDatabaseZ4Report tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_database_z4_report_synthetic() {
+        use crate::proof_database::ProofCategory;
+
+        let report = ProofDatabaseZ4Report {
+            results: vec![
+                ("p1".to_string(), ProofCategory::Arithmetic, Z4Result::Verified),
+                ("p2".to_string(), ProofCategory::Arithmetic, Z4Result::Verified),
+                (
+                    "p3".to_string(),
+                    ProofCategory::Division,
+                    Z4Result::CounterExample(vec![("a".to_string(), 0)]),
+                ),
+                ("p4".to_string(), ProofCategory::Memory, Z4Result::Timeout),
+                (
+                    "p5".to_string(),
+                    ProofCategory::Peephole,
+                    Z4Result::Error("parse error".to_string()),
+                ),
+            ],
+            total_duration: Duration::from_millis(1234),
+        };
+
+        assert_eq!(report.total(), 5);
+        assert_eq!(report.verified(), 2);
+        assert_eq!(report.failed(), 1);
+        assert_eq!(report.timeouts(), 1);
+        assert_eq!(report.errors(), 1);
+        assert!(!report.all_verified());
+
+        let by_cat = report.by_category();
+        let arith = by_cat.iter().find(|b| b.category == ProofCategory::Arithmetic).unwrap();
+        assert_eq!(arith.total, 2);
+        assert_eq!(arith.verified, 2);
+        assert_eq!(arith.failed, 0);
+
+        let failures = report.failed_details();
+        assert_eq!(failures.len(), 3);
+        assert!(failures[0].2.contains("COUNTEREXAMPLE"));
+        assert_eq!(failures[1].2, "TIMEOUT");
+        assert!(failures[2].2.contains("ERROR"));
+
+        // Display should work without panic
+        let text = format!("{}", report);
+        assert!(text.contains("FAIL"));
+        assert!(text.contains("Arithmetic"));
+        assert!(text.contains("Non-verified proofs"));
+    }
+
+    #[test]
+    fn test_proof_database_z4_report_all_verified() {
+        let report = ProofDatabaseZ4Report {
+            results: vec![
+                ("p1".to_string(), ProofCategory::Arithmetic, Z4Result::Verified),
+                ("p2".to_string(), ProofCategory::Branch, Z4Result::Verified),
+            ],
+            total_duration: Duration::from_millis(100),
+        };
+        assert!(report.all_verified());
+        assert_eq!(report.failed_details().len(), 0);
+        let text = format!("{}", report);
+        assert!(text.contains("PASS"));
+    }
+
+    /// Integration test: verify a small subset of the ProofDatabase through z3.
+    /// Uses only Arithmetic proofs to keep runtime reasonable.
+    #[test]
+    fn test_verify_proof_database_with_z4_arithmetic_subset() {
+        if !z3_available() {
+            return;
+        }
+
+        use crate::proof_database::{ProofDatabase, CategorizedProof};
+
+        let full_db = ProofDatabase::new();
+        let subset: Vec<CategorizedProof> = full_db
+            .by_category(ProofCategory::Arithmetic)
+            .into_iter()
+            .cloned()
+            .collect();
+        assert!(
+            subset.len() >= 5,
+            "Expected at least 5 Arithmetic proofs, got {}",
+            subset.len()
+        );
+        let db = ProofDatabase::from_proofs(subset);
+
+        let config = Z4Config::default();
+        let report = verify_proof_database_with_z4(&db, &config);
+
+        assert_eq!(report.total(), db.len());
+        assert!(
+            report.all_verified(),
+            "Not all Arithmetic proofs verified via z3:\n{}",
+            report
+        );
     }
 }
