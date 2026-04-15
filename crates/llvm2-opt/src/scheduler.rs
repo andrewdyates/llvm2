@@ -125,6 +125,19 @@ pub fn opcode_latency(opcode: AArch64Opcode) -> (u32, ExecutionPort) {
         FcvtSD | FcvtDS => (3, ExecutionPort::FpAlu),
         FmovGprFpr | FmovFprGpr | FmovImm => (1, ExecutionPort::FpAlu),
 
+        // NEON SIMD: uses FP/NEON ALU units
+        NeonAddV | NeonSubV => (2, ExecutionPort::FpAlu),
+        NeonMulV => (3, ExecutionPort::FpAlu),
+        NeonFaddV | NeonFsubV => (3, ExecutionPort::FpAlu),
+        NeonFmulV => (4, ExecutionPort::FpAlu),
+        NeonFdivV => (10, ExecutionPort::FpAlu),
+        NeonAndV | NeonOrrV | NeonEorV | NeonBicV | NeonNotV => (1, ExecutionPort::FpAlu),
+        NeonCmeqV | NeonCmgtV | NeonCmgeV => (2, ExecutionPort::FpAlu),
+        NeonDupElem | NeonDupGen | NeonMovi => (2, ExecutionPort::FpAlu),
+        NeonInsGen => (3, ExecutionPort::FpAlu),
+        NeonLd1Post => (4, ExecutionPort::LoadStore),
+        NeonSt1Post => (1, ExecutionPort::LoadStore),
+
         // Trap pseudo-instructions: treated as branches
         TrapOverflow | TrapBoundsCheck | TrapNull | TrapDivZero | TrapShiftRange => {
             (1, ExecutionPort::Branch)

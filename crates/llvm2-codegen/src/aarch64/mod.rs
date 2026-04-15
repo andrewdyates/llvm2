@@ -15,3 +15,4 @@ pub mod encode;
 pub mod encoding;
 pub mod encoding_fp;
 pub mod encoding_mem;
+pub mod encoding_neon;

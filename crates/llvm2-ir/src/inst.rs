@@ -190,6 +190,57 @@ pub enum AArch64Opcode {
     /// FMOV between FPR and GPR (e.g., FMOV Wn, Sd or FMOV Xn, Dd).
     FmovFprGpr,
 
+    // -- NEON SIMD (vector) --
+    /// ADD Vd.T, Vn.T, Vm.T — integer vector add.
+    /// Operands: [Vd, Vn, Vm, Imm(arrangement)]
+    NeonAddV,
+    /// SUB Vd.T, Vn.T, Vm.T — integer vector subtract.
+    NeonSubV,
+    /// MUL Vd.T, Vn.T, Vm.T — integer vector multiply.
+    NeonMulV,
+    /// FADD Vd.T, Vn.T, Vm.T — FP vector add.
+    NeonFaddV,
+    /// FSUB Vd.T, Vn.T, Vm.T — FP vector subtract.
+    NeonFsubV,
+    /// FMUL Vd.T, Vn.T, Vm.T — FP vector multiply.
+    NeonFmulV,
+    /// FDIV Vd.T, Vn.T, Vm.T — FP vector divide.
+    NeonFdivV,
+    /// AND Vd.T, Vn.T, Vm.T — vector bitwise AND.
+    NeonAndV,
+    /// ORR Vd.T, Vn.T, Vm.T — vector bitwise OR.
+    NeonOrrV,
+    /// EOR Vd.T, Vn.T, Vm.T — vector bitwise XOR.
+    NeonEorV,
+    /// BIC Vd.T, Vn.T, Vm.T — vector bitwise AND-NOT.
+    NeonBicV,
+    /// NOT Vd.T, Vn.T — vector bitwise NOT.
+    NeonNotV,
+    /// CMEQ Vd.T, Vn.T, Vm.T — vector compare equal.
+    NeonCmeqV,
+    /// CMGT Vd.T, Vn.T, Vm.T — vector compare greater than (signed).
+    NeonCmgtV,
+    /// CMGE Vd.T, Vn.T, Vm.T — vector compare greater or equal (signed).
+    NeonCmgeV,
+    /// DUP Vd.T, Vn.Ts[lane] — duplicate element to all lanes.
+    /// Operands: [Vd, Vn, Imm(lane), Imm(element_size)]
+    NeonDupElem,
+    /// DUP Vd.T, Xn/Wn — duplicate GPR to all vector lanes.
+    /// Operands: [Vd, Rn, Imm(element_size)]
+    NeonDupGen,
+    /// INS Vd.Ts[lane], Xn/Wn — insert GPR into vector lane.
+    /// Operands: [Vd, Rn, Imm(lane), Imm(element_size)]
+    NeonInsGen,
+    /// MOVI Vd.T, #imm8 — move immediate to vector (byte form).
+    /// Operands: [Vd, Imm(imm8)]
+    NeonMovi,
+    /// LD1 {Vt.T}, [Xn], #imm — SIMD load 1 register, post-index.
+    /// Operands: [Vt, Xn, Imm(arrangement)]
+    NeonLd1Post,
+    /// ST1 {Vt.T}, [Xn], #imm — SIMD store 1 register, post-index.
+    /// Operands: [Vt, Xn, Imm(arrangement)]
+    NeonSt1Post,
+
     // -- Address --
     Adrp,
     AddPCRel,
@@ -295,11 +346,13 @@ impl AArch64Opcode {
             LdrRI | LdrbRI | LdrhRI | LdrsbRI | LdrshRI | LdrRO => InstFlags::READS_MEMORY,
             LdrLiteral | LdrGot | LdrTlvp => InstFlags::READS_MEMORY,
             LdpRI | LdpPostIndex => InstFlags::READS_MEMORY,
+            NeonLd1Post => InstFlags::READS_MEMORY,
 
             // Memory stores
             StrRI | StrbRI | StrhRI | StrRO => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
             STRWui | STRXui | STRSui | STRDui => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
             StpRI | StpPreIndex => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
+            NeonSt1Post => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Pseudo-instructions
             Phi => InstFlags::IS_PSEUDO,

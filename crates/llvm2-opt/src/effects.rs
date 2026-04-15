@@ -74,11 +74,11 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
     match opcode {
         // -- Loads: read memory --
         LdrRI | LdrbRI | LdrhRI | LdrsbRI | LdrshRI | LdrLiteral | LdpRI | LdpPostIndex
-        | LdrRO | LdrGot | LdrTlvp => MemoryEffect::Load,
+        | LdrRO | LdrGot | LdrTlvp | NeonLd1Post => MemoryEffect::Load,
 
         // -- Stores: write memory --
         StrRI | StrbRI | StrhRI | StpRI | StpPreIndex | StrRO
-        | STRWui | STRXui | STRSui | STRDui => MemoryEffect::Store,
+        | STRWui | STRXui | STRSui | STRDui | NeonSt1Post => MemoryEffect::Store,
 
         // -- Calls: full barrier --
         Bl | Blr | BL | BLR => MemoryEffect::Call,
@@ -120,6 +120,13 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
 
         // Floating-point arithmetic
         FaddRR | FsubRR | FmulRR | FdivRR | FnegRR | FabsRR | FsqrtRR => MemoryEffect::Pure,
+
+        // NEON SIMD: pure computation (no memory access except LD1/ST1 above)
+        NeonAddV | NeonSubV | NeonMulV
+        | NeonFaddV | NeonFsubV | NeonFmulV | NeonFdivV
+        | NeonAndV | NeonOrrV | NeonEorV | NeonBicV | NeonNotV
+        | NeonCmeqV | NeonCmgtV | NeonCmgeV
+        | NeonDupElem | NeonDupGen | NeonInsGen | NeonMovi => MemoryEffect::Pure,
 
         // FP conversion
         FcvtzsRR | FcvtzuRR | ScvtfRR | UcvtfRR => MemoryEffect::Pure,
