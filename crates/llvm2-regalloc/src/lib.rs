@@ -107,7 +107,10 @@ pub use machine_types::{
 pub use machine_types::{BlockId, InstId, PReg, RegClass, StackSlotId, VReg};
 pub use phi_elim::{eliminate_phis, split_critical_edges};
 pub use spill::insert_spill_code;
-pub use coalesce::{coalesce_copies, apply_coalescing, CoalesceResult};
+pub use coalesce::{
+    coalesce_copies, apply_coalescing, CoalesceResult,
+    CoalesceMode, CoalesceStats, CopyCoalescer,
+};
 pub use post_ra_coalesce::{post_ra_coalesce, PostRACoalesceResult};
 pub use split::{split_interval, find_optimal_split_point, SplitDecision, SplitResult};
 pub use remat::{classify_remat_cost, find_remat_candidates, RematCost, RematCandidate};
