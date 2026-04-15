@@ -30,6 +30,7 @@
 //! | [`ProofOptimization`] | Consume tMIR proof annotations to eliminate runtime checks |
 //! | [`AddrModeFormation`] | Fold ADD+LDR/STR into rich AArch64 addressing modes |
 //! | [`CmpSelectCombine`] | Diamond CFG to CSEL/CSET conditional select formation |
+//! | [`IfConversion`] | General diamond/triangle CFG to CSEL/CSINC/CSNEG |
 //! | [`CmpBranchFusion`] | Fuse CMP/TST + BCond into CBZ/CBNZ/TBZ/TBNZ |
 //! | [`TailCallOptimization`] | Replace tail calls with branches to eliminate stack growth |
 //! | [`CfgSimplify`] | Simplify CFG: branch folding, empty block elim, unreachable removal |
@@ -58,6 +59,7 @@ pub mod cmp_select;
 pub mod const_fold;
 pub mod const_materialize;
 pub mod copy_prop;
+pub mod if_convert;
 pub mod cse;
 pub mod dce;
 pub mod dom;
