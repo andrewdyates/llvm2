@@ -31,6 +31,7 @@
 //! | [`AddrModeFormation`] | Fold ADD+LDR/STR into rich AArch64 addressing modes |
 //! | [`CmpSelectCombine`] | Diamond CFG to CSEL/CSET conditional select formation |
 //! | [`CmpBranchFusion`] | Fuse CMP/TST + BCond into CBZ/CBNZ/TBZ/TBNZ |
+//! | [`TailCallOptimization`] | Replace tail calls with branches to eliminate stack growth |
 //! | [`CfgSimplify`] | Simplify CFG: branch folding, empty block elim, unreachable removal |
 //! | [`const_materialize`] | Optimal constant materialization (MOVZ/MOVK, logical imm, MOVN) |
 //!
@@ -72,6 +73,7 @@ pub mod pipeline;
 pub mod proof_opts;
 pub mod scheduler;
 pub mod strength_reduce;
+pub mod tail_call;
 pub mod vectorize;
 
 // Re-export the most important types at crate root.
