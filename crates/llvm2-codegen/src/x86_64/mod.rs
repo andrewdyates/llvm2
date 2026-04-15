@@ -24,9 +24,16 @@
 //! Reference: ~/llvm-project-ref/llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp
 
 pub mod encode;
+pub mod pipeline;
 
 // ---------------------------------------------------------------------------
 // Re-exports
 // ---------------------------------------------------------------------------
 
 pub use encode::{ModRM, RexPrefix, Sib, X86EncodeError, X86Encoder, X86InstOperands};
+pub use pipeline::{
+    X86Pipeline, X86PipelineConfig, X86PipelineError,
+    X86RegAssignment,
+    build_x86_add_test_function, build_x86_const_test_function,
+    x86_compile_to_bytes, x86_compile_to_elf,
+};
