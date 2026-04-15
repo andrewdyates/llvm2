@@ -153,6 +153,11 @@ pub enum ProofCategory {
     /// composition, dead IV elimination).
     /// Source: `loop_opt_proofs::all_loop_opt_proofs()`.
     LoopOptimization,
+
+    /// Global Value Numbering correctness proofs (reflexivity, consistency,
+    /// commutativity, dominance safety, value preservation, idempotence).
+    /// Source: `gvn_proofs::all_gvn_proofs()`.
+    Gvn,
 }
 
 impl ProofCategory {
@@ -184,6 +189,7 @@ impl ProofCategory {
             ProofCategory::InstructionScheduling,
             ProofCategory::MachOEmission,
             ProofCategory::LoopOptimization,
+            ProofCategory::Gvn,
         ]
     }
 
@@ -215,6 +221,7 @@ impl ProofCategory {
             ProofCategory::InstructionScheduling => "Instruction Scheduling",
             ProofCategory::MachOEmission => "Mach-O Emission",
             ProofCategory::LoopOptimization => "Loop Optimization",
+            ProofCategory::Gvn => "GVN",
         }
     }
 }
@@ -429,6 +436,13 @@ fn register_emission_proofs(proofs: &mut Vec<CategorizedProof>) {
     }
 }
 
+#[inline(never)]
+fn register_gvn_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::gvn_proofs::all_gvn_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Gvn });
+    }
+}
+
 impl ProofDatabase {
     /// Construct the database by collecting all proofs from all registries.
     ///
@@ -447,6 +461,7 @@ impl ProofDatabase {
         register_backend_proofs(&mut proofs);
         register_target_proofs(&mut proofs);
         register_emission_proofs(&mut proofs);
+        register_gvn_proofs(&mut proofs);
         ProofDatabase { proofs }
     }
 
@@ -794,8 +809,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            24,
-            "expected 24 categories, got {}",
+            26,
+            "expected 26 categories, got {}",
             categories.len()
         );
     }
