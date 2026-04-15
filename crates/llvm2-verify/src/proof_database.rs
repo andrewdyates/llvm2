@@ -172,6 +172,10 @@ pub enum ProofCategory {
     /// return value preservation, callee-saved safety, idempotence).
     /// Source: `tco_proofs::all_tco_proofs()`.
     TailCallOptimization,
+
+    /// If-conversion correctness proofs (diamond/triangle CFG to CSEL/CSINC/CSNEG).
+    /// Source: `if_convert_proofs::all_if_convert_proofs_with_variants()`.
+    IfConversion,
 }
 
 impl ProofCategory {
@@ -208,6 +212,7 @@ impl ProofCategory {
             ProofCategory::CmpCombine,
             ProofCategory::Gvn,
             ProofCategory::TailCallOptimization,
+            ProofCategory::IfConversion,
         ]
     }
 
@@ -244,6 +249,7 @@ impl ProofCategory {
             ProofCategory::CmpCombine => "Cmp Combine",
             ProofCategory::Gvn => "GVN",
             ProofCategory::TailCallOptimization => "Tail Call Optimization",
+            ProofCategory::IfConversion => "If-Conversion",
         }
     }
 }
@@ -489,6 +495,13 @@ fn register_tco_proofs(proofs: &mut Vec<CategorizedProof>) {
     }
 }
 
+#[inline(never)]
+fn register_if_convert_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::if_convert_proofs::all_if_convert_proofs_with_variants() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::IfConversion });
+    }
+}
+
 impl ProofDatabase {
     /// Construct the database by collecting all proofs from all registries.
     ///
@@ -511,6 +524,7 @@ impl ProofDatabase {
         register_cmp_combine_proofs(&mut proofs);
         register_gvn_proofs(&mut proofs);
         register_tco_proofs(&mut proofs);
+        register_if_convert_proofs(&mut proofs);
         ProofDatabase { proofs }
     }
 
@@ -859,8 +873,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            30,
-            "expected 30 categories, got {}",
+            31,
+            "expected 31 categories, got {}",
             categories.len()
         );
     }
