@@ -147,6 +147,12 @@ pub enum ProofCategory {
     /// structural invariants).
     /// Source: `macho_proofs::all_macho_proofs()`.
     MachOEmission,
+
+    /// Loop optimization correctness proofs (loop unrolling semantics preservation,
+    /// strength reduction multiply-to-add equivalence, combined transformation
+    /// composition, dead IV elimination).
+    /// Source: `loop_opt_proofs::all_loop_opt_proofs()`.
+    LoopOptimization,
 }
 
 impl ProofCategory {
@@ -177,6 +183,7 @@ impl ProofCategory {
             ProofCategory::FrameLayout,
             ProofCategory::InstructionScheduling,
             ProofCategory::MachOEmission,
+            ProofCategory::LoopOptimization,
         ]
     }
 
@@ -207,6 +214,7 @@ impl ProofCategory {
             ProofCategory::FrameLayout => "Frame Layout",
             ProofCategory::InstructionScheduling => "Instruction Scheduling",
             ProofCategory::MachOEmission => "Mach-O Emission",
+            ProofCategory::LoopOptimization => "Loop Optimization",
         }
     }
 }
@@ -434,6 +442,12 @@ impl ProofDatabase {
         // structural invariants)
         for p in crate::macho_proofs::all_macho_proofs() {
             proofs.push(CategorizedProof { obligation: p, category: ProofCategory::MachOEmission });
+        }
+
+        // Loop optimization correctness proofs (loop unrolling, strength reduction,
+        // combined composition, dead IV elimination)
+        for p in crate::loop_opt_proofs::all_loop_opt_proofs() {
+            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::LoopOptimization });
         }
 
         ProofDatabase { proofs }
