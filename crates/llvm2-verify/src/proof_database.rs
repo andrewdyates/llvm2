@@ -194,6 +194,13 @@ pub enum ProofCategory {
     /// DMB fence ordering, SUB via NEG+LDADD, AND via MVN+LDCLR equivalences).
     /// Source: `atomic_proofs::all_atomic_proofs()`.
     AtomicOperations,
+
+    /// Call lowering correctness proofs (argument placement X0-X7/V0-V7,
+    /// return values X0/V0, callee-saved preservation X19-X28/V8-V15,
+    /// stack alignment, BL/BLR link register, indirect call via X16 scratch,
+    /// GPR/FPR independent allocation, stack overflow arguments).
+    /// Source: `call_lowering_proofs::all_call_lowering_proofs()`.
+    CallLowering,
 }
 
 impl ProofCategory {
@@ -234,6 +241,7 @@ impl ProofCategory {
             ProofCategory::FpConversion,
             ProofCategory::ExtensionTruncation,
             ProofCategory::AtomicOperations,
+            ProofCategory::CallLowering,
         ]
     }
 
@@ -274,6 +282,7 @@ impl ProofCategory {
             ProofCategory::FpConversion => "FP Conversion",
             ProofCategory::ExtensionTruncation => "Extension/Truncation",
             ProofCategory::AtomicOperations => "Atomic Operations",
+            ProofCategory::CallLowering => "Call Lowering",
         }
     }
 }
@@ -547,6 +556,13 @@ fn register_atomic_proofs(proofs: &mut Vec<CategorizedProof>) {
     }
 }
 
+#[inline(never)]
+fn register_call_lowering_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::call_lowering_proofs::all_call_lowering_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::CallLowering });
+    }
+}
+
 impl ProofDatabase {
     /// Construct the database by collecting all proofs from all registries.
     ///
@@ -573,6 +589,7 @@ impl ProofDatabase {
         register_fp_convert_proofs(&mut proofs);
         register_ext_trunc_proofs(&mut proofs);
         register_atomic_proofs(&mut proofs);
+        register_call_lowering_proofs(&mut proofs);
         ProofDatabase { proofs }
     }
 

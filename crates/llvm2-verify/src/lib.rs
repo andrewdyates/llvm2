@@ -124,6 +124,7 @@ pub mod if_convert_proofs;
 pub mod fp_convert_proofs;
 pub mod ext_trunc_proofs;
 pub mod atomic_proofs;
+pub mod call_lowering_proofs;
 pub mod proof_database;
 pub mod verification_runner;
 pub mod function_verifier;
