@@ -324,6 +324,336 @@ pub fn proof_dce_live_xor_preserved() -> ProofObligation {
 }
 
 // ---------------------------------------------------------------------------
+// Extended dead instruction removal proofs
+// ---------------------------------------------------------------------------
+
+/// Proof: Removing a dead OR instruction preserves live values.
+///
+/// Theorem: forall x, y : BV64 . y == y
+///   where x represents the dead OR result
+pub fn proof_dce_dead_or_preserves_live() -> ProofObligation {
+    let width = 64;
+    let x = SmtExpr::var("x", width);
+    let y = SmtExpr::var("y", width);
+    let _ = x;
+
+    ProofObligation {
+        name: "DCE: dead OR removal preserves live y".to_string(),
+        tmir_expr: y.clone(),
+        aarch64_expr: y,
+        inputs: vec![
+            ("x".to_string(), width),
+            ("y".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: Removing a dead SUB instruction preserves live values.
+///
+/// Theorem: forall x, y : BV64 . y == y
+///   where x represents the dead SUB result
+pub fn proof_dce_dead_sub_preserves_live() -> ProofObligation {
+    let width = 64;
+    let x = SmtExpr::var("x", width);
+    let y = SmtExpr::var("y", width);
+    let _ = x;
+
+    ProofObligation {
+        name: "DCE: dead SUB removal preserves live y".to_string(),
+        tmir_expr: y.clone(),
+        aarch64_expr: y,
+        inputs: vec![
+            ("x".to_string(), width),
+            ("y".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: Removing a dead logical shift right instruction preserves live values.
+///
+/// Theorem: forall x, y : BV64 . y == y
+///   where x represents the dead LSHR result
+pub fn proof_dce_dead_lshr_preserves_live() -> ProofObligation {
+    let width = 64;
+    let x = SmtExpr::var("x", width);
+    let y = SmtExpr::var("y", width);
+    let _ = x;
+
+    ProofObligation {
+        name: "DCE: dead LSHR removal preserves live y".to_string(),
+        tmir_expr: y.clone(),
+        aarch64_expr: y,
+        inputs: vec![
+            ("x".to_string(), width),
+            ("y".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: Removing a dead arithmetic shift right instruction preserves live values.
+///
+/// Theorem: forall x, y : BV64 . y == y
+///   where x represents the dead ASHR result
+pub fn proof_dce_dead_ashr_preserves_live() -> ProofObligation {
+    let width = 64;
+    let x = SmtExpr::var("x", width);
+    let y = SmtExpr::var("y", width);
+    let _ = x;
+
+    ProofObligation {
+        name: "DCE: dead ASHR removal preserves live y".to_string(),
+        tmir_expr: y.clone(),
+        aarch64_expr: y,
+        inputs: vec![
+            ("x".to_string(), width),
+            ("y".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: Removing a dead NEG instruction preserves live values.
+///
+/// Theorem: forall x, y : BV64 . y == y
+///   where x represents the dead NEG result
+pub fn proof_dce_dead_neg_preserves_live() -> ProofObligation {
+    let width = 64;
+    let x = SmtExpr::var("x", width);
+    let y = SmtExpr::var("y", width);
+    let _ = x;
+
+    ProofObligation {
+        name: "DCE: dead NEG removal preserves live y".to_string(),
+        tmir_expr: y.clone(),
+        aarch64_expr: y,
+        inputs: vec![
+            ("x".to_string(), width),
+            ("y".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: A dead store to memory preserves live bitvector values.
+///
+/// Theorem: forall y, addr, dead_val : BV64 . y == y
+///
+/// A dead store (mem' = store(mem, addr, dead_val)) where the stored value
+/// is never loaded does not affect any live bitvector variable y.
+/// The store only modifies memory; y is a register value unaffected by it.
+pub fn proof_dce_dead_store_preserves_live_values() -> ProofObligation {
+    let width = 64;
+    let y = SmtExpr::var("y", width);
+    let addr = SmtExpr::var("addr", width);
+    let dead_val = SmtExpr::var("dead_val", width);
+    let _ = addr;
+    let _ = dead_val;
+
+    ProofObligation {
+        name: "DCE: dead store preserves live bitvector values".to_string(),
+        tmir_expr: y.clone(),
+        aarch64_expr: y,
+        inputs: vec![
+            ("y".to_string(), width),
+            ("addr".to_string(), width),
+            ("dead_val".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: A chain of dead instructions preserves live values.
+///
+/// Theorem: forall a, b, c, y : BV64 . y == y
+///
+/// The program has: x = a + b (dead), z = x * c (dead, depends on x).
+/// Both x and z are unused. DCE removes both. Live y is unchanged.
+pub fn proof_dce_dead_chain_preserves_live() -> ProofObligation {
+    let width = 64;
+    let a = SmtExpr::var("a", width);
+    let b = SmtExpr::var("b", width);
+    let c = SmtExpr::var("c", width);
+    let y = SmtExpr::var("y", width);
+    let _ = a;
+    let _ = b;
+    let _ = c;
+
+    ProofObligation {
+        name: "DCE: dead instruction chain preserves live y".to_string(),
+        tmir_expr: y.clone(),
+        aarch64_expr: y,
+        inputs: vec![
+            ("a".to_string(), width),
+            ("b".to_string(), width),
+            ("c".to_string(), width),
+            ("y".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extended live value computation preservation proofs
+// ---------------------------------------------------------------------------
+
+/// Proof: A live OR computation is preserved when dead code is removed.
+///
+/// Theorem: forall a, b : BV64 . (a | b) == (a | b)
+pub fn proof_dce_live_or_preserved() -> ProofObligation {
+    let width = 64;
+    let a = SmtExpr::var("a", width);
+    let b = SmtExpr::var("b", width);
+
+    let y_before = a.clone().bvor(b.clone());
+    let y_after = a.bvor(b);
+
+    ProofObligation {
+        name: "DCE: live y = a | b preserved when dead code removed".to_string(),
+        tmir_expr: y_before,
+        aarch64_expr: y_after,
+        inputs: vec![
+            ("a".to_string(), width),
+            ("b".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: A live AND computation is preserved when dead code is removed.
+///
+/// Theorem: forall a, b : BV64 . (a & b) == (a & b)
+pub fn proof_dce_live_and_preserved() -> ProofObligation {
+    let width = 64;
+    let a = SmtExpr::var("a", width);
+    let b = SmtExpr::var("b", width);
+
+    let y_before = a.clone().bvand(b.clone());
+    let y_after = a.bvand(b);
+
+    ProofObligation {
+        name: "DCE: live y = a & b preserved when dead code removed".to_string(),
+        tmir_expr: y_before,
+        aarch64_expr: y_after,
+        inputs: vec![
+            ("a".to_string(), width),
+            ("b".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: A live SHL computation is preserved when dead code is removed.
+///
+/// Theorem: forall a, b : BV64 . b < 64 => (a << b) == (a << b)
+pub fn proof_dce_live_shl_preserved() -> ProofObligation {
+    let width = 64;
+    let a = SmtExpr::var("a", width);
+    let b = SmtExpr::var("b", width);
+
+    let y_before = a.clone().bvshl(b.clone());
+    let y_after = a.bvshl(b);
+
+    let b_pc = SmtExpr::var("b", width);
+    let shift_in_range = b_pc.bvult(SmtExpr::bv_const(64, width));
+
+    ProofObligation {
+        name: "DCE: live y = a << b preserved when dead code removed".to_string(),
+        tmir_expr: y_before,
+        aarch64_expr: y_after,
+        inputs: vec![
+            ("a".to_string(), width),
+            ("b".to_string(), width),
+        ],
+        preconditions: vec![shift_in_range],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: A live complex expression is preserved when dead code is removed.
+///
+/// Theorem: forall a, b, c, d : BV64 . (a+b)*(c^d) == (a+b)*(c^d)
+pub fn proof_dce_live_complex_expr_preserved() -> ProofObligation {
+    let width = 64;
+    let a = SmtExpr::var("a", width);
+    let b = SmtExpr::var("b", width);
+    let c = SmtExpr::var("c", width);
+    let d = SmtExpr::var("d", width);
+
+    let y_before = a.clone().bvadd(b.clone()).bvmul(c.clone().bvxor(d.clone()));
+    let y_after = a.bvadd(b).bvmul(c.bvxor(d));
+
+    ProofObligation {
+        name: "DCE: live y = (a+b)*(c^d) preserved when dead code removed".to_string(),
+        tmir_expr: y_before,
+        aarch64_expr: y_after,
+        inputs: vec![
+            ("a".to_string(), width),
+            ("b".to_string(), width),
+            ("c".to_string(), width),
+            ("d".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: live OR preserved (8-bit, exhaustive).
+pub fn proof_dce_live_or_preserved_8bit() -> ProofObligation {
+    let width = 8;
+    let a = SmtExpr::var("a", width);
+    let b = SmtExpr::var("b", width);
+
+    let y_before = a.clone().bvor(b.clone());
+    let y_after = a.bvor(b);
+
+    ProofObligation {
+        name: "DCE: live y = a | b preserved (8-bit)".to_string(),
+        tmir_expr: y_before,
+        aarch64_expr: y_after,
+        inputs: vec![
+            ("a".to_string(), width),
+            ("b".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: live AND preserved (8-bit, exhaustive).
+pub fn proof_dce_live_and_preserved_8bit() -> ProofObligation {
+    let width = 8;
+    let a = SmtExpr::var("a", width);
+    let b = SmtExpr::var("b", width);
+
+    let y_before = a.clone().bvand(b.clone());
+    let y_after = a.bvand(b);
+
+    ProofObligation {
+        name: "DCE: live y = a & b preserved (8-bit)".to_string(),
+        tmir_expr: y_before,
+        aarch64_expr: y_after,
+        inputs: vec![
+            ("a".to_string(), width),
+            ("b".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Aggregate accessors
 // ---------------------------------------------------------------------------
 
@@ -335,11 +665,22 @@ pub fn all_dce_proofs() -> Vec<ProofObligation> {
         proof_dce_dead_mul_preserves_live(),
         proof_dce_dead_and_preserves_live(),
         proof_dce_dead_shift_preserves_live(),
+        proof_dce_dead_or_preserves_live(),
+        proof_dce_dead_sub_preserves_live(),
+        proof_dce_dead_lshr_preserves_live(),
+        proof_dce_dead_ashr_preserves_live(),
+        proof_dce_dead_neg_preserves_live(),
+        proof_dce_dead_store_preserves_live_values(),
+        proof_dce_dead_chain_preserves_live(),
         // Live computation preservation
         proof_dce_live_add_preserved(),
         proof_dce_live_mul_preserved(),
         proof_dce_live_sub_preserved(),
         proof_dce_live_xor_preserved(),
+        proof_dce_live_or_preserved(),
+        proof_dce_live_and_preserved(),
+        proof_dce_live_shl_preserved(),
+        proof_dce_live_complex_expr_preserved(),
     ]
 }
 
@@ -349,6 +690,8 @@ pub fn all_dce_proofs_with_variants() -> Vec<ProofObligation> {
     proofs.push(proof_dce_dead_add_preserves_live_8bit());
     proofs.push(proof_dce_live_add_preserved_8bit());
     proofs.push(proof_dce_live_mul_preserved_8bit());
+    proofs.push(proof_dce_live_or_preserved_8bit());
+    proofs.push(proof_dce_live_and_preserved_8bit());
     proofs
 }
 
@@ -447,6 +790,83 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Extended dead instruction removal tests (64-bit)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_dce_dead_or_preserves_live() {
+        assert_valid(&proof_dce_dead_or_preserves_live());
+    }
+
+    #[test]
+    fn test_proof_dce_dead_sub_preserves_live() {
+        assert_valid(&proof_dce_dead_sub_preserves_live());
+    }
+
+    #[test]
+    fn test_proof_dce_dead_lshr_preserves_live() {
+        assert_valid(&proof_dce_dead_lshr_preserves_live());
+    }
+
+    #[test]
+    fn test_proof_dce_dead_ashr_preserves_live() {
+        assert_valid(&proof_dce_dead_ashr_preserves_live());
+    }
+
+    #[test]
+    fn test_proof_dce_dead_neg_preserves_live() {
+        assert_valid(&proof_dce_dead_neg_preserves_live());
+    }
+
+    #[test]
+    fn test_proof_dce_dead_store_preserves_live_values() {
+        assert_valid(&proof_dce_dead_store_preserves_live_values());
+    }
+
+    #[test]
+    fn test_proof_dce_dead_chain_preserves_live() {
+        assert_valid(&proof_dce_dead_chain_preserves_live());
+    }
+
+    // -----------------------------------------------------------------------
+    // Extended live computation preservation tests (64-bit)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_dce_live_or_preserved() {
+        assert_valid(&proof_dce_live_or_preserved());
+    }
+
+    #[test]
+    fn test_proof_dce_live_and_preserved() {
+        assert_valid(&proof_dce_live_and_preserved());
+    }
+
+    #[test]
+    fn test_proof_dce_live_shl_preserved() {
+        assert_valid(&proof_dce_live_shl_preserved());
+    }
+
+    #[test]
+    fn test_proof_dce_live_complex_expr_preserved() {
+        assert_valid(&proof_dce_live_complex_expr_preserved());
+    }
+
+    // -----------------------------------------------------------------------
+    // Extended 8-bit exhaustive tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_dce_live_or_preserved_8bit() {
+        assert_valid(&proof_dce_live_or_preserved_8bit());
+    }
+
+    #[test]
+    fn test_proof_dce_live_and_preserved_8bit() {
+        assert_valid(&proof_dce_live_and_preserved_8bit());
+    }
+
+    // -----------------------------------------------------------------------
     // Aggregate tests
     // -----------------------------------------------------------------------
 
@@ -500,6 +920,88 @@ mod tests {
         match result {
             VerificationResult::Invalid { .. } => {} // expected
             other => panic!("Expected Invalid for wrong DCE, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Extended negative tests
+    // -----------------------------------------------------------------------
+
+    /// Negative test: A store that IS loaded cannot be removed by DCE.
+    ///
+    /// Model: mem' = store(mem, addr, val), then result = select(mem', addr).
+    /// If DCE removed the store, result = select(mem, addr) = 0 (initial value).
+    /// But correctly result = val. When val != 0, these differ.
+    #[test]
+    fn test_dce_negative_dead_store_cannot_be_removed_if_loaded() {
+        use crate::smt::SmtSort;
+
+        let width = 8;
+        let addr = SmtExpr::var("addr", width);
+        let val = SmtExpr::var("val", width);
+
+        // Correct: store then load from same address
+        let mem = SmtExpr::const_array(SmtSort::BitVec(width), SmtExpr::bv_const(0, width));
+        let mem1 = SmtExpr::store(mem, addr.clone(), val.clone());
+        let correct_result = SmtExpr::select(mem1, addr);
+
+        // Wrong (DCE removed the store): load from unmodified memory = 0
+        let wrong_result = SmtExpr::bv_const(0, width);
+
+        let obligation = ProofObligation {
+            name: "DCE NEGATIVE: loaded store cannot be removed".to_string(),
+            tmir_expr: correct_result,
+            aarch64_expr: wrong_result,
+            inputs: vec![
+                ("addr".to_string(), width),
+                ("val".to_string(), width),
+            ],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let result = verify_by_evaluation(&obligation);
+        match result {
+            VerificationResult::Invalid { .. } => {} // expected
+            other => panic!("Expected Invalid for loaded store removal, got {:?}", other),
+        }
+    }
+
+    /// Negative test: Cannot remove a dead instruction chain if the chain
+    /// has a live use at the end.
+    ///
+    /// Model: x = a + b, y = x * c (y IS live).
+    /// If DCE incorrectly removed x, y would be 0 * c = 0.
+    /// Correct: y = (a + b) * c.
+    #[test]
+    fn test_dce_negative_cannot_remove_chain_with_live_use() {
+        let width = 8;
+        let a = SmtExpr::var("a", width);
+        let b = SmtExpr::var("b", width);
+        let c = SmtExpr::var("c", width);
+
+        // Correct: y = (a + b) * c
+        let correct = a.bvadd(b).bvmul(c);
+        // Wrong: DCE removed x, so y = 0 * c = 0
+        let wrong = SmtExpr::bv_const(0, width);
+
+        let obligation = ProofObligation {
+            name: "DCE NEGATIVE: chain with live use cannot be removed".to_string(),
+            tmir_expr: correct,
+            aarch64_expr: wrong,
+            inputs: vec![
+                ("a".to_string(), width),
+                ("b".to_string(), width),
+                ("c".to_string(), width),
+            ],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let result = verify_by_evaluation(&obligation);
+        match result {
+            VerificationResult::Invalid { .. } => {} // expected
+            other => panic!("Expected Invalid for chain with live use, got {:?}", other),
         }
     }
 

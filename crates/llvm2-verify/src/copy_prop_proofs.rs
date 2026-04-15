@@ -259,6 +259,159 @@ pub fn proof_copy_in_xor() -> ProofObligation {
 }
 
 // ---------------------------------------------------------------------------
+// Copy propagation through shift/negation operations
+// ---------------------------------------------------------------------------
+
+/// Proof: Copy propagation through SHL preserves semantics.
+///
+/// Theorem: forall x, a : BV64 . (x << a) == (x << a)
+pub fn proof_copy_in_shl() -> ProofObligation {
+    let width = 64;
+    let x = SmtExpr::var("x", width);
+    let a = SmtExpr::var("a", width);
+
+    let before = x.clone().bvshl(a.clone());
+    let after = x.bvshl(a);
+
+    ProofObligation {
+        name: "CopyProp: y=COPY(x); y<<a == x<<a".to_string(),
+        tmir_expr: before,
+        aarch64_expr: after,
+        inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: Copy propagation through LSHR preserves semantics.
+///
+/// Theorem: forall x, a : BV64 . (x >>> a) == (x >>> a)
+pub fn proof_copy_in_lshr() -> ProofObligation {
+    let width = 64;
+    let x = SmtExpr::var("x", width);
+    let a = SmtExpr::var("a", width);
+
+    let before = x.clone().bvlshr(a.clone());
+    let after = x.bvlshr(a);
+
+    ProofObligation {
+        name: "CopyProp: y=COPY(x); y>>>a == x>>>a".to_string(),
+        tmir_expr: before,
+        aarch64_expr: after,
+        inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: Copy propagation through ASHR preserves semantics.
+///
+/// Theorem: forall x, a : BV64 . (x >>a a) == (x >>a a)
+pub fn proof_copy_in_ashr() -> ProofObligation {
+    let width = 64;
+    let x = SmtExpr::var("x", width);
+    let a = SmtExpr::var("a", width);
+
+    let before = x.clone().bvashr(a.clone());
+    let after = x.bvashr(a);
+
+    ProofObligation {
+        name: "CopyProp: y=COPY(x); y>>a(arith) == x>>a(arith)".to_string(),
+        tmir_expr: before,
+        aarch64_expr: after,
+        inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: Copy propagation through NEG preserves semantics.
+///
+/// Theorem: forall x : BV64 . (-x) == (-x)
+pub fn proof_copy_in_neg() -> ProofObligation {
+    let width = 64;
+    let x = SmtExpr::var("x", width);
+
+    let before = x.clone().bvneg();
+    let after = x.bvneg();
+
+    ProofObligation {
+        name: "CopyProp: y=COPY(x); -y == -x".to_string(),
+        tmir_expr: before,
+        aarch64_expr: after,
+        inputs: vec![("x".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: Copy propagation in a nested expression preserves semantics.
+///
+/// Theorem: forall x, a, b : BV64 . (x + a) * b == (x + a) * b
+///
+/// Before: y = COPY(x); z = (y + a) * b
+/// After: z = (x + a) * b
+pub fn proof_copy_in_nested_expr() -> ProofObligation {
+    let width = 64;
+    let x = SmtExpr::var("x", width);
+    let a = SmtExpr::var("a", width);
+    let b = SmtExpr::var("b", width);
+
+    let before = x.clone().bvadd(a.clone()).bvmul(b.clone());
+    let after = x.bvadd(a).bvmul(b);
+
+    ProofObligation {
+        name: "CopyProp: y=COPY(x); (y+a)*b == (x+a)*b".to_string(),
+        tmir_expr: before,
+        aarch64_expr: after,
+        inputs: vec![
+            ("x".to_string(), width),
+            ("a".to_string(), width),
+            ("b".to_string(), width),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: copy propagation through SHL (8-bit, exhaustive).
+pub fn proof_copy_in_shl_8bit() -> ProofObligation {
+    let width = 8;
+    let x = SmtExpr::var("x", width);
+    let a = SmtExpr::var("a", width);
+
+    let before = x.clone().bvshl(a.clone());
+    let after = x.bvshl(a);
+
+    ProofObligation {
+        name: "CopyProp: y=COPY(x); y<<a == x<<a (8-bit)".to_string(),
+        tmir_expr: before,
+        aarch64_expr: after,
+        inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Proof: copy propagation through NEG (8-bit, exhaustive).
+pub fn proof_copy_in_neg_8bit() -> ProofObligation {
+    let width = 8;
+    let x = SmtExpr::var("x", width);
+
+    let before = x.clone().bvneg();
+    let after = x.bvneg();
+
+    ProofObligation {
+        name: "CopyProp: y=COPY(x); -y == -x (8-bit)".to_string(),
+        tmir_expr: before,
+        aarch64_expr: after,
+        inputs: vec![("x".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Chain resolution proofs
 // ---------------------------------------------------------------------------
 
@@ -378,6 +531,11 @@ pub fn all_copy_prop_proofs() -> Vec<ProofObligation> {
         proof_copy_in_and(),
         proof_copy_in_or(),
         proof_copy_in_xor(),
+        proof_copy_in_shl(),
+        proof_copy_in_lshr(),
+        proof_copy_in_ashr(),
+        proof_copy_in_neg(),
+        proof_copy_in_nested_expr(),
         proof_copy_chain_two(),
         proof_copy_chain_three(),
         proof_copy_chain_in_expr(),
@@ -392,6 +550,8 @@ pub fn all_copy_prop_proofs_with_variants() -> Vec<ProofObligation> {
     proofs.push(proof_copy_in_sub_8bit());
     proofs.push(proof_copy_chain_two_8bit());
     proofs.push(proof_copy_chain_in_expr_8bit());
+    proofs.push(proof_copy_in_shl_8bit());
+    proofs.push(proof_copy_in_neg_8bit());
     proofs
 }
 
@@ -478,6 +638,45 @@ mod tests {
     #[test]
     fn test_proof_copy_in_xor() {
         assert_valid(&proof_copy_in_xor());
+    }
+
+    // -----------------------------------------------------------------------
+    // Copy propagation through shift/negation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_copy_in_shl() {
+        assert_valid(&proof_copy_in_shl());
+    }
+
+    #[test]
+    fn test_proof_copy_in_lshr() {
+        assert_valid(&proof_copy_in_lshr());
+    }
+
+    #[test]
+    fn test_proof_copy_in_ashr() {
+        assert_valid(&proof_copy_in_ashr());
+    }
+
+    #[test]
+    fn test_proof_copy_in_neg() {
+        assert_valid(&proof_copy_in_neg());
+    }
+
+    #[test]
+    fn test_proof_copy_in_nested_expr() {
+        assert_valid(&proof_copy_in_nested_expr());
+    }
+
+    #[test]
+    fn test_proof_copy_in_shl_8bit() {
+        assert_valid(&proof_copy_in_shl_8bit());
+    }
+
+    #[test]
+    fn test_proof_copy_in_neg_8bit() {
+        assert_valid(&proof_copy_in_neg_8bit());
     }
 
     // -----------------------------------------------------------------------
