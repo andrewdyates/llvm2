@@ -2218,4 +2218,249 @@ mod tests {
             other => panic!("Expected CounterExample, got {:?}", other),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // z3 batch verification tests (issue #228: first real SMT solver calls)
+    //
+    // These tests run real lowering proofs through the z3 CLI binary,
+    // moving from statistical mock evaluation to actual formal verification.
+    // Each test gracefully skips if z3 is not installed.
+    // -----------------------------------------------------------------------
+
+    /// Verify ALL arithmetic lowering proofs (add/sub/mul/neg for I8/I16/I32/I64
+    /// plus division) through z3. This is 20 proofs, each formally verified
+    /// for ALL possible inputs via the SMT solver.
+    #[test]
+    fn test_z4_batch_verify_arithmetic_proofs() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let config = Z4Config::default();
+        let proofs = crate::lowering_proof::all_arithmetic_proofs();
+        assert!(
+            proofs.len() >= 16,
+            "Expected at least 16 arithmetic proofs, got {}",
+            proofs.len()
+        );
+
+        let mut verified_count = 0;
+        for obligation in &proofs {
+            let result = verify_with_cli(obligation, &config);
+            assert_eq!(
+                result,
+                Z4Result::Verified,
+                "Arithmetic proof '{}' failed via z3: {}",
+                obligation.name,
+                result
+            );
+            verified_count += 1;
+        }
+
+        assert!(
+            verified_count >= 16,
+            "Expected >= 16 arithmetic proofs verified, got {}",
+            verified_count
+        );
+    }
+
+    /// Verify all NZCV flag proofs (N/Z/C/V for i32 addition) through z3.
+    #[test]
+    fn test_z4_batch_verify_nzcv_flag_proofs() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let config = Z4Config::default();
+        let proofs = crate::lowering_proof::all_nzcv_flag_proofs();
+        assert_eq!(proofs.len(), 4, "Expected 4 NZCV flag proofs");
+
+        for obligation in &proofs {
+            let result = verify_with_cli(obligation, &config);
+            assert_eq!(
+                result,
+                Z4Result::Verified,
+                "NZCV proof '{}' failed via z3: {}",
+                obligation.name,
+                result
+            );
+        }
+    }
+
+    /// Verify all comparison proofs (eq/ne/slt/sge/sgt/sle/ult/uge/ugt/ule
+    /// for both i32 and i64) through z3. This is 20 proofs.
+    #[test]
+    fn test_z4_batch_verify_comparison_proofs() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let config = Z4Config::default();
+        let proofs_i32 = crate::lowering_proof::all_comparison_proofs_i32();
+        let proofs_i64 = crate::lowering_proof::all_comparison_proofs_i64();
+
+        assert_eq!(proofs_i32.len(), 10, "Expected 10 i32 comparison proofs");
+        assert_eq!(proofs_i64.len(), 10, "Expected 10 i64 comparison proofs");
+
+        for obligation in proofs_i32.iter().chain(proofs_i64.iter()) {
+            let result = verify_with_cli(obligation, &config);
+            assert_eq!(
+                result,
+                Z4Result::Verified,
+                "Comparison proof '{}' failed via z3: {}",
+                obligation.name,
+                result
+            );
+        }
+    }
+
+    /// Verify all conditional branch proofs through z3. This is 20 proofs.
+    #[test]
+    fn test_z4_batch_verify_branch_proofs() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let config = Z4Config::default();
+        let proofs = crate::lowering_proof::all_branch_proofs();
+        assert_eq!(proofs.len(), 20, "Expected 20 branch proofs");
+
+        for obligation in &proofs {
+            let result = verify_with_cli(obligation, &config);
+            assert_eq!(
+                result,
+                Z4Result::Verified,
+                "Branch proof '{}' failed via z3: {}",
+                obligation.name,
+                result
+            );
+        }
+    }
+
+    /// Verify all peephole identity proofs through z3.
+    #[test]
+    fn test_z4_batch_verify_peephole_proofs() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let config = Z4Config::default();
+        let proofs = crate::peephole_proofs::all_peephole_proofs_with_32bit();
+        assert!(
+            proofs.len() >= 9,
+            "Expected at least 9 peephole proofs, got {}",
+            proofs.len()
+        );
+
+        for obligation in &proofs {
+            let result = verify_with_cli(obligation, &config);
+            assert_eq!(
+                result,
+                Z4Result::Verified,
+                "Peephole proof '{}' failed via z3: {}",
+                obligation.name,
+                result
+            );
+        }
+    }
+
+    /// End-to-end test: use verify_all_with_z4() to batch-verify all registered
+    /// arithmetic, NZCV, and peephole proofs and check the VerificationSummary.
+    #[test]
+    fn test_z4_verify_all_batch_and_summary() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let config = Z4Config::default();
+        let results = verify_all_with_z4(&config);
+
+        let summary = VerificationSummary::from_results(&results);
+
+        // Must have a meaningful number of proofs
+        assert!(
+            summary.total >= 30,
+            "Expected >= 30 proofs in verify_all_with_z4, got {}",
+            summary.total
+        );
+
+        // All proofs must be verified -- no failures, no timeouts, no errors
+        assert_eq!(
+            summary.failed, 0,
+            "z3 found {} counterexamples in batch verification",
+            summary.failed
+        );
+        assert_eq!(
+            summary.errors, 0,
+            "z3 had {} errors in batch verification",
+            summary.errors
+        );
+        assert!(
+            summary.all_verified(),
+            "Not all proofs verified: {}",
+            summary
+        );
+    }
+
+    /// Verify load/store proofs through z3 (array theory QF_ABV).
+    #[test]
+    fn test_z4_batch_verify_load_store_proofs() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let config = Z4Config::default();
+        let proofs = crate::lowering_proof::all_load_store_proofs();
+        assert!(
+            proofs.len() >= 6,
+            "Expected at least 6 load/store proofs, got {}",
+            proofs.len()
+        );
+
+        for obligation in &proofs {
+            let result = verify_with_cli(obligation, &config);
+            assert_eq!(
+                result,
+                Z4Result::Verified,
+                "Load/store proof '{}' failed via z3: {}",
+                obligation.name,
+                result
+            );
+        }
+    }
+
+    /// Verify bitwise and shift proofs through z3.
+    #[test]
+    fn test_z4_batch_verify_bitwise_shift_proofs() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let config = Z4Config::default();
+        let proofs = crate::lowering_proof::all_bitwise_shift_proofs();
+        assert!(
+            proofs.len() >= 7,
+            "Expected at least 7 bitwise/shift proofs, got {}",
+            proofs.len()
+        );
+
+        for obligation in &proofs {
+            let result = verify_with_cli(obligation, &config);
+            assert_eq!(
+                result,
+                Z4Result::Verified,
+                "Bitwise/shift proof '{}' failed via z3: {}",
+                obligation.name,
+                result
+            );
+        }
+    }
 }
