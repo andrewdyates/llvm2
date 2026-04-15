@@ -142,6 +142,12 @@ pub enum ProofCategory {
     /// memory ordering, control flow, topological validity, reordering freedom).
     /// Source: `scheduler_proofs::all_scheduler_proofs()`.
     InstructionScheduling,
+
+    /// Loop optimization correctness proofs (loop unrolling semantics preservation,
+    /// strength reduction multiply-to-add equivalence, combined transformation
+    /// composition, dead IV elimination).
+    /// Source: `loop_opt_proofs::all_loop_opt_proofs()`.
+    LoopOptimization,
 }
 
 impl ProofCategory {
@@ -171,6 +177,7 @@ impl ProofCategory {
             ProofCategory::AddressMode,
             ProofCategory::FrameLayout,
             ProofCategory::InstructionScheduling,
+            ProofCategory::LoopOptimization,
         ]
     }
 
@@ -200,6 +207,7 @@ impl ProofCategory {
             ProofCategory::AddressMode => "Address Mode",
             ProofCategory::FrameLayout => "Frame Layout",
             ProofCategory::InstructionScheduling => "Instruction Scheduling",
+            ProofCategory::LoopOptimization => "Loop Optimization",
         }
     }
 }
@@ -421,6 +429,12 @@ impl ProofDatabase {
         // memory ordering, control flow, topological validity, reordering freedom)
         for p in crate::scheduler_proofs::all_scheduler_proofs() {
             proofs.push(CategorizedProof { obligation: p, category: ProofCategory::InstructionScheduling });
+        }
+
+        // Loop optimization correctness proofs (loop unrolling, strength reduction,
+        // combined composition, dead IV elimination)
+        for p in crate::loop_opt_proofs::all_loop_opt_proofs() {
+            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::LoopOptimization });
         }
 
         ProofDatabase { proofs }
@@ -770,8 +784,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            23,
-            "expected 23 categories, got {}",
+            24,
+            "expected 24 categories, got {}",
             categories.len()
         );
     }
