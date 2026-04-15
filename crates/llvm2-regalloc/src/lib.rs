@@ -87,6 +87,7 @@ pub mod spill;
 pub mod phi_elim;
 pub mod coalesce;
 pub mod post_ra_coalesce;
+pub mod post_ra_opt;
 pub mod split;
 pub mod remat;
 pub mod spill_slot_reuse;
@@ -113,6 +114,7 @@ pub use coalesce::{
     CoalesceMode, CoalesceStats, CopyCoalescer,
 };
 pub use post_ra_coalesce::{post_ra_coalesce, PostRACoalesceResult};
+pub use post_ra_opt::{post_ra_optimize, PostRAOptResult};
 pub use split::{split_interval, find_optimal_split_point, SplitDecision, SplitResult};
 pub use remat::{classify_remat_cost, find_remat_candidates, RematCost, RematCandidate};
 pub use spill_slot_reuse::{compute_spill_slot_reuse, SpillSlotReuseResult};
