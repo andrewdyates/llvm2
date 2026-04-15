@@ -134,11 +134,12 @@ pub use lowering_proof::{ProofObligation, verify_by_evaluation, verify_by_evalua
     verify_fp_by_evaluation, VerificationConfig, DEFAULT_SAMPLE_COUNT, EXHAUSTIVE_WIDTH_THRESHOLD};
 pub use smt::{SmtError, SmtExpr, SmtSort, RoundingMode};
 pub use z4_bridge::{Z4Config, Z4Result, verify_with_z4, serialize_to_smt2, verify_with_z4_cli,
-    parse_z4_output, generate_smt2_query, verify_with_cli};
+    parse_z4_output, generate_smt2_query, verify_with_cli, z3_available,
+    verify_proof_database_with_z4, ProofDatabaseZ4Report, Z4CategoryBreakdown};
 pub use cegis::{CegisLoop, CegisResult, ConcreteInput};
 pub use rule_discovery::{RuleDiscovery, RuleProposal, RuleResult, RuleDatabase, DiscoveryStats};
 pub use proof_database::{ProofDatabase, ProofCategory, CategorizedProof, ProofSummary};
 pub use verification_runner::{VerificationRunner, VerificationRunReport, VerificationRunResult,
-    CategoryBreakdown, FailedProofDetail};
+    CategoryBreakdown, FailedProofDetail, Z4VerificationMode};
 pub use function_verifier::{FunctionVerifier, FunctionVerificationReport, InstructionVerificationResult,
     InstructionReport, verify_function};

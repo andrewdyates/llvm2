@@ -35,6 +35,33 @@ use std::time::{Duration, Instant};
 use crate::lowering_proof::{verify_by_evaluation_with_config, VerificationConfig};
 use crate::proof_database::{CategorizedProof, ProofCategory, ProofDatabase};
 use crate::verify::{VerificationResult, VerificationStrength};
+use crate::z4_bridge::{Z4Config, Z4Result};
+
+// ---------------------------------------------------------------------------
+// Z4VerificationMode: selects verification backend
+// ---------------------------------------------------------------------------
+
+/// Selects the verification backend for [`VerificationRunner`].
+///
+/// - [`MockOnly`]: Use mock evaluation only (default, current behavior).
+///   Fast but provides statistical (not formal) verification for 32/64-bit.
+/// - [`Z4Cli`]: Use z3/z4 CLI for formal verification of every proof.
+///   Provides complete proofs but requires a solver binary and is slower.
+/// - [`MockThenZ4`]: Run mock evaluation first as a fast pre-check, then
+///   verify proofs that pass mock with z3/z4 for formal confirmation.
+///   Best of both worlds: fast failure detection + formal proofs.
+///
+/// [`MockOnly`]: Z4VerificationMode::MockOnly
+/// [`Z4Cli`]: Z4VerificationMode::Z4Cli
+/// [`MockThenZ4`]: Z4VerificationMode::MockThenZ4
+pub enum Z4VerificationMode {
+    /// Use mock evaluation only (default, current behavior).
+    MockOnly,
+    /// Use z3/z4 CLI for formal verification.
+    Z4Cli(Z4Config),
+    /// Use mock as fast pre-check, then z4 for proofs that pass mock.
+    MockThenZ4(Z4Config),
+}
 
 // ---------------------------------------------------------------------------
 // VerificationRunResult: result for a single proof in a run
@@ -425,6 +452,111 @@ impl<'a> VerificationRunner<'a> {
         }
     }
 
+    /// Verify every proof in the database using a z3/z4 CLI solver.
+    ///
+    /// Each proof is sent to the solver as an SMT-LIB2 query. The result
+    /// is mapped to [`VerificationResult`] and the strength is set to
+    /// [`VerificationStrength::Formal`] for all proofs verified this way.
+    ///
+    /// # Graceful degradation
+    ///
+    /// If no solver is available, all proofs will report
+    /// `VerificationResult::Unknown` with a descriptive reason.
+    pub fn run_with_z4(&self, z4_config: &Z4Config) -> VerificationRunReport {
+        let start = Instant::now();
+        let results: Vec<VerificationRunResult> = self
+            .db
+            .all()
+            .iter()
+            .map(|cp| {
+                let proof_start = Instant::now();
+                let z4_result = crate::z4_bridge::verify_with_cli(&cp.obligation, z4_config);
+                let duration = proof_start.elapsed();
+                let (result, strength) = z4_result_to_verification_result(&z4_result);
+                VerificationRunResult {
+                    name: cp.obligation.name.clone(),
+                    category: cp.category,
+                    result,
+                    strength,
+                    duration,
+                }
+            })
+            .collect();
+        let total_duration = start.elapsed();
+        VerificationRunReport {
+            results,
+            total_duration,
+        }
+    }
+
+    /// Verify proofs using the specified [`Z4VerificationMode`].
+    ///
+    /// - [`Z4VerificationMode::MockOnly`]: equivalent to [`run_all()`].
+    /// - [`Z4VerificationMode::Z4Cli`]: equivalent to [`run_with_z4()`].
+    /// - [`Z4VerificationMode::MockThenZ4`]: run mock evaluation first;
+    ///   for proofs that pass mock, re-verify with z4 for formal strength.
+    ///   Proofs that fail mock are reported immediately without z4.
+    ///
+    /// [`run_all()`]: VerificationRunner::run_all
+    /// [`run_with_z4()`]: VerificationRunner::run_with_z4
+    pub fn run_with_mode(&self, mode: &Z4VerificationMode) -> VerificationRunReport {
+        match mode {
+            Z4VerificationMode::MockOnly => self.run_all(),
+            Z4VerificationMode::Z4Cli(z4_config) => self.run_with_z4(z4_config),
+            Z4VerificationMode::MockThenZ4(z4_config) => {
+                let start = Instant::now();
+                let results: Vec<VerificationRunResult> = self
+                    .db
+                    .all()
+                    .iter()
+                    .map(|cp| {
+                        let proof_start = Instant::now();
+                        // Step 1: fast mock pre-check
+                        let mock_result =
+                            verify_by_evaluation_with_config(&cp.obligation, &self.config);
+                        match &mock_result {
+                            VerificationResult::Valid => {
+                                // Step 2: promote to formal with z4
+                                let z4_result =
+                                    crate::z4_bridge::verify_with_cli(&cp.obligation, z4_config);
+                                let duration = proof_start.elapsed();
+                                let (result, strength) =
+                                    z4_result_to_verification_result(&z4_result);
+                                VerificationRunResult {
+                                    name: cp.obligation.name.clone(),
+                                    category: cp.category,
+                                    result,
+                                    strength,
+                                    duration,
+                                }
+                            }
+                            _ => {
+                                // Mock already found a problem -- no need for z4
+                                let duration = proof_start.elapsed();
+                                let strength = VerificationStrength::for_obligation_with_config(
+                                    &cp.obligation,
+                                    &self.config,
+                                );
+                                VerificationRunResult {
+                                    name: cp.obligation.name.clone(),
+                                    category: cp.category,
+                                    result: mock_result,
+                                    strength,
+                                    duration,
+                                }
+                            }
+                        }
+                    })
+                    .collect();
+                let total_duration = start.elapsed();
+                VerificationRunReport {
+                    results,
+                    total_duration,
+                }
+            }
+        }
+    }
+
     /// Verify a single categorized proof obligation.
     fn verify_one(&self, cp: &CategorizedProof) -> VerificationRunResult {
         let start = Instant::now();
@@ -439,6 +571,43 @@ impl<'a> VerificationRunner<'a> {
             strength,
             duration,
         }
+    }
+}
+
+/// Convert a [`Z4Result`] to a ([`VerificationResult`], [`VerificationStrength`]) pair.
+///
+/// - `Verified` -> `(Valid, Formal)`
+/// - `CounterExample` -> `(Invalid, Formal)`
+/// - `Timeout` -> `(Unknown, Formal)` (solver ran but couldn't decide)
+/// - `Error` -> `(Unknown, Formal)` (solver error, not a mock limitation)
+fn z4_result_to_verification_result(z4_result: &Z4Result) -> (VerificationResult, VerificationStrength) {
+    match z4_result {
+        Z4Result::Verified => (VerificationResult::Valid, VerificationStrength::Formal),
+        Z4Result::CounterExample(cex) => {
+            let cex_str = cex
+                .iter()
+                .map(|(n, v)| format!("{} = {:#x}", n, v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (
+                VerificationResult::Invalid {
+                    counterexample: cex_str,
+                },
+                VerificationStrength::Formal,
+            )
+        }
+        Z4Result::Timeout => (
+            VerificationResult::Unknown {
+                reason: "z3/z4 solver timed out".to_string(),
+            },
+            VerificationStrength::Formal,
+        ),
+        Z4Result::Error(msg) => (
+            VerificationResult::Unknown {
+                reason: format!("z3/z4 solver error: {}", msg),
+            },
+            VerificationStrength::Formal,
+        ),
     }
 }
 
@@ -867,5 +1036,156 @@ mod tests {
         assert!(text.contains("Result: FAIL"));
         assert!(text.contains("Failed proofs:"));
         assert!(text.contains("bad_proof"));
+    }
+
+    // =======================================================================
+    // z4_result_to_verification_result unit tests
+    // =======================================================================
+
+    #[test]
+    fn test_z4_result_to_verification_result_verified() {
+        let (result, strength) = z4_result_to_verification_result(&Z4Result::Verified);
+        assert!(matches!(result, VerificationResult::Valid));
+        assert_eq!(strength, VerificationStrength::Formal);
+    }
+
+    #[test]
+    fn test_z4_result_to_verification_result_counterexample() {
+        let cex = Z4Result::CounterExample(vec![("a".to_string(), 42)]);
+        let (result, strength) = z4_result_to_verification_result(&cex);
+        assert!(matches!(result, VerificationResult::Invalid { .. }));
+        assert_eq!(strength, VerificationStrength::Formal);
+        if let VerificationResult::Invalid { counterexample } = result {
+            assert!(counterexample.contains("a = 0x2a"));
+        }
+    }
+
+    #[test]
+    fn test_z4_result_to_verification_result_timeout() {
+        let (result, strength) = z4_result_to_verification_result(&Z4Result::Timeout);
+        assert!(matches!(result, VerificationResult::Unknown { .. }));
+        assert_eq!(strength, VerificationStrength::Formal);
+    }
+
+    #[test]
+    fn test_z4_result_to_verification_result_error() {
+        let err = Z4Result::Error("parse failure".to_string());
+        let (result, strength) = z4_result_to_verification_result(&err);
+        assert!(matches!(result, VerificationResult::Unknown { .. }));
+        assert_eq!(strength, VerificationStrength::Formal);
+        if let VerificationResult::Unknown { reason } = result {
+            assert!(reason.contains("parse failure"));
+        }
+    }
+
+    // =======================================================================
+    // run_with_z4 integration test (requires z3)
+    // =======================================================================
+
+    #[test]
+    fn test_run_with_z4_arithmetic_subset() {
+        if !crate::z4_bridge::z3_available() {
+            return;
+        }
+
+        let full_db = ProofDatabase::new();
+        let subset: Vec<_> = full_db
+            .by_category(ProofCategory::Arithmetic)
+            .into_iter()
+            .cloned()
+            .collect();
+        let db = ProofDatabase::from_proofs(subset);
+        let runner = VerificationRunner::new(&db);
+        let z4_config = Z4Config::default();
+        let report = runner.run_with_z4(&z4_config);
+
+        assert_eq!(report.total(), db.len());
+        assert!(
+            report.all_passed(),
+            "Not all Arithmetic proofs passed via z4:\n{}",
+            report
+        );
+
+        // All proofs should have Formal strength
+        for r in &report.results {
+            assert_eq!(
+                r.strength,
+                VerificationStrength::Formal,
+                "Proof '{}' should have Formal strength",
+                r.name
+            );
+        }
+    }
+
+    // =======================================================================
+    // run_with_mode tests
+    // =======================================================================
+
+    #[test]
+    fn test_run_with_mode_mock_only() {
+        let full_db = ProofDatabase::new();
+        let subset: Vec<_> = full_db
+            .by_category(ProofCategory::Arithmetic)
+            .into_iter()
+            .cloned()
+            .collect();
+        let db = ProofDatabase::from_proofs(subset);
+        let runner = VerificationRunner::new(&db);
+
+        let report = runner.run_with_mode(&Z4VerificationMode::MockOnly);
+        assert_eq!(report.total(), db.len());
+        assert!(report.all_passed());
+    }
+
+    #[test]
+    fn test_run_with_mode_z4_cli() {
+        if !crate::z4_bridge::z3_available() {
+            return;
+        }
+
+        let full_db = ProofDatabase::new();
+        let subset: Vec<_> = full_db
+            .by_category(ProofCategory::Arithmetic)
+            .into_iter()
+            .cloned()
+            .collect();
+        let db = ProofDatabase::from_proofs(subset);
+        let runner = VerificationRunner::new(&db);
+
+        let z4_config = Z4Config::default();
+        let report = runner.run_with_mode(&Z4VerificationMode::Z4Cli(z4_config));
+        assert_eq!(report.total(), db.len());
+        assert!(report.all_passed());
+    }
+
+    #[test]
+    fn test_run_with_mode_mock_then_z4() {
+        if !crate::z4_bridge::z3_available() {
+            return;
+        }
+
+        let full_db = ProofDatabase::new();
+        let subset: Vec<_> = full_db
+            .by_category(ProofCategory::Arithmetic)
+            .into_iter()
+            .cloned()
+            .collect();
+        let db = ProofDatabase::from_proofs(subset);
+        let runner = VerificationRunner::new(&db);
+
+        let z4_config = Z4Config::default();
+        let report = runner.run_with_mode(&Z4VerificationMode::MockThenZ4(z4_config));
+        assert_eq!(report.total(), db.len());
+        assert!(report.all_passed());
+
+        // Proofs that pass both mock and z4 should have Formal strength
+        for r in &report.results {
+            assert_eq!(
+                r.strength,
+                VerificationStrength::Formal,
+                "Proof '{}' should be promoted to Formal strength after z4 confirmation",
+                r.name
+            );
+        }
     }
 }
