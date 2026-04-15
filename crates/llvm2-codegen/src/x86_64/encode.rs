@@ -477,6 +477,82 @@ impl X86Encoder {
         self.emit_modrm(ModRM::ext_reg(ext, dst.hw_enc()));
     }
 
+    /// Build REX prefix for XMM reg-reg (no REX.W; only need REX.R/REX.B for XMM8-15).
+    fn rex_xmm_rr(reg: X86PReg, rm: X86PReg) -> RexPrefix {
+        RexPrefix {
+            w: false,
+            r: reg.hw_enc() >= 8,
+            x: false,
+            b: rm.hw_enc() >= 8,
+        }
+    }
+
+    /// Encode an SSE scalar instruction: `[prefix] [REX] 0F opcode /r` (reg-reg, mod=11).
+    ///
+    /// `prefix` is the mandatory SSE prefix (0xF3 for SS, 0xF2 for SD, 0 for none).
+    /// `opcode` is the second byte after 0x0F.
+    fn encode_sse_rr(&mut self, prefix: u8, opcode: u8, dst: X86PReg, src: X86PReg) {
+        if prefix != 0 {
+            self.emit_byte(prefix);
+        }
+        let rex = Self::rex_xmm_rr(dst, src);
+        self.emit_rex(rex);
+        self.emit_byte(0x0F);
+        self.emit_byte(opcode);
+        self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
+    }
+
+    /// Encode an SSE scalar memory load: `[prefix] [REX] 0F opcode /r` (mem operand).
+    fn encode_sse_rm(
+        &mut self,
+        prefix: u8,
+        opcode: u8,
+        dst: X86PReg,
+        base: X86PReg,
+        disp: i64,
+    ) {
+        if prefix != 0 {
+            self.emit_byte(prefix);
+        }
+        let rex = Self::rex_xmm_rr(dst, base);
+        self.emit_rex(rex);
+        self.emit_byte(0x0F);
+        self.emit_byte(opcode);
+        self.emit_mem_operand(dst.hw_enc(), base, disp);
+    }
+
+    /// Encode an SSE scalar memory store: `[prefix] [REX] 0F opcode /r` (mem operand).
+    ///
+    /// For stores, the src XMM register goes into the reg field of ModR/M.
+    fn encode_sse_mr(
+        &mut self,
+        prefix: u8,
+        opcode: u8,
+        src: X86PReg,
+        base: X86PReg,
+        disp: i64,
+    ) {
+        if prefix != 0 {
+            self.emit_byte(prefix);
+        }
+        let rex = Self::rex_xmm_rr(src, base);
+        self.emit_rex(rex);
+        self.emit_byte(0x0F);
+        self.emit_byte(opcode);
+        self.emit_mem_operand(src.hw_enc(), base, disp);
+    }
+
+    /// Encode a two-byte opcode instruction: `REX.W + 0F + opcode /r` (reg-reg, mod=11).
+    ///
+    /// Used for CMOV, BSF, BSR, IMUL, etc.
+    fn encode_0f_rr64(&mut self, opcode: u8, dst: X86PReg, src: X86PReg) {
+        let rex = Self::rex_rr64(dst, src);
+        self.emit_rex(rex);
+        self.emit_byte(0x0F);
+        self.emit_byte(opcode);
+        self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
+    }
+
     /// Emit ModR/M + optional SIB + displacement for a memory operand.
     ///
     /// `reg_or_ext` is the 3-bit value for the ModR/M reg field.
@@ -876,23 +952,232 @@ impl X86Encoder {
             }
 
             // =================================================================
-            // SSE scalar double, LEA, MOVZX, MOVSX — not yet implemented
+            // LEA
             // =================================================================
-            X86Opcode::Movzx
-            | X86Opcode::Movsx
-            | X86Opcode::Lea
-            | X86Opcode::Addsd
-            | X86Opcode::Subsd
-            | X86Opcode::Mulsd
-            | X86Opcode::Divsd
-            | X86Opcode::MovsdRR
-            | X86Opcode::MovsdRM
-            | X86Opcode::MovsdMR
-            | X86Opcode::Ucomisd => {
-                return Err(X86EncodeError::NotImplemented(format!(
-                    "encoding for {:?} not yet implemented",
-                    opcode
-                )));
+            // LEA r64, [base+disp]: REX.W + 8D /r
+            X86Opcode::Lea => {
+                let dst = self.require_dst(ops, opcode)?;
+                let base = ops.base.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands(format!("{:?}: missing base register", opcode))
+                })?;
+                let rex = RexPrefix {
+                    w: true,
+                    r: dst.hw_enc() >= 8,
+                    x: false,
+                    b: base.hw_enc() >= 8,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0x8D);
+                self.emit_mem_operand(dst.hw_enc(), base, ops.disp);
+            }
+
+            // =================================================================
+            // MOVZX / MOVSX
+            // =================================================================
+            // MOVZX r64, r/m8: REX.W + 0F B6 /r (mod=11 for reg-reg)
+            // MOVZX r64, r/m16: REX.W + 0F B7 /r
+            // We encode the r/m8 form by default (8->64 zero-extend).
+            // The ISel should pick between B6 (byte) and B7 (word) variants.
+            X86Opcode::Movzx => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                let rex = Self::rex_rr64(dst, src);
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                // Use B6 for 8-bit source, B7 for 16-bit. Default to B6.
+                self.emit_byte(0xB6);
+                self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
+            }
+            // MOVSXD r64, r/m32: REX.W + 63 /r (sign-extend 32->64)
+            X86Opcode::Movsx => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                let rex = Self::rex_rr64(dst, src);
+                self.emit_rex(rex);
+                self.emit_byte(0x63);
+                self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
+            }
+
+            // =================================================================
+            // SSE scalar double-precision (F2 0F prefix)
+            // =================================================================
+            // ADDSD xmm, xmm: F2 0F 58 /r
+            X86Opcode::Addsd => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_sse_rr(0xF2, 0x58, dst, src);
+            }
+            // SUBSD xmm, xmm: F2 0F 5C /r
+            X86Opcode::Subsd => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_sse_rr(0xF2, 0x5C, dst, src);
+            }
+            // MULSD xmm, xmm: F2 0F 59 /r
+            X86Opcode::Mulsd => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_sse_rr(0xF2, 0x59, dst, src);
+            }
+            // DIVSD xmm, xmm: F2 0F 5E /r
+            X86Opcode::Divsd => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_sse_rr(0xF2, 0x5E, dst, src);
+            }
+            // MOVSD xmm, xmm: F2 0F 10 /r
+            X86Opcode::MovsdRR => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_sse_rr(0xF2, 0x10, dst, src);
+            }
+            // MOVSD xmm, [mem]: F2 0F 10 /r
+            X86Opcode::MovsdRM => {
+                let dst = self.require_dst(ops, opcode)?;
+                let base = ops.base.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands(format!("{:?}: missing base register", opcode))
+                })?;
+                self.encode_sse_rm(0xF2, 0x10, dst, base, ops.disp);
+            }
+            // MOVSD [mem], xmm: F2 0F 11 /r
+            X86Opcode::MovsdMR => {
+                let src = self.require_dst(ops, opcode)?; // dst field holds src for stores
+                let base = ops.base.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands(format!("{:?}: missing base register", opcode))
+                })?;
+                self.encode_sse_mr(0xF2, 0x11, src, base, ops.disp);
+            }
+            // UCOMISD xmm, xmm: 66 0F 2E /r
+            X86Opcode::Ucomisd => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_sse_rr(0x66, 0x2E, dst, src);
+            }
+
+            // =================================================================
+            // SSE scalar single-precision (F3 0F prefix)
+            // =================================================================
+            // ADDSS xmm, xmm: F3 0F 58 /r
+            X86Opcode::Addss => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_sse_rr(0xF3, 0x58, dst, src);
+            }
+            // SUBSS xmm, xmm: F3 0F 5C /r
+            X86Opcode::Subss => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_sse_rr(0xF3, 0x5C, dst, src);
+            }
+            // MULSS xmm, xmm: F3 0F 59 /r
+            X86Opcode::Mulss => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_sse_rr(0xF3, 0x59, dst, src);
+            }
+            // DIVSS xmm, xmm: F3 0F 5E /r
+            X86Opcode::Divss => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_sse_rr(0xF3, 0x5E, dst, src);
+            }
+            // MOVSS xmm, xmm: F3 0F 10 /r
+            X86Opcode::MovssRR => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_sse_rr(0xF3, 0x10, dst, src);
+            }
+            // MOVSS xmm, [mem]: F3 0F 10 /r
+            X86Opcode::MovssRM => {
+                let dst = self.require_dst(ops, opcode)?;
+                let base = ops.base.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands(format!("{:?}: missing base register", opcode))
+                })?;
+                self.encode_sse_rm(0xF3, 0x10, dst, base, ops.disp);
+            }
+            // MOVSS [mem], xmm: F3 0F 11 /r
+            X86Opcode::MovssMR => {
+                let src = self.require_dst(ops, opcode)?;
+                let base = ops.base.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands(format!("{:?}: missing base register", opcode))
+                })?;
+                self.encode_sse_mr(0xF3, 0x11, src, base, ops.disp);
+            }
+            // UCOMISS xmm, xmm: 0F 2E /r (no prefix)
+            X86Opcode::Ucomiss => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_sse_rr(0, 0x2E, dst, src);
+            }
+
+            // =================================================================
+            // CMOVcc — conditional move
+            // =================================================================
+            // CMOVcc r64, r64: REX.W + 0F 40+cc /r
+            X86Opcode::Cmovcc => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                let cc = ops.cc.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands("CMOVcc: missing condition code".into())
+                })?;
+                let rex = Self::rex_rr64(dst, src);
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0x40 + cc.encoding());
+                self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
+            }
+
+            // =================================================================
+            // SETcc — set byte on condition
+            // =================================================================
+            // SETcc r/m8: 0F 90+cc /0 (ModR/M mod=11, reg=0, rm=reg)
+            // Needs REX prefix if dst is R8-R15 or SPL/BPL/SIL/DIL.
+            X86Opcode::Setcc => {
+                let dst = self.require_dst(ops, opcode)?;
+                let cc = ops.cc.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands("SETcc: missing condition code".into())
+                })?;
+                // SETcc operates on 8-bit register, no REX.W.
+                // Need REX.B if destination encoding >= 8.
+                let rex = RexPrefix {
+                    w: false,
+                    r: false,
+                    x: false,
+                    b: dst.hw_enc() >= 8,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0x90 + cc.encoding());
+                self.emit_modrm(ModRM::ext_reg(0, dst.hw_enc()));
+            }
+
+            // =================================================================
+            // Bit manipulation
+            // =================================================================
+            // BSF r64, r64: REX.W + 0F BC /r
+            X86Opcode::Bsf => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_0f_rr64(0xBC, dst, src);
+            }
+            // BSR r64, r64: REX.W + 0F BD /r
+            X86Opcode::Bsr => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_0f_rr64(0xBD, dst, src);
+            }
+            // TZCNT r64, r64: F3 REX.W + 0F BC /r (rep-prefixed BSF)
+            X86Opcode::Tzcnt => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.emit_byte(0xF3); // REP prefix
+                let rex = Self::rex_rr64(dst, src);
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0xBC);
+                self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
+            }
+            // LZCNT r64, r64: F3 REX.W + 0F BD /r (rep-prefixed BSR)
+            X86Opcode::Lzcnt => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.emit_byte(0xF3); // REP prefix
+                let rex = Self::rex_rr64(dst, src);
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0xBD);
+                self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
+            }
+            // POPCNT r64, r64: F3 REX.W + 0F B8 /r
+            X86Opcode::Popcnt => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.emit_byte(0xF3); // REP prefix
+                let rex = Self::rex_rr64(dst, src);
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0xB8);
+                self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
             }
         }
 
@@ -963,6 +1248,8 @@ mod tests {
     use llvm2_ir::x86_64_ops::{X86CondCode, X86Opcode};
     use llvm2_ir::x86_64_regs::{
         R8, R9, R10, R11, R12, R13, R14, R15, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP,
+        AL, CL, R8B,
+        XMM0, XMM1, XMM8, XMM15,
     };
 
     // Helper to encode an instruction and return the bytes.
@@ -1770,5 +2057,588 @@ mod tests {
         // MOV RAX, imm64 = 10 bytes (REX.W + opcode + imm64)
         let n = enc.encode_instruction(X86Opcode::MovRI, &X86InstOperands::ri(RAX, 42)).unwrap();
         assert_eq!(n, 10);
+    }
+
+    // -----------------------------------------------------------------------
+    // LEA tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lea_rax_rbx() {
+        // LEA RAX, [RBX]: REX.W(48) + 8D + ModRM(00 000 011)
+        let bytes = encode(X86Opcode::Lea, &X86InstOperands::rm(RAX, RBX, 0));
+        assert_eq!(bytes, vec![0x48, 0x8D, 0x03]);
+    }
+
+    #[test]
+    fn test_lea_rax_rbx_disp8() {
+        // LEA RAX, [RBX+16]: REX.W + 8D + ModRM(01 000 011) + disp8
+        let bytes = encode(X86Opcode::Lea, &X86InstOperands::rm(RAX, RBX, 16));
+        assert_eq!(bytes, vec![0x48, 0x8D, 0x43, 0x10]);
+    }
+
+    #[test]
+    fn test_lea_rax_rbx_disp32() {
+        // LEA RAX, [RBX+256]: REX.W + 8D + ModRM(10 000 011) + disp32
+        let bytes = encode(X86Opcode::Lea, &X86InstOperands::rm(RAX, RBX, 256));
+        assert_eq!(bytes, vec![0x48, 0x8D, 0x83, 0x00, 0x01, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_lea_r15_rsp_disp8() {
+        // LEA R15, [RSP+8]: REX.WRB(4C) + 8D + ModRM(01 111 100) + SIB(00 100 100) + disp8
+        let bytes = encode(X86Opcode::Lea, &X86InstOperands::rm(R15, RSP, 8));
+        assert_eq!(bytes, vec![0x4C, 0x8D, 0x7C, 0x24, 0x08]);
+    }
+
+    // -----------------------------------------------------------------------
+    // MOVZX / MOVSX tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_movzx_rax_cl() {
+        // MOVZX RAX, CL: REX.W(48) + 0F B6 + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Movzx, &X86InstOperands::rr(RAX, RCX));
+        assert_eq!(bytes, vec![0x48, 0x0F, 0xB6, 0xC1]);
+    }
+
+    #[test]
+    fn test_movzx_r8_al() {
+        // MOVZX R8, AL: REX.WR(4C) + 0F B6 + ModRM(11 000 000)
+        let bytes = encode(X86Opcode::Movzx, &X86InstOperands::rr(R8, RAX));
+        assert_eq!(bytes, vec![0x4C, 0x0F, 0xB6, 0xC0]);
+    }
+
+    #[test]
+    fn test_movsx_rax_ecx() {
+        // MOVSXD RAX, ECX: REX.W(48) + 63 + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Movsx, &X86InstOperands::rr(RAX, RCX));
+        assert_eq!(bytes, vec![0x48, 0x63, 0xC1]);
+    }
+
+    #[test]
+    fn test_movsx_r15_r14() {
+        // MOVSXD R15, R14: REX.WRB(4D) + 63 + ModRM(11 111 110)
+        let bytes = encode(X86Opcode::Movsx, &X86InstOperands::rr(R15, R14));
+        assert_eq!(bytes, vec![0x4D, 0x63, 0xFE]);
+    }
+
+    // -----------------------------------------------------------------------
+    // SSE scalar double-precision tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_addsd_xmm0_xmm1() {
+        // ADDSD XMM0, XMM1: F2 0F 58 + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Addsd, &X86InstOperands::rr(XMM0, XMM1));
+        assert_eq!(bytes, vec![0xF2, 0x0F, 0x58, 0xC1]);
+    }
+
+    #[test]
+    fn test_subsd_xmm0_xmm1() {
+        // SUBSD XMM0, XMM1: F2 0F 5C + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Subsd, &X86InstOperands::rr(XMM0, XMM1));
+        assert_eq!(bytes, vec![0xF2, 0x0F, 0x5C, 0xC1]);
+    }
+
+    #[test]
+    fn test_mulsd_xmm0_xmm1() {
+        // MULSD XMM0, XMM1: F2 0F 59 + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Mulsd, &X86InstOperands::rr(XMM0, XMM1));
+        assert_eq!(bytes, vec![0xF2, 0x0F, 0x59, 0xC1]);
+    }
+
+    #[test]
+    fn test_divsd_xmm0_xmm1() {
+        // DIVSD XMM0, XMM1: F2 0F 5E + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Divsd, &X86InstOperands::rr(XMM0, XMM1));
+        assert_eq!(bytes, vec![0xF2, 0x0F, 0x5E, 0xC1]);
+    }
+
+    #[test]
+    fn test_addsd_xmm8_xmm15() {
+        // ADDSD XMM8, XMM15: F2 REX.RB(45) 0F 58 + ModRM(11 000 111)
+        let bytes = encode(X86Opcode::Addsd, &X86InstOperands::rr(XMM8, XMM15));
+        assert_eq!(bytes, vec![0xF2, 0x45, 0x0F, 0x58, 0xC7]);
+    }
+
+    #[test]
+    fn test_movsd_xmm0_xmm1() {
+        // MOVSD XMM0, XMM1: F2 0F 10 + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::MovsdRR, &X86InstOperands::rr(XMM0, XMM1));
+        assert_eq!(bytes, vec![0xF2, 0x0F, 0x10, 0xC1]);
+    }
+
+    #[test]
+    fn test_movsd_rm_xmm0_rbx() {
+        // MOVSD XMM0, [RBX]: F2 0F 10 + ModRM(00 000 011)
+        let bytes = encode(X86Opcode::MovsdRM, &X86InstOperands::rm(XMM0, RBX, 0));
+        assert_eq!(bytes, vec![0xF2, 0x0F, 0x10, 0x03]);
+    }
+
+    #[test]
+    fn test_movsd_rm_xmm0_rbx_disp8() {
+        // MOVSD XMM0, [RBX+8]: F2 0F 10 + ModRM(01 000 011) + disp8
+        let bytes = encode(X86Opcode::MovsdRM, &X86InstOperands::rm(XMM0, RBX, 8));
+        assert_eq!(bytes, vec![0xF2, 0x0F, 0x10, 0x43, 0x08]);
+    }
+
+    #[test]
+    fn test_movsd_mr_rbx_xmm0() {
+        // MOVSD [RBX], XMM0: F2 0F 11 + ModRM(00 000 011)
+        // For MovsdMR, dst field holds the source XMM register.
+        let bytes = encode(
+            X86Opcode::MovsdMR,
+            &X86InstOperands {
+                dst: Some(XMM0),
+                base: Some(RBX),
+                disp: 0,
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0xF2, 0x0F, 0x11, 0x03]);
+    }
+
+    #[test]
+    fn test_ucomisd_xmm0_xmm1() {
+        // UCOMISD XMM0, XMM1: 66 0F 2E + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Ucomisd, &X86InstOperands::rr(XMM0, XMM1));
+        assert_eq!(bytes, vec![0x66, 0x0F, 0x2E, 0xC1]);
+    }
+
+    // -----------------------------------------------------------------------
+    // SSE scalar single-precision tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_addss_xmm0_xmm1() {
+        // ADDSS XMM0, XMM1: F3 0F 58 + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Addss, &X86InstOperands::rr(XMM0, XMM1));
+        assert_eq!(bytes, vec![0xF3, 0x0F, 0x58, 0xC1]);
+    }
+
+    #[test]
+    fn test_subss_xmm0_xmm1() {
+        // SUBSS XMM0, XMM1: F3 0F 5C + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Subss, &X86InstOperands::rr(XMM0, XMM1));
+        assert_eq!(bytes, vec![0xF3, 0x0F, 0x5C, 0xC1]);
+    }
+
+    #[test]
+    fn test_mulss_xmm0_xmm1() {
+        // MULSS XMM0, XMM1: F3 0F 59 + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Mulss, &X86InstOperands::rr(XMM0, XMM1));
+        assert_eq!(bytes, vec![0xF3, 0x0F, 0x59, 0xC1]);
+    }
+
+    #[test]
+    fn test_divss_xmm0_xmm1() {
+        // DIVSS XMM0, XMM1: F3 0F 5E + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Divss, &X86InstOperands::rr(XMM0, XMM1));
+        assert_eq!(bytes, vec![0xF3, 0x0F, 0x5E, 0xC1]);
+    }
+
+    #[test]
+    fn test_addss_xmm8_xmm15() {
+        // ADDSS XMM8, XMM15: F3 REX.RB(45) 0F 58 + ModRM(11 000 111)
+        let bytes = encode(X86Opcode::Addss, &X86InstOperands::rr(XMM8, XMM15));
+        assert_eq!(bytes, vec![0xF3, 0x45, 0x0F, 0x58, 0xC7]);
+    }
+
+    #[test]
+    fn test_movss_xmm0_xmm1() {
+        // MOVSS XMM0, XMM1: F3 0F 10 + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::MovssRR, &X86InstOperands::rr(XMM0, XMM1));
+        assert_eq!(bytes, vec![0xF3, 0x0F, 0x10, 0xC1]);
+    }
+
+    #[test]
+    fn test_movss_rm_xmm0_rbx() {
+        // MOVSS XMM0, [RBX]: F3 0F 10 + ModRM(00 000 011)
+        let bytes = encode(X86Opcode::MovssRM, &X86InstOperands::rm(XMM0, RBX, 0));
+        assert_eq!(bytes, vec![0xF3, 0x0F, 0x10, 0x03]);
+    }
+
+    #[test]
+    fn test_movss_mr_rbx_xmm0() {
+        // MOVSS [RBX], XMM0: F3 0F 11 + ModRM(00 000 011)
+        let bytes = encode(
+            X86Opcode::MovssMR,
+            &X86InstOperands {
+                dst: Some(XMM0),
+                base: Some(RBX),
+                disp: 0,
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0xF3, 0x0F, 0x11, 0x03]);
+    }
+
+    #[test]
+    fn test_ucomiss_xmm0_xmm1() {
+        // UCOMISS XMM0, XMM1: 0F 2E + ModRM(11 000 001) (no prefix)
+        let bytes = encode(X86Opcode::Ucomiss, &X86InstOperands::rr(XMM0, XMM1));
+        assert_eq!(bytes, vec![0x0F, 0x2E, 0xC1]);
+    }
+
+    #[test]
+    fn test_ucomiss_xmm8_xmm15() {
+        // UCOMISS XMM8, XMM15: REX.RB(45) 0F 2E + ModRM(11 000 111)
+        let bytes = encode(X86Opcode::Ucomiss, &X86InstOperands::rr(XMM8, XMM15));
+        assert_eq!(bytes, vec![0x45, 0x0F, 0x2E, 0xC7]);
+    }
+
+    // -----------------------------------------------------------------------
+    // CMOVcc tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cmove_rax_rcx() {
+        // CMOVE RAX, RCX: REX.W(48) + 0F 44 + ModRM(11 000 001)
+        let bytes = encode(
+            X86Opcode::Cmovcc,
+            &X86InstOperands {
+                dst: Some(RAX),
+                src: Some(RCX),
+                cc: Some(X86CondCode::E),
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0x48, 0x0F, 0x44, 0xC1]);
+    }
+
+    #[test]
+    fn test_cmovne_rbx_rdx() {
+        // CMOVNE RBX, RDX: REX.W(48) + 0F 45 + ModRM(11 011 010)
+        let bytes = encode(
+            X86Opcode::Cmovcc,
+            &X86InstOperands {
+                dst: Some(RBX),
+                src: Some(RDX),
+                cc: Some(X86CondCode::NE),
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0x48, 0x0F, 0x45, 0xDA]);
+    }
+
+    #[test]
+    fn test_cmovl_r8_r9() {
+        // CMOVL R8, R9: REX.WRB(4D) + 0F 4C + ModRM(11 000 001)
+        let bytes = encode(
+            X86Opcode::Cmovcc,
+            &X86InstOperands {
+                dst: Some(R8),
+                src: Some(R9),
+                cc: Some(X86CondCode::L),
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0x4D, 0x0F, 0x4C, 0xC1]);
+    }
+
+    #[test]
+    fn test_cmovg_rax_r15() {
+        // CMOVG RAX, R15: REX.WB(49) + 0F 4F + ModRM(11 000 111)
+        let bytes = encode(
+            X86Opcode::Cmovcc,
+            &X86InstOperands {
+                dst: Some(RAX),
+                src: Some(R15),
+                cc: Some(X86CondCode::G),
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0x49, 0x0F, 0x4F, 0xC7]);
+    }
+
+    // -----------------------------------------------------------------------
+    // SETcc tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sete_al() {
+        // SETE AL: 0F 94 + ModRM(11 000 000)
+        let bytes = encode(
+            X86Opcode::Setcc,
+            &X86InstOperands {
+                dst: Some(AL),
+                cc: Some(X86CondCode::E),
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0x0F, 0x94, 0xC0]);
+    }
+
+    #[test]
+    fn test_setne_cl() {
+        // SETNE CL: 0F 95 + ModRM(11 000 001)
+        let bytes = encode(
+            X86Opcode::Setcc,
+            &X86InstOperands {
+                dst: Some(CL),
+                cc: Some(X86CondCode::NE),
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0x0F, 0x95, 0xC1]);
+    }
+
+    #[test]
+    fn test_setl_r8b() {
+        // SETL R8B: REX.B(41) + 0F 9C + ModRM(11 000 000)
+        let bytes = encode(
+            X86Opcode::Setcc,
+            &X86InstOperands {
+                dst: Some(R8B),
+                cc: Some(X86CondCode::L),
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0x41, 0x0F, 0x9C, 0xC0]);
+    }
+
+    #[test]
+    fn test_setg_al() {
+        // SETG AL: 0F 9F + ModRM(11 000 000)
+        let bytes = encode(
+            X86Opcode::Setcc,
+            &X86InstOperands {
+                dst: Some(AL),
+                cc: Some(X86CondCode::G),
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0x0F, 0x9F, 0xC0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Bit manipulation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bsf_rax_rcx() {
+        // BSF RAX, RCX: REX.W(48) + 0F BC + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Bsf, &X86InstOperands::rr(RAX, RCX));
+        assert_eq!(bytes, vec![0x48, 0x0F, 0xBC, 0xC1]);
+    }
+
+    #[test]
+    fn test_bsf_r8_r9() {
+        // BSF R8, R9: REX.WRB(4D) + 0F BC + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Bsf, &X86InstOperands::rr(R8, R9));
+        assert_eq!(bytes, vec![0x4D, 0x0F, 0xBC, 0xC1]);
+    }
+
+    #[test]
+    fn test_bsr_rax_rcx() {
+        // BSR RAX, RCX: REX.W(48) + 0F BD + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Bsr, &X86InstOperands::rr(RAX, RCX));
+        assert_eq!(bytes, vec![0x48, 0x0F, 0xBD, 0xC1]);
+    }
+
+    #[test]
+    fn test_bsr_r15_rax() {
+        // BSR R15, RAX: REX.WR(4C) + 0F BD + ModRM(11 111 000)
+        let bytes = encode(X86Opcode::Bsr, &X86InstOperands::rr(R15, RAX));
+        assert_eq!(bytes, vec![0x4C, 0x0F, 0xBD, 0xF8]);
+    }
+
+    #[test]
+    fn test_tzcnt_rax_rcx() {
+        // TZCNT RAX, RCX: F3 REX.W(48) + 0F BC + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Tzcnt, &X86InstOperands::rr(RAX, RCX));
+        assert_eq!(bytes, vec![0xF3, 0x48, 0x0F, 0xBC, 0xC1]);
+    }
+
+    #[test]
+    fn test_tzcnt_r8_r9() {
+        // TZCNT R8, R9: F3 REX.WRB(4D) + 0F BC + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Tzcnt, &X86InstOperands::rr(R8, R9));
+        assert_eq!(bytes, vec![0xF3, 0x4D, 0x0F, 0xBC, 0xC1]);
+    }
+
+    #[test]
+    fn test_lzcnt_rax_rcx() {
+        // LZCNT RAX, RCX: F3 REX.W(48) + 0F BD + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Lzcnt, &X86InstOperands::rr(RAX, RCX));
+        assert_eq!(bytes, vec![0xF3, 0x48, 0x0F, 0xBD, 0xC1]);
+    }
+
+    #[test]
+    fn test_lzcnt_r15_rax() {
+        // LZCNT R15, RAX: F3 REX.WR(4C) + 0F BD + ModRM(11 111 000)
+        let bytes = encode(X86Opcode::Lzcnt, &X86InstOperands::rr(R15, RAX));
+        assert_eq!(bytes, vec![0xF3, 0x4C, 0x0F, 0xBD, 0xF8]);
+    }
+
+    #[test]
+    fn test_popcnt_rax_rcx() {
+        // POPCNT RAX, RCX: F3 REX.W(48) + 0F B8 + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Popcnt, &X86InstOperands::rr(RAX, RCX));
+        assert_eq!(bytes, vec![0xF3, 0x48, 0x0F, 0xB8, 0xC1]);
+    }
+
+    #[test]
+    fn test_popcnt_r8_r9() {
+        // POPCNT R8, R9: F3 REX.WRB(4D) + 0F B8 + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::Popcnt, &X86InstOperands::rr(R8, R9));
+        assert_eq!(bytes, vec![0xF3, 0x4D, 0x0F, 0xB8, 0xC1]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Mixed encoding size tests for new instructions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_new_instruction_sizes() {
+        let mut enc = X86Encoder::new();
+
+        // SSE scalar: prefix(1) + 0F(1) + opcode(1) + ModRM(1) = 4 bytes
+        let n = enc.encode_instruction(X86Opcode::Addsd, &X86InstOperands::rr(XMM0, XMM1)).unwrap();
+        assert_eq!(n, 4);
+
+        // SSE scalar with extended regs: prefix(1) + REX(1) + 0F(1) + opcode(1) + ModRM(1) = 5 bytes
+        let n = enc.encode_instruction(X86Opcode::Addsd, &X86InstOperands::rr(XMM8, XMM15)).unwrap();
+        assert_eq!(n, 5);
+
+        // CMOVcc: REX.W(1) + 0F(1) + opcode(1) + ModRM(1) = 4 bytes
+        let n = enc.encode_instruction(
+            X86Opcode::Cmovcc,
+            &X86InstOperands {
+                dst: Some(RAX),
+                src: Some(RCX),
+                cc: Some(X86CondCode::E),
+                ..X86InstOperands::none()
+            },
+        ).unwrap();
+        assert_eq!(n, 4);
+
+        // SETcc (no REX): 0F(1) + opcode(1) + ModRM(1) = 3 bytes
+        let n = enc.encode_instruction(
+            X86Opcode::Setcc,
+            &X86InstOperands {
+                dst: Some(AL),
+                cc: Some(X86CondCode::E),
+                ..X86InstOperands::none()
+            },
+        ).unwrap();
+        assert_eq!(n, 3);
+
+        // SETcc with REX.B: REX(1) + 0F(1) + opcode(1) + ModRM(1) = 4 bytes
+        let n = enc.encode_instruction(
+            X86Opcode::Setcc,
+            &X86InstOperands {
+                dst: Some(R8B),
+                cc: Some(X86CondCode::E),
+                ..X86InstOperands::none()
+            },
+        ).unwrap();
+        assert_eq!(n, 4);
+
+        // BSF: REX.W(1) + 0F(1) + opcode(1) + ModRM(1) = 4 bytes
+        let n = enc.encode_instruction(X86Opcode::Bsf, &X86InstOperands::rr(RAX, RCX)).unwrap();
+        assert_eq!(n, 4);
+
+        // TZCNT: F3(1) + REX.W(1) + 0F(1) + opcode(1) + ModRM(1) = 5 bytes
+        let n = enc.encode_instruction(X86Opcode::Tzcnt, &X86InstOperands::rr(RAX, RCX)).unwrap();
+        assert_eq!(n, 5);
+
+        // POPCNT: F3(1) + REX.W(1) + 0F(1) + opcode(1) + ModRM(1) = 5 bytes
+        let n = enc.encode_instruction(X86Opcode::Popcnt, &X86InstOperands::rr(RAX, RCX)).unwrap();
+        assert_eq!(n, 5);
+
+        // LEA [base+0] = 3 bytes (REX.W + 8D + ModRM)
+        let n = enc.encode_instruction(X86Opcode::Lea, &X86InstOperands::rm(RAX, RBX, 0)).unwrap();
+        assert_eq!(n, 3);
+
+        // MOVZX = 4 bytes (REX.W + 0F + B6 + ModRM)
+        let n = enc.encode_instruction(X86Opcode::Movzx, &X86InstOperands::rr(RAX, RCX)).unwrap();
+        assert_eq!(n, 4);
+
+        // MOVSXD = 3 bytes (REX.W + 63 + ModRM)
+        let n = enc.encode_instruction(X86Opcode::Movsx, &X86InstOperands::rr(RAX, RCX)).unwrap();
+        assert_eq!(n, 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // CMOVcc / SETcc missing cc errors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cmovcc_missing_cc_error() {
+        let mut enc = X86Encoder::new();
+        let result = enc.encode_instruction(
+            X86Opcode::Cmovcc,
+            &X86InstOperands::rr(RAX, RCX),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_setcc_missing_cc_error() {
+        let mut enc = X86Encoder::new();
+        let result = enc.encode_instruction(
+            X86Opcode::Setcc,
+            &X86InstOperands::r(AL),
+        );
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // All CMOVcc condition codes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cmovcc_all_conditions() {
+        let all_cc = [
+            (X86CondCode::O,  0x40u8),
+            (X86CondCode::NO, 0x41),
+            (X86CondCode::B,  0x42),
+            (X86CondCode::AE, 0x43),
+            (X86CondCode::E,  0x44),
+            (X86CondCode::NE, 0x45),
+            (X86CondCode::BE, 0x46),
+            (X86CondCode::A,  0x47),
+            (X86CondCode::S,  0x48),
+            (X86CondCode::NS, 0x49),
+            (X86CondCode::P,  0x4A),
+            (X86CondCode::NP, 0x4B),
+            (X86CondCode::L,  0x4C),
+            (X86CondCode::GE, 0x4D),
+            (X86CondCode::LE, 0x4E),
+            (X86CondCode::G,  0x4F),
+        ];
+        for (cc, expected_byte) in &all_cc {
+            let bytes = encode(
+                X86Opcode::Cmovcc,
+                &X86InstOperands {
+                    dst: Some(RAX),
+                    src: Some(RCX),
+                    cc: Some(*cc),
+                    ..X86InstOperands::none()
+                },
+            );
+            // REX.W(48) + 0F + cc_byte + ModRM
+            assert_eq!(bytes[2], *expected_byte, "CMOVcc {:?}", cc);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SSE memory with extended registers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_movsd_rm_xmm8_rsp_disp8() {
+        // MOVSD XMM8, [RSP+16]: F2 REX.R(44) 0F 10 + ModRM(01 000 100) + SIB(00 100 100) + disp8
+        let bytes = encode(X86Opcode::MovsdRM, &X86InstOperands::rm(XMM8, RSP, 16));
+        assert_eq!(bytes, vec![0xF2, 0x44, 0x0F, 0x10, 0x44, 0x24, 0x10]);
+    }
+
+    #[test]
+    fn test_movss_rm_xmm8_rbp() {
+        // MOVSS XMM8, [RBP+0]: F3 REX.R(44) 0F 10 + ModRM(01 000 101) + disp8(00)
+        let bytes = encode(X86Opcode::MovssRM, &X86InstOperands::rm(XMM8, RBP, 0));
+        assert_eq!(bytes, vec![0xF3, 0x44, 0x0F, 0x10, 0x45, 0x00]);
     }
 }
