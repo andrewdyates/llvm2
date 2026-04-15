@@ -108,6 +108,58 @@ pub enum Opcode {
     /// ALL variadic args are placed on the stack (8-byte aligned).
     /// `fixed_args` is the count of non-variadic parameters.
     CallVariadic { name: String, fixed_args: u32 },
+    /// Invoke — call that may throw an exception.
+    ///
+    /// Like `Call`, but has two successors: a normal continuation block and
+    /// an unwind landing pad block. If the callee returns normally, control
+    /// transfers to `normal_dest`. If the callee throws an exception that
+    /// is caught by a landing pad in this function, control transfers to
+    /// `unwind_dest`.
+    ///
+    /// `args` are the call arguments, classified per ABI (same as Call).
+    /// Results are the call return values (same as Call).
+    ///
+    /// Lowered to BL on AArch64, but with EH metadata: the call site
+    /// gets an entry in the LSDA call site table pointing to the
+    /// landing pad at `unwind_dest`.
+    ///
+    /// Reference: LLVM IR `invoke` instruction
+    Invoke {
+        name: String,
+        normal_dest: Block,
+        unwind_dest: Block,
+    },
+
+    /// Landing pad — exception handler entry point.
+    ///
+    /// Marks the beginning of an exception handler block. When the unwinder
+    /// dispatches to this landing pad, it provides:
+    /// - The exception object pointer (args[0] result, I64)
+    /// - The type selector value (args[1] result, I32)
+    ///
+    /// The type selector is used by downstream code to determine which
+    /// catch clause matched (if any), or whether this is a cleanup-only
+    /// handler.
+    ///
+    /// `is_cleanup`: If true, this landing pad runs cleanup code (destructors)
+    /// and then resumes unwinding. If false, it catches specific exception types.
+    ///
+    /// `catch_type_indices`: 1-based indices into the type table for catch
+    /// clauses. Index 0 means catch-all. Empty for cleanup-only pads.
+    ///
+    /// Reference: LLVM IR `landingpad` instruction
+    LandingPad {
+        is_cleanup: bool,
+        catch_type_indices: Vec<u32>,
+    },
+
+    /// Resume unwinding — re-throw the current exception.
+    ///
+    /// Used at the end of a cleanup landing pad to continue unwinding
+    /// after executing cleanup code. `args[0]` is the exception object
+    /// pointer. Lowered to a call to `_Unwind_Resume`.
+    Resume,
+
     /// Multi-way branch (switch statement).
     ///
     /// `args[0]` is the selector value (integer).
