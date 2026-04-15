@@ -153,6 +153,12 @@ pub enum ProofCategory {
     /// composition, dead IV elimination).
     /// Source: `loop_opt_proofs::all_loop_opt_proofs()`.
     LoopOptimization,
+
+    /// Strength reduction pass correctness proofs (multiply-to-shift, multiply-to-add,
+    /// multiply-to-sub-shift, multiply-to-add-shift, division-to-shift, modulo-to-mask,
+    /// IV update, idempotence, no-change safety, DCE composition).
+    /// Source: `strength_reduce_proofs::all_strength_reduce_proofs()`.
+    StrengthReduction,
 }
 
 impl ProofCategory {
@@ -184,6 +190,7 @@ impl ProofCategory {
             ProofCategory::InstructionScheduling,
             ProofCategory::MachOEmission,
             ProofCategory::LoopOptimization,
+            ProofCategory::StrengthReduction,
         ]
     }
 
@@ -215,6 +222,7 @@ impl ProofCategory {
             ProofCategory::InstructionScheduling => "Instruction Scheduling",
             ProofCategory::MachOEmission => "Mach-O Emission",
             ProofCategory::LoopOptimization => "Loop Optimization",
+            ProofCategory::StrengthReduction => "Strength Reduction",
         }
     }
 }
@@ -429,6 +437,13 @@ fn register_emission_proofs(proofs: &mut Vec<CategorizedProof>) {
     }
 }
 
+#[inline(never)]
+fn register_strength_reduce_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::strength_reduce_proofs::all_strength_reduce_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::StrengthReduction });
+    }
+}
+
 impl ProofDatabase {
     /// Construct the database by collecting all proofs from all registries.
     ///
@@ -447,6 +462,7 @@ impl ProofDatabase {
         register_backend_proofs(&mut proofs);
         register_target_proofs(&mut proofs);
         register_emission_proofs(&mut proofs);
+        register_strength_reduce_proofs(&mut proofs);
         ProofDatabase { proofs }
     }
 
@@ -794,8 +810,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            24,
-            "expected 24 categories, got {}",
+            26,
+            "expected 26 categories, got {}",
             categories.len()
         );
     }
