@@ -727,6 +727,26 @@ impl<'a> TmirAdapter<'a> {
                 };
                 Ok(vec![fneg_inst])
             }
+            UnOp::FAbs => {
+                // FAbs: result = |operand|
+                // Directly emit Fabs; ISel lowers to FABS Sd/Dd, Sn/Dn.
+                let fabs_inst = Instruction {
+                    opcode: Opcode::Fabs,
+                    args: vec![src],
+                    results: vec![dst],
+                };
+                Ok(vec![fabs_inst])
+            }
+            UnOp::FSqrt => {
+                // FSqrt: result = sqrt(operand)
+                // Directly emit Fsqrt; ISel lowers to FSQRT Sd/Dd, Sn/Dn.
+                let fsqrt_inst = Instruction {
+                    opcode: Opcode::Fsqrt,
+                    args: vec![src],
+                    results: vec![dst],
+                };
+                Ok(vec![fsqrt_inst])
+            }
         }
     }
 

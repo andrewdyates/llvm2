@@ -119,7 +119,8 @@ pub fn opcode_latency(opcode: AArch64Opcode) -> (u32, ExecutionPort) {
         Bl | Blr | BL | BLR | Ret => (1, ExecutionPort::Branch),
 
         // Floating-point arithmetic: 3 cycles
-        FaddRR | FsubRR | FmulRR | FdivRR | FnegRR | Fcmp => (3, ExecutionPort::FpAlu),
+        FaddRR | FsubRR | FmulRR | FdivRR | FnegRR | FabsRR | Fcmp => (3, ExecutionPort::FpAlu),
+        FsqrtRR => (12, ExecutionPort::FpAlu),
         FcvtzsRR | FcvtzuRR | ScvtfRR | UcvtfRR => (3, ExecutionPort::FpAlu),
         FcvtSD | FcvtDS => (3, ExecutionPort::FpAlu),
         FmovGprFpr | FmovFprGpr | FmovImm => (1, ExecutionPort::FpAlu),

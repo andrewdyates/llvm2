@@ -493,7 +493,7 @@ fn encode_inst(inst: &MachInst) -> Result<u32, LowerError> {
             fp_size(0)?;
             encode_instruction(inst).map_err(map_encode_error)
         }
-        AArch64Opcode::FnegRR => {
+        AArch64Opcode::FnegRR | AArch64Opcode::FabsRR | AArch64Opcode::FsqrtRR => {
             fp_size(0)?;
             encode_instruction(inst).map_err(map_encode_error)
         }

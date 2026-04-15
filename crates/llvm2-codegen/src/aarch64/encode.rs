@@ -945,6 +945,26 @@ pub fn encode_instruction(inst: &MachInst) -> Result<u32, EncodeError> {
             Ok(enc)
         }
 
+        // FABS Dd, Dn — floating-point absolute value (1-source FP)
+        AArch64Opcode::FabsRR => {
+            let fp_size = fp_size_from_inst(inst);
+            let enc = encoding_fp::encode_fp_unary(
+                fp_size, encoding_fp::FpUnaryOp::Fabs,
+                preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
+        // FSQRT Dd, Dn — floating-point square root (1-source FP)
+        AArch64Opcode::FsqrtRR => {
+            let fp_size = fp_size_from_inst(inst);
+            let enc = encoding_fp::encode_fp_unary(
+                fp_size, encoding_fp::FpUnaryOp::Fsqrt,
+                preg_hw(inst, 1)? as u8, preg_hw(inst, 0)? as u8,
+            )?;
+            Ok(enc)
+        }
+
         // FCMP Rn, Rm
         AArch64Opcode::Fcmp => {
             let fp_size = fp_size_from_cmp_inst(inst);
@@ -2315,6 +2335,8 @@ mod tests {
             (AArch64Opcode::FmulRR, vec![preg(V0), preg(V1), preg(V2)]),
             (AArch64Opcode::FdivRR, vec![preg(V0), preg(V1), preg(V2)]),
             (AArch64Opcode::FnegRR, vec![preg(V0), preg(V1)]),
+            (AArch64Opcode::FabsRR, vec![preg(V0), preg(V1)]),
+            (AArch64Opcode::FsqrtRR, vec![preg(V0), preg(V1)]),
             (AArch64Opcode::Fcmp, vec![preg(V0), preg(V1)]),
             (AArch64Opcode::FcvtzsRR, vec![preg(X0), preg(V1)]),
             (AArch64Opcode::ScvtfRR, vec![preg(V0), preg(X1)]),
