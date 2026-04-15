@@ -124,6 +124,10 @@ pub enum ProofCategory {
     /// Bitwise and shift lowering proofs: AND, OR, XOR, NOT, SHL, LSR, ASR (I8, I16).
     /// Source: `lowering_proof::all_bitwise_shift_proofs()`.
     BitwiseShift,
+
+    /// Constant materialization proofs (MOVZ, MOVZ+MOVK, ORR logical imm, MOVN).
+    /// Source: `const_materialize_proofs::all_const_materialize_proofs_with_variants()`.
+    ConstantMaterialization,
 }
 
 impl ProofCategory {
@@ -149,6 +153,7 @@ impl ProofCategory {
             ProofCategory::AnePrecision,
             ProofCategory::RegAlloc,
             ProofCategory::BitwiseShift,
+            ProofCategory::ConstantMaterialization,
         ]
     }
 
@@ -174,6 +179,7 @@ impl ProofCategory {
             ProofCategory::AnePrecision => "ANE Precision",
             ProofCategory::RegAlloc => "Register Allocation",
             ProofCategory::BitwiseShift => "Bitwise/Shift",
+            ProofCategory::ConstantMaterialization => "Constant Materialization",
         }
     }
 }
@@ -373,6 +379,11 @@ impl ProofDatabase {
         // Bitwise and shift lowering proofs (I8 exhaustive + I16 statistical)
         for p in crate::lowering_proof::all_bitwise_shift_proofs() {
             proofs.push(CategorizedProof { obligation: p, category: ProofCategory::BitwiseShift });
+        }
+
+        // Constant materialization proofs (MOVZ, MOVZ+MOVK, ORR, MOVN)
+        for p in crate::const_materialize_proofs::all_const_materialize_proofs_with_variants() {
+            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::ConstantMaterialization });
         }
 
         ProofDatabase { proofs }

@@ -109,6 +109,7 @@ pub mod neon_lowering_proofs;
 pub mod vectorization_proofs;
 pub mod ane_precision_proofs;
 pub mod regalloc_proofs;
+pub mod const_materialize_proofs;
 pub mod proof_database;
 pub mod verification_runner;
 pub mod function_verifier;
