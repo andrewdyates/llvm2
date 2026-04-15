@@ -1898,6 +1898,334 @@ pub fn all_nzcv_proofs() -> Vec<ProofObligation> {
     proofs
 }
 
+// ---------------------------------------------------------------------------
+// Bitwise lowering proofs: tMIR::Band/Bor/Bxor/Bnot -> AArch64 AND/ORR/EOR/MVN
+// ---------------------------------------------------------------------------
+
+/// Build the proof obligation for: `tMIR::Band(I32, a, b) -> AND Wd, Wn, Wm`
+pub fn proof_and_i32() -> ProofObligation {
+    use crate::aarch64_semantics::encode_and_rr;
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "Band_I32 -> ANDWrr".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Band, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_and_rr(OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Band(I64, a, b) -> AND Xd, Xn, Xm`
+pub fn proof_and_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_and_rr;
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "Band_I64 -> ANDXrr".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Band, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_and_rr(OperandSize::S64, a, b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bor(I32, a, b) -> ORR Wd, Wn, Wm`
+pub fn proof_or_i32() -> ProofObligation {
+    use crate::aarch64_semantics::encode_orr_rr;
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "Bor_I32 -> ORRWrr".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Bor, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_orr_rr(OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bor(I64, a, b) -> ORR Xd, Xn, Xm`
+pub fn proof_or_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_orr_rr;
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "Bor_I64 -> ORRXrr".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Bor, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_orr_rr(OperandSize::S64, a, b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bxor(I32, a, b) -> EOR Wd, Wn, Wm`
+pub fn proof_xor_i32() -> ProofObligation {
+    use crate::aarch64_semantics::encode_eor_rr;
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "Bxor_I32 -> EORWrr".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Bxor, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_eor_rr(OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bxor(I64, a, b) -> EOR Xd, Xn, Xm`
+pub fn proof_xor_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_eor_rr;
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "Bxor_I64 -> EORXrr".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Bxor, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_eor_rr(OperandSize::S64, a, b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bnot(I32, a) -> MVN Wd, Wm`
+///
+/// MVN is `ORN Rd, WZR, Rm`, which is bitwise complement.
+/// tMIR Bnot is encoded as `bvxor(a, all_ones)`, AArch64 MVN is also `bvxor(a, all_ones)`.
+pub fn proof_not_i32() -> ProofObligation {
+    use crate::aarch64_semantics::encode_mvn;
+    use crate::tmir_semantics::encode_tmir_bnot;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+
+    ProofObligation {
+        name: "Bnot_I32 -> MVN Wd".to_string(),
+        tmir_expr: encode_tmir_bnot(Type::I32, a.clone()),
+        aarch64_expr: encode_mvn(OperandSize::S32, a),
+        inputs: vec![("a".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bnot(I64, a) -> MVN Xd, Xm`
+pub fn proof_not_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_mvn;
+    use crate::tmir_semantics::encode_tmir_bnot;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+
+    ProofObligation {
+        name: "Bnot_I64 -> MVN Xd".to_string(),
+        tmir_expr: encode_tmir_bnot(Type::I64, a.clone()),
+        aarch64_expr: encode_mvn(OperandSize::S64, a),
+        inputs: vec![("a".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shift lowering proofs: tMIR::Ishl/Ushr/Sshr -> AArch64 LSL/LSR/ASR
+// ---------------------------------------------------------------------------
+
+/// Build the proof obligation for: `tMIR::Ishl(I32, a, b) -> LSL Wd, Wn, Wm`
+pub fn proof_shl_i32() -> ProofObligation {
+    use crate::aarch64_semantics::encode_lsl_rr;
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "Ishl_I32 -> LSLWrr".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Ishl, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_lsl_rr(OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Ishl(I64, a, b) -> LSL Xd, Xn, Xm`
+pub fn proof_shl_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_lsl_rr;
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "Ishl_I64 -> LSLXrr".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Ishl, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_lsl_rr(OperandSize::S64, a, b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Ushr(I32, a, b) -> LSR Wd, Wn, Wm`
+pub fn proof_lsr_i32() -> ProofObligation {
+    use crate::aarch64_semantics::encode_lsr_rr;
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "Ushr_I32 -> LSRWrr".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Ushr, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_lsr_rr(OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Ushr(I64, a, b) -> LSR Xd, Xn, Xm`
+pub fn proof_lsr_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_lsr_rr;
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "Ushr_I64 -> LSRXrr".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Ushr, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_lsr_rr(OperandSize::S64, a, b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Sshr(I32, a, b) -> ASR Wd, Wn, Wm`
+///
+/// Arithmetic shift right preserves the sign bit. AArch64 ASR uses ASRV
+/// which shifts by `Rm mod 32` bits, sign-extending the result.
+pub fn proof_asr_i32() -> ProofObligation {
+    use crate::aarch64_semantics::encode_asr_rr;
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "Sshr_I32 -> ASRWrr".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Sshr, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_asr_rr(OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Sshr(I64, a, b) -> ASR Xd, Xn, Xm`
+pub fn proof_asr_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_asr_rr;
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "Sshr_I64 -> ASRXrr".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Sshr, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_asr_rr(OperandSize::S64, a, b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+    }
+}
+
+/// Return all bitwise and shift lowering proofs.
+///
+/// Includes AND, OR, XOR, NOT at I32/I64, and SHL, LSR, ASR at I32/I64.
+pub fn all_bitwise_shift_proofs() -> Vec<ProofObligation> {
+    vec![
+        // Bitwise operations
+        proof_and_i32(),
+        proof_and_i64(),
+        proof_or_i32(),
+        proof_or_i64(),
+        proof_xor_i32(),
+        proof_xor_i64(),
+        proof_not_i32(),
+        proof_not_i64(),
+        // Shift operations
+        proof_shl_i32(),
+        proof_shl_i64(),
+        proof_lsr_i32(),
+        proof_lsr_i64(),
+        proof_asr_i32(),
+        proof_asr_i64(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2574,6 +2902,115 @@ mod tests {
         for obligation in all_nzcv_proofs() {
             assert_valid(&obligation);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Bitwise lowering proof tests (I32/I64)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_and_i32() {
+        assert_valid(&proof_and_i32());
+    }
+
+    #[test]
+    fn test_proof_and_i64() {
+        assert_valid(&proof_and_i64());
+    }
+
+    #[test]
+    fn test_proof_or_i32() {
+        assert_valid(&proof_or_i32());
+    }
+
+    #[test]
+    fn test_proof_or_i64() {
+        assert_valid(&proof_or_i64());
+    }
+
+    #[test]
+    fn test_proof_xor_i32() {
+        assert_valid(&proof_xor_i32());
+    }
+
+    #[test]
+    fn test_proof_xor_i64() {
+        assert_valid(&proof_xor_i64());
+    }
+
+    #[test]
+    fn test_proof_not_i32() {
+        assert_valid(&proof_not_i32());
+    }
+
+    #[test]
+    fn test_proof_not_i64() {
+        assert_valid(&proof_not_i64());
+    }
+
+    // -----------------------------------------------------------------------
+    // Shift lowering proof tests (I32/I64)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_shl_i32() {
+        assert_valid(&proof_shl_i32());
+    }
+
+    #[test]
+    fn test_proof_shl_i64() {
+        assert_valid(&proof_shl_i64());
+    }
+
+    #[test]
+    fn test_proof_lsr_i32() {
+        assert_valid(&proof_lsr_i32());
+    }
+
+    #[test]
+    fn test_proof_lsr_i64() {
+        assert_valid(&proof_lsr_i64());
+    }
+
+    #[test]
+    fn test_proof_asr_i32() {
+        assert_valid(&proof_asr_i32());
+    }
+
+    #[test]
+    fn test_proof_asr_i64() {
+        assert_valid(&proof_asr_i64());
+    }
+
+    // -----------------------------------------------------------------------
+    // Aggregate bitwise/shift proof tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_all_bitwise_shift_proofs() {
+        for obligation in all_bitwise_shift_proofs() {
+            assert_valid(&obligation);
+        }
+    }
+
+    /// Verify that bitwise/shift proofs have no preconditions
+    /// (unlike division which requires NonZeroDivisor).
+    #[test]
+    fn test_bitwise_shift_proofs_no_preconditions() {
+        for obligation in all_bitwise_shift_proofs() {
+            assert!(
+                obligation.preconditions.is_empty(),
+                "Proof '{}' should have no preconditions",
+                obligation.name
+            );
+        }
+    }
+
+    /// Verify the count of bitwise/shift proofs: 8 bitwise + 6 shift = 14 total.
+    #[test]
+    fn test_bitwise_shift_proof_count() {
+        let proofs = all_bitwise_shift_proofs();
+        assert_eq!(proofs.len(), 14, "Expected 14 bitwise/shift proofs (8 bitwise + 6 shift)");
     }
 
     // -----------------------------------------------------------------------

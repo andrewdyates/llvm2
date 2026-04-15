@@ -142,6 +142,82 @@ pub fn encode_fneg(_size: FPSize, rn: SmtExpr) -> SmtExpr {
     rn.fp_neg()
 }
 
+// ---------------------------------------------------------------------------
+// Bitwise instruction semantics
+// ---------------------------------------------------------------------------
+
+/// Encode `AND Wd, Wn, Wm` or `AND Xd, Xn, Xm` — bitwise AND.
+///
+/// Semantics: `Rd = Rn & Rm`.
+/// Reference: ARM DDI 0487, C6.2.12 AND (shifted register).
+pub fn encode_and_rr(size: OperandSize, rn: SmtExpr, rm: SmtExpr) -> SmtExpr {
+    let _ = size;
+    rn.bvand(rm)
+}
+
+/// Encode `ORR Wd, Wn, Wm` or `ORR Xd, Xn, Xm` — bitwise inclusive OR.
+///
+/// Semantics: `Rd = Rn | Rm`.
+/// Reference: ARM DDI 0487, C6.2.230 ORR (shifted register).
+pub fn encode_orr_rr(size: OperandSize, rn: SmtExpr, rm: SmtExpr) -> SmtExpr {
+    let _ = size;
+    rn.bvor(rm)
+}
+
+/// Encode `EOR Wd, Wn, Wm` or `EOR Xd, Xn, Xm` — bitwise exclusive OR.
+///
+/// Semantics: `Rd = Rn ^ Rm`.
+/// Reference: ARM DDI 0487, C6.2.87 EOR (shifted register).
+pub fn encode_eor_rr(size: OperandSize, rn: SmtExpr, rm: SmtExpr) -> SmtExpr {
+    let _ = size;
+    rn.bvxor(rm)
+}
+
+/// Encode `MVN Wd, Wm` or `MVN Xd, Xm` — bitwise NOT (move NOT).
+///
+/// On AArch64, `MVN Rd, Rm` is an alias for `ORN Rd, XZR/WZR, Rm`.
+/// Semantics: `Rd = ~Rm` (bitwise complement).
+/// Reference: ARM DDI 0487, C6.2.192 MVN.
+pub fn encode_mvn(size: OperandSize, rn: SmtExpr) -> SmtExpr {
+    let width = operand_size_bits(size);
+    let all_ones = SmtExpr::bv_const(crate::smt::mask(u64::MAX, width), width);
+    rn.bvxor(all_ones)
+}
+
+// ---------------------------------------------------------------------------
+// Shift instruction semantics
+// ---------------------------------------------------------------------------
+
+/// Encode `LSL Wd, Wn, Wm` or `LSL Xd, Xn, Xm` — logical shift left.
+///
+/// On AArch64, `LSL Rd, Rn, Rm` is an alias for `LSLV Rd, Rn, Rm`.
+/// Semantics: `Rd = Rn << (Rm mod width)`.
+/// Reference: ARM DDI 0487, C6.2.171 LSL (register).
+pub fn encode_lsl_rr(size: OperandSize, rn: SmtExpr, rm: SmtExpr) -> SmtExpr {
+    let _ = size;
+    rn.bvshl(rm)
+}
+
+/// Encode `LSR Wd, Wn, Wm` or `LSR Xd, Xn, Xm` — logical shift right.
+///
+/// On AArch64, `LSR Rd, Rn, Rm` is an alias for `LSRV Rd, Rn, Rm`.
+/// Semantics: `Rd = Rn >> (Rm mod width)` (unsigned / zero-fill).
+/// Reference: ARM DDI 0487, C6.2.173 LSR (register).
+pub fn encode_lsr_rr(size: OperandSize, rn: SmtExpr, rm: SmtExpr) -> SmtExpr {
+    let _ = size;
+    rn.bvlshr(rm)
+}
+
+/// Encode `ASR Wd, Wn, Wm` or `ASR Xd, Xn, Xm` — arithmetic shift right.
+///
+/// On AArch64, `ASR Rd, Rn, Rm` is an alias for `ASRV Rd, Rn, Rm`.
+/// Semantics: `Rd = Rn >>_s (Rm mod width)` (sign-extending).
+/// Reference: ARM DDI 0487, C6.2.16 ASR (register).
+pub fn encode_asr_rr(size: OperandSize, rn: SmtExpr, rm: SmtExpr) -> SmtExpr {
+    let _ = size;
+    rn.bvashr(rm)
+}
+
 /// Width in bits for an OperandSize.
 pub fn operand_size_bits(size: OperandSize) -> u32 {
     match size {
@@ -300,5 +376,87 @@ mod tests {
         assert_eq!(FPSize::Single.sb(), 24);
         assert_eq!(FPSize::Double.eb(), 11);
         assert_eq!(FPSize::Double.sb(), 53);
+    }
+
+    // -----------------------------------------------------------------------
+    // Bitwise instruction semantics tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_and_rr_32() {
+        let (a, b) = sym32();
+        let expr = encode_and_rr(OperandSize::S32, a, b);
+        let result = expr.eval(&env(&[("a", 0xFF00_FF00), ("b", 0x0F0F_0F0F)]));
+        assert_eq!(result, EvalResult::Bv(0x0F00_0F00));
+    }
+
+    #[test]
+    fn test_orr_rr_32() {
+        let (a, b) = sym32();
+        let expr = encode_orr_rr(OperandSize::S32, a, b);
+        let result = expr.eval(&env(&[("a", 0xFF00_0000), ("b", 0x00FF_0000)]));
+        assert_eq!(result, EvalResult::Bv(0xFFFF_0000));
+    }
+
+    #[test]
+    fn test_eor_rr_32() {
+        let (a, b) = sym32();
+        let expr = encode_eor_rr(OperandSize::S32, a, b);
+        let result = expr.eval(&env(&[("a", 0xAAAA_AAAA), ("b", 0x5555_5555)]));
+        assert_eq!(result, EvalResult::Bv(0xFFFF_FFFF));
+    }
+
+    #[test]
+    fn test_mvn_32() {
+        let a = SmtExpr::var("a", 32);
+        let expr = encode_mvn(OperandSize::S32, a);
+        let result = expr.eval(&env(&[("a", 0)]));
+        assert_eq!(result, EvalResult::Bv(0xFFFF_FFFF));
+    }
+
+    #[test]
+    fn test_mvn_32_all_ones() {
+        let a = SmtExpr::var("a", 32);
+        let expr = encode_mvn(OperandSize::S32, a);
+        let result = expr.eval(&env(&[("a", 0xFFFF_FFFF)]));
+        assert_eq!(result, EvalResult::Bv(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Shift instruction semantics tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lsl_rr_32() {
+        let (a, b) = sym32();
+        let expr = encode_lsl_rr(OperandSize::S32, a, b);
+        let result = expr.eval(&env(&[("a", 1), ("b", 4)]));
+        assert_eq!(result, EvalResult::Bv(16));
+    }
+
+    #[test]
+    fn test_lsr_rr_32() {
+        let (a, b) = sym32();
+        let expr = encode_lsr_rr(OperandSize::S32, a, b);
+        let result = expr.eval(&env(&[("a", 0x8000_0000), ("b", 4)]));
+        assert_eq!(result, EvalResult::Bv(0x0800_0000));
+    }
+
+    #[test]
+    fn test_asr_rr_32() {
+        let (a, b) = sym32();
+        let expr = encode_asr_rr(OperandSize::S32, a, b);
+        // Arithmetic shift right of 0x80000000 by 4 = 0xF8000000 (sign-extends)
+        let result = expr.eval(&env(&[("a", 0x8000_0000), ("b", 4)]));
+        assert_eq!(result, EvalResult::Bv(0xF800_0000));
+    }
+
+    #[test]
+    fn test_asr_rr_32_positive() {
+        let (a, b) = sym32();
+        let expr = encode_asr_rr(OperandSize::S32, a, b);
+        // Positive value: 0x7FFFFFFF >> 4 = 0x07FFFFFF (zero-fills)
+        let result = expr.eval(&env(&[("a", 0x7FFF_FFFF), ("b", 4)]));
+        assert_eq!(result, EvalResult::Bv(0x07FF_FFFF));
     }
 }
