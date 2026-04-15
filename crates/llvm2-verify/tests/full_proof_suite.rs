@@ -35,7 +35,7 @@ fn full_proof_suite_all_pass() {
     println!("{}", summary);
 
     // Verify the database has a meaningful number of proofs.
-    // As of Wave 24: 32 categories registered.
+    // As of Wave 24: 34 categories registered.
     assert!(
         db.len() >= 300,
         "Expected at least 300 proofs in the database, got {}. \
@@ -100,18 +100,18 @@ fn full_proof_suite_every_category_populated() {
     let db = ProofDatabase::new();
     let categories = ProofCategory::all_categories();
 
-    // 32 categories: Arithmetic, Division, FloatingPoint, NzcvFlags,
+    // 34 categories: Arithmetic, Division, FloatingPoint, NzcvFlags,
     // Comparison, Branch, Peephole, Optimization, ConstantFolding,
     // CopyPropagation, CseLicm, DeadCodeElimination, CfgSimplification,
     // Memory, NeonLowering, NeonEncoding, Vectorization, AnePrecision,
     // RegAlloc, BitwiseShift, ConstantMaterialization, AddressMode,
     // FrameLayout, InstructionScheduling, MachOEmission, LoopOptimization,
     // StrengthReduction, CmpCombine, Gvn, TailCallOptimization,
-    // IfConversion, FpConversion.
+    // IfConversion, FpConversion, ExtensionTruncation, AtomicOperations.
     assert_eq!(
         categories.len(),
-        32,
-        "Expected 32 proof categories, got {}",
+        34,
+        "Expected 34 proof categories, got {}",
         categories.len()
     );
 
