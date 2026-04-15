@@ -1222,6 +1222,536 @@ pub fn generate_dwarf_cfi(info: &UnwindInfo) -> Vec<DwarfCfiOp> {
     ops
 }
 
+// ===========================================================================
+// Exception Handling ABI — Landing Pads, LSDA, Personality Functions
+// ===========================================================================
+//
+// Reference: Itanium C++ ABI: Exception Handling
+//            https://itanium-cxx-abi.github.io/cxx-abi/abi-eh.html
+// Reference: DWARF 5 spec, Section 6.4.1 (Structure of Call Frame Information)
+// Reference: LLVM libunwind: src/DwarfParser.hpp (LSDA parsing)
+// Reference: ~/llvm-project-ref/llvm/include/llvm/MC/MCStreamer.h
+//            (personality + LSDA emission)
+//
+// On Apple AArch64, exception handling uses the "zero-cost" Itanium-derived
+// ABI. The runtime uses DWARF unwind tables to walk the stack, and the
+// Language-Specific Data Area (LSDA) to dispatch exceptions to the correct
+// landing pad. The personality function (e.g., __gxx_personality_v0 for C++)
+// interprets the LSDA and decides whether to catch, filter, or propagate.
+//
+// Layout of the LSDA (per Itanium EH ABI):
+//
+// ┌─────────────────────────────┐
+// │  LSDA Header                │  lpstart encoding, type table encoding,
+// │                             │  call site table encoding
+// ├─────────────────────────────┤
+// │  Call Site Table             │  Maps PC ranges to landing pads + action
+// │    entry 0                  │
+// │    entry 1                  │
+// │    ...                      │
+// ├─────────────────────────────┤
+// │  Action Table                │  Chains of type filter references
+// │    action 0                 │
+// │    action 1                 │
+// │    ...                      │
+// ├─────────────────────────────┤
+// │  Type Table                  │  Pointers to typeinfo objects (C++ RTTI)
+// │    type 0                   │
+// │    type 1                   │
+// │    ...                      │
+// └─────────────────────────────┘
+
+// ---------------------------------------------------------------------------
+// Personality function selection
+// ---------------------------------------------------------------------------
+
+/// Known personality function identifiers for exception handling.
+///
+/// The personality function is called by the unwinder for each frame during
+/// exception propagation. It interprets the LSDA to determine whether the
+/// current frame should handle the exception (catch), filter it, or
+/// continue unwinding.
+///
+/// Reference: Itanium C++ ABI sec. 2.5.2 "Personality Routine"
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PersonalityFunction {
+    /// C++ personality: `__gxx_personality_v0`
+    /// Handles C++ try/catch, RTTI-based type matching, and cleanup.
+    GxxPersonalityV0,
+
+    /// Rust personality: `__rust_eh_personality`
+    /// Handles Rust panic unwinding with cleanup-only semantics
+    /// (Rust does not catch by type, only by cleanup).
+    RustEhPersonality,
+
+    /// Objective-C personality: `__objc_personality_v0`
+    /// Handles Objective-C @try/@catch/@finally on Apple platforms.
+    ObjcPersonalityV0,
+
+    /// C personality (GCC __attribute__((cleanup))): `__gcc_personality_v0`
+    /// Minimal personality for C code with cleanup attributes.
+    GccPersonalityV0,
+
+    /// Custom personality function referenced by symbol name.
+    /// Used for language runtimes not covered by the standard set.
+    Custom(String),
+}
+
+impl PersonalityFunction {
+    /// Returns the linker symbol name for this personality function.
+    pub fn symbol_name(&self) -> &str {
+        match self {
+            Self::GxxPersonalityV0 => "__gxx_personality_v0",
+            Self::RustEhPersonality => "__rust_eh_personality",
+            Self::ObjcPersonalityV0 => "__objc_personality_v0",
+            Self::GccPersonalityV0 => "__gcc_personality_v0",
+            Self::Custom(name) => name,
+        }
+    }
+
+    /// Select the appropriate personality function for a source language.
+    ///
+    /// This is a convenience constructor for the common case where the
+    /// personality function is determined by the source language alone.
+    pub fn for_language(lang: SourceLanguage) -> Self {
+        match lang {
+            SourceLanguage::Cpp => Self::GxxPersonalityV0,
+            SourceLanguage::Rust => Self::RustEhPersonality,
+            SourceLanguage::ObjectiveC => Self::ObjcPersonalityV0,
+            SourceLanguage::C => Self::GccPersonalityV0,
+        }
+    }
+}
+
+/// Source language for personality function selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SourceLanguage {
+    /// C++ (try/catch/throw)
+    Cpp,
+    /// Rust (panic/catch_unwind)
+    Rust,
+    /// Objective-C (@try/@catch/@throw)
+    ObjectiveC,
+    /// C (cleanup attributes only)
+    C,
+}
+
+// ---------------------------------------------------------------------------
+// Landing pad
+// ---------------------------------------------------------------------------
+
+/// A landing pad descriptor for one exception-handling entry point.
+///
+/// A landing pad is a code location where control transfers when an
+/// exception is caught or cleanup is needed during stack unwinding.
+/// Each landing pad corresponds to a `catch`, `catch(...)`, or cleanup
+/// block in the source language.
+///
+/// Reference: Itanium C++ ABI sec. 2.5.1 "Landing Pad"
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LandingPad {
+    /// Offset of the landing pad code from the function start (in bytes).
+    /// The unwinder jumps to `function_start + landing_pad_offset` when
+    /// dispatching to this landing pad.
+    pub landing_pad_offset: u32,
+
+    /// Types that this landing pad catches.
+    ///
+    /// Each entry is an index into the LSDA type table. Index 0 is
+    /// reserved for "catch-all" (C++ `catch(...)`).
+    ///
+    /// For C++: each index refers to a `std::type_info*` in the type table.
+    /// For Rust: typically empty (Rust uses cleanup-only semantics).
+    pub catch_type_indices: Vec<u32>,
+
+    /// Type filter indices for exception specification filters.
+    ///
+    /// Negative indices in the action table encode exception specification
+    /// filters. If the thrown type does NOT match any type in the filter
+    /// list, `std::unexpected()` (C++03) or `std::terminate()` is called.
+    ///
+    /// Each entry is an index into the type table. The filter matches if
+    /// the thrown type is NOT in this set.
+    pub filter_type_indices: Vec<u32>,
+
+    /// Whether this landing pad is a cleanup-only handler.
+    ///
+    /// Cleanup landing pads execute destructor/drop code but do not
+    /// catch the exception. After cleanup, unwinding continues.
+    /// All Rust landing pads are cleanup-only (panics are not caught
+    /// by type). C++ cleanup corresponds to local object destructors.
+    pub is_cleanup: bool,
+}
+
+impl LandingPad {
+    /// Create a catch-all landing pad (C++ `catch(...)`).
+    pub fn catch_all(landing_pad_offset: u32) -> Self {
+        Self {
+            landing_pad_offset,
+            catch_type_indices: vec![0], // 0 = catch-all
+            filter_type_indices: Vec::new(),
+            is_cleanup: false,
+        }
+    }
+
+    /// Create a typed catch landing pad (C++ `catch(SomeType&)`).
+    ///
+    /// `type_index` is the 1-based index into the LSDA type table
+    /// for the caught type's `std::type_info`.
+    pub fn catch_typed(landing_pad_offset: u32, type_index: u32) -> Self {
+        Self {
+            landing_pad_offset,
+            catch_type_indices: vec![type_index],
+            filter_type_indices: Vec::new(),
+            is_cleanup: false,
+        }
+    }
+
+    /// Create a cleanup-only landing pad (destructors/drops, no catch).
+    pub fn cleanup(landing_pad_offset: u32) -> Self {
+        Self {
+            landing_pad_offset,
+            catch_type_indices: Vec::new(),
+            filter_type_indices: Vec::new(),
+            is_cleanup: true,
+        }
+    }
+
+    /// Returns true if this landing pad catches any exception type
+    /// (either specific types or catch-all).
+    pub fn has_catch(&self) -> bool {
+        !self.catch_type_indices.is_empty()
+    }
+
+    /// Returns true if this landing pad has exception specification filters.
+    pub fn has_filter(&self) -> bool {
+        !self.filter_type_indices.is_empty()
+    }
+
+    /// Returns true if this is a catch-all landing pad (catches everything).
+    pub fn is_catch_all(&self) -> bool {
+        self.catch_type_indices.contains(&0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LSDA — Language-Specific Data Area
+// ---------------------------------------------------------------------------
+
+/// A call site table entry in the LSDA.
+///
+/// Each entry maps a range of PC values to a landing pad and an action
+/// chain. During unwinding, the personality function searches the call
+/// site table for the current PC to determine the correct handler.
+///
+/// Reference: Itanium C++ ABI sec. 2.5.4 "Call Site Table"
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallSiteEntry {
+    /// Start of the call site range, as an offset from the function start.
+    pub start_offset: u32,
+    /// Length of the call site range in bytes.
+    pub length: u32,
+    /// Landing pad offset from the function start, or 0 if no landing pad.
+    /// A value of 0 means this call site has no handler (exception
+    /// propagates to the caller).
+    pub landing_pad_offset: u32,
+    /// Index into the action table (1-based), or 0 if no action.
+    /// The action table entry determines which types are caught or
+    /// filtered by the associated landing pad.
+    pub action_index: u32,
+}
+
+impl CallSiteEntry {
+    /// Returns true if this call site has a landing pad.
+    pub fn has_landing_pad(&self) -> bool {
+        self.landing_pad_offset != 0
+    }
+
+    /// Returns true if this call site has an associated action chain.
+    pub fn has_action(&self) -> bool {
+        self.action_index != 0
+    }
+}
+
+/// An action table entry in the LSDA.
+///
+/// Action entries form chains (linked lists via `next_offset`). Each entry
+/// specifies a type filter: positive values index into the type table for
+/// catch handlers; negative values index into the type table for exception
+/// specification filters; zero means cleanup.
+///
+/// Reference: Itanium C++ ABI sec. 2.5.5 "Action Table"
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionEntry {
+    /// Type filter value:
+    /// - Positive: 1-based index into the type table (catch handler).
+    ///   Matches if the thrown type matches type_table[filter - 1].
+    /// - Zero: cleanup action (no type matching, just run cleanup code).
+    /// - Negative: exception specification filter. The absolute value is
+    ///   a 1-based index into a filter list in the type table.
+    pub type_filter: i32,
+    /// Offset to the next action entry in the chain (in bytes from
+    /// the start of this entry), or 0 if this is the last action.
+    /// This enables multiple catch clauses per landing pad.
+    pub next_offset: i32,
+}
+
+impl ActionEntry {
+    /// Returns true if this is a cleanup action (type_filter == 0).
+    pub fn is_cleanup(&self) -> bool {
+        self.type_filter == 0
+    }
+
+    /// Returns true if this is a catch handler (type_filter > 0).
+    pub fn is_catch(&self) -> bool {
+        self.type_filter > 0
+    }
+
+    /// Returns true if this is an exception specification filter (type_filter < 0).
+    pub fn is_filter(&self) -> bool {
+        self.type_filter < 0
+    }
+
+    /// Returns true if there is a next action in the chain.
+    pub fn has_next(&self) -> bool {
+        self.next_offset != 0
+    }
+}
+
+/// A type table reference in the LSDA.
+///
+/// The type table contains pointers to type descriptor objects (e.g.,
+/// `std::type_info*` for C++). These are used by the personality function
+/// to determine if a thrown exception matches a catch clause's type.
+///
+/// Entries are indexed from the END of the type table (index 1 is the
+/// last entry, index 2 is second-to-last, etc.). This reverse indexing
+/// is mandated by the Itanium ABI.
+///
+/// Reference: Itanium C++ ABI sec. 2.5.6 "Type Table"
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeTableEntry {
+    /// Symbol name of the type descriptor (e.g., "_ZTIi" for `int`,
+    /// "_ZTISt9exception" for `std::exception`).
+    /// Empty string represents a catch-all (null type pointer).
+    pub type_info_symbol: String,
+    /// Encoding format for the type pointer in the LSDA.
+    pub encoding: TypeTableEncoding,
+}
+
+/// Encoding format for type table pointers in the LSDA.
+///
+/// Determines how the personality function reads type descriptor pointers
+/// from the type table section of the LSDA.
+///
+/// Reference: DWARF Exception Header Encoding (DW_EH_PE_*)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeTableEncoding {
+    /// Absolute pointer (DW_EH_PE_absptr). Full pointer-width value.
+    AbsPtr,
+    /// PC-relative signed 4-byte offset (DW_EH_PE_pcrel | DW_EH_PE_sdata4).
+    /// Standard on Apple AArch64.
+    PcRelSData4,
+    /// Indirect pointer: the value at the encoded address is itself a pointer
+    /// to the type descriptor (DW_EH_PE_indirect | DW_EH_PE_pcrel | DW_EH_PE_sdata4).
+    /// Used when type descriptors are in a different DSO.
+    IndirectPcRel,
+    /// Omitted (DW_EH_PE_omit). No type table present.
+    Omit,
+}
+
+impl TypeTableEncoding {
+    /// Returns the DWARF exception header encoding byte (DW_EH_PE_*).
+    pub fn dwarf_encoding(self) -> u8 {
+        match self {
+            Self::AbsPtr => 0x00,         // DW_EH_PE_absptr
+            Self::PcRelSData4 => 0x1B,    // DW_EH_PE_pcrel | DW_EH_PE_sdata4
+            Self::IndirectPcRel => 0x9B,  // DW_EH_PE_indirect | DW_EH_PE_pcrel | DW_EH_PE_sdata4
+            Self::Omit => 0xFF,           // DW_EH_PE_omit
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ExceptionHandlingInfo — per-function exception handling metadata
+// ---------------------------------------------------------------------------
+
+/// Complete exception handling information for a single function.
+///
+/// Collects all the EH metadata needed to generate the LSDA, personality
+/// function reference, and compact unwind / DWARF CFI augmentation data.
+///
+/// This is the ABI-level representation. The codegen layer uses this to
+/// emit the `__gcc_except_tab` section (LSDA) and to set the personality
+/// and LSDA pointers in compact unwind / DWARF FDE entries.
+///
+/// # Usage
+///
+/// ```ignore
+/// let mut eh = ExceptionHandlingInfo::new(PersonalityFunction::GxxPersonalityV0);
+///
+/// // Add a landing pad for a try/catch block
+/// eh.add_landing_pad(LandingPad::catch_typed(0x40, 1));
+///
+/// // Add call site entries covering the try region
+/// eh.add_call_site(CallSiteEntry {
+///     start_offset: 0x10,
+///     length: 0x20,
+///     landing_pad_offset: 0x40,
+///     action_index: 1,
+/// });
+///
+/// // Add action and type table entries
+/// eh.add_action(ActionEntry { type_filter: 1, next_offset: 0 });
+/// eh.add_type(TypeTableEntry {
+///     type_info_symbol: "_ZTIi".to_string(),
+///     encoding: TypeTableEncoding::PcRelSData4,
+/// });
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionHandlingInfo {
+    /// The personality function for this function.
+    pub personality: PersonalityFunction,
+
+    /// Landing pads (exception entry points) in this function.
+    pub landing_pads: Vec<LandingPad>,
+
+    /// Call site table entries (PC ranges mapped to landing pads).
+    pub call_sites: Vec<CallSiteEntry>,
+
+    /// Action table entries (type filter chains for each call site).
+    pub actions: Vec<ActionEntry>,
+
+    /// Type table entries (type descriptors for catch/filter matching).
+    pub type_table: Vec<TypeTableEntry>,
+
+    /// Encoding used for type table pointers. Default: PcRelSData4 on Apple.
+    pub type_table_encoding: TypeTableEncoding,
+}
+
+impl ExceptionHandlingInfo {
+    /// Create exception handling info with the given personality function.
+    pub fn new(personality: PersonalityFunction) -> Self {
+        Self {
+            personality,
+            landing_pads: Vec::new(),
+            call_sites: Vec::new(),
+            actions: Vec::new(),
+            type_table: Vec::new(),
+            type_table_encoding: TypeTableEncoding::PcRelSData4,
+        }
+    }
+
+    /// Create exception handling info for C++ code.
+    pub fn for_cpp() -> Self {
+        Self::new(PersonalityFunction::GxxPersonalityV0)
+    }
+
+    /// Create exception handling info for Rust code.
+    pub fn for_rust() -> Self {
+        Self::new(PersonalityFunction::RustEhPersonality)
+    }
+
+    /// Add a landing pad.
+    pub fn add_landing_pad(&mut self, lp: LandingPad) {
+        self.landing_pads.push(lp);
+    }
+
+    /// Add a call site table entry.
+    pub fn add_call_site(&mut self, cs: CallSiteEntry) {
+        self.call_sites.push(cs);
+    }
+
+    /// Add an action table entry.
+    pub fn add_action(&mut self, action: ActionEntry) {
+        self.actions.push(action);
+    }
+
+    /// Add a type table entry.
+    pub fn add_type(&mut self, ty: TypeTableEntry) {
+        self.type_table.push(ty);
+    }
+
+    /// Returns true if there are any landing pads.
+    pub fn has_landing_pads(&self) -> bool {
+        !self.landing_pads.is_empty()
+    }
+
+    /// Returns true if any landing pad catches exceptions (not cleanup-only).
+    pub fn has_catch_handlers(&self) -> bool {
+        self.landing_pads.iter().any(|lp| lp.has_catch())
+    }
+
+    /// Returns true if any landing pad is cleanup-only.
+    pub fn has_cleanup_handlers(&self) -> bool {
+        self.landing_pads.iter().any(|lp| lp.is_cleanup)
+    }
+
+    /// Returns the total number of entries in the call site table.
+    pub fn call_site_count(&self) -> usize {
+        self.call_sites.len()
+    }
+
+    /// Returns the total number of entries in the action table.
+    pub fn action_count(&self) -> usize {
+        self.actions.len()
+    }
+
+    /// Returns the total number of entries in the type table.
+    pub fn type_count(&self) -> usize {
+        self.type_table.len()
+    }
+
+    /// Returns the personality function symbol name.
+    pub fn personality_symbol(&self) -> &str {
+        self.personality.symbol_name()
+    }
+
+    /// Validate the internal consistency of the exception handling info.
+    ///
+    /// Checks:
+    /// - All call site landing pad offsets correspond to a registered landing pad
+    /// - All action indices are within range
+    /// - All type filter indices in actions are within the type table range
+    ///
+    /// Returns a list of validation errors (empty if valid).
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        // Check that call site landing pads correspond to registered landing pads.
+        let lp_offsets: Vec<u32> = self.landing_pads.iter()
+            .map(|lp| lp.landing_pad_offset)
+            .collect();
+
+        for (i, cs) in self.call_sites.iter().enumerate() {
+            if cs.has_landing_pad() && !lp_offsets.contains(&cs.landing_pad_offset) {
+                errors.push(format!(
+                    "call site {} references landing pad at offset 0x{:x} which is not registered",
+                    i, cs.landing_pad_offset
+                ));
+            }
+            if cs.has_action() && cs.action_index as usize > self.actions.len() {
+                errors.push(format!(
+                    "call site {} has action_index {} but only {} actions exist",
+                    i, cs.action_index, self.actions.len()
+                ));
+            }
+        }
+
+        // Check type filter indices in actions.
+        for (i, action) in self.actions.iter().enumerate() {
+            if action.is_catch() && action.type_filter as usize > self.type_table.len() {
+                errors.push(format!(
+                    "action {} has type_filter {} but only {} types in type table",
+                    i, action.type_filter, self.type_table.len()
+                ));
+            }
+        }
+
+        errors
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2978,5 +3508,600 @@ mod tests {
             Type::Struct(vec![Type::F64]),
         ]);
         assert_eq!(AppleAArch64ABI::classify_hfa(&ty), None);
+    }
+
+    // ===================================================================
+    // Exception Handling ABI tests
+    // ===================================================================
+
+    // --- PersonalityFunction tests ---
+
+    #[test]
+    fn personality_gxx_symbol_name() {
+        let p = PersonalityFunction::GxxPersonalityV0;
+        assert_eq!(p.symbol_name(), "__gxx_personality_v0");
+    }
+
+    #[test]
+    fn personality_rust_symbol_name() {
+        let p = PersonalityFunction::RustEhPersonality;
+        assert_eq!(p.symbol_name(), "__rust_eh_personality");
+    }
+
+    #[test]
+    fn personality_objc_symbol_name() {
+        let p = PersonalityFunction::ObjcPersonalityV0;
+        assert_eq!(p.symbol_name(), "__objc_personality_v0");
+    }
+
+    #[test]
+    fn personality_gcc_symbol_name() {
+        let p = PersonalityFunction::GccPersonalityV0;
+        assert_eq!(p.symbol_name(), "__gcc_personality_v0");
+    }
+
+    #[test]
+    fn personality_custom_symbol_name() {
+        let p = PersonalityFunction::Custom("__my_personality".to_string());
+        assert_eq!(p.symbol_name(), "__my_personality");
+    }
+
+    #[test]
+    fn personality_for_language_cpp() {
+        assert_eq!(
+            PersonalityFunction::for_language(SourceLanguage::Cpp),
+            PersonalityFunction::GxxPersonalityV0
+        );
+    }
+
+    #[test]
+    fn personality_for_language_rust() {
+        assert_eq!(
+            PersonalityFunction::for_language(SourceLanguage::Rust),
+            PersonalityFunction::RustEhPersonality
+        );
+    }
+
+    #[test]
+    fn personality_for_language_objc() {
+        assert_eq!(
+            PersonalityFunction::for_language(SourceLanguage::ObjectiveC),
+            PersonalityFunction::ObjcPersonalityV0
+        );
+    }
+
+    #[test]
+    fn personality_for_language_c() {
+        assert_eq!(
+            PersonalityFunction::for_language(SourceLanguage::C),
+            PersonalityFunction::GccPersonalityV0
+        );
+    }
+
+    #[test]
+    fn personality_equality() {
+        assert_eq!(PersonalityFunction::GxxPersonalityV0, PersonalityFunction::GxxPersonalityV0);
+        assert_ne!(PersonalityFunction::GxxPersonalityV0, PersonalityFunction::RustEhPersonality);
+    }
+
+    #[test]
+    fn personality_clone() {
+        let p = PersonalityFunction::Custom("__test".to_string());
+        let p2 = p.clone();
+        assert_eq!(p, p2);
+    }
+
+    // --- LandingPad tests ---
+
+    #[test]
+    fn landing_pad_catch_all_construction() {
+        let lp = LandingPad::catch_all(0x40);
+        assert_eq!(lp.landing_pad_offset, 0x40);
+        assert_eq!(lp.catch_type_indices, vec![0]);
+        assert!(lp.filter_type_indices.is_empty());
+        assert!(!lp.is_cleanup);
+    }
+
+    #[test]
+    fn landing_pad_catch_all_predicates() {
+        let lp = LandingPad::catch_all(0x40);
+        assert!(lp.has_catch());
+        assert!(!lp.has_filter());
+        assert!(lp.is_catch_all());
+        assert!(!lp.is_cleanup);
+    }
+
+    #[test]
+    fn landing_pad_catch_typed_construction() {
+        let lp = LandingPad::catch_typed(0x80, 3);
+        assert_eq!(lp.landing_pad_offset, 0x80);
+        assert_eq!(lp.catch_type_indices, vec![3]);
+        assert!(lp.filter_type_indices.is_empty());
+        assert!(!lp.is_cleanup);
+    }
+
+    #[test]
+    fn landing_pad_catch_typed_predicates() {
+        let lp = LandingPad::catch_typed(0x80, 3);
+        assert!(lp.has_catch());
+        assert!(!lp.has_filter());
+        assert!(!lp.is_catch_all()); // type index 3 is not catch-all
+        assert!(!lp.is_cleanup);
+    }
+
+    #[test]
+    fn landing_pad_cleanup_construction() {
+        let lp = LandingPad::cleanup(0xC0);
+        assert_eq!(lp.landing_pad_offset, 0xC0);
+        assert!(lp.catch_type_indices.is_empty());
+        assert!(lp.filter_type_indices.is_empty());
+        assert!(lp.is_cleanup);
+    }
+
+    #[test]
+    fn landing_pad_cleanup_predicates() {
+        let lp = LandingPad::cleanup(0xC0);
+        assert!(!lp.has_catch());
+        assert!(!lp.has_filter());
+        assert!(!lp.is_catch_all());
+        assert!(lp.is_cleanup);
+    }
+
+    #[test]
+    fn landing_pad_with_filter() {
+        let lp = LandingPad {
+            landing_pad_offset: 0x50,
+            catch_type_indices: Vec::new(),
+            filter_type_indices: vec![1, 2],
+            is_cleanup: false,
+        };
+        assert!(!lp.has_catch());
+        assert!(lp.has_filter());
+        assert!(!lp.is_catch_all());
+    }
+
+    #[test]
+    fn landing_pad_with_catch_and_filter() {
+        let lp = LandingPad {
+            landing_pad_offset: 0x60,
+            catch_type_indices: vec![1],
+            filter_type_indices: vec![2, 3],
+            is_cleanup: false,
+        };
+        assert!(lp.has_catch());
+        assert!(lp.has_filter());
+        assert!(!lp.is_catch_all());
+    }
+
+    #[test]
+    fn landing_pad_equality() {
+        let lp1 = LandingPad::catch_all(0x40);
+        let lp2 = LandingPad::catch_all(0x40);
+        assert_eq!(lp1, lp2);
+
+        let lp3 = LandingPad::cleanup(0x40);
+        assert_ne!(lp1, lp3);
+    }
+
+    // --- CallSiteEntry tests ---
+
+    #[test]
+    fn call_site_entry_with_landing_pad() {
+        let cs = CallSiteEntry {
+            start_offset: 0x10,
+            length: 0x20,
+            landing_pad_offset: 0x40,
+            action_index: 1,
+        };
+        assert!(cs.has_landing_pad());
+        assert!(cs.has_action());
+    }
+
+    #[test]
+    fn call_site_entry_no_landing_pad() {
+        let cs = CallSiteEntry {
+            start_offset: 0x10,
+            length: 0x20,
+            landing_pad_offset: 0,
+            action_index: 0,
+        };
+        assert!(!cs.has_landing_pad());
+        assert!(!cs.has_action());
+    }
+
+    #[test]
+    fn call_site_entry_landing_pad_no_action() {
+        let cs = CallSiteEntry {
+            start_offset: 0x10,
+            length: 0x08,
+            landing_pad_offset: 0x30,
+            action_index: 0,
+        };
+        assert!(cs.has_landing_pad());
+        assert!(!cs.has_action());
+    }
+
+    #[test]
+    fn call_site_entry_equality() {
+        let cs1 = CallSiteEntry {
+            start_offset: 0x10,
+            length: 0x20,
+            landing_pad_offset: 0x40,
+            action_index: 1,
+        };
+        let cs2 = cs1.clone();
+        assert_eq!(cs1, cs2);
+    }
+
+    // --- ActionEntry tests ---
+
+    #[test]
+    fn action_entry_catch() {
+        let action = ActionEntry { type_filter: 1, next_offset: 0 };
+        assert!(action.is_catch());
+        assert!(!action.is_cleanup());
+        assert!(!action.is_filter());
+        assert!(!action.has_next());
+    }
+
+    #[test]
+    fn action_entry_cleanup() {
+        let action = ActionEntry { type_filter: 0, next_offset: 0 };
+        assert!(!action.is_catch());
+        assert!(action.is_cleanup());
+        assert!(!action.is_filter());
+        assert!(!action.has_next());
+    }
+
+    #[test]
+    fn action_entry_filter() {
+        let action = ActionEntry { type_filter: -1, next_offset: 0 };
+        assert!(!action.is_catch());
+        assert!(!action.is_cleanup());
+        assert!(action.is_filter());
+        assert!(!action.has_next());
+    }
+
+    #[test]
+    fn action_entry_with_chain() {
+        let action = ActionEntry { type_filter: 2, next_offset: 4 };
+        assert!(action.is_catch());
+        assert!(action.has_next());
+    }
+
+    #[test]
+    fn action_entry_equality() {
+        let a1 = ActionEntry { type_filter: 1, next_offset: 0 };
+        let a2 = ActionEntry { type_filter: 1, next_offset: 0 };
+        assert_eq!(a1, a2);
+
+        let a3 = ActionEntry { type_filter: 2, next_offset: 0 };
+        assert_ne!(a1, a3);
+    }
+
+    // --- TypeTableEntry and TypeTableEncoding tests ---
+
+    #[test]
+    fn type_table_encoding_dwarf_values() {
+        assert_eq!(TypeTableEncoding::AbsPtr.dwarf_encoding(), 0x00);
+        assert_eq!(TypeTableEncoding::PcRelSData4.dwarf_encoding(), 0x1B);
+        assert_eq!(TypeTableEncoding::IndirectPcRel.dwarf_encoding(), 0x9B);
+        assert_eq!(TypeTableEncoding::Omit.dwarf_encoding(), 0xFF);
+    }
+
+    #[test]
+    fn type_table_entry_construction() {
+        let entry = TypeTableEntry {
+            type_info_symbol: "_ZTIi".to_string(),
+            encoding: TypeTableEncoding::PcRelSData4,
+        };
+        assert_eq!(entry.type_info_symbol, "_ZTIi");
+        assert_eq!(entry.encoding, TypeTableEncoding::PcRelSData4);
+    }
+
+    #[test]
+    fn type_table_entry_catch_all_empty_symbol() {
+        let entry = TypeTableEntry {
+            type_info_symbol: String::new(),
+            encoding: TypeTableEncoding::PcRelSData4,
+        };
+        assert!(entry.type_info_symbol.is_empty());
+    }
+
+    #[test]
+    fn type_table_entry_equality() {
+        let e1 = TypeTableEntry {
+            type_info_symbol: "_ZTIi".to_string(),
+            encoding: TypeTableEncoding::PcRelSData4,
+        };
+        let e2 = e1.clone();
+        assert_eq!(e1, e2);
+    }
+
+    #[test]
+    fn type_table_encoding_equality() {
+        assert_eq!(TypeTableEncoding::AbsPtr, TypeTableEncoding::AbsPtr);
+        assert_ne!(TypeTableEncoding::AbsPtr, TypeTableEncoding::Omit);
+    }
+
+    // --- ExceptionHandlingInfo tests ---
+
+    #[test]
+    fn eh_info_new_cpp() {
+        let eh = ExceptionHandlingInfo::for_cpp();
+        assert_eq!(eh.personality, PersonalityFunction::GxxPersonalityV0);
+        assert!(eh.landing_pads.is_empty());
+        assert!(eh.call_sites.is_empty());
+        assert!(eh.actions.is_empty());
+        assert!(eh.type_table.is_empty());
+        assert_eq!(eh.type_table_encoding, TypeTableEncoding::PcRelSData4);
+    }
+
+    #[test]
+    fn eh_info_new_rust() {
+        let eh = ExceptionHandlingInfo::for_rust();
+        assert_eq!(eh.personality, PersonalityFunction::RustEhPersonality);
+    }
+
+    #[test]
+    fn eh_info_add_landing_pad() {
+        let mut eh = ExceptionHandlingInfo::for_cpp();
+        eh.add_landing_pad(LandingPad::catch_all(0x40));
+        eh.add_landing_pad(LandingPad::cleanup(0x80));
+
+        assert!(eh.has_landing_pads());
+        assert_eq!(eh.landing_pads.len(), 2);
+        assert!(eh.has_catch_handlers());
+        assert!(eh.has_cleanup_handlers());
+    }
+
+    #[test]
+    fn eh_info_only_catch_no_cleanup() {
+        let mut eh = ExceptionHandlingInfo::for_cpp();
+        eh.add_landing_pad(LandingPad::catch_typed(0x40, 1));
+
+        assert!(eh.has_catch_handlers());
+        assert!(!eh.has_cleanup_handlers());
+    }
+
+    #[test]
+    fn eh_info_only_cleanup_no_catch() {
+        let mut eh = ExceptionHandlingInfo::for_rust();
+        eh.add_landing_pad(LandingPad::cleanup(0x40));
+
+        assert!(!eh.has_catch_handlers());
+        assert!(eh.has_cleanup_handlers());
+    }
+
+    #[test]
+    fn eh_info_add_call_site() {
+        let mut eh = ExceptionHandlingInfo::for_cpp();
+        eh.add_call_site(CallSiteEntry {
+            start_offset: 0x10,
+            length: 0x20,
+            landing_pad_offset: 0x40,
+            action_index: 1,
+        });
+        assert_eq!(eh.call_site_count(), 1);
+    }
+
+    #[test]
+    fn eh_info_add_action() {
+        let mut eh = ExceptionHandlingInfo::for_cpp();
+        eh.add_action(ActionEntry { type_filter: 1, next_offset: 0 });
+        eh.add_action(ActionEntry { type_filter: 0, next_offset: 0 });
+        assert_eq!(eh.action_count(), 2);
+    }
+
+    #[test]
+    fn eh_info_add_type() {
+        let mut eh = ExceptionHandlingInfo::for_cpp();
+        eh.add_type(TypeTableEntry {
+            type_info_symbol: "_ZTIi".to_string(),
+            encoding: TypeTableEncoding::PcRelSData4,
+        });
+        assert_eq!(eh.type_count(), 1);
+    }
+
+    #[test]
+    fn eh_info_personality_symbol() {
+        let eh = ExceptionHandlingInfo::for_cpp();
+        assert_eq!(eh.personality_symbol(), "__gxx_personality_v0");
+
+        let eh_rust = ExceptionHandlingInfo::for_rust();
+        assert_eq!(eh_rust.personality_symbol(), "__rust_eh_personality");
+    }
+
+    #[test]
+    fn eh_info_validate_empty_is_valid() {
+        let eh = ExceptionHandlingInfo::for_cpp();
+        assert!(eh.validate().is_empty());
+    }
+
+    #[test]
+    fn eh_info_validate_consistent_info() {
+        let mut eh = ExceptionHandlingInfo::for_cpp();
+
+        // Add matching landing pad, call site, action, and type
+        eh.add_landing_pad(LandingPad::catch_typed(0x40, 1));
+        eh.add_call_site(CallSiteEntry {
+            start_offset: 0x10,
+            length: 0x20,
+            landing_pad_offset: 0x40,
+            action_index: 1,
+        });
+        eh.add_action(ActionEntry { type_filter: 1, next_offset: 0 });
+        eh.add_type(TypeTableEntry {
+            type_info_symbol: "_ZTIi".to_string(),
+            encoding: TypeTableEncoding::PcRelSData4,
+        });
+
+        let errors = eh.validate();
+        assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
+    }
+
+    #[test]
+    fn eh_info_validate_detects_missing_landing_pad() {
+        let mut eh = ExceptionHandlingInfo::for_cpp();
+        // Call site references landing pad 0x40 but no landing pad registered
+        eh.add_call_site(CallSiteEntry {
+            start_offset: 0x10,
+            length: 0x20,
+            landing_pad_offset: 0x40,
+            action_index: 0,
+        });
+
+        let errors = eh.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("landing pad at offset 0x40"));
+    }
+
+    #[test]
+    fn eh_info_validate_detects_out_of_range_action_index() {
+        let mut eh = ExceptionHandlingInfo::for_cpp();
+        eh.add_landing_pad(LandingPad::catch_all(0x40));
+        // Call site references action 5 but no actions exist
+        eh.add_call_site(CallSiteEntry {
+            start_offset: 0x10,
+            length: 0x20,
+            landing_pad_offset: 0x40,
+            action_index: 5,
+        });
+
+        let errors = eh.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("action_index 5"));
+    }
+
+    #[test]
+    fn eh_info_validate_detects_out_of_range_type_filter() {
+        let mut eh = ExceptionHandlingInfo::for_cpp();
+        // Action references type 3 but type table is empty
+        eh.add_action(ActionEntry { type_filter: 3, next_offset: 0 });
+
+        let errors = eh.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("type_filter 3"));
+    }
+
+    #[test]
+    fn eh_info_validate_no_landing_pad_offset_zero_is_ok() {
+        let mut eh = ExceptionHandlingInfo::for_cpp();
+        // Call site with landing_pad_offset=0 (no handler) is valid
+        eh.add_call_site(CallSiteEntry {
+            start_offset: 0x10,
+            length: 0x20,
+            landing_pad_offset: 0,
+            action_index: 0,
+        });
+
+        let errors = eh.validate();
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn eh_info_equality() {
+        let eh1 = ExceptionHandlingInfo::for_cpp();
+        let eh2 = ExceptionHandlingInfo::for_cpp();
+        assert_eq!(eh1, eh2);
+    }
+
+    #[test]
+    fn eh_info_clone() {
+        let mut eh = ExceptionHandlingInfo::for_cpp();
+        eh.add_landing_pad(LandingPad::catch_all(0x40));
+        let eh2 = eh.clone();
+        assert_eq!(eh, eh2);
+    }
+
+    // --- Full C++ exception handling scenario ---
+
+    #[test]
+    fn full_cpp_try_catch_scenario() {
+        // Simulate: void foo() { try { bar(); } catch(int) { ... } catch(...) { ... } }
+        let mut eh = ExceptionHandlingInfo::for_cpp();
+
+        // Type table: index 1 = int
+        eh.add_type(TypeTableEntry {
+            type_info_symbol: "_ZTIi".to_string(),
+            encoding: TypeTableEncoding::PcRelSData4,
+        });
+
+        // Landing pad for catch(int) at offset 0x40
+        eh.add_landing_pad(LandingPad::catch_typed(0x40, 1));
+
+        // Landing pad for catch(...) at offset 0x60
+        eh.add_landing_pad(LandingPad::catch_all(0x60));
+
+        // Action chain: action 1 catches int, chains to action 2 (catch-all)
+        eh.add_action(ActionEntry { type_filter: 1, next_offset: 4 });
+        eh.add_action(ActionEntry { type_filter: 0, next_offset: 0 }); // catch-all = cleanup
+
+        // Call site covering the try region
+        eh.add_call_site(CallSiteEntry {
+            start_offset: 0x10,
+            length: 0x20,
+            landing_pad_offset: 0x40,
+            action_index: 1,
+        });
+
+        // Assertions
+        assert!(eh.has_landing_pads());
+        assert!(eh.has_catch_handlers());
+        assert_eq!(eh.call_site_count(), 1);
+        assert_eq!(eh.action_count(), 2);
+        assert_eq!(eh.type_count(), 1);
+        assert_eq!(eh.personality_symbol(), "__gxx_personality_v0");
+
+        // Validate internal consistency
+        let errors = eh.validate();
+        assert!(errors.is_empty(), "Expected valid, got: {:?}", errors);
+    }
+
+    // --- Full Rust panic unwinding scenario ---
+
+    #[test]
+    fn full_rust_panic_unwind_scenario() {
+        // Simulate: fn foo() { let _guard = Guard::new(); bar(); }
+        // Rust uses cleanup-only landing pads (drop glue), no type-based catch.
+        let mut eh = ExceptionHandlingInfo::for_rust();
+
+        // Cleanup landing pad for Guard's destructor
+        eh.add_landing_pad(LandingPad::cleanup(0x30));
+
+        // Call site for bar() call
+        eh.add_call_site(CallSiteEntry {
+            start_offset: 0x10,
+            length: 0x08,
+            landing_pad_offset: 0x30,
+            action_index: 1,
+        });
+
+        // Action: cleanup only (type_filter = 0)
+        eh.add_action(ActionEntry { type_filter: 0, next_offset: 0 });
+
+        assert!(eh.has_landing_pads());
+        assert!(!eh.has_catch_handlers());
+        assert!(eh.has_cleanup_handlers());
+        assert_eq!(eh.personality_symbol(), "__rust_eh_personality");
+
+        let errors = eh.validate();
+        assert!(errors.is_empty(), "Expected valid, got: {:?}", errors);
+    }
+
+    // --- SourceLanguage tests ---
+
+    #[test]
+    fn source_language_equality() {
+        assert_eq!(SourceLanguage::Cpp, SourceLanguage::Cpp);
+        assert_ne!(SourceLanguage::Cpp, SourceLanguage::Rust);
+        assert_ne!(SourceLanguage::C, SourceLanguage::ObjectiveC);
+    }
+
+    #[test]
+    fn source_language_clone() {
+        let lang = SourceLanguage::Rust;
+        let lang2 = lang;
+        assert_eq!(lang, lang2);
     }
 }
