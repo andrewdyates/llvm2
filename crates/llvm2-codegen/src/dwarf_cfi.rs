@@ -89,6 +89,14 @@ const SP_REGISTER: u64 = 31;
 /// The CIE contains parameters shared by all FDEs: code/data alignment,
 /// return address register, and initial instructions. For eh_frame, the
 /// CIE also includes augmentation data with pointer encoding.
+///
+/// ## Augmentation strings
+///
+/// - `"zR"` — Basic pointer encoding (no personality, no LSDA).
+/// - `"zPLR"` — Personality function + LSDA pointers + pointer encoding.
+///   Used for functions that participate in C++/Rust exception handling.
+///   The "P" augmentation encodes the personality function pointer in the
+///   CIE, and "L" indicates that each FDE carries an LSDA pointer.
 #[derive(Debug, Clone)]
 pub struct DwarfCie {
     /// eh_frame version (always 1 for .eh_frame).
@@ -103,13 +111,23 @@ pub struct DwarfCie {
     pub return_address_register: u64,
     /// Pointer encoding (DW_EH_PE_pcrel | DW_EH_PE_sdata4).
     pub fde_pointer_encoding: u8,
+    /// Personality function encoding (only used with "zPLR" augmentation).
+    /// DW_EH_PE_pcrel | DW_EH_PE_sdata4 on Apple AArch64.
+    pub personality_encoding: Option<u8>,
+    /// Personality function pointer (placeholder, relocated by linker).
+    /// Only used with "zPLR" augmentation.
+    pub personality_pointer: Option<u32>,
+    /// LSDA pointer encoding (only used with "zPLR" augmentation).
+    /// DW_EH_PE_pcrel | DW_EH_PE_sdata4 on Apple AArch64.
+    pub lsda_encoding: Option<u8>,
     /// Initial CFI instructions (define initial CFA).
     pub initial_instructions: Vec<u8>,
 }
 
 impl DwarfCie {
-    /// Create the standard AArch64 Darwin CIE.
+    /// Create the standard AArch64 Darwin CIE (no personality/LSDA).
     ///
+    /// Augmentation: "zR" — only FDE pointer encoding.
     /// Initial instructions define CFA = SP + 0 (before prologue).
     pub fn aarch64_darwin() -> Self {
         let mut initial_instructions = Vec::new();
@@ -125,8 +143,50 @@ impl DwarfCie {
             data_alignment_factor: DATA_ALIGN_FACTOR,
             return_address_register: RA_REGISTER,
             fde_pointer_encoding: DW_EH_PE_PCREL | DW_EH_PE_SDATA4,
+            personality_encoding: None,
+            personality_pointer: None,
+            lsda_encoding: None,
             initial_instructions,
         }
+    }
+
+    /// Create an AArch64 Darwin CIE with personality and LSDA support.
+    ///
+    /// Augmentation: "zPLR" — personality pointer, LSDA pointer encoding,
+    /// and FDE pointer encoding. Used for functions that participate in
+    /// C++ exception handling or Rust panic unwinding.
+    ///
+    /// The personality pointer is a placeholder (0) that gets a relocation
+    /// pointing to the personality function symbol (e.g., `__gxx_personality_v0`).
+    ///
+    /// Reference: LSB Core spec, Section 10.6.1 (Augmentation String Format)
+    /// Reference: LLVM MCDwarf.cpp, EmitPersonality()
+    pub fn aarch64_darwin_with_eh() -> Self {
+        let mut initial_instructions = Vec::new();
+        initial_instructions.push(DW_CFA_DEF_CFA);
+        encode_uleb128(SP_REGISTER, &mut initial_instructions);
+        encode_uleb128(0, &mut initial_instructions);
+
+        let personality_enc = DW_EH_PE_PCREL | DW_EH_PE_SDATA4;
+        let lsda_enc = DW_EH_PE_PCREL | DW_EH_PE_SDATA4;
+
+        Self {
+            version: 1,
+            augmentation: b"zPLR\0".to_vec(),
+            code_alignment_factor: CODE_ALIGN_FACTOR,
+            data_alignment_factor: DATA_ALIGN_FACTOR,
+            return_address_register: RA_REGISTER,
+            fde_pointer_encoding: DW_EH_PE_PCREL | DW_EH_PE_SDATA4,
+            personality_encoding: Some(personality_enc),
+            personality_pointer: Some(0), // placeholder, relocated
+            lsda_encoding: Some(lsda_enc),
+            initial_instructions,
+        }
+    }
+
+    /// Returns true if this CIE has personality/LSDA augmentation ("zPLR").
+    pub fn has_personality(&self) -> bool {
+        self.personality_encoding.is_some()
     }
 
     /// Serialize the CIE to bytes.
@@ -140,7 +200,9 @@ impl DwarfCie {
     /// - SLEB128: data alignment factor
     /// - ULEB128: return address register
     /// - ULEB128: augmentation data length
-    /// - augmentation data (pointer encoding byte)
+    /// - augmentation data (varies by augmentation string):
+    ///   "zR":   [FDE pointer encoding]
+    ///   "zPLR": [personality encoding, personality pointer(4), LSDA encoding, FDE pointer encoding]
     /// - initial instructions
     /// - padding to 8-byte boundary (pointer size)
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -164,11 +226,29 @@ impl DwarfCie {
         // Return address register (ULEB128)
         encode_uleb128(self.return_address_register, &mut body);
 
-        // Augmentation data length (ULEB128) — 1 byte for pointer encoding
-        encode_uleb128(1, &mut body);
+        // Augmentation data: build it first, then emit length + data.
+        let mut aug_data = Vec::new();
 
-        // Pointer encoding
-        body.push(self.fde_pointer_encoding);
+        if let Some(personality_enc) = self.personality_encoding {
+            // "P" augmentation: personality encoding byte + personality pointer.
+            aug_data.push(personality_enc);
+            let ptr = self.personality_pointer.unwrap_or(0);
+            aug_data.extend_from_slice(&ptr.to_le_bytes());
+        }
+
+        if let Some(lsda_enc) = self.lsda_encoding {
+            // "L" augmentation: LSDA pointer encoding byte.
+            aug_data.push(lsda_enc);
+        }
+
+        // "R" augmentation: FDE pointer encoding byte.
+        aug_data.push(self.fde_pointer_encoding);
+
+        // Augmentation data length (ULEB128)
+        encode_uleb128(aug_data.len() as u64, &mut body);
+
+        // Augmentation data
+        body.extend_from_slice(&aug_data);
 
         // Initial instructions
         body.extend_from_slice(&self.initial_instructions);
@@ -195,6 +275,10 @@ impl DwarfCie {
 ///
 /// Contains the PC range and CFI instructions describing how to unwind
 /// the function's frame at each point in the code.
+///
+/// When the parent CIE uses "zPLR" augmentation, the FDE carries an LSDA
+/// pointer in its augmentation data (an i32 PC-relative offset to the
+/// function's LSDA in `__TEXT,__gcc_except_table`).
 #[derive(Debug, Clone)]
 pub struct DwarfFde {
     /// Function start address (will be relocated, stored as 0 initially).
@@ -205,6 +289,10 @@ pub struct DwarfFde {
     pub symbol_index: u32,
     /// CFI instructions describing the frame state changes.
     pub instructions: Vec<u8>,
+    /// LSDA pointer (i32, PC-relative, for "zPLR" CIE augmentation).
+    /// `None` if the CIE uses "zR" augmentation or the function has no LSDA.
+    /// The value is a placeholder (0) that gets a relocation to the LSDA.
+    pub lsda_pointer: Option<i32>,
 }
 
 impl DwarfFde {
@@ -272,6 +360,7 @@ impl DwarfFde {
             function_length,
             symbol_index,
             instructions,
+            lsda_pointer: None,
         }
     }
 
@@ -282,7 +371,8 @@ impl DwarfFde {
     /// - u32: CIE pointer (offset from this field to the CIE)
     /// - i32: function start (PC-relative, relocated)
     /// - u32: function length
-    /// - ULEB128: augmentation data length (0)
+    /// - ULEB128: augmentation data length
+    /// - augmentation data (LSDA pointer if "zPLR" CIE)
     /// - CFI instructions
     /// - padding to 8-byte boundary
     pub fn to_bytes(&self, cie_offset: u32) -> Vec<u8> {
@@ -299,8 +389,15 @@ impl DwarfFde {
         // PC range (u32, function length)
         body.extend_from_slice(&self.function_length.to_le_bytes());
 
-        // Augmentation data length (ULEB128, 0 = no augmentation data)
-        encode_uleb128(0, &mut body);
+        // Augmentation data: LSDA pointer for "zPLR" CIE, empty for "zR".
+        if let Some(lsda_ptr) = self.lsda_pointer {
+            // LSDA pointer is 4 bytes (sdata4, PC-relative).
+            encode_uleb128(4, &mut body);
+            body.extend_from_slice(&lsda_ptr.to_le_bytes());
+        } else {
+            // No augmentation data.
+            encode_uleb128(0, &mut body);
+        }
 
         // CFI instructions
         body.extend_from_slice(&self.instructions);
@@ -860,5 +957,159 @@ mod tests {
         assert_eq!(buf.len(), 3);
         assert_eq!(buf[0], DW_CFA_ADVANCE_LOC2);
         assert_eq!(u16::from_le_bytes([buf[1], buf[2]]), 300);
+    }
+
+    // --- zPLR augmentation CIE tests ---
+
+    #[test]
+    fn test_cie_with_eh_creation() {
+        let cie = DwarfCie::aarch64_darwin_with_eh();
+        assert_eq!(cie.version, 1);
+        assert_eq!(cie.augmentation, b"zPLR\0");
+        assert!(cie.has_personality());
+        assert!(cie.personality_encoding.is_some());
+        assert!(cie.lsda_encoding.is_some());
+    }
+
+    #[test]
+    fn test_cie_without_eh_has_no_personality() {
+        let cie = DwarfCie::aarch64_darwin();
+        assert!(!cie.has_personality());
+        assert!(cie.personality_encoding.is_none());
+        assert!(cie.lsda_encoding.is_none());
+    }
+
+    #[test]
+    fn test_cie_with_eh_serialization_not_empty() {
+        let cie = DwarfCie::aarch64_darwin_with_eh();
+        let bytes = cie.to_bytes();
+        assert!(!bytes.is_empty());
+        // zPLR CIE is larger than zR because of personality pointer
+        let basic_cie = DwarfCie::aarch64_darwin();
+        let basic_bytes = basic_cie.to_bytes();
+        assert!(bytes.len() > basic_bytes.len(),
+            "zPLR CIE ({}) should be larger than zR CIE ({})",
+            bytes.len(), basic_bytes.len());
+    }
+
+    #[test]
+    fn test_cie_with_eh_alignment() {
+        let cie = DwarfCie::aarch64_darwin_with_eh();
+        let bytes = cie.to_bytes();
+        assert_eq!(bytes.len() % 8, 0, "CIE must be 8-byte aligned");
+    }
+
+    #[test]
+    fn test_cie_with_eh_id_is_zero() {
+        let cie = DwarfCie::aarch64_darwin_with_eh();
+        let bytes = cie.to_bytes();
+        let cie_id = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert_eq!(cie_id, 0, "eh_frame CIE ID must be 0");
+    }
+
+    #[test]
+    fn test_cie_with_eh_version() {
+        let cie = DwarfCie::aarch64_darwin_with_eh();
+        let bytes = cie.to_bytes();
+        assert_eq!(bytes[8], 1, "eh_frame version must be 1");
+    }
+
+    #[test]
+    fn test_cie_with_eh_augmentation_string() {
+        let cie = DwarfCie::aarch64_darwin_with_eh();
+        let bytes = cie.to_bytes();
+        // After length(4) + CIE id(4) + version(1) = byte 9, augmentation starts
+        assert_eq!(&bytes[9..14], b"zPLR\0");
+    }
+
+    #[test]
+    fn test_cie_with_eh_length_field() {
+        let cie = DwarfCie::aarch64_darwin_with_eh();
+        let bytes = cie.to_bytes();
+        let length = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        assert_eq!(length as usize, bytes.len() - 4);
+    }
+
+    // --- FDE with LSDA pointer tests ---
+
+    #[test]
+    fn test_fde_with_lsda_pointer() {
+        let layout = make_simple_layout();
+        let mut fde = DwarfFde::from_layout(&layout, 0, 64, 0);
+        fde.lsda_pointer = Some(0); // placeholder
+
+        let bytes = fde.to_bytes(24);
+        assert!(!bytes.is_empty());
+        assert_eq!(bytes.len() % 8, 0, "FDE must be 8-byte aligned");
+    }
+
+    #[test]
+    fn test_fde_with_lsda_larger_than_without() {
+        let layout = make_simple_layout();
+
+        let fde_no_lsda = DwarfFde::from_layout(&layout, 0, 64, 0);
+        let bytes_no_lsda = fde_no_lsda.to_bytes(24);
+
+        let mut fde_lsda = DwarfFde::from_layout(&layout, 0, 64, 0);
+        fde_lsda.lsda_pointer = Some(0);
+        let bytes_lsda = fde_lsda.to_bytes(24);
+
+        // FDE with LSDA has 4 extra bytes for the pointer + augmentation length change
+        assert!(bytes_lsda.len() >= bytes_no_lsda.len(),
+            "FDE with LSDA ({}) should be >= FDE without ({})",
+            bytes_lsda.len(), bytes_no_lsda.len());
+    }
+
+    #[test]
+    fn test_fde_without_lsda_aug_data_zero() {
+        let layout = make_simple_layout();
+        let fde = DwarfFde::from_layout(&layout, 0, 64, 0);
+        let bytes = fde.to_bytes(24);
+
+        // After length(4) + CIE ptr(4) + PC begin(4) + PC range(4) = byte 16,
+        // augmentation data length should be ULEB128(0) = 0x00
+        // But we need to account for the length prefix: offset is 4+4+4+4 = 16 in body
+        // The body starts at byte 4 (after the length field)
+        // Body: cie_ptr(4) + pc_begin(4) + pc_range(4) = 12, then aug data len
+        assert_eq!(bytes[4 + 12], 0x00, "Augmentation data length should be 0");
+    }
+
+    #[test]
+    fn test_fde_with_lsda_aug_data_four() {
+        let layout = make_simple_layout();
+        let mut fde = DwarfFde::from_layout(&layout, 0, 64, 0);
+        fde.lsda_pointer = Some(0x42);
+        let bytes = fde.to_bytes(24);
+
+        // Augmentation data length should be 4 (i32 LSDA pointer)
+        assert_eq!(bytes[4 + 12], 0x04, "Augmentation data length should be 4");
+        // LSDA pointer value
+        let lsda_val = i32::from_le_bytes(bytes[4+13..4+17].try_into().unwrap());
+        assert_eq!(lsda_val, 0x42);
+    }
+
+    // --- Section with EH CIE ---
+
+    #[test]
+    fn test_section_with_eh_cie() {
+        let cie = DwarfCie::aarch64_darwin_with_eh();
+        let mut section = DwarfCfiSection {
+            cie,
+            fdes: Vec::new(),
+        };
+        assert!(section.is_empty());
+
+        let layout = make_simple_layout();
+        let mut fde = DwarfFde::from_layout(&layout, 0, 64, 0);
+        fde.lsda_pointer = Some(0);
+        section.add_fde(fde);
+
+        assert_eq!(section.fde_count(), 1);
+        let bytes = section.to_bytes();
+        assert!(!bytes.is_empty());
+
+        // Verify terminator
+        let last_4 = &bytes[bytes.len() - 4..];
+        assert_eq!(last_4, &[0, 0, 0, 0]);
     }
 }
