@@ -193,6 +193,102 @@ pub fn encode_tmir_icmp(cond: &IntCC, _ty: Type, lhs: SmtExpr, rhs: SmtExpr) -> 
     SmtExpr::ite(cmp_bool, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1))
 }
 
+/// Encode a tMIR bitwise binary operation as an SMT bitvector expression (fallible).
+///
+/// Returns `Err(SmtError::UnsupportedType)` if the opcode is not a supported
+/// bitwise binary opcode.
+///
+/// # Supported opcodes
+///
+/// - `Opcode::Band` -> `bvand`
+/// - `Opcode::Bor`  -> `bvor`
+/// - `Opcode::Bxor` -> `bvxor`
+pub fn try_encode_tmir_bitwise_binop(
+    opcode: &Opcode,
+    _ty: Type,
+    lhs: SmtExpr,
+    rhs: SmtExpr,
+) -> Result<SmtExpr, SmtError> {
+    match opcode {
+        Opcode::Band => Ok(lhs.bvand(rhs)),
+        Opcode::Bor => Ok(lhs.bvor(rhs)),
+        Opcode::Bxor => Ok(lhs.bvxor(rhs)),
+        other => Err(SmtError::UnsupportedType(format!(
+            "encode_tmir_bitwise_binop: unsupported opcode {:?}",
+            other
+        ))),
+    }
+}
+
+/// Encode a tMIR bitwise binary operation as an SMT bitvector expression.
+///
+/// Convenience wrapper around [`try_encode_tmir_bitwise_binop`].
+///
+/// # Panics
+///
+/// Panics if `opcode` is not a bitwise binary opcode.
+pub fn encode_tmir_bitwise_binop(opcode: &Opcode, ty: Type, lhs: SmtExpr, rhs: SmtExpr) -> SmtExpr {
+    try_encode_tmir_bitwise_binop(opcode, ty, lhs, rhs)
+        .expect("encode_tmir_bitwise_binop: unsupported opcode; use try_encode_tmir_bitwise_binop() for fallible encoding")
+}
+
+/// Encode a tMIR bitwise NOT as an SMT bitvector expression.
+///
+/// `Bnot(a)` is encoded as `bvxor(a, all_ones)` which flips all bits.
+/// This matches the AArch64 MVN instruction semantics.
+pub fn encode_tmir_bnot(ty: Type, operand: SmtExpr) -> SmtExpr {
+    let width = ty.bits();
+    let all_ones = SmtExpr::bv_const(crate::smt::mask(u64::MAX, width), width);
+    operand.bvxor(all_ones)
+}
+
+/// Encode a tMIR shift operation as an SMT bitvector expression (fallible).
+///
+/// Returns `Err(SmtError::UnsupportedType)` if the opcode is not a supported
+/// shift opcode.
+///
+/// # Supported opcodes
+///
+/// - `Opcode::Ishl` -> `bvshl`  (logical shift left)
+/// - `Opcode::Ushr` -> `bvlshr` (logical shift right)
+/// - `Opcode::Sshr` -> `bvashr` (arithmetic shift right)
+///
+/// # Shift amount semantics
+///
+/// On AArch64, shift amounts are masked to the register width (mod 32 for W,
+/// mod 64 for X). The SMT `bvshl`/`bvlshr`/`bvashr` operations define the
+/// result as zero when the shift amount >= width, which differs slightly.
+/// For proofs, we verify equivalence under the assumption that the shift
+/// amount is in range [0, width). The tMIR type system enforces this.
+pub fn try_encode_tmir_shift(
+    opcode: &Opcode,
+    _ty: Type,
+    lhs: SmtExpr,
+    rhs: SmtExpr,
+) -> Result<SmtExpr, SmtError> {
+    match opcode {
+        Opcode::Ishl => Ok(lhs.bvshl(rhs)),
+        Opcode::Ushr => Ok(lhs.bvlshr(rhs)),
+        Opcode::Sshr => Ok(lhs.bvashr(rhs)),
+        other => Err(SmtError::UnsupportedType(format!(
+            "encode_tmir_shift: unsupported opcode {:?}",
+            other
+        ))),
+    }
+}
+
+/// Encode a tMIR shift operation as an SMT bitvector expression.
+///
+/// Convenience wrapper around [`try_encode_tmir_shift`].
+///
+/// # Panics
+///
+/// Panics if `opcode` is not a shift opcode.
+pub fn encode_tmir_shift(opcode: &Opcode, ty: Type, lhs: SmtExpr, rhs: SmtExpr) -> SmtExpr {
+    try_encode_tmir_shift(opcode, ty, lhs, rhs)
+        .expect("encode_tmir_shift: unsupported opcode; use try_encode_tmir_shift() for fallible encoding")
+}
+
 /// Return the precondition for a tMIR opcode, if any.
 ///
 /// Division and remainder opcodes require `rhs != 0`. Other opcodes have no preconditions.
@@ -373,6 +469,93 @@ mod tests {
         let a = SmtExpr::fp64_const(1.0);
         let b = SmtExpr::fp64_const(2.0);
         let result = try_encode_tmir_fp_binop(&Opcode::Iadd, Type::F64, a, b);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Bitwise semantic encoder tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encode_band() {
+        let (a, b) = symbolic_binary_inputs(Type::I32);
+        let expr = encode_tmir_bitwise_binop(&Opcode::Band, Type::I32, a, b);
+        let result = expr.eval(&env(&[("a", 0xFF00_FF00), ("b", 0x0F0F_0F0F)]));
+        assert_eq!(result, EvalResult::Bv(0x0F00_0F00));
+    }
+
+    #[test]
+    fn test_encode_bor() {
+        let (a, b) = symbolic_binary_inputs(Type::I32);
+        let expr = encode_tmir_bitwise_binop(&Opcode::Bor, Type::I32, a, b);
+        let result = expr.eval(&env(&[("a", 0xFF00_0000), ("b", 0x00FF_0000)]));
+        assert_eq!(result, EvalResult::Bv(0xFFFF_0000));
+    }
+
+    #[test]
+    fn test_encode_bxor() {
+        let (a, b) = symbolic_binary_inputs(Type::I32);
+        let expr = encode_tmir_bitwise_binop(&Opcode::Bxor, Type::I32, a, b);
+        let result = expr.eval(&env(&[("a", 0xAAAA_AAAA), ("b", 0x5555_5555)]));
+        assert_eq!(result, EvalResult::Bv(0xFFFF_FFFF));
+    }
+
+    #[test]
+    fn test_encode_bnot() {
+        let a = symbolic_unary_input(Type::I32);
+        let expr = encode_tmir_bnot(Type::I32, a);
+        let result = expr.eval(&env(&[("a", 0)]));
+        assert_eq!(result, EvalResult::Bv(0xFFFF_FFFF));
+    }
+
+    #[test]
+    fn test_encode_bnot_ones() {
+        let a = symbolic_unary_input(Type::I32);
+        let expr = encode_tmir_bnot(Type::I32, a);
+        let result = expr.eval(&env(&[("a", 0xFFFF_FFFF)]));
+        assert_eq!(result, EvalResult::Bv(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Shift semantic encoder tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encode_ishl() {
+        let (a, b) = symbolic_binary_inputs(Type::I32);
+        let expr = encode_tmir_shift(&Opcode::Ishl, Type::I32, a, b);
+        let result = expr.eval(&env(&[("a", 1), ("b", 4)]));
+        assert_eq!(result, EvalResult::Bv(16));
+    }
+
+    #[test]
+    fn test_encode_ushr() {
+        let (a, b) = symbolic_binary_inputs(Type::I32);
+        let expr = encode_tmir_shift(&Opcode::Ushr, Type::I32, a, b);
+        let result = expr.eval(&env(&[("a", 0x8000_0000), ("b", 4)]));
+        assert_eq!(result, EvalResult::Bv(0x0800_0000));
+    }
+
+    #[test]
+    fn test_encode_sshr() {
+        let (a, b) = symbolic_binary_inputs(Type::I32);
+        let expr = encode_tmir_shift(&Opcode::Sshr, Type::I32, a, b);
+        // Arithmetic shift right of 0x80000000 by 4 = 0xF8000000 (sign-extends)
+        let result = expr.eval(&env(&[("a", 0x8000_0000), ("b", 4)]));
+        assert_eq!(result, EvalResult::Bv(0xF800_0000));
+    }
+
+    #[test]
+    fn test_try_encode_bitwise_unsupported() {
+        let (a, b) = symbolic_binary_inputs(Type::I32);
+        let result = try_encode_tmir_bitwise_binop(&Opcode::Iadd, Type::I32, a, b);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_try_encode_shift_unsupported() {
+        let (a, b) = symbolic_binary_inputs(Type::I32);
+        let result = try_encode_tmir_shift(&Opcode::Iadd, Type::I32, a, b);
         assert!(result.is_err());
     }
 }
