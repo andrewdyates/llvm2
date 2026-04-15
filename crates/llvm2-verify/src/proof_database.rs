@@ -162,6 +162,12 @@ pub enum ProofCategory {
 
     /// Global Value Numbering correctness proofs.
     Gvn,
+
+    /// Tail call optimization correctness proofs (self-recursive semantics,
+    /// argument shuffle, sibling call, guard conditions, stack reuse,
+    /// return value preservation, callee-saved safety, idempotence).
+    /// Source: `tco_proofs::all_tco_proofs()`.
+    TailCallOptimization,
 }
 
 impl ProofCategory {
@@ -196,6 +202,7 @@ impl ProofCategory {
             ProofCategory::StrengthReduction,
             ProofCategory::CmpCombine,
             ProofCategory::Gvn,
+            ProofCategory::TailCallOptimization,
         ]
     }
 
@@ -230,6 +237,7 @@ impl ProofCategory {
             ProofCategory::StrengthReduction => "Strength Reduction",
             ProofCategory::CmpCombine => "Cmp Combine",
             ProofCategory::Gvn => "GVN",
+            ProofCategory::TailCallOptimization => "Tail Call Optimization",
         }
     }
 }
@@ -465,6 +473,13 @@ fn register_gvn_proofs(proofs: &mut Vec<CategorizedProof>) {
     }
 }
 
+#[inline(never)]
+fn register_tco_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::tco_proofs::all_tco_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::TailCallOptimization });
+    }
+}
+
 impl ProofDatabase {
     /// Construct the database by collecting all proofs from all registries.
     ///
@@ -486,6 +501,7 @@ impl ProofDatabase {
         register_strength_reduce_proofs(&mut proofs);
         register_cmp_combine_proofs(&mut proofs);
         register_gvn_proofs(&mut proofs);
+        register_tco_proofs(&mut proofs);
         ProofDatabase { proofs }
     }
 
@@ -834,8 +850,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            28,
-            "expected 28 categories, got {}",
+            29,
+            "expected 29 categories, got {}",
             categories.len()
         );
     }
