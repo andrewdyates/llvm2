@@ -8,6 +8,8 @@
 
 #![allow(dead_code)]
 
+pub mod builder;
+
 use serde::{Deserialize, Serialize};
 use tmir_instrs::InstrNode;
 use tmir_types::{BlockId, FuncId, FuncTy, StructDef, TmirProof, Ty, ValueId};

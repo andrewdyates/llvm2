@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 
 use tmir_func::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule};
-use tmir_instrs::{AtomicRmwOp as TmirAtomicRmwOp, BinOp, CastOp, CmpOp, Instr, InstrNode, MemoryOrdering, UnOp};
+use tmir_instrs::{AtomicRmwOp as TmirAtomicRmwOp, BinOp, CastOp, CmpOp, Instr, InstrNode, MemoryOrdering, SwitchCase, UnOp};
 use tmir_types::{BlockId, FuncId, StructDef, TmirProof, Ty, ValueId};
 
 use crate::function::{BasicBlock, Function, Signature};
@@ -666,14 +666,32 @@ impl<'a> TmirAdapter<'a> {
             Instr::Fence { ordering } => {
                 self.translate_fence(ordering)
             }
-            // Switch: unsupported in MVP.
-            Instr::Switch { .. } => Err(AdapterError::UnsupportedInstruction(
-                "Switch".to_string(),
-            )),
-            // CallIndirect: unsupported in MVP.
-            Instr::CallIndirect { .. } => Err(AdapterError::UnsupportedInstruction(
-                "CallIndirect".to_string(),
-            )),
+            // Switch: multi-way branch.
+            Instr::Switch {
+                value,
+                cases,
+                default,
+            } => self.translate_switch(value, cases, default),
+            // CallIndirect: call through pointer.
+            Instr::CallIndirect {
+                callee,
+                args,
+                ret_ty,
+            } => self.translate_call_indirect(callee, args, ret_ty, &node.results),
+            // Select: conditional value (branchless).
+            Instr::Select {
+                ty: _,
+                cond,
+                true_val,
+                false_val,
+            } => self.translate_select(cond, true_val, false_val, &node.results),
+            // GetElementPtr: typed pointer arithmetic.
+            Instr::GetElementPtr {
+                elem_ty,
+                base,
+                index,
+                offset,
+            } => self.translate_gep(elem_ty, base, index, *offset, &node.results),
         }
     }
 
@@ -1364,6 +1382,212 @@ impl<'a> TmirAdapter<'a> {
             instrs.push(Instruction {
                 opcode: Opcode::Iadd,
                 args: vec![base_ptr, offset],
+                results: vec![dst],
+            });
+        }
+
+        Ok(instrs)
+    }
+
+    // -----------------------------------------------------------------------
+    // Switch (multi-way branch)
+    // -----------------------------------------------------------------------
+
+    /// Translate a tMIR Switch to an internal LIR Switch instruction.
+    ///
+    /// Maps tMIR SwitchCase entries to (value, Block) pairs and resolves
+    /// the default target block.
+    fn translate_switch(
+        &mut self,
+        value: &ValueId,
+        cases: &[SwitchCase],
+        default: &BlockId,
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        let selector = self.map_value(*value);
+        let default_block = self.map_block(*default);
+
+        let lir_cases: Vec<(i64, Block)> = cases
+            .iter()
+            .map(|c| (c.value, self.map_block(c.target)))
+            .collect();
+
+        Ok(vec![Instruction {
+            opcode: Opcode::Switch {
+                cases: lir_cases,
+                default: default_block,
+            },
+            args: vec![selector],
+            results: vec![],
+        }])
+    }
+
+    // -----------------------------------------------------------------------
+    // Indirect function call
+    // -----------------------------------------------------------------------
+
+    /// Translate a tMIR CallIndirect to an internal LIR CallIndirect.
+    ///
+    /// The callee is a function pointer (first arg), followed by the call
+    /// arguments. Lowered to BLR on AArch64.
+    fn translate_call_indirect(
+        &mut self,
+        callee: &ValueId,
+        args: &[ValueId],
+        _ret_ty: &[Ty],
+        results: &[ValueId],
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        let callee_val = self.map_value(*callee);
+        let mut arg_vals = vec![callee_val];
+        arg_vals.extend(args.iter().map(|vid| self.map_value(*vid)));
+        let result_vals = self.map_results(results);
+
+        Ok(vec![Instruction {
+            opcode: Opcode::CallIndirect,
+            args: arg_vals,
+            results: result_vals,
+        }])
+    }
+
+    // -----------------------------------------------------------------------
+    // Select (conditional value, branchless)
+    // -----------------------------------------------------------------------
+
+    /// Translate a tMIR Select to an internal LIR Select.
+    ///
+    /// `Select { cond, true_val, false_val }` produces a value without
+    /// branching. Lowered to CSEL on AArch64.
+    ///
+    /// We use `Icmp { cond: Equal }` to compare the boolean condition to 1,
+    /// then `Select { cond: Equal }` to pick between true_val and false_val.
+    fn translate_select(
+        &mut self,
+        cond: &ValueId,
+        true_val: &ValueId,
+        false_val: &ValueId,
+        results: &[ValueId],
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        let cond_val = self.map_value(*cond);
+        let true_v = self.map_value(*true_val);
+        let false_v = self.map_value(*false_val);
+        let dst = self.map_result(results)?;
+        let mut instrs = Vec::new();
+
+        // Compare condition to 1 (true) to set NZCV flags.
+        let one = self.fresh_value();
+        instrs.push(Instruction {
+            opcode: Opcode::Iconst {
+                ty: Type::I32,
+                imm: 1,
+            },
+            args: vec![],
+            results: vec![one],
+        });
+        let cmp_result = self.fresh_value();
+        instrs.push(Instruction {
+            opcode: Opcode::Icmp {
+                cond: IntCC::Equal,
+            },
+            args: vec![cond_val, one],
+            results: vec![cmp_result],
+        });
+        // Select based on the comparison result.
+        instrs.push(Instruction {
+            opcode: Opcode::Select {
+                cond: IntCC::Equal,
+            },
+            args: vec![true_v, false_v, cmp_result],
+            results: vec![dst],
+        });
+
+        Ok(instrs)
+    }
+
+    // -----------------------------------------------------------------------
+    // GetElementPtr (typed pointer arithmetic)
+    // -----------------------------------------------------------------------
+
+    /// Translate a tMIR GetElementPtr to internal LIR pointer arithmetic.
+    ///
+    /// Computes: result = base + index * sizeof(elem_ty) + byte_offset
+    fn translate_gep(
+        &mut self,
+        elem_ty: &Ty,
+        base: &ValueId,
+        index: &ValueId,
+        offset: i32,
+        results: &[ValueId],
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        let base_ptr = self.map_value(*base);
+        let index_val = self.map_value(*index);
+        let dst = self.map_result(results)?;
+        let mut instrs = Vec::new();
+
+        // Determine element size from the element type.
+        let elem_size = translate_type(elem_ty)
+            .map(|t| t.bytes())
+            .unwrap_or(1) as i64;
+
+        // Compute index * elem_size.
+        let scaled_index = if elem_size == 1 {
+            index_val
+        } else {
+            let size_val = self.fresh_value();
+            instrs.push(Instruction {
+                opcode: Opcode::Iconst {
+                    ty: Type::I64,
+                    imm: elem_size,
+                },
+                args: vec![],
+                results: vec![size_val],
+            });
+            let mul_result = self.fresh_value();
+            instrs.push(Instruction {
+                opcode: Opcode::Imul,
+                args: vec![index_val, size_val],
+                results: vec![mul_result],
+            });
+            mul_result
+        };
+
+        // Add to base.
+        let indexed_ptr = self.fresh_value();
+        instrs.push(Instruction {
+            opcode: Opcode::Iadd,
+            args: vec![base_ptr, scaled_index],
+            results: vec![indexed_ptr],
+        });
+
+        // Add byte offset if non-zero.
+        if offset != 0 {
+            let offset_val = self.fresh_value();
+            instrs.push(Instruction {
+                opcode: Opcode::Iconst {
+                    ty: Type::I64,
+                    imm: offset as i64,
+                },
+                args: vec![],
+                results: vec![offset_val],
+            });
+            instrs.push(Instruction {
+                opcode: Opcode::Iadd,
+                args: vec![indexed_ptr, offset_val],
+                results: vec![dst],
+            });
+        } else {
+            // No offset — directly alias the indexed pointer to the result.
+            // Use Iadd with a zero constant to produce a new value.
+            let zero = self.fresh_value();
+            instrs.push(Instruction {
+                opcode: Opcode::Iconst {
+                    ty: Type::I64,
+                    imm: 0,
+                },
+                args: vec![],
+                results: vec![zero],
+            });
+            instrs.push(Instruction {
+                opcode: Opcode::Iadd,
+                args: vec![indexed_ptr, zero],
                 results: vec![dst],
             });
         }

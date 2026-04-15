@@ -118,6 +118,21 @@ impl InstrSemantics for ConcreteSemantics {
                 let width = ty.bits().unwrap_or(64);
                 vec![SemValue::Float { width, value: *value }]
             }
+            Instr::Select { .. } => {
+                // Select: result = cond ? true_val : false_val
+                if inputs.len() < 3 {
+                    return vec![SemValue::Undef];
+                }
+                match &inputs[0] {
+                    SemValue::Bool(true) => vec![inputs[1].clone()],
+                    SemValue::Bool(false) => vec![inputs[2].clone()],
+                    _ => vec![SemValue::Undef],
+                }
+            }
+            Instr::GetElementPtr { .. } => {
+                // GEP: result is a pointer (address). Stub returns Undef.
+                vec![SemValue::Undef]
+            }
             Instr::Nop => vec![],
             // Most instructions need full implementation for real verification.
             // Return Undef as placeholder for the stub.
@@ -139,6 +154,8 @@ impl InstrSemantics for ConcreteSemantics {
             | Instr::Phi { ty, .. }
             | Instr::Const { ty, .. }
             | Instr::FConst { ty, .. } => vec![ty.clone()],
+            Instr::Select { ty, .. } => vec![ty.clone()],
+            Instr::GetElementPtr { .. } => vec![Ty::Ptr(Box::new(Ty::Void))],
             Instr::Cmp { .. } | Instr::IsUnique { .. } => vec![Ty::Bool],
             Instr::Cast { dst_ty, .. } => vec![dst_ty.clone()],
             Instr::Call { ret_ty, .. } | Instr::CallIndirect { ret_ty, .. } => ret_ty.clone(),
