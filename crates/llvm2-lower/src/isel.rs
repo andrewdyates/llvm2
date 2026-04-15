@@ -550,7 +550,9 @@ impl InstructionSelector {
             // Unary operations
             Opcode::Ineg => self.select_int_unaryop(AArch64IntUnaryOp::Neg, inst, block)?,
             Opcode::Bnot => self.select_int_unaryop(AArch64IntUnaryOp::Mvn, inst, block)?,
-            Opcode::Fneg => self.select_fp_unaryop(inst, block)?,
+            Opcode::Fneg => self.select_fp_unaryop(AArch64Opcode::FnegRR, inst, block)?,
+            Opcode::Fabs => self.select_fp_unaryop(AArch64Opcode::FabsRR, inst, block)?,
+            Opcode::Fsqrt => self.select_fp_unaryop(AArch64Opcode::FsqrtRR, inst, block)?,
 
             // Shift operations
             Opcode::Ishl => self.select_shift(AArch64ShiftOp::Lsl, inst, block)?,
@@ -965,8 +967,12 @@ impl InstructionSelector {
         Ok(())
     }
 
-    /// Select floating-point unary negate: FNEG Sd/Dd, Sn/Dn.
-    fn select_fp_unaryop(&mut self, inst: &Instruction, block: Block) -> Result<(), ISelError> {
+    /// Select floating-point unary operation: FNEG/FABS/FSQRT Sd/Dd, Sn/Dn.
+    ///
+    /// The `opc` parameter selects the concrete AArch64 opcode (FnegRR, FabsRR,
+    /// FsqrtRR). All three share the same operand shape: one FPR source, one
+    /// FPR destination, precision determined by register class.
+    fn select_fp_unaryop(&mut self, opc: AArch64Opcode, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         Self::require_args(inst, 1, "FpUnaryOp")?;
         Self::require_result(inst, "FpUnaryOp")?;
 
@@ -974,17 +980,10 @@ impl InstructionSelector {
         let result_val = inst.results[0];
 
         let ty = self.value_type(&src_val);
-        let is_f32 = matches!(ty, Type::F32);
         let class = reg_class_for_type(&ty);
         let dst = self.new_vreg(class);
 
         let src = self.use_value(&src_val)?;
-
-        let opc = if is_f32 {
-            AArch64Opcode::FnegRR
-        } else {
-            AArch64Opcode::FnegRR
-        };
 
         self.func.push_inst(
             block,
@@ -7140,5 +7139,689 @@ mod tests {
         assert!(!InstructionSelector::is_32bit(&Type::I64));
         assert!(!InstructionSelector::is_32bit(&Type::I128));
         assert!(!InstructionSelector::is_32bit(&Type::F64));
+    }
+
+    // =======================================================================
+    // Floating-point instruction selection tests (issue #211)
+    // =======================================================================
+
+    // -- FABS tests --
+
+    #[test]
+    fn select_fabs_f64() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("fabs64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fabs,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        // 1 COPY (formal arg) + 1 FABS
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FabsRR);
+    }
+
+    #[test]
+    fn select_fabs_f32() {
+        let sig = Signature {
+            params: vec![Type::F32],
+            returns: vec![Type::F32],
+        };
+        let mut isel = InstructionSelector::new("fabs32".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fabs,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FabsRR);
+    }
+
+    #[test]
+    fn fabs_result_is_defined_with_correct_type() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("fabs_ty".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fabs,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        // The result value should be usable in subsequent instructions
+        // (verifies it was properly defined in the value map).
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fadd,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FabsRR);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::FaddRR);
+    }
+
+    // -- FSQRT tests --
+
+    #[test]
+    fn select_fsqrt_f64() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("fsqrt64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fsqrt,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts.len(), 2);
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FsqrtRR);
+    }
+
+    #[test]
+    fn select_fsqrt_f32() {
+        let sig = Signature {
+            params: vec![Type::F32],
+            returns: vec![Type::F32],
+        };
+        let mut isel = InstructionSelector::new("fsqrt32".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fsqrt,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FsqrtRR);
+    }
+
+    #[test]
+    fn fsqrt_result_chains_to_fadd() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("sqrtadd".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        // sqrt(x) + x
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fsqrt,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fadd,
+                args: vec![Value(1), Value(0)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FsqrtRR);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::FaddRR);
+    }
+
+    // -- FP arithmetic with both precision variants --
+
+    #[test]
+    fn select_fadd_f32() {
+        let (mut isel, entry) = make_f32_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fadd,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FaddRR);
+    }
+
+    #[test]
+    fn select_fsub_f64() {
+        let (mut isel, entry) = make_f64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fsub,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FsubRR);
+    }
+
+    #[test]
+    fn select_fmul_f32() {
+        let (mut isel, entry) = make_f32_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fmul,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FmulRR);
+    }
+
+    #[test]
+    fn select_fdiv_f64() {
+        let (mut isel, entry) = make_f64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fdiv,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[2].opcode, AArch64Opcode::FdivRR);
+    }
+
+    // -- FP comparison with various condition codes --
+
+    #[test]
+    fn select_fcmp_f32_equal() {
+        let (mut isel, entry) = make_f32_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fcmp { cond: FloatCC::Equal },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::Fcmp);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::CSet);
+        assert_eq!(mblock.insts[3].operands[1], ISelOperand::CondCode(AArch64CC::EQ));
+    }
+
+    #[test]
+    fn select_fcmp_f64_greater_than() {
+        let (mut isel, entry) = make_f64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fcmp { cond: FloatCC::GreaterThan },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::Fcmp);
+        assert_eq!(mblock.insts[3].operands[1], ISelOperand::CondCode(AArch64CC::GT));
+    }
+
+    #[test]
+    fn select_fcmp_f64_unordered() {
+        let (mut isel, entry) = make_f64_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fcmp { cond: FloatCC::Unordered },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts[3].operands[1], ISelOperand::CondCode(AArch64CC::VS));
+    }
+
+    // -- FP-to-int conversions --
+
+    #[test]
+    fn select_fcvt_to_int_i64_from_f64() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("fcvt_i64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtToInt { dst_ty: Type::I64 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FcvtzsRR);
+    }
+
+    #[test]
+    fn select_fcvt_to_uint_from_f32() {
+        let sig = Signature {
+            params: vec![Type::F32],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("f32_to_u32".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtToUint { dst_ty: Type::I32 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::FcvtzuRR);
+    }
+
+    // -- Int-to-FP conversions --
+
+    #[test]
+    fn select_scvtf_i64_to_f64() {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("i64_to_f64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtFromInt { src_ty: Type::I64 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::ScvtfRR);
+    }
+
+    #[test]
+    fn select_ucvtf_i32_to_f32() {
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::F32],
+        };
+        let mut isel = InstructionSelector::new("u32_to_f32".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtFromUint { src_ty: Type::I32 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::UcvtfRR);
+    }
+
+    #[test]
+    fn select_ucvtf_i64_to_f64() {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("u64_to_f64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtFromUint { src_ty: Type::I64 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::UcvtfRR);
+    }
+
+    // -- FP precision conversion --
+
+    #[test]
+    fn select_fpext_f32_to_f64_operand_types() {
+        let sig = Signature {
+            params: vec![Type::F32],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("fpext".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FPExt,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[1];
+        assert_eq!(inst.opcode, AArch64Opcode::FcvtSD);
+        // dst is Fpr64, src is Fpr32
+        if let ISelOperand::VReg(dst) = &inst.operands[0] {
+            assert_eq!(dst.class, RegClass::Fpr64);
+        } else {
+            panic!("expected VReg dst");
+        }
+    }
+
+    #[test]
+    fn select_fptrunc_f64_to_f32_operand_types() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::F32],
+        };
+        let mut isel = InstructionSelector::new("fptrunc".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FPTrunc,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[1];
+        assert_eq!(inst.opcode, AArch64Opcode::FcvtDS);
+        if let ISelOperand::VReg(dst) = &inst.operands[0] {
+            assert_eq!(dst.class, RegClass::Fpr32);
+        } else {
+            panic!("expected VReg dst");
+        }
+    }
+
+    // -- FP constants --
+
+    #[test]
+    fn select_fconst_f32_one() {
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fconst { ty: Type::F32, imm: 1.0 },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::FmovImm);
+        assert_eq!(inst.operands[1], ISelOperand::FImm(1.0));
+    }
+
+    #[test]
+    fn select_fconst_f64_negative() {
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fconst { ty: Type::F64, imm: -3.0 },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::FmovImm);
+        assert_eq!(inst.operands[1], ISelOperand::FImm(-3.0));
+    }
+
+    #[test]
+    fn select_fconst_f64_zero() {
+        let (mut isel, entry) = make_empty_isel();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fconst { ty: Type::F64, imm: 0.0 },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[0].opcode, AArch64Opcode::FmovImm);
+    }
+
+    // -- Combined FP operations (chaining) --
+
+    #[test]
+    fn fp_chain_fabs_then_fsqrt() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("abs_sqrt".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        // result = sqrt(|x|)
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fabs,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fsqrt,
+                args: vec![Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts[1].opcode, AArch64Opcode::FabsRR);
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::FsqrtRR);
+    }
+
+    #[test]
+    fn fp_chain_fmul_then_fabs() {
+        let (mut isel, entry) = make_f64_isel();
+
+        // result = |x * y|
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fmul,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fabs,
+                args: vec![Value(2)],
+                results: vec![Value(3)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let mblock = &mfunc.blocks[&entry];
+        assert_eq!(mblock.insts[2].opcode, AArch64Opcode::FmulRR);
+        assert_eq!(mblock.insts[3].opcode, AArch64Opcode::FabsRR);
+    }
+
+    // -- Error handling --
+
+    #[test]
+    fn fabs_missing_arg_errors() {
+        let (mut isel, entry) = make_empty_isel();
+        let result = isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fabs,
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fsqrt_missing_result_errors() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![],
+        };
+        let mut isel = InstructionSelector::new("err".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        let result = isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fsqrt,
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        );
+        assert!(result.is_err());
+    }
+
+    // -- to_ir_func conversion for FP ops --
+
+    #[test]
+    fn fp_isel_to_ir_func_preserves_fabs_opcode() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("ir_fabs".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fabs,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let isel_func = isel.finalize();
+        let ir_func = isel_func.to_ir_func();
+
+        // Verify the opcode survives the ISel->IR conversion
+        let ir_insts = &ir_func.blocks[0].insts;
+        let fabs_inst_id = ir_insts[1]; // after the COPY for formal arg
+        let fabs_inst = &ir_func.insts[fabs_inst_id.0 as usize];
+        assert_eq!(fabs_inst.opcode, AArch64Opcode::FabsRR);
+    }
+
+    #[test]
+    fn fp_isel_to_ir_func_preserves_fsqrt_opcode() {
+        let sig = Signature {
+            params: vec![Type::F64],
+            returns: vec![Type::F64],
+        };
+        let mut isel = InstructionSelector::new("ir_fsqrt".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fsqrt,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let isel_func = isel.finalize();
+        let ir_func = isel_func.to_ir_func();
+
+        let ir_insts = &ir_func.blocks[0].insts;
+        let fsqrt_inst_id = ir_insts[1];
+        let fsqrt_inst = &ir_func.insts[fsqrt_inst_id.0 as usize];
+        assert_eq!(fsqrt_inst.opcode, AArch64Opcode::FsqrtRR);
     }
 }

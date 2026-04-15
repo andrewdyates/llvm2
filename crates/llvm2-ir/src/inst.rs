@@ -170,6 +170,10 @@ pub enum AArch64Opcode {
     FdivRR,
     /// FNEG Dd, Dn — floating-point negate.
     FnegRR,
+    /// FABS Dd, Dn — floating-point absolute value.
+    FabsRR,
+    /// FSQRT Dd, Dn — floating-point square root.
+    FsqrtRR,
     Fcmp,
     FcvtzsRR,
     /// FCVTZU: float-to-unsigned-integer conversion (round toward zero).

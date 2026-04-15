@@ -40,6 +40,8 @@ pub enum UnOp {
     Neg,
     Not,
     FNeg,
+    FAbs,
+    FSqrt,
 }
 
 /// Integer/float comparison predicates.

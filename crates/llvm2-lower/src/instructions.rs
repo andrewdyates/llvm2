@@ -38,6 +38,8 @@ pub enum Opcode {
 
     // Floating-point unary
     Fneg,   // Floating-point negate: result = -operand
+    Fabs,   // Floating-point absolute value: result = |operand|
+    Fsqrt,  // Floating-point square root: result = sqrt(operand)
 
     // Shift operations
     Ishl,   // Logical shift left

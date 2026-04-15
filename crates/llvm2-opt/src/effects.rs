@@ -119,7 +119,7 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
         OrnRR => MemoryEffect::Pure,
 
         // Floating-point arithmetic
-        FaddRR | FsubRR | FmulRR | FdivRR | FnegRR => MemoryEffect::Pure,
+        FaddRR | FsubRR | FmulRR | FdivRR | FnegRR | FabsRR | FsqrtRR => MemoryEffect::Pure,
 
         // FP conversion
         FcvtzsRR | FcvtzuRR | ScvtfRR | UcvtfRR => MemoryEffect::Pure,

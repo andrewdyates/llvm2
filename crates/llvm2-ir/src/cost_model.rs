@@ -231,6 +231,8 @@ impl AppleSiliconCostModel {
             FmulRR  => (4, 2.0),
             FdivRR  => (10, 0.5),  // Single: ~10, Double: ~15
             FnegRR  => (1, 2.0),   // Simple bit flip, uses FP unit
+            FabsRR  => (1, 2.0),   // Simple bit clear, uses FP unit
+            FsqrtRR => (12, 0.25), // Single: ~9, Double: ~12-16 cycles, 1 unit
             Fcmp    => (3, 2.0),
             FmovImm => (2, 2.0),
 
@@ -1723,7 +1725,8 @@ mod tests {
             // FP
             AArch64Opcode::FaddRR, AArch64Opcode::FsubRR,
             AArch64Opcode::FmulRR, AArch64Opcode::FdivRR,
-            AArch64Opcode::FnegRR, AArch64Opcode::Fcmp,
+            AArch64Opcode::FnegRR, AArch64Opcode::FabsRR,
+            AArch64Opcode::FsqrtRR, AArch64Opcode::Fcmp,
             AArch64Opcode::FmovImm,
             // FP conversion
             AArch64Opcode::FcvtzsRR, AArch64Opcode::FcvtzuRR,
