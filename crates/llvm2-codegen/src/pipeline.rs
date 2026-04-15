@@ -727,9 +727,23 @@ impl Pipeline {
         &self,
         func: &IrMachFunction,
     ) -> Result<llvm2_verify::FunctionVerificationReport, PipelineError> {
+        // Skip the expensive ProofDatabase construction + evaluation when
+        // verification is disabled. Previously we always ran verify_function()
+        // and only checked the result when config.verify was true, but
+        // ProofDatabase::new() alone consumes significant stack space in debug
+        // builds (hundreds of proof obligations with SmtExpr trees), which
+        // contributed to stack overflows on the default 8 MB test-thread stack.
+        // See issue #205.
+        if !self.config.verify {
+            return Ok(llvm2_verify::FunctionVerificationReport {
+                function_name: func.name.clone(),
+                instructions: vec![],
+            });
+        }
+
         let report = llvm2_verify::verify_function(func);
 
-        if self.config.verify && report.failed_count() > 0 {
+        if report.failed_count() > 0 {
             return Err(PipelineError::VerificationFailed {
                 function: report.function_name.clone(),
                 failures: report.failed_count(),
@@ -1906,7 +1920,7 @@ mod tests {
     #[test]
     fn run_verification_disabled_returns_report() {
         // With verify=false, run_verification should always return Ok
-        // even though the function has unverified instructions.
+        // and skip expensive proof evaluation entirely (empty report).
         let pipeline = Pipeline::new(PipelineConfig {
             verify: false,
             ..Default::default()
@@ -1916,7 +1930,7 @@ mod tests {
         assert!(result.is_ok(), "verification disabled should always succeed");
         let report = result.unwrap();
         assert_eq!(report.function_name, "add");
-        assert!(report.total() > 0);
+        assert_eq!(report.total(), 0, "verification disabled skips proof evaluation");
     }
 
     #[test]
