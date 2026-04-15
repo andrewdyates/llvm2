@@ -142,8 +142,10 @@ pub enum ProofCategory {
     /// Source: `frame_proofs::all_frame_proofs()`.
     FrameLayout,
 
-    /// Instruction scheduling correctness proofs (dependency preservation,
-    /// memory ordering, control flow, topological validity, reordering freedom).
+    /// Instruction scheduling correctness proofs (RAW/WAW/WAR dependency
+    /// preservation, register pressure bounds, latency ordering, memory
+    /// ordering, control flow, topological validity, reordering freedom,
+    /// critical path optimality).
     /// Source: `scheduler_proofs::all_scheduler_proofs()`.
     InstructionScheduling,
 
