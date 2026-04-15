@@ -550,6 +550,296 @@ pub fn generate_lsda(table: &ExceptionTable) -> Vec<u8> {
     lsda
 }
 
+// ---------------------------------------------------------------------------
+// EH-to-LSDA bridge — convert ABI-level EH info to codegen-level LSDA
+// ---------------------------------------------------------------------------
+
+/// Parameters describing a function's exception handling for LSDA generation.
+///
+/// This is a standalone bridge type that can be constructed from the ABI-level
+/// `ExceptionHandlingInfo` in `llvm2-lower` without requiring a cross-crate
+/// dependency. The ISel or pipeline adapter populates this struct and passes
+/// it to `build_exception_table()` to produce an `ExceptionTable` ready for
+/// `generate_lsda()`.
+///
+/// # Usage
+///
+/// ```ignore
+/// let eh_params = EhBridgeParams {
+///     personality_symbol: Some("__gxx_personality_v0".to_string()),
+///     call_sites: vec![
+///         EhCallSite { start_offset: 0x10, length: 0x08, landing_pad_offset: 0x50, action_index: 1 },
+///     ],
+///     actions: vec![
+///         EhAction { type_filter: 1, next_offset: 0 },
+///     ],
+///     type_indices: vec![42], // opaque indices into the type table
+/// };
+/// let table = build_exception_table(&eh_params);
+/// let lsda_bytes = generate_lsda(&table);
+/// ```
+#[derive(Debug, Clone)]
+pub struct EhBridgeParams {
+    /// Personality routine symbol name (e.g., "__gxx_personality_v0").
+    /// `None` for functions without exception handling.
+    pub personality_symbol: Option<String>,
+    /// Call site entries mapping PC ranges to landing pads.
+    pub call_sites: Vec<EhCallSite>,
+    /// Action table entries (type filter chains).
+    pub actions: Vec<EhAction>,
+    /// Type info indices (opaque references to type descriptors).
+    /// These are 1-based indices as used in the action table's type_filter.
+    /// Index 0 is implicitly catch-all/cleanup.
+    pub type_indices: Vec<u32>,
+}
+
+/// A call site for the EH bridge.
+#[derive(Debug, Clone)]
+pub struct EhCallSite {
+    /// Start of the call site region (offset from function start).
+    pub start_offset: u32,
+    /// Length of the call site region in bytes.
+    pub length: u32,
+    /// Landing pad offset from function start (0 = no landing pad).
+    pub landing_pad_offset: u32,
+    /// 1-based index into the action table (0 = no action / cleanup-only).
+    pub action_index: u32,
+}
+
+/// An action entry for the EH bridge.
+#[derive(Debug, Clone)]
+pub struct EhAction {
+    /// Type filter: positive = catch, 0 = cleanup, negative = filter.
+    pub type_filter: i32,
+    /// Byte offset to next action in the chain (0 = end of chain).
+    pub next_offset: i32,
+}
+
+/// Build an `ExceptionTable` from bridge parameters.
+///
+/// Converts the ABI-level EH metadata into the codegen-level LSDA types:
+/// - Maps call site entries to `CallSiteEntry` (codegen level)
+/// - Maps action entries to `ActionEntry` (codegen level) with correct
+///   byte offsets for the action chain
+/// - Populates the type table from the type index list
+///
+/// The resulting `ExceptionTable` can be passed directly to `generate_lsda()`.
+pub fn build_exception_table(params: &EhBridgeParams) -> ExceptionTable {
+    let mut table = ExceptionTable::new();
+    table.personality = params.personality_symbol.clone();
+
+    // Map call sites.
+    for cs in &params.call_sites {
+        table.add_call_site(CallSiteEntry::new(
+            cs.start_offset,
+            cs.length,
+            cs.landing_pad_offset,
+            cs.action_index,
+        ));
+    }
+
+    // Map actions. The Itanium ABI specifies action chains as byte-offset
+    // linked lists. Each action entry is 2 SLEB128 values: type_filter and
+    // next_action_offset. The next_action_offset is a byte displacement from
+    // the start of the current entry to the start of the next entry.
+    //
+    // For our bridge, we compute byte offsets from the incoming next_offset
+    // field. If next_offset is 0, it means end of chain. Otherwise, it's
+    // treated as a 1-based index into the action table (the byte offset is
+    // computed from the SLEB128 sizes of the intervening entries).
+    //
+    // However, the simpler approach (matching LLVM's EHStreamer) is to treat
+    // the action entries as a flat array where the caller has already computed
+    // byte offsets. We pass them through directly.
+    for action in &params.actions {
+        table.actions.push(ActionEntry {
+            type_filter: action.type_filter,
+            next_action_offset: action.next_offset,
+        });
+    }
+
+    // Map type table.
+    for &idx in &params.type_indices {
+        table.add_type_info(TypeInfo::new(idx));
+    }
+
+    table
+}
+
+/// Build an `ExceptionTable` from landing pad metadata.
+///
+/// This is a higher-level builder that takes landing pad descriptors and
+/// automatically constructs the call site table, action table, and type
+/// table. It handles:
+///
+/// - **Catch typed**: Creates catch actions with positive type filter indices
+/// - **Catch-all**: Creates actions with type filter 0 (distinguished from
+///   cleanup by having a non-zero action index in the call site)
+/// - **Cleanup**: Creates cleanup call sites (action_idx = 0, landing pad set)
+/// - **Action chains**: When a landing pad has multiple catch types, chains
+///   them via next_action_offset
+///
+/// # Arguments
+///
+/// * `personality` — Personality function symbol name
+/// * `landing_pads` — Landing pad descriptors
+/// * `call_site_ranges` — PC ranges mapping to landing pads. Each tuple is
+///   `(start_offset, length, landing_pad_offset)`.
+///
+/// # Returns
+///
+/// A fully populated `ExceptionTable` ready for `generate_lsda()`.
+pub fn build_exception_table_from_pads(
+    personality: &str,
+    landing_pads: &[LandingPadDesc],
+    call_site_ranges: &[(u32, u32, u32)],
+) -> ExceptionTable {
+    let mut table = ExceptionTable::new();
+    table.personality = Some(personality.to_string());
+
+    // Collect all unique type indices and build the type table.
+    let mut type_index_set: Vec<u32> = Vec::new();
+    for lp in landing_pads {
+        for &ti in &lp.catch_type_indices {
+            if ti != 0 && !type_index_set.contains(&ti) {
+                type_index_set.push(ti);
+            }
+        }
+    }
+
+    // Add type infos to the table.
+    for &ti in &type_index_set {
+        table.add_type_info(TypeInfo::new(ti));
+    }
+
+    // Build action entries for each landing pad.
+    // Each landing pad gets an action chain. The first action's 1-based index
+    // is stored in the call site entry.
+    let mut lp_to_first_action: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+
+    for lp in landing_pads {
+        if lp.is_cleanup && lp.catch_type_indices.is_empty() {
+            // Cleanup-only: action_idx = 0 in the call site (no action chain).
+            lp_to_first_action.insert(lp.landing_pad_offset, 0);
+            continue;
+        }
+
+        // Build the action chain for this landing pad's catch types.
+        let chain_start = table.actions.len() as u32 + 1; // 1-based
+        let num_catches = lp.catch_type_indices.len();
+
+        for (i, &catch_idx) in lp.catch_type_indices.iter().enumerate() {
+            let type_filter = if catch_idx == 0 {
+                // Catch-all: use type filter 0, but the personality distinguishes
+                // this from cleanup via the call site's non-zero action index.
+                0i32
+            } else {
+                // Map the opaque type index to its 1-based position in our type table.
+                type_index_set.iter().position(|&ti| ti == catch_idx)
+                    .map(|pos| (pos + 1) as i32)
+                    .unwrap_or(0)
+            };
+
+            // Compute next_action_offset. Each action entry is 2 SLEB128 values.
+            // For simplicity, we use a fixed-size encoding estimate: each SLEB128
+            // value for small integers fits in 1 byte, so each action entry is
+            // typically 2 bytes.
+            let is_last = i == num_catches - 1;
+            let next_offset = if is_last && !lp.is_cleanup {
+                0 // end of chain
+            } else if is_last && lp.is_cleanup {
+                // Chain to a cleanup action.
+                2 // next entry is 2 bytes ahead (SLEB128(type_filter) + SLEB128(next))
+            } else {
+                // Point to next catch in the chain.
+                // Each entry is SLEB128(filter) + SLEB128(next_offset).
+                // For small values, each SLEB128 is 1 byte, so entry size = 2.
+                2i32
+            };
+
+            table.actions.push(ActionEntry {
+                type_filter,
+                next_action_offset: next_offset,
+            });
+        }
+
+        // If the landing pad has both catches and cleanup, add a cleanup action
+        // at the end of the chain.
+        if lp.is_cleanup && !lp.catch_type_indices.is_empty() {
+            table.actions.push(ActionEntry {
+                type_filter: 0, // cleanup
+                next_action_offset: 0, // end of chain
+            });
+        }
+
+        lp_to_first_action.insert(lp.landing_pad_offset, chain_start);
+    }
+
+    // Build call site entries.
+    for &(start, length, lp_offset) in call_site_ranges {
+        let action_idx = if lp_offset == 0 {
+            0 // no landing pad
+        } else {
+            lp_to_first_action.get(&lp_offset).copied().unwrap_or(0)
+        };
+
+        table.add_call_site(CallSiteEntry::new(
+            start, length, lp_offset, action_idx,
+        ));
+    }
+
+    table
+}
+
+/// Descriptor for a landing pad, used by `build_exception_table_from_pads`.
+#[derive(Debug, Clone)]
+pub struct LandingPadDesc {
+    /// Offset of the landing pad from the function start.
+    pub landing_pad_offset: u32,
+    /// Type indices this landing pad catches. 0 = catch-all.
+    pub catch_type_indices: Vec<u32>,
+    /// Whether this landing pad runs cleanup (destructors/drops).
+    pub is_cleanup: bool,
+}
+
+impl LandingPadDesc {
+    /// Create a catch-all landing pad.
+    pub fn catch_all(offset: u32) -> Self {
+        Self {
+            landing_pad_offset: offset,
+            catch_type_indices: vec![0],
+            is_cleanup: false,
+        }
+    }
+
+    /// Create a typed catch landing pad.
+    pub fn catch_typed(offset: u32, type_index: u32) -> Self {
+        Self {
+            landing_pad_offset: offset,
+            catch_type_indices: vec![type_index],
+            is_cleanup: false,
+        }
+    }
+
+    /// Create a cleanup-only landing pad.
+    pub fn cleanup(offset: u32) -> Self {
+        Self {
+            landing_pad_offset: offset,
+            catch_type_indices: Vec::new(),
+            is_cleanup: true,
+        }
+    }
+
+    /// Create a landing pad that catches a type and also runs cleanup.
+    pub fn catch_and_cleanup(offset: u32, type_index: u32) -> Self {
+        Self {
+            landing_pad_offset: offset,
+            catch_type_indices: vec![type_index],
+            is_cleanup: true,
+        }
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -1012,5 +1302,309 @@ mod tests {
             }
         }
         (result, data.len())
+    }
+
+    // =======================================================================
+    // EH Bridge tests
+    // =======================================================================
+
+    #[test]
+    fn test_build_exception_table_empty() {
+        let params = EhBridgeParams {
+            personality_symbol: None,
+            call_sites: Vec::new(),
+            actions: Vec::new(),
+            type_indices: Vec::new(),
+        };
+        let table = build_exception_table(&params);
+        assert!(table.is_empty());
+        assert!(table.personality.is_none());
+    }
+
+    #[test]
+    fn test_build_exception_table_cxx_personality() {
+        let params = EhBridgeParams {
+            personality_symbol: Some("__gxx_personality_v0".to_string()),
+            call_sites: vec![
+                EhCallSite {
+                    start_offset: 0x10,
+                    length: 0x08,
+                    landing_pad_offset: 0x50,
+                    action_index: 1,
+                },
+            ],
+            actions: vec![
+                EhAction { type_filter: 1, next_offset: 0 },
+            ],
+            type_indices: vec![42],
+        };
+        let table = build_exception_table(&params);
+
+        assert_eq!(table.personality.as_deref(), Some("__gxx_personality_v0"));
+        assert_eq!(table.call_sites.len(), 1);
+        assert_eq!(table.call_sites[0].region_start, 0x10);
+        assert_eq!(table.call_sites[0].region_length, 0x08);
+        assert_eq!(table.call_sites[0].landing_pad, 0x50);
+        assert_eq!(table.call_sites[0].action_idx, 1);
+        assert_eq!(table.actions.len(), 1);
+        assert_eq!(table.actions[0].type_filter, 1);
+        assert_eq!(table.type_infos.len(), 1);
+        assert_eq!(table.type_infos[0].type_info_index, 42);
+    }
+
+    #[test]
+    fn test_build_exception_table_rust_personality() {
+        let params = EhBridgeParams {
+            personality_symbol: Some("__rust_eh_personality".to_string()),
+            call_sites: vec![
+                EhCallSite {
+                    start_offset: 0,
+                    length: 0x20,
+                    landing_pad_offset: 0x30,
+                    action_index: 0, // cleanup only
+                },
+            ],
+            actions: Vec::new(),
+            type_indices: Vec::new(),
+        };
+        let table = build_exception_table(&params);
+
+        assert_eq!(table.personality.as_deref(), Some("__rust_eh_personality"));
+        assert_eq!(table.call_sites.len(), 1);
+        assert_eq!(table.call_sites[0].action_idx, 0);
+        assert!(table.actions.is_empty());
+        assert!(table.type_infos.is_empty());
+    }
+
+    #[test]
+    fn test_build_exception_table_generates_valid_lsda() {
+        let params = EhBridgeParams {
+            personality_symbol: Some("__gxx_personality_v0".to_string()),
+            call_sites: vec![
+                EhCallSite {
+                    start_offset: 0,
+                    length: 16,
+                    landing_pad_offset: 32,
+                    action_index: 1,
+                },
+            ],
+            actions: vec![
+                EhAction { type_filter: 1, next_offset: 0 },
+            ],
+            type_indices: vec![100],
+        };
+        let table = build_exception_table(&params);
+        let lsda = generate_lsda(&table);
+
+        // Should produce a valid non-empty LSDA.
+        assert!(lsda.len() > 4);
+        assert_eq!(lsda[0], 0xFF); // LPStart omit
+        assert_ne!(lsda[1], 0xFF); // TType present (has type infos)
+    }
+
+    #[test]
+    fn test_build_exception_table_action_chain() {
+        // Two catch types chained together.
+        let params = EhBridgeParams {
+            personality_symbol: Some("__gxx_personality_v0".to_string()),
+            call_sites: vec![
+                EhCallSite {
+                    start_offset: 0,
+                    length: 8,
+                    landing_pad_offset: 16,
+                    action_index: 1,
+                },
+            ],
+            actions: vec![
+                EhAction { type_filter: 1, next_offset: 2 },  // catch type 1, chain to next
+                EhAction { type_filter: 2, next_offset: 0 },  // catch type 2, end of chain
+            ],
+            type_indices: vec![10, 20],
+        };
+        let table = build_exception_table(&params);
+
+        assert_eq!(table.actions.len(), 2);
+        assert_eq!(table.actions[0].type_filter, 1);
+        assert_eq!(table.actions[0].next_action_offset, 2);
+        assert_eq!(table.actions[1].type_filter, 2);
+        assert_eq!(table.actions[1].next_action_offset, 0);
+    }
+
+    #[test]
+    fn test_build_exception_table_multiple_call_sites() {
+        let params = EhBridgeParams {
+            personality_symbol: Some("__gxx_personality_v0".to_string()),
+            call_sites: vec![
+                EhCallSite {
+                    start_offset: 0x00,
+                    length: 0x10,
+                    landing_pad_offset: 0x80,
+                    action_index: 1,
+                },
+                EhCallSite {
+                    start_offset: 0x10,
+                    length: 0x08,
+                    landing_pad_offset: 0x90,
+                    action_index: 1,
+                },
+                EhCallSite {
+                    start_offset: 0x18,
+                    length: 0x04,
+                    landing_pad_offset: 0,
+                    action_index: 0,
+                },
+            ],
+            actions: vec![
+                EhAction { type_filter: 1, next_offset: 0 },
+            ],
+            type_indices: vec![1],
+        };
+        let table = build_exception_table(&params);
+        assert_eq!(table.call_sites.len(), 3);
+
+        // Third call site has no landing pad.
+        assert_eq!(table.call_sites[2].landing_pad, 0);
+        assert_eq!(table.call_sites[2].action_idx, 0);
+
+        let lsda = generate_lsda(&table);
+        assert!(lsda.len() > 4);
+    }
+
+    // =======================================================================
+    // build_exception_table_from_pads tests
+    // =======================================================================
+
+    #[test]
+    fn test_from_pads_cleanup_only() {
+        let table = build_exception_table_from_pads(
+            "__rust_eh_personality",
+            &[LandingPadDesc::cleanup(0x100)],
+            &[(0x00, 0x20, 0x100)],
+        );
+
+        assert_eq!(table.personality.as_deref(), Some("__rust_eh_personality"));
+        assert_eq!(table.call_sites.len(), 1);
+        assert_eq!(table.call_sites[0].landing_pad, 0x100);
+        assert_eq!(table.call_sites[0].action_idx, 0); // cleanup = action 0
+        assert!(table.actions.is_empty()); // no action chain for cleanup-only
+        assert!(table.type_infos.is_empty());
+
+        let lsda = generate_lsda(&table);
+        assert!(lsda.len() > 4);
+    }
+
+    #[test]
+    fn test_from_pads_catch_typed() {
+        let table = build_exception_table_from_pads(
+            "__gxx_personality_v0",
+            &[LandingPadDesc::catch_typed(0x50, 1)],
+            &[(0x10, 0x08, 0x50)],
+        );
+
+        assert_eq!(table.call_sites.len(), 1);
+        assert_eq!(table.call_sites[0].action_idx, 1); // first action
+        assert_eq!(table.actions.len(), 1);
+        assert_eq!(table.actions[0].type_filter, 1); // type index 1
+        assert_eq!(table.actions[0].next_action_offset, 0); // end of chain
+        assert_eq!(table.type_infos.len(), 1);
+        assert_eq!(table.type_infos[0].type_info_index, 1);
+    }
+
+    #[test]
+    fn test_from_pads_catch_all() {
+        let table = build_exception_table_from_pads(
+            "__gxx_personality_v0",
+            &[LandingPadDesc::catch_all(0x40)],
+            &[(0x00, 0x10, 0x40)],
+        );
+
+        assert_eq!(table.call_sites.len(), 1);
+        assert_ne!(table.call_sites[0].action_idx, 0); // non-zero = has action
+        assert_eq!(table.actions.len(), 1);
+        assert_eq!(table.actions[0].type_filter, 0); // catch-all
+    }
+
+    #[test]
+    fn test_from_pads_catch_and_cleanup() {
+        let table = build_exception_table_from_pads(
+            "__gxx_personality_v0",
+            &[LandingPadDesc::catch_and_cleanup(0x60, 1)],
+            &[(0x00, 0x10, 0x60)],
+        );
+
+        // Should have catch action + cleanup action chained.
+        assert_eq!(table.actions.len(), 2);
+        assert_eq!(table.actions[0].type_filter, 1); // catch type 1
+        assert_ne!(table.actions[0].next_action_offset, 0); // chains to cleanup
+        assert_eq!(table.actions[1].type_filter, 0); // cleanup
+        assert_eq!(table.actions[1].next_action_offset, 0); // end
+    }
+
+    #[test]
+    fn test_from_pads_multiple_landing_pads() {
+        let table = build_exception_table_from_pads(
+            "__gxx_personality_v0",
+            &[
+                LandingPadDesc::catch_typed(0x80, 1),
+                LandingPadDesc::cleanup(0xC0),
+            ],
+            &[
+                (0x00, 0x10, 0x80),
+                (0x10, 0x08, 0xC0),
+                (0x18, 0x04, 0),    // no landing pad
+            ],
+        );
+
+        assert_eq!(table.call_sites.len(), 3);
+        // First call site -> catch landing pad
+        assert_ne!(table.call_sites[0].action_idx, 0);
+        // Second call site -> cleanup landing pad
+        assert_eq!(table.call_sites[1].action_idx, 0);
+        // Third call site -> no landing pad
+        assert_eq!(table.call_sites[2].landing_pad, 0);
+    }
+
+    #[test]
+    fn test_from_pads_end_to_end_lsda() {
+        // Build a complete C++-style exception table and generate LSDA.
+        let table = build_exception_table_from_pads(
+            "__gxx_personality_v0",
+            &[
+                LandingPadDesc::catch_typed(0x50, 1),
+                LandingPadDesc::catch_typed(0x80, 2),
+            ],
+            &[
+                (0x00, 0x10, 0x50),
+                (0x10, 0x08, 0x80),
+            ],
+        );
+
+        let lsda = generate_lsda(&table);
+        assert!(lsda.len() > 10);
+        assert_eq!(lsda[0], 0xFF); // LPStart omit
+        assert_ne!(lsda[1], 0xFF); // TType present
+
+        // Type table should have 2 entries.
+        assert_eq!(table.type_infos.len(), 2);
+    }
+
+    #[test]
+    fn test_landing_pad_desc_constructors() {
+        let ca = LandingPadDesc::catch_all(0x40);
+        assert_eq!(ca.landing_pad_offset, 0x40);
+        assert_eq!(ca.catch_type_indices, vec![0]);
+        assert!(!ca.is_cleanup);
+
+        let ct = LandingPadDesc::catch_typed(0x50, 3);
+        assert_eq!(ct.catch_type_indices, vec![3]);
+        assert!(!ct.is_cleanup);
+
+        let cl = LandingPadDesc::cleanup(0x60);
+        assert!(cl.catch_type_indices.is_empty());
+        assert!(cl.is_cleanup);
+
+        let cc = LandingPadDesc::catch_and_cleanup(0x70, 5);
+        assert_eq!(cc.catch_type_indices, vec![5]);
+        assert!(cc.is_cleanup);
     }
 }

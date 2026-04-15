@@ -636,6 +636,15 @@ impl InstructionSelector {
             Opcode::Switch { cases, default } => {
                 self.select_switch(cases, *default, inst, block)?;
             }
+            Opcode::Invoke { name, normal_dest, unwind_dest } => {
+                self.select_invoke(name, *normal_dest, *unwind_dest, inst, block)?;
+            }
+            Opcode::LandingPad { is_cleanup, catch_type_indices } => {
+                self.select_landing_pad(*is_cleanup, catch_type_indices, inst, block)?;
+            }
+            Opcode::Resume => {
+                self.select_resume(inst, block)?;
+            }
 
             // Type conversions (unsigned FP <-> int)
             Opcode::FcvtToUint { dst_ty } => {
@@ -1313,6 +1322,159 @@ impl InstructionSelector {
                 }
             }
         }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Invoke (call that may throw)
+    // -----------------------------------------------------------------------
+
+    /// Select an `Invoke` instruction (call with exception handling).
+    ///
+    /// An invoke is lowered identically to a Call (BL instruction) at the
+    /// machine level. The difference is purely metadata: the call site is
+    /// recorded for the LSDA call site table, with the landing pad offset
+    /// pointing to the unwind_dest block.
+    ///
+    /// At the MachIR level, the invoke generates:
+    /// 1. The same BL as a normal call
+    /// 2. A fallthrough to normal_dest (B instruction)
+    /// 3. The unwind_dest block is recorded as a successor (for CFG)
+    ///
+    /// The LSDA generation pass later uses the EH metadata to build the
+    /// call site table mapping the BL instruction range to the landing pad.
+    ///
+    /// Reference: LLVM SelectionDAGBuilder::visitInvoke
+    fn select_invoke(
+        &mut self,
+        name: &str,
+        normal_dest: Block,
+        unwind_dest: Block,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        // Lower the call exactly like a normal Call.
+        let result_types: Vec<Type> = inst
+            .results
+            .iter()
+            .map(|v| self.value_type(v))
+            .collect();
+        self.select_call(name, &inst.args, &inst.results, &result_types, block)?;
+
+        // Add a branch to normal_dest (the non-exception path).
+        self.func.push_inst(
+            block,
+            ISelInst::new(AArch64Opcode::B, vec![ISelOperand::Block(normal_dest)]),
+        );
+
+        // Record both successors in the block (normal + unwind).
+        let isel_block = self.func.blocks.get_mut(&block).unwrap();
+        if !isel_block.successors.contains(&normal_dest) {
+            isel_block.successors.push(normal_dest);
+        }
+        if !isel_block.successors.contains(&unwind_dest) {
+            isel_block.successors.push(unwind_dest);
+        }
+
+        Ok(())
+    }
+
+    /// Select a `LandingPad` instruction.
+    ///
+    /// A landing pad marks the beginning of an exception handler block.
+    /// The unwinder has already set up the exception state before transferring
+    /// control here. On AArch64, the unwinder places:
+    /// - The exception object pointer in X0
+    /// - The type selector in X1
+    ///
+    /// This method defines the two result values (exception pointer and
+    /// type selector) from X0 and X1 respectively.
+    ///
+    /// The `is_cleanup` and `catch_type_indices` metadata are stored on the
+    /// instruction for later use by the LSDA generation pass. At the
+    /// machine instruction level, the landing pad is just a block entry
+    /// that reads X0 and X1.
+    ///
+    /// Reference: Itanium C++ ABI sec. 2.5.1 — exception object in X0
+    /// Reference: LLVM AArch64ISelLowering.cpp — EH_RETURN lowering
+    fn select_landing_pad(
+        &mut self,
+        _is_cleanup: bool,
+        _catch_type_indices: &[u32],
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        // The landing pad produces two results:
+        //   results[0] = exception object pointer (I64, in X0)
+        //   results[1] = type selector value (I32, in X1)
+        if inst.results.len() >= 1 {
+            // Exception pointer: copy from X0.
+            let exc_vreg = self.new_vreg(RegClass::Gpr64);
+            self.func.push_inst(
+                block,
+                ISelInst::new(
+                    AArch64Opcode::MovR,
+                    vec![ISelOperand::VReg(exc_vreg), ISelOperand::PReg(gpr::X0)],
+                ),
+            );
+            self.define_value(inst.results[0], ISelOperand::VReg(exc_vreg), Type::I64);
+        }
+
+        if inst.results.len() >= 2 {
+            // Type selector: copy from X1.
+            let sel_vreg = self.new_vreg(RegClass::Gpr32);
+            self.func.push_inst(
+                block,
+                ISelInst::new(
+                    AArch64Opcode::MovR,
+                    vec![ISelOperand::VReg(sel_vreg), ISelOperand::PReg(gpr::X1)],
+                ),
+            );
+            self.define_value(inst.results[1], ISelOperand::VReg(sel_vreg), Type::I32);
+        }
+
+        Ok(())
+    }
+
+    /// Select a `Resume` instruction (re-throw / continue unwinding).
+    ///
+    /// Resume transfers the exception object back to the unwinder to continue
+    /// stack unwinding after a cleanup handler has executed.
+    ///
+    /// Lowered to a call to `_Unwind_Resume(exception_ptr)`:
+    /// - Move args[0] (exception pointer) to X0
+    /// - BL _Unwind_Resume
+    ///
+    /// `_Unwind_Resume` does not return (it transfers control to the next
+    /// frame's landing pad or terminates).
+    ///
+    /// Reference: Itanium C++ ABI sec. 1.3 — _Unwind_Resume
+    fn select_resume(
+        &mut self,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        Self::require_args(inst, 1, "Resume")?;
+
+        // Move exception pointer to X0.
+        let exc_ptr = self.use_value(&inst.args[0])?;
+        self.func.push_inst(
+            block,
+            ISelInst::new(
+                AArch64Opcode::MovR,
+                vec![ISelOperand::PReg(gpr::X0), exc_ptr],
+            ),
+        );
+
+        // Call _Unwind_Resume (does not return).
+        self.func.push_inst(
+            block,
+            ISelInst::new(
+                AArch64Opcode::Bl,
+                vec![ISelOperand::Symbol("_Unwind_Resume".to_string())],
+            ),
+        );
+
         Ok(())
     }
 
@@ -8530,5 +8692,234 @@ mod tests {
         let insts = &mfunc.blocks[&entry].insts;
         assert!(insts.is_empty(),
             "Fence with Relaxed ordering should emit no instructions (NOP)");
+    }
+
+    // =======================================================================
+    // Invoke (call that may throw)
+    // =======================================================================
+
+    #[test]
+    fn select_invoke_emits_bl_and_branch() {
+        let (mut isel, entry) = make_empty_isel();
+
+        // Create normal and unwind destination blocks.
+        let normal_dest = Block(1);
+        let unwind_dest = Block(2);
+        isel.func.ensure_block(normal_dest);
+        isel.func.ensure_block(unwind_dest);
+
+        // Define an arg value.
+        let vreg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(0), ISelOperand::VReg(vreg), Type::I32);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Invoke {
+                    name: "may_throw".to_string(),
+                    normal_dest,
+                    unwind_dest,
+                },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+
+        // Should contain at least a BL and a B to normal_dest.
+        let has_bl = insts.iter().any(|i| i.opcode == AArch64Opcode::Bl);
+        let has_b = insts.iter().any(|i| i.opcode == AArch64Opcode::B);
+        assert!(has_bl, "Invoke should emit BL instruction");
+        assert!(has_b, "Invoke should emit B to normal_dest");
+
+        // Check the BL targets "may_throw".
+        let bl_inst = insts.iter().find(|i| i.opcode == AArch64Opcode::Bl).unwrap();
+        assert!(
+            bl_inst.operands.iter().any(|op| matches!(op, ISelOperand::Symbol(s) if s == "may_throw")),
+            "BL should target 'may_throw'"
+        );
+
+        // Check successors include both normal and unwind blocks.
+        let block = &mfunc.blocks[&entry];
+        assert!(block.successors.contains(&normal_dest), "Should have normal_dest as successor");
+        assert!(block.successors.contains(&unwind_dest), "Should have unwind_dest as successor");
+    }
+
+    #[test]
+    fn select_invoke_no_args_no_results() {
+        let (mut isel, entry) = make_empty_isel();
+
+        let normal_dest = Block(1);
+        let unwind_dest = Block(2);
+        isel.func.ensure_block(normal_dest);
+        isel.func.ensure_block(unwind_dest);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Invoke {
+                    name: "void_throwing".to_string(),
+                    normal_dest,
+                    unwind_dest,
+                },
+                args: vec![],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+
+        let has_bl = insts.iter().any(|i| i.opcode == AArch64Opcode::Bl);
+        assert!(has_bl, "Invoke should emit BL even with no args/results");
+    }
+
+    // =======================================================================
+    // LandingPad (exception handler entry)
+    // =======================================================================
+
+    #[test]
+    fn select_landing_pad_defines_exception_ptr_and_selector() {
+        let (mut isel, entry) = make_empty_isel();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::LandingPad {
+                    is_cleanup: false,
+                    catch_type_indices: vec![1],
+                },
+                args: vec![],
+                results: vec![Value(0), Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+
+        // Should have 2 MOV instructions: X0 -> exc_ptr, X1 -> selector.
+        assert_eq!(insts.len(), 2, "LandingPad should emit 2 MOV instructions");
+        assert_eq!(insts[0].opcode, AArch64Opcode::MovR);
+        assert_eq!(insts[1].opcode, AArch64Opcode::MovR);
+
+        // First MOV should source from X0.
+        assert!(
+            insts[0].operands.iter().any(|op| matches!(op, ISelOperand::PReg(p) if *p == gpr::X0)),
+            "Exception pointer should come from X0"
+        );
+
+        // Second MOV should source from X1.
+        assert!(
+            insts[1].operands.iter().any(|op| matches!(op, ISelOperand::PReg(p) if *p == gpr::X1)),
+            "Type selector should come from X1"
+        );
+    }
+
+    #[test]
+    fn select_landing_pad_cleanup_only() {
+        let (mut isel, entry) = make_empty_isel();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::LandingPad {
+                    is_cleanup: true,
+                    catch_type_indices: vec![],
+                },
+                args: vec![],
+                results: vec![Value(0), Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+
+        // Cleanup landing pads still define the exception ptr and selector.
+        assert_eq!(insts.len(), 2);
+    }
+
+    #[test]
+    fn select_landing_pad_single_result() {
+        let (mut isel, entry) = make_empty_isel();
+
+        // Only one result (exception pointer, no selector).
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::LandingPad {
+                    is_cleanup: true,
+                    catch_type_indices: vec![],
+                },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+
+        // Only one MOV (exception pointer from X0).
+        assert_eq!(insts.len(), 1);
+        assert_eq!(insts[0].opcode, AArch64Opcode::MovR);
+    }
+
+    // =======================================================================
+    // Resume (continue unwinding)
+    // =======================================================================
+
+    #[test]
+    fn select_resume_calls_unwind_resume() {
+        let (mut isel, entry) = make_empty_isel();
+
+        // Define exception pointer value.
+        let exc_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(exc_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Resume,
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+
+        // Should emit: MOV X0, exc_ptr; BL _Unwind_Resume
+        assert!(insts.len() >= 2, "Resume should emit at least 2 instructions");
+
+        // Last instruction should be BL to _Unwind_Resume.
+        let bl_inst = insts.iter().find(|i| i.opcode == AArch64Opcode::Bl).unwrap();
+        assert!(
+            bl_inst.operands.iter().any(|op| matches!(op, ISelOperand::Symbol(s) if s == "_Unwind_Resume")),
+            "Resume should call _Unwind_Resume"
+        );
+
+        // Should have a MOV to X0.
+        let mov_inst = insts.iter().find(|i| {
+            i.opcode == AArch64Opcode::MovR &&
+            i.operands.iter().any(|op| matches!(op, ISelOperand::PReg(p) if *p == gpr::X0))
+        });
+        assert!(mov_inst.is_some(), "Resume should move exception ptr to X0");
+    }
+
+    #[test]
+    fn select_resume_requires_one_arg() {
+        let (mut isel, entry) = make_empty_isel();
+
+        let result = isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Resume,
+                args: vec![], // missing the exception pointer
+                results: vec![],
+            },
+            entry,
+        );
+
+        assert!(result.is_err(), "Resume with no args should fail");
     }
 }
