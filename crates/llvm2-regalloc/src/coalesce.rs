@@ -322,6 +322,7 @@ impl CoalesceResult {
 }
 
 /// Compute the total span (sum of range lengths) of a [`LiveInterval`].
+#[cfg(test)]
 fn interval_span(interval: &LiveInterval) -> u32 {
     interval.ranges.iter().map(|r| r.end - r.start).sum()
 }
