@@ -91,6 +91,7 @@ pub mod split;
 pub mod remat;
 pub mod spill_slot_reuse;
 pub mod call_clobber;
+pub mod x86_adapter;
 
 pub use liveness::{compute_live_intervals, LiveInterval, LiveRange, LivenessResult};
 pub use linear_scan::{aarch64_allocatable_regs, AllocError, AllocationResult, LinearScan, SpillInfo};
@@ -118,6 +119,14 @@ pub use spill_slot_reuse::{compute_spill_slot_reuse, SpillSlotReuseResult};
 pub use call_clobber::{
     aarch64_callee_saved_regs, aarch64_caller_saved_regs, find_call_crossings,
     insert_call_save_restore, compute_call_crossing_hints, CallCrossing,
+};
+pub use x86_adapter::{
+    x86_to_preg, preg_to_x86, is_x86_preg,
+    x86_64_allocatable_regs, x86_64_caller_saved_regs, x86_64_callee_saved_regs,
+    x86_preg_aliases, x86_pregs_overlap,
+    x86_64_alloc_config, x86_64_greedy_alloc_config,
+    translate_allocation, TiedOperand, is_two_address_opcode,
+    X86_PREG_GPR64_BASE, X86_PREG_GPR32_BASE, X86_PREG_XMM_BASE,
 };
 
 use std::collections::HashMap;
