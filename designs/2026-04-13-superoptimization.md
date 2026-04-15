@@ -7,6 +7,34 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: Offline synthesis framework is implemented and operational using mock evaluation. CEGIS loop works. No real z4 solver connected, so proofs are mock-verified (exhaustive for small widths, sampled for larger). Online synthesis and solver-driven search are not yet implemented.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **CEGIS loop** (`llvm2-verify/cegis.rs`) | IMPLEMENTED | Counter-example guided inductive synthesis. Generates counterexamples, refines candidates, verifies via mock evaluation. |
+| **Offline peephole synthesis** (`llvm2-verify/synthesis.rs`) | IMPLEMENTED | 1.7K LOC. SearchSpace enumeration over AArch64 instruction patterns, SynthesisEngine with candidate verification, ProvenRuleDb. SearchConfig controls max pattern/replacement length and width. |
+| **Unified multi-target CEGIS** (`llvm2-verify/unified_synthesis.rs`) | IMPLEMENTED | 5.1K LOC. Cross-target candidate ranking across CPU scalar, NEON SIMD, GPU, and ANE. Generates TargetCandidates, fast-filters against counterexamples, ranks by cost. |
+| **AI-native rule discovery** (`llvm2-verify/rule_discovery.rs`) | IMPLEMENTED | 1.4K LOC. Agent-proposed rules verified via CEGIS loop. |
+| **Proof database** (`llvm2-verify/proof_database.rs`) | IMPLEMENTED | Stores discovered proven-correct rules with proof certificates. |
+| **Cost model (Apple M-series)** (`llvm2-ir/cost_model.rs`) | IMPLEMENTED | 2.7K LOC. Hand-written latency/throughput tables for AArch64 instructions. Phase 1 of cost model complete. |
+| **Peephole pass integration** (`llvm2-opt/peephole.rs`) | IMPLEMENTED | Peephole optimization pass exists in the pipeline. Applies hand-written rules. |
+| **SMT solver connection** | NOT CONNECTED | Synthesis uses mock evaluation (Rust concrete arithmetic), not a real SMT solver. z4 bridge serializes to SMT-LIB2 but native z4 API not linked. See #34, #236. |
+| **Online synthesis (compile-time)** | NOT IMPLEMENTED | No hot-path detection, no time-budgeted stochastic search during compilation. |
+| **Dataflow pruning** | NOT IMPLEMENTED | Known-bits, value ranges (Souper-style) for search space pruning not yet built. |
+| **STOKE-style mutations** | NOT IMPLEMENTED | Stochastic mutations with simulated annealing not yet built. |
+| **Learned cost model (Phase 2)** | NOT IMPLEMENTED | No Ithemal-style learned model. Current cost model is hand-written tables. |
+| **Verified superoptimizer (tRust)** | NOT IMPLEMENTED | The superoptimizer itself is not yet written in tRust or formally verified. |
+
+**Implementation plan progress:**
+- **Phase 1 (Offline rule mining)**: Implemented with mock evaluation. SearchSpace, CegisLoop, rule serialization, and peephole integration all exist. No real z4-backed proofs.
+- **Phase 2 (Enhanced search)**: Cost model (hand-written) implemented. Dataflow pruning and STOKE mutations not yet built.
+- **Phase 3 (Online synthesis)**: Not implemented.
+- **Phase 4 (Verified superoptimizer)**: Not implemented.
+
+---
+
 ## Introduction
 
 Traditional compilers use hand-written pattern matching — thousands of peephole rules accumulated over decades by human experts. LLVM has ~2,000 InstCombine patterns. Each must be written, tested, and maintained by hand. Bugs in these patterns cause miscompilations (Alive2 has found hundreds).

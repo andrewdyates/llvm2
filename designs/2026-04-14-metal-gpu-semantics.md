@@ -8,6 +8,20 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: GPU semantic encoding is implemented. Metal MSL kernel emission exists. No end-to-end GPU execution tested.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **GPU semantics** (`gpu_semantics.rs`) | IMPLEMENTED | SMT encoding for parallel map/reduce/scatter/gather operations with algebraic property justification. |
+| **Metal MSL kernel emitter** (`metal_emitter.rs`) | IMPLEMENTED | 2.2K LOC. Generates compute kernel source for map, reduce, map-reduce fused, tiled matmul patterns. |
+| **Dispatch integration** (`dispatch.rs`) | IMPLEMENTED | GPU target in dispatch plan generation. |
+| **Metal compilation pipeline** | NOT TESTED | Emitted MSL source has not been compiled via `xcrun metal` and executed on GPU hardware. |
+| **AIR bitcode emission (Phase 2)** | NOT IMPLEMENTED | Only Phase 1 (MSL source text) is built. |
+
+---
+
 ## Problem
 
 The unified solver architecture searches over CPU scalar, NEON SIMD, GPU, and ANE targets to find the optimal proven-correct implementation for each computation subgraph. The NEON semantic encoding (`neon_semantics.rs`) is implemented. The GPU semantic encoding is missing -- without it, the solver cannot generate or verify Metal GPU candidates.

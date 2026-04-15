@@ -8,6 +8,20 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: ANE semantic encoding is implemented. CoreML MIL emission exists. No end-to-end ANE execution tested.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **ANE semantics** (`ane_semantics.rs`) | IMPLEMENTED | 1.4K LOC. GEMM, Conv2D, activations, FP16 quantization encoding. |
+| **ANE precision proofs** (`ane_precision_proofs.rs`) | IMPLEMENTED (mock) | FP32-to-FP16 bounded error proofs via f64 mock evaluation. |
+| **CoreML MIL emitter** (`coreml_emitter.rs`) | IMPLEMENTED | 1.8K LOC. Generates CoreML model graphs for ANE execution. |
+| **ANE capability detection** | PARTIAL | Encoded in semantic module. Not tested against real hardware. |
+| **End-to-end ANE execution** | NOT TESTED | Emitted CoreML models have not been loaded and executed on ANE hardware. |
+
+---
+
 ## Problem
 
 The unified solver architecture requires semantic encodings for every compilation target so the solver can prove equivalence across them. ANE is a fixed-function accelerator on Apple Silicon that excels at matrix-heavy and neural network workloads. Without an ANE semantic encoding, the solver cannot consider ANE as a candidate target -- leaving significant compute capacity unused on Apple hardware.

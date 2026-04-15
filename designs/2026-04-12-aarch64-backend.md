@@ -7,6 +7,34 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: Core backend implemented and functional. ~120K LOC across 6 crates, ~5,350 tests.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **llvm2-ir** (Machine model) | IMPLEMENTED | 14 modules, 12.5K LOC. MachInst, MachFunction, registers (AArch64, x86-64 scaffolding, RISC-V scaffolding), operands, stack slots, cost model, provenance, trace. |
+| **llvm2-lower** (ISel + ABI) | IMPLEMENTED | 10 modules, 28K LOC. SSA tree-pattern ISel (`isel.rs`, 8.9K LOC), Apple AArch64 ABI (`abi.rs`, 4.2K LOC), type system, legalization, tMIR adapter, compute graph analysis, dispatch plan generation. |
+| **llvm2-opt** (Optimizations) | IMPLEMENTED | 26 modules, 21K LOC. All passes listed in design are implemented: DCE, constant folding, copy prop, peephole, CSE, LICM, CFG simplify, addr mode formation, cmp/select combines, NEON vectorization, pass manager with O0-O3 pipelines, plus additional passes (GVN, if-conversion, loop unroll, strength reduction, tail call, instruction scheduling). |
+| **llvm2-regalloc** (Register alloc) | IMPLEMENTED | 15 modules, 15K LOC. Both linear scan and greedy allocator, liveness analysis, interval splitting, spill generation, phi elimination, copy coalescing, post-RA coalescing, rematerialization, call-clobber handling, spill-slot reuse, x86 adapter. |
+| **llvm2-codegen** (Encoding + Mach-O) | IMPLEMENTED | 29 modules, 36K LOC. AArch64 encoding (integer/memory/FP/branch/NEON, 5 modules), Mach-O writer (8 modules), compact unwind, DWARF CFI, DWARF debug info, frame lowering, branch relaxation, layout, end-to-end pipeline. |
+| **llvm2-verify** (Verification) | IMPLEMENTED (mock mode) | 46 modules, 63K LOC, 1,865 tests. All proof categories present: lowering, peephole, NZCV, CFG, memory, NEON, GPU semantics, ANE semantics, CEGIS, synthesis. **Uses mock evaluator** (exhaustive for <=8-bit, random sampling for larger). z4 bridge exists but z4 native API not yet linked (feature-gated). |
+| **x86-64 target** | SCAFFOLDING | Opcode enum, register definitions, encoding stub, ISel stub (1.9K LOC). Not functional. See #232. |
+| **RISC-V target** | SCAFFOLDING | Register and opcode definitions only. See #209. |
+| **tMIR integration** | STUBBED | Uses development stubs (`stubs/tmir-*`), not real tMIR crate. See #227. |
+| **Metal GPU emission** | IMPLEMENTED (source gen) | MSL kernel emitter generates compute kernel source (map/reduce/matmul). Phase 1 only -- no AIR bitcode emission. |
+| **CoreML ANE emission** | IMPLEMENTED (model gen) | CoreML MIL emitter generates ANE model graphs. |
+| **z4 native integration** | NOT CONNECTED | z4 bridge module exists (2.8K LOC) with SMT-LIB2 serialization and CLI subprocess fallback, but z4 Rust API not linked. See #34, #236. |
+
+**Key gaps vs. this design doc:**
+- Build order phases 1-7 are complete. Phase 8 (proof-aware opts + SMT validation) uses mock evaluation, not real z4.
+- Memory-effects model is implemented but verification uses concrete evaluation, not SMT.
+- Proof-enabled optimizations (`proof_opts.rs`, 2K LOC) are implemented but rely on tMIR stubs, not real proof annotations.
+- PAC/BTI/arm64e remain deferred as specified.
+- Full DWARF debug info now implemented (beyond the MVP "compact unwind only" scope).
+
+---
+
 ## Overview
 
 Build a production-quality AArch64 compiler backend for macOS (Apple Silicon) that compiles tMIR to optimized machine code. 100% Rust, zero external dependencies for the core backend. Study LLVM source as reference and port the proven algorithms.

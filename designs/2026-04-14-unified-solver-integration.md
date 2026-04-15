@@ -7,6 +7,19 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: Individual modules exist (semantics encoders, synthesis loops, cost model, dispatch). Integration gaps between modules remain -- the unified solver does not yet drive actual compilation decisions end-to-end.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **Per-target semantic modules** | IMPLEMENTED | CPU, NEON, GPU, ANE encodings all present. |
+| **Unified synthesis loop** | IMPLEMENTED | `unified_synthesis.rs` (5.1K LOC) searches across targets. |
+| **End-to-end data flow** | NOT CONNECTED | Synthesis results do not automatically feed into the compilation pipeline's ISel/dispatch decisions. |
+| **z4 solver integration** | NOT CONNECTED | See #34, #121, #236. |
+
+---
+
 ## Purpose
 
 This document maps the end-to-end data flow through the unified solver system,

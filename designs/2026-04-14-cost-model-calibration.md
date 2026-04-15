@@ -7,6 +7,19 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: Hand-written cost model tables are implemented. No hardware-measured calibration has been performed.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **Cost model** (`cost_model.rs`) | IMPLEMENTED | 2.7K LOC. Multi-target (CPU/NEON/GPU/ANE) latency and throughput tables. Hand-written from published microarchitecture data. |
+| **Profitability analyzer** | IMPLEMENTED | Part of cost model. Evaluates whether moving computation to a different target is profitable. |
+| **Hardware calibration** | NOT DONE | No measurements on actual Apple M-series hardware. Tables are from published research (Dougall Johnson et al.), not direct measurement. |
+| **Learned cost model** | NOT IMPLEMENTED | No ML-based cost model (Ithemal-style). |
+
+---
+
 ## Purpose
 
 LLVM2's optimization passes (peephole, CSE, LICM, instruction selection) need a cost

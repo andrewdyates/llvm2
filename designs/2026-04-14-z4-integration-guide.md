@@ -7,6 +7,19 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: Research complete. z4-bindings API is documented. Integration into llvm2-verify is not yet done.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **z4-bindings API documentation** | COMPLETE | This document covers all four theories (QF_ABV, QF_FP, QF_UF, bounded quantifiers). |
+| **z4 bridge** (`z4_bridge.rs`) | IMPLEMENTED (not connected) | 2.8K LOC. SMT-LIB2 serialization exists. z4 native API feature-gated but triggers `compile_error!`. |
+| **Array theory translation** | NOT IMPLEMENTED | `translate_expr_to_z4()` missing Array/FP/UF theory support. See #236. |
+| **Integration into llvm2-verify** | NOT DONE | See #34. |
+
+---
+
 ## Executive Summary
 
 This guide documents the exact z4-bindings Rust API for four SMT theories needed by

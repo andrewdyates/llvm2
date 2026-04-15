@@ -9,6 +9,19 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: Phase 1 (MSL source generation) is implemented. Phase 2 (AIR bitcode) and runtime integration are not built.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **MSL source generation** (`metal_emitter.rs`) | IMPLEMENTED | 2.2K LOC. Parallel map, reduce, map-reduce fused, tiled matmul kernels. |
+| **AIR bitcode emission** | NOT IMPLEMENTED | Direct AIR bitcode generation bypassing xcrun not built. |
+| **Host-side dispatch code** | PARTIAL | Dispatch plan generation exists (`dispatch.rs`), but no actual Metal API host code generated. |
+| **Metal runtime integration** | NOT IMPLEMENTED | No MTLDevice/MTLCommandBuffer code generation. |
+
+---
+
 ## Problem
 
 The GPU semantic encoding (`gpu_semantics.rs`) and dispatch plan generator (`dispatch.rs`) prove that a computation is correct on a Metal GPU and decide when to dispatch to it. What remains is the **emission** step: generating actual Metal compute kernels and the host-side code that launches them. This document specifies how LLVM2 emits Metal IR (Apple Intermediate Representation, "AIR") and integrates with the Metal runtime for GPU execution.

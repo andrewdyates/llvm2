@@ -7,6 +7,23 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: All three target semantic encodings (NEON, GPU, ANE) are implemented as code modules. Verification uses mock evaluation, not a real SMT solver.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **NEON SIMD encoding** (`neon_semantics.rs`) | IMPLEMENTED | 1.6K LOC. 128-bit vector lane decomposition, arrangement selection. |
+| **NEON lowering proofs** (`neon_lowering_proofs.rs`, `neon_encoding_proofs.rs`) | IMPLEMENTED (mock) | tMIR vector ops to NEON verified via mock evaluation. |
+| **Metal GPU encoding** (`gpu_semantics.rs`) | IMPLEMENTED | Parallel map/reduce/scatter/gather with algebraic property justification. |
+| **ANE encoding** (`ane_semantics.rs`) | IMPLEMENTED | 1.4K LOC. GEMM, Conv2D, activations, FP16 quantization. |
+| **ANE precision proofs** (`ane_precision_proofs.rs`) | IMPLEMENTED (mock) | FP32-to-FP16 bounded error via f64 mock evaluation. |
+| **Cross-target equivalence** | MOCK ONLY | Unified synthesis loop (`unified_synthesis.rs`) can compare across targets but uses mock evaluation, not z4. |
+
+See #121 (Unified solver architecture epic).
+
+---
+
 ## Overview
 
 The unified solver architecture requires semantic encodings for each compilation target so the solver can prove equivalence across targets. This document specifies the SMT encoding strategy for:

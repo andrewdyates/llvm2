@@ -7,6 +7,22 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: Adapter layer is implemented but consumes tMIR development stubs, not the real tMIR crate. The adapter, ISel, and ABI lowering are functional against stub types.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **tMIR adapter** (`llvm2-lower/adapter.rs`) | IMPLEMENTED (against stubs) | 4.8K LOC. Module/function/type translation, proof extraction from tMIR stub types. |
+| **tMIR stubs** (`stubs/tmir-*`) | DEVELOPMENT STUBS | `tmir-types`, `tmir-instrs`, `tmir-func`, `tmir-semantics` provide type definitions for development. Not the real tMIR crate. |
+| **ISel consuming tMIR** (`llvm2-lower/isel.rs`) | IMPLEMENTED (against stubs) | 8.9K LOC. SSA tree-pattern ISel works with adapter output. |
+| **ABI lowering** (`llvm2-lower/abi.rs`) | IMPLEMENTED | 4.2K LOC. Apple AArch64 calling convention. |
+| **Proof annotation consumption** (`llvm2-lower/target_analysis.rs`) | IMPLEMENTED (against stubs) | Reads tMIR proof annotations (NoOverflow, InBounds, etc.) to guide optimization. Annotations come from stubs, not real proofs. |
+| **Real tMIR integration** | NOT DONE | Blocked on tMIR repo providing stable Rust API. See #227 (P1). |
+| **JSON wire format** | NOT DONE | No external tMIR input path. See #237. |
+
+---
+
 ## Overview
 
 LLVM2's instruction selector (`crates/llvm2-lower/src/isel.rs`) currently consumes

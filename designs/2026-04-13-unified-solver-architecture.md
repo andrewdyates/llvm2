@@ -6,6 +6,24 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: Per-target semantic encodings and the unified synthesis loop are implemented. The "same solver, all targets" vision is structurally present but runs on mock evaluation, not a real SMT solver.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **CPU scalar semantics** (`aarch64_semantics.rs`) | IMPLEMENTED | AArch64 instruction semantics as SmtExpr. |
+| **NEON SIMD semantics** (`neon_semantics.rs`) | IMPLEMENTED | 1.6K LOC. Lane decomposition for vector instructions. |
+| **GPU semantics** (`gpu_semantics.rs`) | IMPLEMENTED | Metal parallel map/reduce/scatter/gather encoding. |
+| **ANE semantics** (`ane_semantics.rs`) | IMPLEMENTED | 1.4K LOC. GEMM, Conv2D, activations, FP16 quantization. |
+| **Unified CEGIS synthesis** (`unified_synthesis.rs`) | IMPLEMENTED | 5.1K LOC. Cross-target candidate ranking (CPU/NEON/GPU/ANE), fast counterexample filtering, cost-based ranking. |
+| **Multi-target cost model** (`cost_model.rs`) | IMPLEMENTED | 2.7K LOC. CPU/NEON/GPU/ANE latency and throughput. |
+| **SMT solver backend** | NOT CONNECTED | All verification uses mock Rust evaluation. z4 not linked. See #34, #121, #236. |
+| **Cross-target equivalence proofs** | MOCK ONLY | The solver can compare across targets using mock evaluation, but no formal z4-backed proofs exist. |
+| **Integration with compilation pipeline** | PARTIAL | Unified synthesis can propose cross-target lowerings, but the compilation pipeline does not yet invoke it to make actual dispatch decisions during compilation. |
+
+---
+
 ## The Core Insight
 
 LLVM2's four vision pillars — superoptimization, transparency, AI-native compilation, and heterogeneous compute — are not separate features. They are **the same system** viewed at different granularities. The unifying mechanism is the **solver**.

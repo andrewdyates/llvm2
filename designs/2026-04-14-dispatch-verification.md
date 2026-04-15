@@ -7,6 +7,19 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: Dispatch plan generation and target analysis are implemented. Formal verification of dispatch correctness uses mock evaluation.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **Dispatch plan generation** (`dispatch.rs`) | IMPLEMENTED | 2.8K LOC. Target assignment, data transfer, synchronization. |
+| **Target analysis** (`target_analysis.rs`) | IMPLEMENTED | 1.2K LOC. Proof-guided legality analysis. |
+| **Dispatch correctness proofs** | MOCK ONLY | No z4-backed formal proof that dispatching preserves semantics. |
+| **Data race freedom proofs** | NOT IMPLEMENTED | No formal synchronization correctness verification. |
+
+---
+
 ## Problem
 
 LLVM2's heterogeneous compute pipeline (`llvm2-lower/src/compute_graph.rs`

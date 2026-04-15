@@ -7,6 +7,46 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: Verification crate is the largest in the project (63K LOC, 46 modules, 1,865 tests). Core proof infrastructure works via mock evaluation. Real z4 SMT integration is not yet connected.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **SMT expression AST** (`smt.rs`) | IMPLEMENTED | 3.5K LOC. Full bitvector expression AST matching SMT-LIB2 QF_BV semantics, with concrete evaluator, IEEE 754 rounding modes, array sorts, vector arrangements. |
+| **tMIR semantic encoder** (`tmir_semantics.rs`) | IMPLEMENTED | Encodes tMIR arithmetic, comparison, bitwise, shift, extension, and truncation operations as SmtExpr trees. Consumes tMIR stubs (not real tMIR). |
+| **AArch64 semantic encoder** (`aarch64_semantics.rs`) | IMPLEMENTED | Encodes AArch64 instruction semantics as SmtExpr for verification. |
+| **NZCV flag model** (`nzcv.rs`) | IMPLEMENTED | N/Z/C/V flag encoding with correctness lemma tests. |
+| **Lowering proofs** (`lowering_proof.rs`) | IMPLEMENTED (mock) | 3.5K LOC. Proof obligations for add/sub/mul/neg, comparisons, conditional branches, constants, extensions, truncations. Verified via exhaustive evaluation (<=8-bit) and random sampling (>8-bit). |
+| **Peephole proofs** (`peephole_proofs.rs`) | IMPLEMENTED (mock) | Identity proofs for peephole optimizations. |
+| **Optimization proofs** | IMPLEMENTED (mock) | CFG simplification, constant folding, copy propagation, CSE/LICM, DCE, GVN, if-conversion, loop, strength reduction proofs -- all via mock evaluation. |
+| **Memory model** (`memory_model.rs`, `memory_proofs.rs`) | IMPLEMENTED (mock) | Concrete HashMap evaluation + symbolic SMT array theory (QF_ABV) encoding. 3K LOC of memory load/store proofs. Not connected to real z4 solver. |
+| **NEON SIMD semantics** (`neon_semantics.rs`) | IMPLEMENTED | 1.6K LOC. Lane decomposition for vector instructions. |
+| **NEON lowering/vectorization proofs** | IMPLEMENTED (mock) | Proofs for tMIR vector ops to NEON, scalar-to-NEON mapping. |
+| **GPU semantics** (`gpu_semantics.rs`) | IMPLEMENTED | Metal parallel map/reduce/scatter/gather with algebraic property justification. |
+| **ANE semantics** (`ane_semantics.rs`) | IMPLEMENTED | 1.4K LOC. GEMM, Conv2D, activations, FP16 quantization. |
+| **ANE precision proofs** (`ane_precision_proofs.rs`) | IMPLEMENTED (mock) | FP32-to-FP16 bounded error proofs via f64 mock evaluation. |
+| **CEGIS loop** (`cegis.rs`) | IMPLEMENTED | Counter-example guided inductive synthesis loop. |
+| **Peephole synthesis** (`synthesis.rs`) | IMPLEMENTED | 1.7K LOC. Alive2-style enumeration of pattern rewrites with CEGIS verification. |
+| **Unified synthesis** (`unified_synthesis.rs`) | IMPLEMENTED | 5.1K LOC. Cross-target candidate ranking (CPU/NEON/GPU/ANE). |
+| **AI-native rule discovery** (`rule_discovery.rs`) | IMPLEMENTED | 1.4K LOC. Agent-proposed rules verified via CEGIS. |
+| **z4 bridge** (`z4_bridge.rs`) | IMPLEMENTED (not connected) | 2.8K LOC. SMT-LIB2 serialization, CLI subprocess fallback, z4 native API translation stubs. z4 Rust API feature-gated but **not linked** -- `compile_error!` on `feature = "z4"`. See #34, #236. |
+| **Proof database** (`proof_database.rs`) | IMPLEMENTED | Stores and indexes proven rules. |
+
+**Key gaps vs. this design doc:**
+- **Mock evaluation only**: All 1,865 proof tests use concrete Rust evaluation, not a real SMT solver. Exhaustive for <=8-bit widths, random sampling for 32/64-bit. This catches most bugs but is not formally complete for larger widths.
+- **z4 not linked**: The z4 bridge can serialize to SMT-LIB2 and invoke a CLI solver, but the in-process z4 Rust API is not connected. The `z4` feature gate triggers `compile_error!`. See #34, #236.
+- **Memory verification**: Uses concrete HashMap evaluation, not z4's Array theory. See #236 (Array/FP/UF theory translation missing).
+- **FP verification**: Deferred as specified. ANE precision proofs use f64 mock arithmetic.
+- **Verification modes**: Build-time mock tests work (`cargo test`). CLI batch verification (`--check-all`) and CI gate not yet operational with a real solver.
+- **Phase 1 (Arithmetic rules)**: Complete via mock evaluation.
+- **Phase 2 (Comparison + constant)**: Complete via mock evaluation.
+- **Phase 3 (Peephole proofs)**: Complete via mock evaluation.
+- **Phase 4 (Memory)**: Concrete evaluation implemented, not SMT-proven.
+- **Phase 5 (Floating-point)**: ANE precision proofs only; general FP verification deferred.
+
+---
+
 ## Overview
 
 This document specifies the verification architecture for LLVM2 -- a system that

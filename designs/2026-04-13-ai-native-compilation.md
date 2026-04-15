@@ -7,6 +7,25 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: The self-improving compilation vision has foundational infrastructure. AI-native rule discovery and CEGIS verification loops exist. The programmatic API and interactive compilation explorer are not yet built.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **AI-native rule discovery** (`rule_discovery.rs`) | IMPLEMENTED | 1.4K LOC. Agent-proposed optimization rules verified via CEGIS loop. |
+| **Provenance tracking** (`llvm2-ir/provenance.rs`) | IMPLEMENTED | 1.1K LOC. tMIR-to-binary offset mapping for instruction traceability. |
+| **Compilation trace** (`llvm2-ir/trace.rs`) | IMPLEMENTED | 700 LOC. Structured event log for glass-box transparency. |
+| **CEGIS verification** (`cegis.rs`, `synthesis.rs`) | IMPLEMENTED | Proven-correct rule addition to database. |
+| **Programmatic API** | NOT IMPLEMENTED | Compiler is a library (Rust crates), but no stable public API designed for external AI agent consumption. |
+| **Interactive compilation explorer** | NOT IMPLEMENTED | No tool to query "why was this instruction chosen?" |
+| **Decision point traits** | NOT IMPLEMENTED | Heuristics are not yet exposed as overridable traits for AI agents. |
+| **Machine-readable pipeline output** | PARTIAL | Provenance and trace exist, but not all pipeline stages emit structured data. |
+
+See #108 (Epic: AI-native compilation).
+
+---
+
 ## Introduction
 
 LLVM was designed in 2003 for human compiler engineers. The interface is a CLI (`clang`), debugging is printf + GDB, and extending it means writing C++ passes and rebuilding.

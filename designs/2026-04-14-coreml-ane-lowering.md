@@ -9,6 +9,19 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: CoreML MIL emission is implemented. No end-to-end ANE execution tested.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **CoreML MIL emitter** (`coreml_emitter.rs`) | IMPLEMENTED | 1.8K LOC. Generates ANE model graphs for GEMM, Conv2D, activations. |
+| **Dispatch integration** | IMPLEMENTED | ANE target in dispatch plan generation (`dispatch.rs`). |
+| **CoreML compilation** | NOT TESTED | Emitted models have not been compiled to `.mlmodelc` and executed. |
+| **Fallback to GPU/CPU** | PARTIAL | Dispatch plan supports fallback, but not tested end-to-end. |
+
+---
+
 ## Problem
 
 The ANE semantic encoding (`ane_semantics.rs`) proves that a computation is correct at FP16 precision on the Neural Engine. The dispatch plan generator (`dispatch.rs`) decides when to dispatch to `ComputeTarget::NeuralEngine`. What remains is the **lowering** step: translating verified tMIR computations into CoreML models that execute on the ANE.

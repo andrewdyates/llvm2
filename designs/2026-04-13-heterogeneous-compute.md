@@ -7,6 +7,39 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: Foundational infrastructure is implemented. Computation graph analysis, dispatch plan generation, cost model, Metal MSL emission, and CoreML ANE emission all exist as code. End-to-end heterogeneous compilation is not yet operational -- no real GPU/ANE workloads have been compiled and executed.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **Computation graph analysis** (`llvm2-lower/compute_graph.rs`) | IMPLEMENTED | 3.2K LOC. Builds ComputeGraph from tMIR modules, identifies data-parallel and matrix-heavy regions, evaluates partition costs. |
+| **Target analysis** (`llvm2-lower/target_analysis.rs`) | IMPLEMENTED | 1.2K LOC. Proof-guided target legality analysis, subgraph descriptors, ComputeTarget enum. |
+| **Dispatch plan generation** (`llvm2-lower/dispatch.rs`) | IMPLEMENTED | 2.8K LOC. CPU/NEON/GPU/ANE scheduling with data transfer and synchronization planning. |
+| **Multi-target cost model** (`llvm2-ir/cost_model.rs`) | IMPLEMENTED | 2.7K LOC. CPU/NEON/GPU/ANE latency and throughput model, profitability analyzer. |
+| **NEON auto-vectorization** (`llvm2-opt/vectorize.rs`) | IMPLEMENTED | 2.1K LOC. Loop vectorizability analysis, cost-model-driven profitability, SIMD arrangement selection. |
+| **Metal MSL kernel emitter** (`llvm2-codegen/metal_emitter.rs`) | IMPLEMENTED | 2.2K LOC. Generates Metal compute kernel source text: parallel map, reduce, map-reduce fused, tiled matmul. Phase 1 only (source text, not AIR bitcode). |
+| **CoreML MIL emitter** (`llvm2-codegen/coreml_emitter.rs`) | IMPLEMENTED | 1.8K LOC. Generates ANE model graphs for GEMM, Conv2D, activations. |
+| **GPU semantic verification** (`llvm2-verify/gpu_semantics.rs`) | IMPLEMENTED | SMT encoding for Metal parallel map/reduce/scatter/gather operations. |
+| **ANE semantic verification** (`llvm2-verify/ane_semantics.rs`) | IMPLEMENTED | 1.4K LOC. GEMM, Conv2D, activation, FP16 quantization encoding. |
+| **ANE precision proofs** (`llvm2-verify/ane_precision_proofs.rs`) | IMPLEMENTED (mock) | FP32-to-FP16 bounded error via f64 mock evaluation. |
+| **Unified multi-target synthesis** (`llvm2-verify/unified_synthesis.rs`) | IMPLEMENTED | 5.1K LOC. Cross-target candidate ranking across CPU/NEON/GPU/ANE. |
+| **Greedy allocation algorithm** | PARTIALLY | Dispatch plan generation includes target assignment logic, but not the full graph-partitioning solver described in the design. |
+| **Solver-driven optimal allocation (Phase 5)** | NOT IMPLEMENTED | z4-based ILP encoding for optimal graph partitioning not yet built. |
+| **Energy-aware compilation** | NOT IMPLEMENTED | CompilationGoal enum and E-core/P-core distinction not yet in cost model. |
+| **End-to-end GPU/ANE execution** | NOT TESTED | Metal kernels emit source text but have not been compiled via `xcrun metal` and run on hardware. CoreML models have not been loaded and executed via the ANE. |
+| **tMIR proof integration** | STUBBED | Proof-guided optimizations (InBounds, NoOverflow, ValidBorrow) depend on tMIR stubs, not real proof annotations. See #227. |
+
+**Implementation plan progress:**
+- **Phase 1 (Computation graph analysis)**: Implemented.
+- **Phase 2 (SIMD auto-targeting)**: Implemented (NEON vectorization in `llvm2-opt`).
+- **Phase 3 (GPU targeting - Metal)**: Metal MSL emission implemented. No end-to-end test with actual Metal runtime. See #109.
+- **Phase 4 (Neural Engine targeting)**: CoreML MIL emission implemented. No end-to-end test with actual ANE hardware. See #109.
+- **Phase 5 (Solver-driven optimal allocation)**: Not implemented. See #121.
+- **Phase 6 (Verified heterogeneous compilation)**: Verification modules exist (gpu_semantics, ane_semantics) but use mock evaluation. See #34.
+
+---
+
 ## Introduction
 
 Today's compilers allocate **registers** and **memory** automatically — the programmer writes `let x = a + b` and the compiler decides whether `x` lives in X0, X3, or on the stack. Nobody manually assigns registers anymore (outside of inline assembly).

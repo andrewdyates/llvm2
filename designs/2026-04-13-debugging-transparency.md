@@ -7,6 +7,24 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: Core infrastructure for provenance tracking and compilation tracing is implemented. Interactive exploration tools and proof certificate shipping are not yet built.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **Provenance tracking** (`llvm2-ir/provenance.rs`) | IMPLEMENTED | 1.1K LOC. Maps tMIR source locations to binary offsets, enabling "which source expression produced this instruction?" queries. |
+| **Compilation trace** (`llvm2-ir/trace.rs`) | IMPLEMENTED | 700 LOC. Structured event log recording compilation decisions. |
+| **DWARF debug info** (`llvm2-codegen/dwarf_info.rs`) | IMPLEMENTED | 1.5K LOC. `__debug_abbrev`, `__debug_info`, `__debug_line` section emission. |
+| **DWARF CFI** (`llvm2-codegen/dwarf_cfi.rs`) | IMPLEMENTED | 1.1K LOC. Call frame information for non-compact-unwind frames. |
+| **Proof certificates** | NOT IMPLEMENTED | No mechanism to ship UNSAT proofs alongside binaries. z4 not connected. |
+| **Interactive explorer** | NOT IMPLEMENTED | No tool for querying why a specific instruction was chosen. |
+| **Optimization remark system** | NOT IMPLEMENTED | No LLVM-style `-Rpass` equivalent yet. |
+
+See #107 (Epic: Radical debugging and transparency).
+
+---
+
 ## Introduction
 
 Traditional compilers are black boxes. Ask "why did clang emit this instruction?" and you'll get silence. LLVM has opt-remarks (`-Rpass`) that tell you *which* optimization fired, but not *why* it was chosen, what alternatives were considered, or how to trace an output instruction back to its source expression.

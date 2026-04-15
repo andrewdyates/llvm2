@@ -8,6 +8,18 @@
 
 ---
 
+## Implementation Status (as of 2026-04-15)
+
+**Overall: Precision verification framework is implemented using mock (f64) evaluation. Not connected to a real FP SMT solver.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **ANE precision proofs** (`ane_precision_proofs.rs`) | IMPLEMENTED (mock) | FP32-to-FP16 bounded error proofs using f64 concrete arithmetic to simulate FP16 rounding. |
+| **FP16 quantization model** | IMPLEMENTED | In `ane_semantics.rs`. Models rounding to nearest FP16 representable value. |
+| **SMT FP theory proofs** | NOT CONNECTED | z4's FP theory (`Sort::fp(5, 11)`) for FP16 not used. Proofs use f64 mock only. See #236. |
+
+---
+
 ## Problem
 
 When the compiler lowers tMIR operations from FP32 to ANE's FP16 execution, it introduces quantization error. Without formal bounds on this error, users cannot trust that the ANE-compiled code preserves the numerical properties of the source program. The verification system must prove that for every input in a specified range, the FP16 result is within a bounded distance of the FP32 reference result.
