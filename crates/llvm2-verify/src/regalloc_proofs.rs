@@ -734,6 +734,50 @@ pub fn proof_regalloc_spill_slot_non_aliasing_8bit() -> ProofObligation {
 }
 
 // ===========================================================================
+// Aggregator: all regalloc proofs
+// ===========================================================================
+
+/// Return all register allocation correctness proofs (14 total).
+///
+/// Covers seven categories of regalloc invariants:
+/// - Non-interference: overlapping live ranges get distinct registers (2 proofs)
+/// - Completeness: every VReg allocated or spilled (2 proofs)
+/// - Spill correctness: store/load roundtrip preserves value (2 proofs)
+/// - Copy insertion: independent parallel copies and swap correctness (2 proofs)
+/// - Phi elimination: phi lowering preserves predecessor values (2 proofs)
+/// - Calling convention: callee-saved preservation, caller-saved spill/restore (2 proofs)
+/// - Live-through: values across calls preserved via callee-saved or spill (2 proofs)
+/// - Spill slot non-aliasing: distinct slots do not interfere (2 proofs)
+pub fn all_regalloc_proofs() -> Vec<ProofObligation> {
+    vec![
+        // Non-interference
+        proof_regalloc_non_interference(),
+        proof_regalloc_non_interference_8bit(),
+        // Completeness
+        proof_regalloc_completeness(),
+        proof_regalloc_completeness_8bit(),
+        // Spill correctness
+        proof_regalloc_spill_store_load(),
+        proof_regalloc_spill_store_load_8bit(),
+        // Copy insertion
+        proof_regalloc_parallel_copy_two(),
+        proof_regalloc_parallel_copy_swap(),
+        // Phi elimination
+        proof_regalloc_phi_elimination(),
+        proof_regalloc_phi_elimination_8bit(),
+        // Calling convention
+        proof_regalloc_callee_saved_preserved(),
+        proof_regalloc_caller_saved_spill_restore(),
+        // Live-through
+        proof_regalloc_live_through_callee_saved(),
+        proof_regalloc_live_through_spill(),
+        // Spill slot non-aliasing
+        proof_regalloc_spill_slot_non_aliasing(),
+        proof_regalloc_spill_slot_non_aliasing_8bit(),
+    ]
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 

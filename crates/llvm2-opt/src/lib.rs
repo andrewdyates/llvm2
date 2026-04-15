@@ -29,6 +29,7 @@
 //! | [`ProofOptimization`] | Consume tMIR proof annotations to eliminate runtime checks |
 //! | [`AddrModeFormation`] | Fold ADD+LDR/STR into rich AArch64 addressing modes |
 //! | [`CmpSelectCombine`] | Diamond CFG to CSEL/CSET conditional select formation |
+//! | [`CmpBranchFusion`] | Fuse CMP/TST + BCond into CBZ/CBNZ/TBZ/TBNZ |
 //! | [`CfgSimplify`] | Simplify CFG: branch folding, empty block elim, unreachable removal |
 //! | [`const_materialize`] | Optimal constant materialization (MOVZ/MOVK, logical imm, MOVN) |
 //!
@@ -50,6 +51,7 @@
 
 pub mod addr_mode;
 pub mod cfg_simplify;
+pub mod cmp_branch_fusion;
 pub mod cmp_select;
 pub mod const_fold;
 pub mod const_materialize;

@@ -24,6 +24,7 @@ use llvm2_ir::MachFunction;
 
 use crate::addr_mode::AddrModeFormation;
 use crate::cfg_simplify::CfgSimplify;
+use crate::cmp_branch_fusion::CmpBranchFusion;
 use crate::cmp_select::CmpSelectCombine;
 use crate::const_fold::ConstantFolding;
 use crate::copy_prop::CopyPropagation;
@@ -78,6 +79,8 @@ impl OptimizationPipeline {
                 // Proof opts run first: they eliminate checks that DCE/peephole
                 // can then clean up further. Address mode formation runs after
                 // peephole to fold ADD+LDR/STR into richer addressing modes.
+                // CmpBranchFusion runs after CmpSelectCombine to fuse remaining
+                // CMP/TST + BCond pairs into CBZ/CBNZ/TBZ/TBNZ.
                 // CFG simplification runs last to clean up branches left dead
                 // by prior passes.
                 PassManager::new()
@@ -89,6 +92,7 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(Peephole))
                     .with_pass(Box::new(AddrModeFormation))
                     .with_pass(Box::new(CmpSelectCombine))
+                    .with_pass(Box::new(CmpBranchFusion))
                     .with_pass(Box::new(DeadCodeElimination))
                     .with_pass(Box::new(CfgSimplify))
             }
@@ -96,6 +100,7 @@ impl OptimizationPipeline {
                 // Aggressive: full pipeline with proof-consuming opts (will be iterated).
                 // Address mode formation runs after peephole, before DCE.
                 // CmpSelect combines run after addr-mode, before DCE.
+                // CmpBranchFusion fuses CMP/TST + BCond into CBZ/CBNZ/TBZ/TBNZ.
                 PassManager::new()
                     .with_pass(Box::new(ProofOptimization::new()))
                     .with_pass(Box::new(ConstantFolding))
@@ -105,6 +110,7 @@ impl OptimizationPipeline {
                     .with_pass(Box::new(Peephole))
                     .with_pass(Box::new(AddrModeFormation))
                     .with_pass(Box::new(CmpSelectCombine))
+                    .with_pass(Box::new(CmpBranchFusion))
                     .with_pass(Box::new(DeadCodeElimination))
                     .with_pass(Box::new(CfgSimplify))
             }
@@ -213,7 +219,7 @@ mod tests {
     fn test_o3_iterates() {
         let pipeline = OptimizationPipeline::new(OptLevel::O3);
         let pm = pipeline.build_pass_manager();
-        // 10 passes: proof-opts + const-fold + copy-prop + cse + licm + peephole + addr-mode + cmp-select + dce + cfg-simplify
-        assert_eq!(pm.num_passes(), 10);
+        // 11 passes: proof-opts + const-fold + copy-prop + cse + licm + peephole + addr-mode + cmp-select + cmp-branch-fusion + dce + cfg-simplify
+        assert_eq!(pm.num_passes(), 11);
     }
 }

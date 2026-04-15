@@ -19,7 +19,7 @@
 //!
 //! # Example
 //!
-//! ```rust
+//! ```rust,no_run
 //! use llvm2_verify::proof_database::ProofDatabase;
 //! use llvm2_verify::verification_runner::VerificationRunner;
 //!

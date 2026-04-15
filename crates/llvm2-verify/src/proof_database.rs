@@ -114,6 +114,12 @@ pub enum ProofCategory {
     /// ANE precision proofs (FP16 quantization bounded error).
     /// Source: `ane_precision_proofs::all_ane_precision_proofs()`.
     AnePrecision,
+
+    /// Register allocation correctness proofs (non-interference, completeness,
+    /// spill correctness, copy insertion, phi elimination, calling convention,
+    /// live-through, spill slot non-aliasing).
+    /// Source: `regalloc_proofs::all_regalloc_proofs()`.
+    RegAlloc,
 }
 
 impl ProofCategory {
@@ -137,6 +143,7 @@ impl ProofCategory {
             ProofCategory::NeonLowering,
             ProofCategory::Vectorization,
             ProofCategory::AnePrecision,
+            ProofCategory::RegAlloc,
         ]
     }
 
@@ -160,6 +167,7 @@ impl ProofCategory {
             ProofCategory::NeonLowering => "NEON Lowering",
             ProofCategory::Vectorization => "Vectorization",
             ProofCategory::AnePrecision => "ANE Precision",
+            ProofCategory::RegAlloc => "Register Allocation",
         }
     }
 }
@@ -349,6 +357,11 @@ impl ProofDatabase {
         // ANE precision proofs
         for p in crate::ane_precision_proofs::all_ane_precision_proofs() {
             proofs.push(CategorizedProof { obligation: p, category: ProofCategory::AnePrecision });
+        }
+
+        // Register allocation correctness proofs
+        for p in crate::regalloc_proofs::all_regalloc_proofs() {
+            proofs.push(CategorizedProof { obligation: p, category: ProofCategory::RegAlloc });
         }
 
         ProofDatabase { proofs }
@@ -698,8 +711,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            17,
-            "expected 17 categories, got {}",
+            18,
+            "expected 18 categories, got {}",
             categories.len()
         );
     }
