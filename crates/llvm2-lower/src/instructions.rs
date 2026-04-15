@@ -120,6 +120,23 @@ pub enum Opcode {
     Load { ty: Type },
     Store,
 
+    // Atomic memory operations
+    /// Atomic load with acquire semantics: result = atomic_load(ptr).
+    /// args[0] = ptr. Lowered to LDAR on AArch64.
+    AtomicLoad { ty: Type, ordering: AtomicOrdering },
+    /// Atomic store with release semantics: atomic_store(ptr, value).
+    /// args[0] = value, args[1] = ptr. Lowered to STLR on AArch64.
+    AtomicStore { ordering: AtomicOrdering },
+    /// Atomic read-modify-write: result (old value) = atomic_rmw(op, ptr, val).
+    /// args[0] = val, args[1] = ptr. Lowered to LDADD/LDCLR/LDSET/LDEOR/SWP.
+    AtomicRmw { op: AtomicRmwOp, ty: Type, ordering: AtomicOrdering },
+    /// Compare-and-swap: result (old value) = cmpxchg(ptr, expected, desired).
+    /// args[0] = expected, args[1] = desired, args[2] = ptr.
+    /// Lowered to CAS (LSE) or LDAXR/STLXR loop (non-LSE).
+    CmpXchg { ty: Type, ordering: AtomicOrdering },
+    /// Memory fence. No args, no results. Lowered to DMB.
+    Fence { ordering: AtomicOrdering },
+
     // Aggregate operations
     /// Compute address of a struct field: base_ptr + offset_of(struct_ty, field_index).
     /// args[0] = base pointer (pointer to struct), result = pointer to field.
@@ -152,6 +169,38 @@ pub enum IntCC {
     UnsignedGreaterThanOrEqual,
     UnsignedGreaterThan,
     UnsignedLessThanOrEqual,
+}
+
+/// Memory ordering for atomic operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AtomicOrdering {
+    /// No ordering constraint.
+    Relaxed,
+    /// Acquire: subsequent reads/writes cannot be reordered before this.
+    Acquire,
+    /// Release: preceding reads/writes cannot be reordered after this.
+    Release,
+    /// Acquire + Release combined.
+    AcqRel,
+    /// Sequential consistency (strongest).
+    SeqCst,
+}
+
+/// Atomic read-modify-write operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AtomicRmwOp {
+    /// Atomic add.
+    Add,
+    /// Atomic subtract.
+    Sub,
+    /// Atomic AND.
+    And,
+    /// Atomic OR.
+    Or,
+    /// Atomic XOR.
+    Xor,
+    /// Atomic exchange (swap).
+    Xchg,
 }
 
 /// An instruction in the IR.

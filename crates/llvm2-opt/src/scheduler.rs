@@ -146,6 +146,27 @@ pub fn opcode_latency(opcode: AArch64Opcode) -> (u32, ExecutionPort) {
         // Reference counting: memory-like
         Retain | Release => (1, ExecutionPort::LoadStore),
 
+        // Atomic loads: 4 cycles (like regular load + ordering)
+        Ldar | Ldarb | Ldarh | Ldaxr => (4, ExecutionPort::LoadStore),
+
+        // Atomic stores: 2 cycles (like regular store + ordering)
+        Stlr | Stlrb | Stlrh | Stlxr => (2, ExecutionPort::LoadStore),
+
+        // Atomic RMW (LSE): 6 cycles
+        Ldadd | Ldadda | Ldaddal
+        | Ldclr | Ldclral
+        | Ldeor | Ldeoral
+        | Ldset | Ldsetal
+        | Swp | Swpal => (6, ExecutionPort::LoadStore),
+
+        // Compare-and-swap: 8 cycles
+        Cas | Casa | Casal => (8, ExecutionPort::LoadStore),
+
+        // Barriers: 4-12 cycles
+        Dmb => (4, ExecutionPort::LoadStore),
+        Dsb => (8, ExecutionPort::LoadStore),
+        Isb => (12, ExecutionPort::LoadStore),
+
         // Pseudo-instructions
         Phi | Copy | Nop => (1, ExecutionPort::IntAlu),
     }

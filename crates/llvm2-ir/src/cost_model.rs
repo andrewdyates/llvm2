@@ -280,6 +280,27 @@ impl AppleSiliconCostModel {
             TrapOverflow | TrapBoundsCheck | TrapNull
             | TrapDivZero | TrapShiftRange => (1, 1.0),
 
+            // ===== Atomic memory operations =====
+            // Load-acquire: same latency as regular load + ordering overhead.
+            Ldar | Ldarb | Ldarh => (4, 1.0),
+            // Store-release: same latency as regular store + ordering overhead.
+            Stlr | Stlrb | Stlrh => (2, 1.0),
+            // LSE atomics (RMW): ~6 cycles latency, single issue.
+            Ldadd | Ldadda | Ldaddal => (6, 0.5),
+            Ldclr | Ldclral => (6, 0.5),
+            Ldeor | Ldeoral => (6, 0.5),
+            Ldset | Ldsetal => (6, 0.5),
+            Swp | Swpal => (6, 0.5),
+            // CAS: ~8 cycles (compare + conditional store).
+            Cas | Casa | Casal => (8, 0.5),
+            // LL/SC exclusive: similar to LSE but may require retry loop.
+            Ldaxr => (4, 1.0),
+            Stlxr => (4, 0.5),
+            // Barriers: pipeline flush overhead.
+            Dmb => (4, 0.5),
+            Dsb => (8, 0.25),
+            Isb => (12, 0.25),
+
             // ===== Reference counting pseudo-instructions =====
             // Model as load+store pair (atomic RMW in practice).
             Retain  => (6, 0.5),

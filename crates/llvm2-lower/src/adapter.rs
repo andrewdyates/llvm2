@@ -22,11 +22,11 @@
 use std::collections::HashMap;
 
 use tmir_func::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule};
-use tmir_instrs::{BinOp, CastOp, CmpOp, Instr, InstrNode, UnOp};
+use tmir_instrs::{AtomicRmwOp as TmirAtomicRmwOp, BinOp, CastOp, CmpOp, Instr, InstrNode, MemoryOrdering, UnOp};
 use tmir_types::{BlockId, FuncId, StructDef, TmirProof, Ty, ValueId};
 
 use crate::function::{BasicBlock, Function, Signature};
-use crate::instructions::{Block, FloatCC, Instruction, IntCC, Opcode, Value};
+use crate::instructions::{AtomicOrdering, AtomicRmwOp, Block, FloatCC, Instruction, IntCC, Opcode, Value};
 use crate::types::Type;
 
 // ---------------------------------------------------------------------------
@@ -311,6 +311,29 @@ pub fn translate_type_with_structs(
         Ty::Func(_) => {
             Err(AdapterError::UnsupportedType(format!("{:?}", ty)))
         }
+    }
+}
+
+/// Convert a tMIR `MemoryOrdering` to an internal LIR `AtomicOrdering`.
+fn translate_ordering(ordering: &MemoryOrdering) -> AtomicOrdering {
+    match ordering {
+        MemoryOrdering::Relaxed => AtomicOrdering::Relaxed,
+        MemoryOrdering::Acquire => AtomicOrdering::Acquire,
+        MemoryOrdering::Release => AtomicOrdering::Release,
+        MemoryOrdering::AcqRel => AtomicOrdering::AcqRel,
+        MemoryOrdering::SeqCst => AtomicOrdering::SeqCst,
+    }
+}
+
+/// Convert a tMIR `AtomicRmwOp` to an internal LIR `AtomicRmwOp`.
+fn translate_atomic_rmw_op(op: &TmirAtomicRmwOp) -> AtomicRmwOp {
+    match op {
+        TmirAtomicRmwOp::Add => AtomicRmwOp::Add,
+        TmirAtomicRmwOp::Sub => AtomicRmwOp::Sub,
+        TmirAtomicRmwOp::And => AtomicRmwOp::And,
+        TmirAtomicRmwOp::Or => AtomicRmwOp::Or,
+        TmirAtomicRmwOp::Xor => AtomicRmwOp::Xor,
+        TmirAtomicRmwOp::Xchg => AtomicRmwOp::Xchg,
     }
 }
 
@@ -627,6 +650,22 @@ impl<'a> TmirAdapter<'a> {
             Instr::Index { ty, base, index } => {
                 self.translate_array_index(ty, base, index, &node.results)
             }
+            // Atomic operations: translate to LIR atomic opcodes.
+            Instr::AtomicLoad { ty, ptr, ordering } => {
+                self.translate_atomic_load(ty, ptr, ordering, &node.results)
+            }
+            Instr::AtomicStore { ty: _, ptr, value, ordering } => {
+                self.translate_atomic_store(ptr, value, ordering)
+            }
+            Instr::AtomicRmw { op, ty, ptr, value, ordering } => {
+                self.translate_atomic_rmw(op, ty, ptr, value, ordering, &node.results)
+            }
+            Instr::CmpXchg { ty, ptr, expected, desired, success_ordering, .. } => {
+                self.translate_cmpxchg(ty, ptr, expected, desired, success_ordering, &node.results)
+            }
+            Instr::Fence { ordering } => {
+                self.translate_fence(ordering)
+            }
             // Switch: unsupported in MVP.
             Instr::Switch { .. } => Err(AdapterError::UnsupportedInstruction(
                 "Switch".to_string(),
@@ -882,6 +921,101 @@ impl<'a> TmirAdapter<'a> {
         Ok(vec![Instruction {
             opcode: Opcode::Store,
             args: vec![val, ptr_val],
+            results: vec![],
+        }])
+    }
+
+    fn translate_atomic_load(
+        &mut self,
+        ty: &Ty,
+        ptr: &ValueId,
+        ordering: &MemoryOrdering,
+        results: &[ValueId],
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        let lir_ty = translate_type(ty)?;
+        let ptr_val = self.map_value(*ptr);
+        let dst = self.map_result(results)?;
+        let lir_ordering = translate_ordering(ordering);
+
+        Ok(vec![Instruction {
+            opcode: Opcode::AtomicLoad { ty: lir_ty, ordering: lir_ordering },
+            args: vec![ptr_val],
+            results: vec![dst],
+        }])
+    }
+
+    fn translate_atomic_store(
+        &mut self,
+        ptr: &ValueId,
+        value: &ValueId,
+        ordering: &MemoryOrdering,
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        let ptr_val = self.map_value(*ptr);
+        let val = self.map_value(*value);
+        let lir_ordering = translate_ordering(ordering);
+
+        Ok(vec![Instruction {
+            opcode: Opcode::AtomicStore { ordering: lir_ordering },
+            args: vec![val, ptr_val],
+            results: vec![],
+        }])
+    }
+
+    fn translate_atomic_rmw(
+        &mut self,
+        op: &TmirAtomicRmwOp,
+        ty: &Ty,
+        ptr: &ValueId,
+        value: &ValueId,
+        ordering: &MemoryOrdering,
+        results: &[ValueId],
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        let lir_ty = translate_type(ty)?;
+        let ptr_val = self.map_value(*ptr);
+        let val = self.map_value(*value);
+        let dst = self.map_result(results)?;
+        let lir_ordering = translate_ordering(ordering);
+        let lir_op = translate_atomic_rmw_op(op);
+
+        Ok(vec![Instruction {
+            opcode: Opcode::AtomicRmw { op: lir_op, ty: lir_ty, ordering: lir_ordering },
+            args: vec![val, ptr_val],
+            results: vec![dst],
+        }])
+    }
+
+    fn translate_cmpxchg(
+        &mut self,
+        ty: &Ty,
+        ptr: &ValueId,
+        expected: &ValueId,
+        desired: &ValueId,
+        ordering: &MemoryOrdering,
+        results: &[ValueId],
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        let lir_ty = translate_type(ty)?;
+        let ptr_val = self.map_value(*ptr);
+        let exp_val = self.map_value(*expected);
+        let des_val = self.map_value(*desired);
+        let dst = self.map_result(results)?;
+        let lir_ordering = translate_ordering(ordering);
+
+        Ok(vec![Instruction {
+            opcode: Opcode::CmpXchg { ty: lir_ty, ordering: lir_ordering },
+            args: vec![exp_val, des_val, ptr_val],
+            results: vec![dst],
+        }])
+    }
+
+    fn translate_fence(
+        &mut self,
+        ordering: &MemoryOrdering,
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        let lir_ordering = translate_ordering(ordering);
+
+        Ok(vec![Instruction {
+            opcode: Opcode::Fence { ordering: lir_ordering },
+            args: vec![],
             results: vec![],
         }])
     }

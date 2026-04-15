@@ -241,6 +241,93 @@ pub enum AArch64Opcode {
     /// Operands: [Vt, Xn, Imm(arrangement)]
     NeonSt1Post,
 
+    // -- Atomic memory operations (ARMv8.1-a LSE + legacy LL/SC) --
+
+    /// LDAR Xt, [Xn] — load-acquire (sequential consistency load).
+    /// size: 32-bit (Wt) or 64-bit (Xt) from register class.
+    /// Operands: [Rt, Rn]
+    Ldar,
+    /// LDARB Wt, [Xn] — load-acquire byte.
+    /// Operands: [Rt, Rn]
+    Ldarb,
+    /// LDARH Wt, [Xn] — load-acquire halfword.
+    /// Operands: [Rt, Rn]
+    Ldarh,
+    /// STLR Xt, [Xn] — store-release (sequential consistency store).
+    /// size: 32-bit (Wt) or 64-bit (Xt) from register class.
+    /// Operands: [Rt, Rn]
+    Stlr,
+    /// STLRB Wt, [Xn] — store-release byte.
+    /// Operands: [Rt, Rn]
+    Stlrb,
+    /// STLRH Wt, [Xn] — store-release halfword.
+    /// Operands: [Rt, Rn]
+    Stlrh,
+
+    /// LDADD Xs, Xt, [Xn] — atomic add (ARMv8.1-a LSE).
+    /// Atomically: Xt = *Xn; *Xn = Xt + Xs.
+    /// Operands: [Rs (addend), Rt (old value dest), Rn (address)]
+    Ldadd,
+    /// LDADDA — load-acquire variant.
+    Ldadda,
+    /// LDADDAL — load-acquire + store-release (full barrier).
+    Ldaddal,
+
+    /// LDCLR Xs, Xt, [Xn] — atomic bit clear (AND NOT) (ARMv8.1-a LSE).
+    /// Atomically: Xt = *Xn; *Xn = Xt AND NOT Xs.
+    /// Operands: [Rs, Rt, Rn]
+    Ldclr,
+    /// LDCLRAL — full barrier variant.
+    Ldclral,
+
+    /// LDEOR Xs, Xt, [Xn] — atomic exclusive OR (ARMv8.1-a LSE).
+    /// Atomically: Xt = *Xn; *Xn = Xt XOR Xs.
+    /// Operands: [Rs, Rt, Rn]
+    Ldeor,
+    /// LDEORAL — full barrier variant.
+    Ldeoral,
+
+    /// LDSET Xs, Xt, [Xn] — atomic bit set (OR) (ARMv8.1-a LSE).
+    /// Atomically: Xt = *Xn; *Xn = Xt OR Xs.
+    /// Operands: [Rs, Rt, Rn]
+    Ldset,
+    /// LDSETAL — full barrier variant.
+    Ldsetal,
+
+    /// SWP Xs, Xt, [Xn] — atomic swap (ARMv8.1-a LSE).
+    /// Atomically: Xt = *Xn; *Xn = Xs.
+    /// Operands: [Rs, Rt, Rn]
+    Swp,
+    /// SWPAL — full barrier variant.
+    Swpal,
+
+    /// CAS Xs, Xt, [Xn] — compare and swap (ARMv8.1-a LSE).
+    /// Atomically: if *Xn == Xs then *Xn = Xt; Xs = old *Xn.
+    /// Operands: [Rs (expected/result), Rt (desired), Rn (address)]
+    Cas,
+    /// CASA — load-acquire variant.
+    Casa,
+    /// CASAL — full barrier (acquire + release).
+    Casal,
+
+    /// LDAXR Xt, [Xn] — load-acquire exclusive register (LL/SC legacy path).
+    /// Operands: [Rt, Rn]
+    Ldaxr,
+    /// STLXR Ws, Xt, [Xn] — store-release exclusive register (LL/SC legacy path).
+    /// Ws receives 0 on success, 1 on failure.
+    /// Operands: [Ws (status), Rt (value), Rn (address)]
+    Stlxr,
+
+    /// DMB — data memory barrier.
+    /// Operands: [Imm(option)] where option is CRm field (e.g., 0xF = SY, 0xB = ISH).
+    Dmb,
+    /// DSB — data synchronization barrier.
+    /// Operands: [Imm(option)]
+    Dsb,
+    /// ISB — instruction synchronization barrier.
+    /// Operands: [Imm(option)] (typically 0xF = SY).
+    Isb,
+
     // -- Address --
     Adrp,
     AddPCRel,
@@ -353,6 +440,37 @@ impl AArch64Opcode {
             STRWui | STRXui | STRSui | STRDui => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
             StpRI | StpPreIndex => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
             NeonSt1Post => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
+
+            // Atomic loads (load-acquire): read memory with ordering side effect
+            Ldar | Ldarb | Ldarh => InstFlags::READS_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
+
+            // Atomic stores (store-release): write memory with ordering side effect
+            Stlr | Stlrb | Stlrh => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
+
+            // Atomic read-modify-write (LSE): read AND write memory, always side-effecting
+            Ldadd | Ldadda | Ldaddal
+            | Ldclr | Ldclral
+            | Ldeor | Ldeoral
+            | Ldset | Ldsetal
+            | Swp | Swpal => {
+                InstFlags::READS_MEMORY
+                    .union(InstFlags::WRITES_MEMORY)
+                    .union(InstFlags::HAS_SIDE_EFFECTS)
+            }
+
+            // Compare-and-swap (LSE): read AND write memory, always side-effecting
+            Cas | Casa | Casal => {
+                InstFlags::READS_MEMORY
+                    .union(InstFlags::WRITES_MEMORY)
+                    .union(InstFlags::HAS_SIDE_EFFECTS)
+            }
+
+            // Exclusive load/store (LL/SC legacy path)
+            Ldaxr => InstFlags::READS_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
+            Stlxr => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
+
+            // Memory barriers: pure side effects (enforce ordering)
+            Dmb | Dsb | Isb => InstFlags::HAS_SIDE_EFFECTS,
 
             // Pseudo-instructions
             Phi => InstFlags::IS_PSEUDO,

@@ -37,7 +37,7 @@ use std::collections::HashMap;
 
 use crate::abi::{gpr, AppleAArch64ABI, ArgLocation, PReg};
 use crate::function::Signature;
-use crate::instructions::{Block, FloatCC, Instruction, IntCC, Opcode, Value};
+use crate::instructions::{AtomicOrdering, AtomicRmwOp, Block, FloatCC, Instruction, IntCC, Opcode, Value};
 use crate::types::Type;
 use thiserror::Error;
 
@@ -654,6 +654,23 @@ impl InstructionSelector {
             // Memory
             Opcode::Load { ty } => self.select_load(ty.clone(), inst, block)?,
             Opcode::Store => self.select_store(inst, block)?,
+
+            // Atomic memory operations
+            Opcode::AtomicLoad { ty, ordering } => {
+                self.select_atomic_load(ty.clone(), *ordering, inst, block)?;
+            }
+            Opcode::AtomicStore { ordering } => {
+                self.select_atomic_store(*ordering, inst, block)?;
+            }
+            Opcode::AtomicRmw { op, ty, ordering } => {
+                self.select_atomic_rmw(*op, ty.clone(), *ordering, inst, block)?;
+            }
+            Opcode::CmpXchg { ty, ordering } => {
+                self.select_cmpxchg(ty.clone(), *ordering, inst, block)?;
+            }
+            Opcode::Fence { ordering } => {
+                self.select_fence(*ordering, block)?;
+            }
 
             // Aggregate operations
             Opcode::StructGep { struct_ty, field_index } => {
@@ -1808,6 +1825,273 @@ impl InstructionSelector {
         self.func.push_inst(
             block,
             ISelInst::new(opc, vec![src, addr, ISelOperand::Imm(0)]),
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Atomic memory operations
+    // -----------------------------------------------------------------------
+
+    /// Select an atomic load: LDAR Rt, [Rn].
+    ///
+    /// Atomic loads use LDAR (load-acquire) which provides acquire semantics.
+    /// For byte/halfword sizes, LDARB/LDARH are used.
+    /// Operands: [Rt (dest), Rn (address)].
+    fn select_atomic_load(
+        &mut self,
+        ty: Type,
+        _ordering: AtomicOrdering,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        Self::require_args(inst, 1, "AtomicLoad")?;
+        Self::require_result(inst, "AtomicLoad")?;
+
+        let addr_val = inst.args[0];
+        let result_val = inst.results[0];
+        let addr = self.use_value(&addr_val)?;
+
+        let class = reg_class_for_type(&ty);
+        let dst = self.new_vreg(class);
+
+        // Select LDAR variant based on type size.
+        // All orderings map to LDAR (acquire) since AArch64 LDAR provides
+        // at least acquire semantics (load-acquire). For SeqCst, the
+        // LDAR/STLR pair provides sequential consistency per the
+        // ARMv8 memory model.
+        let opc = match ty {
+            Type::I8 => AArch64Opcode::Ldarb,
+            Type::I16 => AArch64Opcode::Ldarh,
+            _ => AArch64Opcode::Ldar, // I32, I64
+        };
+
+        self.func.push_inst(
+            block,
+            ISelInst::new(opc, vec![ISelOperand::VReg(dst), addr]),
+        );
+
+        self.define_value(result_val, ISelOperand::VReg(dst), ty);
+        Ok(())
+    }
+
+    /// Select an atomic store: STLR Rt, [Rn].
+    ///
+    /// Atomic stores use STLR (store-release) which provides release semantics.
+    /// For byte/halfword sizes, STLRB/STLRH are used.
+    /// Operands: [Rt (value), Rn (address)].
+    fn select_atomic_store(
+        &mut self,
+        _ordering: AtomicOrdering,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        Self::require_args(inst, 2, "AtomicStore")?;
+
+        let value_val = inst.args[0];
+        let addr_val = inst.args[1];
+
+        let src = self.use_value(&value_val)?;
+        let addr = self.use_value(&addr_val)?;
+        let ty = self.value_type(&value_val);
+
+        let opc = match ty {
+            Type::I8 => AArch64Opcode::Stlrb,
+            Type::I16 => AArch64Opcode::Stlrh,
+            _ => AArch64Opcode::Stlr, // I32, I64
+        };
+
+        self.func.push_inst(
+            block,
+            ISelInst::new(opc, vec![src, addr]),
+        );
+        Ok(())
+    }
+
+    /// Select an atomic read-modify-write operation.
+    ///
+    /// LSE path (ARMv8.1-a): Uses LDADD/LDCLR/LDEOR/LDSET/SWP.
+    /// All LSE atomics have the form: Xs (operand), Xt (old value), [Xn] (address).
+    /// Operands: [Rs, Rt, Rn].
+    fn select_atomic_rmw(
+        &mut self,
+        op: AtomicRmwOp,
+        ty: Type,
+        ordering: AtomicOrdering,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        Self::require_args(inst, 2, "AtomicRmw")?;
+        Self::require_result(inst, "AtomicRmw")?;
+
+        let val_val = inst.args[0];
+        let addr_val = inst.args[1];
+        let result_val = inst.results[0];
+
+        let val = self.use_value(&val_val)?;
+        let addr = self.use_value(&addr_val)?;
+
+        let class = reg_class_for_type(&ty);
+        let dst = self.new_vreg(class);
+
+        // For AND and SUB, we need a preparation step. Track the actual
+        // operand vreg to pass to the LSE instruction.
+        let mut actual_val = val;
+
+        // Select LSE opcode. For SeqCst/AcqRel, use *AL variants (acquire+release).
+        // For Acquire, use *A variants. Otherwise use base (relaxed).
+        let opc = match op {
+            AtomicRmwOp::Add => match ordering {
+                AtomicOrdering::SeqCst | AtomicOrdering::AcqRel => AArch64Opcode::Ldaddal,
+                AtomicOrdering::Acquire => AArch64Opcode::Ldadda,
+                _ => AArch64Opcode::Ldadd,
+            },
+            AtomicRmwOp::And => {
+                // AND is lowered as LDCLR with inverted operand.
+                // LDCLR clears bits: new = old AND NOT(Rs).
+                // To achieve AND(val): new = old AND val = old AND NOT(NOT(val)).
+                // So we invert val first: emit MVN (ORN Xd, XZR, Xn alias).
+                let inv = self.new_vreg(class);
+                self.func.push_inst(
+                    block,
+                    ISelInst::new(
+                        AArch64Opcode::OrnRR,
+                        vec![ISelOperand::VReg(inv), actual_val],
+                    ),
+                );
+                actual_val = ISelOperand::VReg(inv);
+                match ordering {
+                    AtomicOrdering::SeqCst | AtomicOrdering::AcqRel => AArch64Opcode::Ldclral,
+                    _ => AArch64Opcode::Ldclr,
+                }
+            }
+            AtomicRmwOp::Or => match ordering {
+                AtomicOrdering::SeqCst | AtomicOrdering::AcqRel => AArch64Opcode::Ldsetal,
+                _ => AArch64Opcode::Ldset,
+            },
+            AtomicRmwOp::Xor => match ordering {
+                AtomicOrdering::SeqCst | AtomicOrdering::AcqRel => AArch64Opcode::Ldeoral,
+                _ => AArch64Opcode::Ldeor,
+            },
+            AtomicRmwOp::Sub => {
+                // SUB is lowered as LDADD with negated value.
+                // NEG Xd, Xn = SUB Xd, XZR, Xn (2-operand ISel form).
+                let neg = self.new_vreg(class);
+                self.func.push_inst(
+                    block,
+                    ISelInst::new(
+                        AArch64Opcode::Neg,
+                        vec![ISelOperand::VReg(neg), actual_val],
+                    ),
+                );
+                actual_val = ISelOperand::VReg(neg);
+                match ordering {
+                    AtomicOrdering::SeqCst | AtomicOrdering::AcqRel => AArch64Opcode::Ldaddal,
+                    AtomicOrdering::Acquire => AArch64Opcode::Ldadda,
+                    _ => AArch64Opcode::Ldadd,
+                }
+            }
+            AtomicRmwOp::Xchg => match ordering {
+                AtomicOrdering::SeqCst | AtomicOrdering::AcqRel => AArch64Opcode::Swpal,
+                _ => AArch64Opcode::Swp,
+            },
+        };
+
+        self.func.push_inst(
+            block,
+            ISelInst::new(
+                opc,
+                vec![actual_val, ISelOperand::VReg(dst), addr],
+            ),
+        );
+
+        self.define_value(result_val, ISelOperand::VReg(dst), ty);
+        Ok(())
+    }
+
+    /// Select a compare-and-swap: CAS Rs, Rt, [Xn].
+    ///
+    /// LSE path: CAS/CASA/CASAL.
+    /// Rs = expected value (updated to old value on return).
+    /// Rt = desired value.
+    /// [Xn] = memory address.
+    ///
+    /// After CAS: Rs contains old value. Success = (Rs == original expected).
+    fn select_cmpxchg(
+        &mut self,
+        ty: Type,
+        ordering: AtomicOrdering,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        Self::require_args(inst, 3, "CmpXchg")?;
+        Self::require_result(inst, "CmpXchg")?;
+
+        let expected_val = inst.args[0];
+        let desired_val = inst.args[1];
+        let addr_val = inst.args[2];
+
+        let expected = self.use_value(&expected_val)?;
+        let desired = self.use_value(&desired_val)?;
+        let addr = self.use_value(&addr_val)?;
+
+        let class = reg_class_for_type(&ty);
+        let dst = self.new_vreg(class);
+
+        // Copy expected to dst (CAS reads and writes Rs in-place).
+        self.func.push_inst(
+            block,
+            ISelInst::new(
+                AArch64Opcode::MovR,
+                vec![ISelOperand::VReg(dst), expected],
+            ),
+        );
+
+        let opc = match ordering {
+            AtomicOrdering::SeqCst | AtomicOrdering::AcqRel => AArch64Opcode::Casal,
+            AtomicOrdering::Acquire => AArch64Opcode::Casa,
+            _ => AArch64Opcode::Cas,
+        };
+
+        // CAS Rs, Rt, [Xn]: Rs (expected/result), Rt (desired), Xn (address)
+        self.func.push_inst(
+            block,
+            ISelInst::new(
+                opc,
+                vec![ISelOperand::VReg(dst), desired, addr],
+            ),
+        );
+
+        // Result is the old value in dst.
+        self.define_value(inst.results[0], ISelOperand::VReg(dst), ty);
+        Ok(())
+    }
+
+    /// Select a memory fence: DMB.
+    ///
+    /// DMB with option field:
+    ///   - SeqCst/AcqRel: DMB ISH (0xB) — inner-shareable full barrier
+    ///   - Acquire: DMB ISHLD (0x9) — inner-shareable load barrier
+    ///   - Release: DMB ISHST (0xA) — inner-shareable store barrier
+    ///   - Relaxed: NOP (no barrier needed)
+    fn select_fence(
+        &mut self,
+        ordering: AtomicOrdering,
+        block: Block,
+    ) -> Result<(), ISelError> {
+        let option = match ordering {
+            AtomicOrdering::SeqCst | AtomicOrdering::AcqRel => 0x0B, // ISH
+            AtomicOrdering::Acquire => 0x09, // ISHLD
+            AtomicOrdering::Release => 0x0A, // ISHST
+            AtomicOrdering::Relaxed => return Ok(()), // No barrier needed
+        };
+
+        self.func.push_inst(
+            block,
+            ISelInst::new(
+                AArch64Opcode::Dmb,
+                vec![ISelOperand::Imm(option)],
+            ),
         );
         Ok(())
     }
@@ -3342,7 +3626,7 @@ enum AArch64FpBinOp {
 mod tests {
     use super::*;
     use crate::function::Signature;
-    use crate::instructions::{Block, FloatCC, Instruction, IntCC, Opcode, Value};
+    use crate::instructions::{AtomicOrdering, AtomicRmwOp, Block, FloatCC, Instruction, IntCC, Opcode, Value};
 
     /// Helper: create a simple isel for fn(i32, i32) -> i32.
     fn make_add_isel() -> (InstructionSelector, Block) {
@@ -7823,5 +8107,401 @@ mod tests {
         let fsqrt_inst_id = ir_insts[1];
         let fsqrt_inst = &ir_func.insts[fsqrt_inst_id.0 as usize];
         assert_eq!(fsqrt_inst.opcode, AArch64Opcode::FsqrtRR);
+    }
+
+    // =======================================================================
+    // Atomic memory operation tests
+    // =======================================================================
+
+    #[test]
+    fn select_atomic_load_i32_emits_ldar() {
+        let (mut isel, entry) = make_empty_isel();
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::AtomicLoad { ty: Type::I32, ordering: AtomicOrdering::Acquire },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::Ldar,
+            "AtomicLoad I32 with Acquire ordering should emit LDAR");
+    }
+
+    #[test]
+    fn select_atomic_load_i8_emits_ldarb() {
+        let (mut isel, entry) = make_empty_isel();
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::AtomicLoad { ty: Type::I8, ordering: AtomicOrdering::SeqCst },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::Ldarb,
+            "AtomicLoad I8 should emit LDARB");
+    }
+
+    #[test]
+    fn select_atomic_load_i16_emits_ldarh() {
+        let (mut isel, entry) = make_empty_isel();
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::AtomicLoad { ty: Type::I16, ordering: AtomicOrdering::Acquire },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::Ldarh,
+            "AtomicLoad I16 should emit LDARH");
+    }
+
+    #[test]
+    fn select_atomic_store_i32_emits_stlr() {
+        let (mut isel, entry) = make_empty_isel();
+        let val_vreg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(0), ISelOperand::VReg(val_vreg), Type::I32);
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::AtomicStore { ordering: AtomicOrdering::Release },
+                args: vec![Value(0), Value(1)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::Stlr,
+            "AtomicStore I32 with Release ordering should emit STLR");
+    }
+
+    #[test]
+    fn select_atomic_store_i8_emits_stlrb() {
+        let (mut isel, entry) = make_empty_isel();
+        let val_vreg = isel.new_vreg(RegClass::Gpr32);
+        isel.define_value(Value(0), ISelOperand::VReg(val_vreg), Type::I8);
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::AtomicStore { ordering: AtomicOrdering::SeqCst },
+                args: vec![Value(0), Value(1)],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::Stlrb,
+            "AtomicStore I8 should emit STLRB");
+    }
+
+    #[test]
+    fn select_atomic_rmw_add_seqcst_emits_ldaddal() {
+        let (mut isel, entry) = make_empty_isel();
+        let val_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(val_vreg), Type::I64);
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::AtomicRmw {
+                    op: AtomicRmwOp::Add,
+                    ty: Type::I64,
+                    ordering: AtomicOrdering::SeqCst,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::Ldaddal,
+            "AtomicRmw Add with SeqCst should emit LDADDAL");
+    }
+
+    #[test]
+    fn select_atomic_rmw_add_relaxed_emits_ldadd() {
+        let (mut isel, entry) = make_empty_isel();
+        let val_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(val_vreg), Type::I64);
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::AtomicRmw {
+                    op: AtomicRmwOp::Add,
+                    ty: Type::I64,
+                    ordering: AtomicOrdering::Relaxed,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::Ldadd,
+            "AtomicRmw Add with Relaxed should emit LDADD (no ordering suffix)");
+    }
+
+    #[test]
+    fn select_atomic_rmw_or_seqcst_emits_ldsetal() {
+        let (mut isel, entry) = make_empty_isel();
+        let val_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(val_vreg), Type::I64);
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::AtomicRmw {
+                    op: AtomicRmwOp::Or,
+                    ty: Type::I64,
+                    ordering: AtomicOrdering::SeqCst,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::Ldsetal,
+            "AtomicRmw Or with SeqCst should emit LDSETAL");
+    }
+
+    #[test]
+    fn select_atomic_rmw_xchg_seqcst_emits_swpal() {
+        let (mut isel, entry) = make_empty_isel();
+        let val_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(val_vreg), Type::I64);
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::AtomicRmw {
+                    op: AtomicRmwOp::Xchg,
+                    ty: Type::I64,
+                    ordering: AtomicOrdering::SeqCst,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::Swpal,
+            "AtomicRmw Xchg with SeqCst should emit SWPAL");
+    }
+
+    #[test]
+    fn select_atomic_rmw_and_emits_mvn_then_ldclral() {
+        let (mut isel, entry) = make_empty_isel();
+        let val_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(val_vreg), Type::I64);
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::AtomicRmw {
+                    op: AtomicRmwOp::And,
+                    ty: Type::I64,
+                    ordering: AtomicOrdering::SeqCst,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        // AND is lowered as MVN (ORN) + LDCLRAL
+        assert_eq!(insts[0].opcode, AArch64Opcode::OrnRR,
+            "AtomicRmw And should first emit MVN (ORN) to invert the operand");
+        assert_eq!(insts[1].opcode, AArch64Opcode::Ldclral,
+            "AtomicRmw And with SeqCst should emit LDCLRAL after MVN");
+    }
+
+    #[test]
+    fn select_atomic_rmw_sub_emits_neg_then_ldaddal() {
+        let (mut isel, entry) = make_empty_isel();
+        let val_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(val_vreg), Type::I64);
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::AtomicRmw {
+                    op: AtomicRmwOp::Sub,
+                    ty: Type::I64,
+                    ordering: AtomicOrdering::SeqCst,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        // SUB is lowered as NEG + LDADDAL
+        assert_eq!(insts[0].opcode, AArch64Opcode::Neg,
+            "AtomicRmw Sub should first emit NEG to negate the operand");
+        assert_eq!(insts[1].opcode, AArch64Opcode::Ldaddal,
+            "AtomicRmw Sub with SeqCst should emit LDADDAL after NEG");
+    }
+
+    #[test]
+    fn select_cmpxchg_seqcst_emits_mov_then_casal() {
+        let (mut isel, entry) = make_empty_isel();
+        let exp_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(exp_vreg), Type::I64);
+        let des_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), ISelOperand::VReg(des_vreg), Type::I64);
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(2), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::CmpXchg { ty: Type::I64, ordering: AtomicOrdering::SeqCst },
+                args: vec![Value(0), Value(1), Value(2)],
+                results: vec![Value(3)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        // CmpXchg emits MOV (copy expected) then CASAL
+        assert_eq!(insts[0].opcode, AArch64Opcode::MovR,
+            "CmpXchg should first copy expected value with MOV");
+        assert_eq!(insts[1].opcode, AArch64Opcode::Casal,
+            "CmpXchg with SeqCst should emit CASAL");
+    }
+
+    #[test]
+    fn select_cmpxchg_acquire_emits_casa() {
+        let (mut isel, entry) = make_empty_isel();
+        let exp_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(0), ISelOperand::VReg(exp_vreg), Type::I64);
+        let des_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(1), ISelOperand::VReg(des_vreg), Type::I64);
+        let addr_vreg = isel.new_vreg(RegClass::Gpr64);
+        isel.define_value(Value(2), ISelOperand::VReg(addr_vreg), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::CmpXchg { ty: Type::I64, ordering: AtomicOrdering::Acquire },
+                args: vec![Value(0), Value(1), Value(2)],
+                results: vec![Value(3)],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        assert_eq!(insts[1].opcode, AArch64Opcode::Casa,
+            "CmpXchg with Acquire should emit CASA");
+    }
+
+    #[test]
+    fn select_fence_seqcst_emits_dmb_ish() {
+        let (mut isel, entry) = make_empty_isel();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fence { ordering: AtomicOrdering::SeqCst },
+                args: vec![],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::Dmb,
+            "Fence with SeqCst should emit DMB");
+        // The immediate operand should be ISH (0xB)
+        assert_eq!(inst.operands[0], ISelOperand::Imm(0x0B),
+            "SeqCst fence should use DMB ISH (0xB)");
+    }
+
+    #[test]
+    fn select_fence_acquire_emits_dmb_ishld() {
+        let (mut isel, entry) = make_empty_isel();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fence { ordering: AtomicOrdering::Acquire },
+                args: vec![],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, AArch64Opcode::Dmb,
+            "Fence with Acquire should emit DMB");
+        assert_eq!(inst.operands[0], ISelOperand::Imm(0x09),
+            "Acquire fence should use DMB ISHLD (0x9)");
+    }
+
+    #[test]
+    fn select_fence_relaxed_emits_nothing() {
+        let (mut isel, entry) = make_empty_isel();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fence { ordering: AtomicOrdering::Relaxed },
+                args: vec![],
+                results: vec![],
+            },
+            entry,
+        ).unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        assert!(insts.is_empty(),
+            "Fence with Relaxed ordering should emit no instructions (NOP)");
     }
 }
