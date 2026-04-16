@@ -644,10 +644,13 @@ pub fn schedule_list(dag: &mut ScheduleDAG) -> Vec<InstId> {
         scheduled_order.push(dag.nodes[best].inst_id);
 
         // Update dependents: their earliest_start is at least (cycle + latency).
+        // Use saturating_sub because force-scheduled nodes may have had their
+        // remaining_deps zeroed, causing a successor's count to underflow if
+        // decremented again by a different predecessor in a cycle.
         let finish = cycle + dag.nodes[best].latency;
         let rev_deps = dag.nodes[best].rev_deps.clone();
         for &succ in &rev_deps {
-            remaining_deps[succ] -= 1;
+            remaining_deps[succ] = remaining_deps[succ].saturating_sub(1);
             if dag.nodes[succ].earliest_start < finish {
                 dag.nodes[succ].earliest_start = finish;
             }
@@ -806,10 +809,13 @@ pub fn schedule_list_pressure_aware(
         }
 
         // Update dependents.
+        // Use saturating_sub because force-scheduled nodes may have had their
+        // remaining_deps zeroed, causing a successor's count to underflow if
+        // decremented again by a different predecessor in a cycle.
         let finish = cycle + dag.nodes[best].latency;
         let rev_deps = dag.nodes[best].rev_deps.clone();
         for &succ in &rev_deps {
-            remaining_deps[succ] -= 1;
+            remaining_deps[succ] = remaining_deps[succ].saturating_sub(1);
             if dag.nodes[succ].earliest_start < finish {
                 dag.nodes[succ].earliest_start = finish;
             }
