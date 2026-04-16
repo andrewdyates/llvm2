@@ -39,7 +39,7 @@
 use crate::machine_types::{
     InstFlags, InstId, MachFunction, MachInst, MachOperand, PReg,
 };
-use crate::phi_elim::PSEUDO_COPY;
+// PSEUDO_COPY import removed — now using is_copy_opcode() which handles both opcodes
 
 /// A no-op pseudo-instruction opcode for deleted instructions.
 /// We reuse the existing NOP pattern: opcode 0 with empty operands.
@@ -106,8 +106,9 @@ fn coalesce_block(
     for (pos, &inst_id) in block_insts.iter().enumerate() {
         let inst = &func.insts[inst_id.0 as usize];
 
-        // Only process PSEUDO_COPY instructions.
-        if inst.opcode != PSEUDO_COPY {
+        // Only process copy pseudo-instructions (both PSEUDO_COPY from phi
+        // elimination and IR_COPY_OPCODE from ISel).
+        if !crate::phi_elim::is_copy_opcode(inst.opcode) {
             continue;
         }
 
@@ -322,6 +323,7 @@ mod tests {
         BlockId, InstFlags, InstId, MachBlock, MachFunction, MachInst, MachOperand,
         PReg, RegClass,
     };
+    use crate::phi_elim::PSEUDO_COPY;
     use std::collections::HashMap;
 
     // AArch64 register constants (matching llvm2-ir encoding).
