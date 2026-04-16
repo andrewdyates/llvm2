@@ -38,6 +38,12 @@ pub enum FixupTarget {
         symbol_index: u32,
         section_offset: u64,
     },
+
+    /// A named symbol reference (resolved to a symbol index during module emission).
+    /// Used when encoding cross-function BL/B instructions before the symbol
+    /// table is built. The module-level emitter resolves this to a `Symbol(u32)`
+    /// after all functions have been laid out and symbols assigned indices.
+    NamedSymbol(String),
 }
 
 /// A pending fixup that will be resolved after layout.
@@ -74,6 +80,19 @@ impl Fixup {
             offset,
             kind: AArch64RelocKind::Branch26,
             target: FixupTarget::Symbol(symbol_index),
+            addend: 0,
+        }
+    }
+
+    /// Create a fixup for a branch instruction (B/BL) targeting a named symbol.
+    ///
+    /// Used during instruction encoding when the symbol table index is not yet
+    /// known. The module-level emitter resolves the name to an index.
+    pub fn branch_sym(offset: u32, symbol_name: String) -> Self {
+        Self {
+            offset,
+            kind: AArch64RelocKind::Branch26,
+            target: FixupTarget::NamedSymbol(symbol_name),
             addend: 0,
         }
     }
@@ -210,6 +229,26 @@ impl FixupList {
         self.fixups.get(index)
     }
 
+    /// Resolve named symbol fixups to numeric indices.
+    ///
+    /// Takes a lookup function that maps symbol names to symbol table indices.
+    /// All `NamedSymbol` targets are replaced with `Symbol(index)`.
+    ///
+    /// # Panics
+    /// Panics if a named symbol is not found by the lookup function.
+    pub fn resolve_named_symbols<F>(&mut self, lookup: F)
+    where
+        F: Fn(&str) -> Option<u32>,
+    {
+        for fixup in &mut self.fixups {
+            if let FixupTarget::NamedSymbol(ref name) = fixup.target {
+                let index = lookup(name)
+                    .unwrap_or_else(|| panic!("unresolved symbol in fixup: {}", name));
+                fixup.target = FixupTarget::Symbol(index);
+            }
+        }
+    }
+
     /// Resolve all fixups into relocations.
     ///
     /// This converts each fixup into one or more `Relocation` entries suitable
@@ -220,6 +259,10 @@ impl FixupList {
     /// Note: this does NOT patch the instruction bytes. The caller is responsible
     /// for applying fixup values to the section data based on final layout.
     /// The relocations tell the linker what adjustments are needed at link time.
+    ///
+    /// # Panics
+    /// Panics if any `NamedSymbol` fixup targets remain unresolved. Call
+    /// [`resolve_named_symbols`](Self::resolve_named_symbols) first.
     pub fn resolve_to_relocations(&self) -> Vec<Relocation> {
         let mut relocs = Vec::with_capacity(self.fixups.len() * 2);
 
@@ -230,6 +273,13 @@ impl FixupList {
                 FixupTarget::SymbolPlusOffset {
                     symbol_index, ..
                 } => (*symbol_index, true),
+                FixupTarget::NamedSymbol(name) => {
+                    panic!(
+                        "unresolved named symbol in fixup at offset {:#x}: '{}'. \
+                         Call resolve_named_symbols() before resolve_to_relocations().",
+                        fixup.offset, name
+                    );
+                }
             };
 
             // Emit addend relocation first if needed
