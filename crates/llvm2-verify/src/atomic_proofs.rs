@@ -783,57 +783,76 @@ pub fn proof_atomic_and_via_mvn_ldclr_i64() -> ProofObligation {
 // Atomic store non-interference
 // ---------------------------------------------------------------------------
 
-/// Proof: Atomic store at addr A does not affect memory at addr B.
+/// Build a non-interference proof for atomic store: writing at addr_a
+/// does not affect the value loaded from addr_b.
 ///
 /// For disjoint, non-wrapping address ranges, STLR at A preserves
 /// the value at B. We require:
-///   1. addr_a + 4 does not wrap (addr_a <= 0xFFFFFFFFFFFFFFFC)
-///   2. addr_b + 4 does not wrap (addr_b <= 0xFFFFFFFFFFFFFFFC)
-///   3. B starts at or after A+4 (no overlap): addr_b >= addr_a + 4
+///   0. addr_a != addr_b (distinct addresses)
+///   1. addr_a + size does not wrap (addr_a <= MAX - size + 1)
+///   2. addr_b + size does not wrap (addr_b <= MAX - size + 1)
+///   3. B starts at or after A+size (no overlap): addr_b >= addr_a + size
 ///
-/// These three conditions together guarantee that the 4-byte regions
-/// [addr_a, addr_a+3] and [addr_b, addr_b+3] are fully disjoint even
-/// with unsigned arithmetic.
-pub fn proof_atomic_store_non_interference_i32() -> ProofObligation {
+/// These conditions together guarantee that the byte regions
+/// [addr_a, addr_a+size-1] and [addr_b, addr_b+size-1] are fully disjoint
+/// even with unsigned arithmetic.
+fn proof_atomic_store_non_interference(name: &str, size_bytes: u32) -> ProofObligation {
+    let result_width = size_bytes * 8;
     let mem = symbolic_memory("mem_default");
     let addr_a = SmtExpr::var("addr_a", 64);
     let addr_b = SmtExpr::var("addr_b", 64);
-    let value = SmtExpr::var("value", 32);
+    let value = SmtExpr::var("value", result_width);
 
-    let four = SmtExpr::bv_const(4, 64);
-    let max_safe = SmtExpr::bv_const(0xFFFF_FFFF_FFFF_FFFCu64, 64);
+    let size = SmtExpr::bv_const(size_bytes as u64, 64);
+    let max_safe = SmtExpr::bv_const(u64::MAX - (size_bytes as u64) + 1, 64);
 
     // Precondition 0: addresses are distinct (prevents wrap-around edge case
-    // where addr_a + 4 overflows to 0, making the disjointness check trivially true)
+    // where addr_a + size overflows to 0, making the disjointness check trivially true)
     let precond_distinct = addr_a.clone().eq_expr(addr_b.clone()).not_expr();
-    // Precondition 1: addr_a doesn't wrap on +4
+    // Precondition 1: addr_a doesn't wrap on +size
     let precond_a_safe = SmtExpr::bvuge(max_safe.clone(), addr_a.clone());
-    // Precondition 2: addr_b doesn't wrap on +4
+    // Precondition 2: addr_b doesn't wrap on +size
     let precond_b_safe = SmtExpr::bvuge(max_safe, addr_b.clone());
     // Precondition 3: B starts after A's region ends
-    let a_plus_4 = addr_a.clone().bvadd(four);
-    let precond_disjoint = SmtExpr::bvuge(addr_b.clone(), a_plus_4);
+    let a_plus_size = addr_a.clone().bvadd(size);
+    let precond_disjoint = SmtExpr::bvuge(addr_b.clone(), a_plus_size);
 
     // Value at B before atomic store at A
-    let before = encode_load_le(&mem, &addr_b, 4);
+    let before = encode_load_le(&mem, &addr_b, size_bytes);
 
     // Value at B after atomic store at A
-    let mem_after = encode_aarch64_stlr(&mem, &addr_a, &value, 4);
-    let after = encode_load_le(&mem_after, &addr_b, 4);
+    let mem_after = encode_aarch64_stlr(&mem, &addr_a, &value, size_bytes);
+    let after = encode_load_le(&mem_after, &addr_b, size_bytes);
 
     ProofObligation {
-        name: "AtomicStore_I32: non-interference (store at A, read at B unchanged)".to_string(),
+        name: name.to_string(),
         tmir_expr: before,
         aarch64_expr: after,
         inputs: vec![
             ("addr_a".to_string(), 64),
             ("addr_b".to_string(), 64),
-            ("value".to_string(), 32),
+            ("value".to_string(), result_width),
             ("mem_default".to_string(), 8),
         ],
         preconditions: vec![precond_distinct, precond_a_safe, precond_b_safe, precond_disjoint],
         fp_inputs: vec![],
     }
+}
+
+/// Proof: Atomic store at addr A does not affect memory at addr B (32-bit).
+pub fn proof_atomic_store_non_interference_i32() -> ProofObligation {
+    proof_atomic_store_non_interference(
+        "AtomicStore_I32: non-interference (store at A, read at B unchanged)",
+        4,
+    )
+}
+
+/// Proof: Atomic store at addr A does not affect memory at addr B (64-bit).
+pub fn proof_atomic_store_non_interference_i64() -> ProofObligation {
+    proof_atomic_store_non_interference(
+        "AtomicStore_I64: non-interference (store at A, read at B unchanged)",
+        8,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -918,6 +937,7 @@ pub fn all_and_mvn_ldclr_proofs() -> Vec<ProofObligation> {
 pub fn all_atomic_non_interference_proofs() -> Vec<ProofObligation> {
     vec![
         proof_atomic_store_non_interference_i32(),
+        proof_atomic_store_non_interference_i64(),
     ]
 }
 
@@ -931,9 +951,9 @@ pub fn all_atomic_non_interference_proofs() -> Vec<ProofObligation> {
 /// - 3 fence proofs (DMB ISH, ISHLD, ISHST)
 /// - 2 SUB via NEG+LDADD proofs (I32, I64)
 /// - 2 AND via MVN+LDCLR proofs (I32, I64)
-/// - 1 non-interference proof
+/// - 2 non-interference proofs (I32, I64)
 ///
-/// Total: 33 proofs.
+/// Total: 34 proofs.
 pub fn all_atomic_proofs() -> Vec<ProofObligation> {
     let mut proofs = Vec::new();
     proofs.extend(all_atomic_load_proofs());
@@ -1233,7 +1253,14 @@ mod tests {
     fn test_atomic_store_non_interference_i32() {
         let p = proof_atomic_store_non_interference_i32();
         assert!(matches!(verify_by_evaluation(&p), VerificationResult::Valid),
-            "Atomic store at A should not affect read at B");
+            "Atomic store at A should not affect read at B (I32)");
+    }
+
+    #[test]
+    fn test_atomic_store_non_interference_i64() {
+        let p = proof_atomic_store_non_interference_i64();
+        assert!(matches!(verify_by_evaluation(&p), VerificationResult::Valid),
+            "Atomic store at A should not affect read at B (I64)");
     }
 
     // -----------------------------------------------------------------------
@@ -1243,8 +1270,8 @@ mod tests {
     #[test]
     fn test_all_atomic_proofs_count() {
         let proofs = all_atomic_proofs();
-        assert_eq!(proofs.len(), 33,
-            "expected 33 atomic proofs, got {}", proofs.len());
+        assert_eq!(proofs.len(), 34,
+            "expected 34 atomic proofs, got {}", proofs.len());
     }
 
     #[test]
