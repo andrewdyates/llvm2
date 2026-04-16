@@ -179,6 +179,18 @@ pub fn encode_sar_rr(_size: X86OperandSize, src1: SmtExpr, src2: SmtExpr) -> Smt
 }
 
 // ---------------------------------------------------------------------------
+// Move instruction semantics
+// ---------------------------------------------------------------------------
+
+/// Encode `MOV r64, r64` or `MOV r32, r32` -- register-to-register move.
+///
+/// Semantics: `dst = src` (identity).
+/// Reference: Intel SDM Vol 2B, MOV instruction.
+pub fn encode_mov_rr(_size: X86OperandSize, src: SmtExpr) -> SmtExpr {
+    src
+}
+
+// ---------------------------------------------------------------------------
 // Floating-point instruction semantics (SSE)
 // ---------------------------------------------------------------------------
 
