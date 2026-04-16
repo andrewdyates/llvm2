@@ -42,7 +42,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use tmir_func::Module as TmirModule;
-use tmir_instrs::{BinOp, Instr, InstrNode};
+use tmir_instrs::{BinOp, Instr, InstrNode, Operand};
 use tmir_types::{BlockId, Ty, ValueId};
 
 use crate::instructions::Value;
@@ -614,11 +614,15 @@ impl ComputeGraph {
                     for instr_node in &block.body {
                         match &instr_node.instr {
                             Instr::BinOp { ty, lhs, rhs, .. } => {
-                                if all_values.contains(lhs) {
-                                    value_types_map.entry(*lhs).or_insert_with(|| ty.clone());
+                                if let Some(lhs_vid) = lhs.as_value() {
+                                    if all_values.contains(&lhs_vid) {
+                                        value_types_map.entry(lhs_vid).or_insert_with(|| ty.clone());
+                                    }
                                 }
-                                if all_values.contains(rhs) {
-                                    value_types_map.entry(*rhs).or_insert_with(|| ty.clone());
+                                if let Some(rhs_vid) = rhs.as_value() {
+                                    if all_values.contains(&rhs_vid) {
+                                        value_types_map.entry(rhs_vid).or_insert_with(|| ty.clone());
+                                    }
                                 }
                                 for r in &instr_node.results {
                                     if all_values.contains(r) {
@@ -627,8 +631,10 @@ impl ComputeGraph {
                                 }
                             }
                             Instr::UnOp { ty, operand, .. } => {
-                                if all_values.contains(operand) {
-                                    value_types_map.entry(*operand).or_insert_with(|| ty.clone());
+                                if let Some(op_vid) = operand.as_value() {
+                                    if all_values.contains(&op_vid) {
+                                        value_types_map.entry(op_vid).or_insert_with(|| ty.clone());
+                                    }
                                 }
                                 for r in &instr_node.results {
                                     if all_values.contains(r) {
@@ -891,9 +897,9 @@ fn detect_data_parallel(instrs: &[&InstrNode], value_types: &HashMap<ValueId, Ty
             if !is_elementwise {
                 return false;
             }
-            // At least one operand must be array-typed
-            let lhs_is_array = value_types.get(lhs).is_some_and(|ty| matches!(ty, Ty::Array(_, _)));
-            let rhs_is_array = value_types.get(rhs).is_some_and(|ty| matches!(ty, Ty::Array(_, _)));
+            // At least one operand must be array-typed (skip constants)
+            let lhs_is_array = lhs.as_value().and_then(|v| value_types.get(&v)).is_some_and(|ty| matches!(ty, Ty::Array(_, _)));
+            let rhs_is_array = rhs.as_value().and_then(|v| value_types.get(&v)).is_some_and(|ty| matches!(ty, Ty::Array(_, _)));
             lhs_is_array || rhs_is_array
         }
         _ => false,
@@ -945,9 +951,9 @@ fn detect_matrix_heavy(instrs: &[&InstrNode], value_types: &HashMap<ValueId, Ty>
             Instr::BinOp { op, lhs, rhs, .. }
                 if matches!(op, BinOp::FMul | BinOp::Mul) =>
             {
-                // Check that at least one operand is array-typed
-                let lhs_is_array = value_types.get(lhs).is_some_and(|ty| matches!(ty, Ty::Array(_, _)));
-                let rhs_is_array = value_types.get(rhs).is_some_and(|ty| matches!(ty, Ty::Array(_, _)));
+                // Check that at least one operand is array-typed (skip constants)
+                let lhs_is_array = lhs.as_value().and_then(|v| value_types.get(&v)).is_some_and(|ty| matches!(ty, Ty::Array(_, _)));
+                let rhs_is_array = rhs.as_value().and_then(|v| value_types.get(&v)).is_some_and(|ty| matches!(ty, Ty::Array(_, _)));
                 if lhs_is_array || rhs_is_array {
                     for r in &node.results {
                         mul_results.insert(*r);
@@ -957,8 +963,10 @@ fn detect_matrix_heavy(instrs: &[&InstrNode], value_types: &HashMap<ValueId, Ty>
             Instr::BinOp { op, lhs, rhs, .. }
                 if matches!(op, BinOp::FAdd | BinOp::Add) =>
             {
-                // The accumulate must consume a multiply result
-                if mul_results.contains(lhs) || mul_results.contains(rhs) {
+                // The accumulate must consume a multiply result (skip constants)
+                let lhs_match = lhs.as_value().is_some_and(|v| mul_results.contains(&v));
+                let rhs_match = rhs.as_value().is_some_and(|v| mul_results.contains(&v));
+                if lhs_match || rhs_match {
                     has_mac_pattern = true;
                 }
             }
@@ -1045,24 +1053,24 @@ impl GraphBuilder {
                     value_types.insert(*vid, ty.clone());
                 }
                 for node in &block.body {
-                    // Infer types from instructions
+                    // Infer types from instructions (skip constant operands)
                     match &node.instr {
                         Instr::BinOp { ty, lhs, rhs, .. } => {
-                            value_types.entry(*lhs).or_insert_with(|| ty.clone());
-                            value_types.entry(*rhs).or_insert_with(|| ty.clone());
+                            if let Some(v) = lhs.as_value() { value_types.entry(v).or_insert_with(|| ty.clone()); }
+                            if let Some(v) = rhs.as_value() { value_types.entry(v).or_insert_with(|| ty.clone()); }
                             for r in &node.results {
                                 value_types.insert(*r, ty.clone());
                             }
                         }
                         Instr::UnOp { ty, operand, .. } => {
-                            value_types.entry(*operand).or_insert_with(|| ty.clone());
+                            if let Some(v) = operand.as_value() { value_types.entry(v).or_insert_with(|| ty.clone()); }
                             for r in &node.results {
                                 value_types.insert(*r, ty.clone());
                             }
                         }
                         Instr::Cmp { ty, lhs, rhs, .. } => {
-                            value_types.entry(*lhs).or_insert_with(|| ty.clone());
-                            value_types.entry(*rhs).or_insert_with(|| ty.clone());
+                            if let Some(v) = lhs.as_value() { value_types.entry(v).or_insert_with(|| ty.clone()); }
+                            if let Some(v) = rhs.as_value() { value_types.entry(v).or_insert_with(|| ty.clone()); }
                             for r in &node.results {
                                 value_types.insert(*r, Ty::Bool);
                             }
@@ -1111,7 +1119,7 @@ impl GraphBuilder {
                     .copied();
 
                 for node in &block.body {
-                    let targets: Vec<(BlockId, &[ValueId])> = match &node.instr {
+                    let targets: Vec<(BlockId, &[Operand])> = match &node.instr {
                         Instr::Br { target, args } => {
                             vec![(*target, args.as_slice())]
                         }
@@ -1128,7 +1136,7 @@ impl GraphBuilder {
                         if let Some(target_block) = func.block(target_block_id) {
                             // Map branch args -> target block params.
                             // The target block's params are produced by the source block.
-                            for (arg_vid, (param_vid, _param_ty)) in
+                            for (arg_op, (param_vid, _param_ty)) in
                                 args.iter().zip(target_block.params.iter())
                             {
                                 if let Some(src_node) = source_node_id {
@@ -1136,7 +1144,7 @@ impl GraphBuilder {
                                     // (it flows through the branch)
                                     value_to_node.insert(*param_vid, src_node);
                                     // Also ensure the arg itself is tracked
-                                    let _ = arg_vid; // already tracked as consumed
+                                    let _ = arg_op; // already tracked as consumed
                                 }
                             }
                         }
@@ -1195,45 +1203,58 @@ impl GraphBuilder {
             // Track produced values
             produced_values.extend_from_slice(&node.results);
 
-            // Track consumed values and estimate data size
+            // Track consumed values and estimate data size.
+            // Operand::Constant values are skipped (they don't have ValueIds).
+            let push_operand = |cv: &mut Vec<ValueId>, op: &Operand| {
+                if let Some(vid) = op.as_value() {
+                    cv.push(vid);
+                }
+            };
+            let push_operands = |cv: &mut Vec<ValueId>, ops: &[Operand]| {
+                for op in ops {
+                    if let Some(vid) = op.as_value() {
+                        cv.push(vid);
+                    }
+                }
+            };
             match &node.instr {
                 Instr::BinOp { ty, lhs, rhs, .. } => {
-                    consumed_values.push(*lhs);
-                    consumed_values.push(*rhs);
+                    push_operand(&mut consumed_values, lhs);
+                    push_operand(&mut consumed_values, rhs);
                     data_size_bytes += estimate_type_bytes(ty) as u64 * 2;
                 }
                 Instr::UnOp { ty, operand, .. } => {
-                    consumed_values.push(*operand);
+                    push_operand(&mut consumed_values, operand);
                     data_size_bytes += estimate_type_bytes(ty) as u64;
                 }
                 Instr::Cmp { lhs, rhs, .. } => {
-                    consumed_values.push(*lhs);
-                    consumed_values.push(*rhs);
+                    push_operand(&mut consumed_values, lhs);
+                    push_operand(&mut consumed_values, rhs);
                 }
                 Instr::Load { ptr, .. } => {
                     consumed_values.push(*ptr);
                 }
                 Instr::Store { ptr, value, .. } => {
                     consumed_values.push(*ptr);
-                    consumed_values.push(*value);
+                    push_operand(&mut consumed_values, value);
                 }
                 Instr::Br { args, .. } => {
-                    consumed_values.extend_from_slice(args);
+                    push_operands(&mut consumed_values, args);
                 }
                 Instr::CondBr { cond, then_args, else_args, .. } => {
-                    consumed_values.push(*cond);
-                    consumed_values.extend_from_slice(then_args);
-                    consumed_values.extend_from_slice(else_args);
+                    push_operand(&mut consumed_values, cond);
+                    push_operands(&mut consumed_values, then_args);
+                    push_operands(&mut consumed_values, else_args);
                 }
                 Instr::Return { values } => {
-                    consumed_values.extend_from_slice(values);
+                    push_operands(&mut consumed_values, values);
                 }
                 Instr::Call { args, .. } => {
-                    consumed_values.extend_from_slice(args);
+                    push_operands(&mut consumed_values, args);
                 }
                 Instr::Index { base, index, .. } => {
                     consumed_values.push(*base);
-                    consumed_values.push(*index);
+                    push_operand(&mut consumed_values, index);
                 }
                 _ => {}
             }
@@ -1382,7 +1403,7 @@ impl ComputeGraph {
 mod tests {
     use super::*;
     use tmir_func::{Block as TmirBlock, Function as TmirFunction, Module};
-    use tmir_instrs::{BinOp, Instr, InstrNode};
+    use tmir_instrs::{BinOp, Instr, InstrNode, Operand};
     use tmir_types::{BlockId, FuncId, FuncTy, Ty, ValueId};
 
     // -------------------------------------------------------------------
@@ -1412,15 +1433,15 @@ mod tests {
                             instr: Instr::BinOp {
                                 op: BinOp::Add,
                                 ty: Ty::Int(32),
-                                lhs: ValueId(0),
-                                rhs: ValueId(1),
+                                lhs: Operand::Value(ValueId(0)),
+                                rhs: Operand::Value(ValueId(1)),
                             },
                             results: vec![ValueId(2)],
                             proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
-                                values: vec![ValueId(2)],
+                                values: vec![Operand::Value(ValueId(2))],
                             },
                             results: vec![],
                             proofs: vec![],
@@ -1459,15 +1480,15 @@ mod tests {
                             instr: Instr::BinOp {
                                 op: BinOp::FAdd,
                                 ty: Ty::Array(Box::new(Ty::Float(64)), 1000),
-                                lhs: ValueId(0),
-                                rhs: ValueId(1),
+                                lhs: Operand::Value(ValueId(0)),
+                                rhs: Operand::Value(ValueId(1)),
                             },
                             results: vec![ValueId(2)],
                             proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
-                                values: vec![ValueId(2)],
+                                values: vec![Operand::Value(ValueId(2))],
                             },
                             results: vec![],
                             proofs: vec![],
@@ -1507,8 +1528,8 @@ mod tests {
                             instr: Instr::BinOp {
                                 op: BinOp::FMul,
                                 ty: Ty::Array(Box::new(Ty::Float(64)), 1000),
-                                lhs: ValueId(0),
-                                rhs: ValueId(1),
+                                lhs: Operand::Value(ValueId(0)),
+                                rhs: Operand::Value(ValueId(1)),
                             },
                             results: vec![ValueId(2)],
                             proofs: vec![],
@@ -1518,15 +1539,15 @@ mod tests {
                             instr: Instr::BinOp {
                                 op: BinOp::FAdd,
                                 ty: Ty::Float(64),
-                                lhs: ValueId(2),
-                                rhs: ValueId(2),
+                                lhs: Operand::Value(ValueId(2)),
+                                rhs: Operand::Value(ValueId(2)),
                             },
                             results: vec![ValueId(3)],
                             proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
-                                values: vec![ValueId(3)],
+                                values: vec![Operand::Value(ValueId(3))],
                             },
                             results: vec![],
                             proofs: vec![],
@@ -1566,15 +1587,15 @@ mod tests {
                             instr: Instr::BinOp {
                                 op: BinOp::FAdd,
                                 ty: Ty::Array(Box::new(Ty::Float(64)), 100_000),
-                                lhs: ValueId(0),
-                                rhs: ValueId(1),
+                                lhs: Operand::Value(ValueId(0)),
+                                rhs: Operand::Value(ValueId(1)),
                             },
                             results: vec![ValueId(2)],
                             proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
-                                values: vec![ValueId(2)],
+                                values: vec![Operand::Value(ValueId(2))],
                             },
                             results: vec![],
                             proofs: vec![],
@@ -1615,8 +1636,8 @@ mod tests {
                             instr: Instr::BinOp {
                                 op: BinOp::FMul,
                                 ty: Ty::Array(Box::new(Ty::Float(64)), 100_000),
-                                lhs: ValueId(0),
-                                rhs: ValueId(1),
+                                lhs: Operand::Value(ValueId(0)),
+                                rhs: Operand::Value(ValueId(1)),
                             },
                             results: vec![ValueId(2)],
                             proofs: vec![],
@@ -1626,15 +1647,15 @@ mod tests {
                             instr: Instr::BinOp {
                                 op: BinOp::FAdd,
                                 ty: Ty::Float(64),
-                                lhs: ValueId(2),
-                                rhs: ValueId(2),
+                                lhs: Operand::Value(ValueId(2)),
+                                rhs: Operand::Value(ValueId(2)),
                             },
                             results: vec![ValueId(3)],
                             proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
-                                values: vec![ValueId(3)],
+                                values: vec![Operand::Value(ValueId(3))],
                             },
                             results: vec![],
                             proofs: vec![],
@@ -1672,8 +1693,8 @@ mod tests {
                                 instr: Instr::BinOp {
                                     op: BinOp::Add,
                                     ty: Ty::Int(32),
-                                    lhs: ValueId(0),
-                                    rhs: ValueId(1),
+                                    lhs: Operand::Value(ValueId(0)),
+                                    rhs: Operand::Value(ValueId(1)),
                                 },
                                 results: vec![ValueId(2)],
                                 proofs: vec![],
@@ -1681,7 +1702,7 @@ mod tests {
                             InstrNode {
                                 instr: Instr::Br {
                                     target: BlockId(1),
-                                    args: vec![ValueId(2)],
+                                    args: vec![Operand::Value(ValueId(2))],
                                 },
                                 results: vec![],
                                 proofs: vec![],
@@ -1696,15 +1717,15 @@ mod tests {
                                 instr: Instr::BinOp {
                                     op: BinOp::Mul,
                                     ty: Ty::Int(32),
-                                    lhs: ValueId(3),
-                                    rhs: ValueId(3),
+                                    lhs: Operand::Value(ValueId(3)),
+                                    rhs: Operand::Value(ValueId(3)),
                                 },
                                 results: vec![ValueId(4)],
                                 proofs: vec![],
                             },
                             InstrNode {
                                 instr: Instr::Return {
-                                    values: vec![ValueId(4)],
+                                    values: vec![Operand::Value(ValueId(4))],
                                 },
                                 results: vec![],
                                 proofs: vec![],
@@ -2020,8 +2041,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::Add,
                 ty: Ty::Int(32),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![],
@@ -2045,8 +2066,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::FAdd,
                 ty: Ty::Array(Box::new(Ty::Float(64)), 100),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![],
@@ -2071,8 +2092,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::FMul,
                 ty: Ty::Array(Box::new(Ty::Float(64)), 100),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![],
@@ -2095,8 +2116,8 @@ mod tests {
                 instr: Instr::BinOp {
                     op: BinOp::FMul,
                     ty: Ty::Array(Box::new(Ty::Float(64)), 100),
-                    lhs: ValueId(0),
-                    rhs: ValueId(1),
+                    lhs: Operand::Value(ValueId(0)),
+                    rhs: Operand::Value(ValueId(1)),
                 },
                 results: vec![ValueId(2)],
                 proofs: vec![],
@@ -2105,8 +2126,8 @@ mod tests {
                 instr: Instr::BinOp {
                     op: BinOp::FAdd,
                     ty: Ty::Float(64),
-                    lhs: ValueId(2),
-                    rhs: ValueId(2),
+                    lhs: Operand::Value(ValueId(2)),
+                    rhs: Operand::Value(ValueId(2)),
                 },
                 results: vec![ValueId(3)],
                 proofs: vec![],
@@ -2320,7 +2341,7 @@ mod tests {
                         id: BlockId(0),
                         params: vec![(ValueId(0), Ty::Int(32))],
                         body: vec![InstrNode {
-                            instr: Instr::Return { values: vec![ValueId(0)] },
+                            instr: Instr::Return { values: vec![Operand::Value(ValueId(0))] },
                             results: vec![],
                             proofs: vec![],
                         }],
@@ -2339,7 +2360,7 @@ mod tests {
                         id: BlockId(0),
                         params: vec![(ValueId(10), Ty::Int(64))],
                         body: vec![InstrNode {
-                            instr: Instr::Return { values: vec![ValueId(10)] },
+                            instr: Instr::Return { values: vec![Operand::Value(ValueId(10))] },
                             results: vec![],
                             proofs: vec![],
                         }],
@@ -2745,8 +2766,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::FAdd,
                 ty: Ty::Array(Box::new(Ty::Float(64)), 2),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![],
@@ -2775,8 +2796,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::Add,
                 ty: Ty::Int(32),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![],
@@ -2806,8 +2827,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::FMul,
                 ty: Ty::Array(Box::new(Ty::Float(64)), 100),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![],
@@ -2837,8 +2858,8 @@ mod tests {
                 instr: Instr::BinOp {
                     op: BinOp::FMul,
                     ty: Ty::Array(Box::new(Ty::Float(64)), 100),
-                    lhs: ValueId(0),
-                    rhs: ValueId(1),
+                    lhs: Operand::Value(ValueId(0)),
+                    rhs: Operand::Value(ValueId(1)),
                 },
                 results: vec![ValueId(2)],
                 proofs: vec![],
@@ -2847,8 +2868,8 @@ mod tests {
                 instr: Instr::BinOp {
                     op: BinOp::FAdd,
                     ty: Ty::Float(64),
-                    lhs: ValueId(3), // NOT ValueId(2)
-                    rhs: ValueId(4), // NOT ValueId(2)
+                    lhs: Operand::Value(ValueId(3)), // NOT ValueId(2)
+                    rhs: Operand::Value(ValueId(4)), // NOT ValueId(2)
                 },
                 results: vec![ValueId(5)],
                 proofs: vec![],
@@ -2879,8 +2900,8 @@ mod tests {
                 instr: Instr::BinOp {
                     op: BinOp::FMul,
                     ty: Ty::Float(64),
-                    lhs: ValueId(0),
-                    rhs: ValueId(1),
+                    lhs: Operand::Value(ValueId(0)),
+                    rhs: Operand::Value(ValueId(1)),
                 },
                 results: vec![ValueId(2)],
                 proofs: vec![],
@@ -2889,8 +2910,8 @@ mod tests {
                 instr: Instr::BinOp {
                     op: BinOp::FAdd,
                     ty: Ty::Float(64),
-                    lhs: ValueId(2),
-                    rhs: ValueId(2),
+                    lhs: Operand::Value(ValueId(2)),
+                    rhs: Operand::Value(ValueId(2)),
                 },
                 results: vec![ValueId(3)],
                 proofs: vec![],
@@ -2920,8 +2941,8 @@ mod tests {
                 instr: Instr::BinOp {
                     op: BinOp::FMul,
                     ty: Ty::Array(Box::new(Ty::Float(64)), 2),
-                    lhs: ValueId(0),
-                    rhs: ValueId(1),
+                    lhs: Operand::Value(ValueId(0)),
+                    rhs: Operand::Value(ValueId(1)),
                 },
                 results: vec![ValueId(2)],
                 proofs: vec![],
@@ -2930,8 +2951,8 @@ mod tests {
                 instr: Instr::BinOp {
                     op: BinOp::FAdd,
                     ty: Ty::Float(64),
-                    lhs: ValueId(2),
-                    rhs: ValueId(2),
+                    lhs: Operand::Value(ValueId(2)),
+                    rhs: Operand::Value(ValueId(2)),
                 },
                 results: vec![ValueId(3)],
                 proofs: vec![],
@@ -2959,8 +2980,8 @@ mod tests {
                 instr: Instr::BinOp {
                     op: BinOp::FMul,
                     ty: Ty::Array(Box::new(Ty::Float(64)), 100),
-                    lhs: ValueId(0),
-                    rhs: ValueId(1),
+                    lhs: Operand::Value(ValueId(0)),
+                    rhs: Operand::Value(ValueId(1)),
                 },
                 results: vec![ValueId(2)],
                 proofs: vec![],
@@ -2969,8 +2990,8 @@ mod tests {
                 instr: Instr::BinOp {
                     op: BinOp::FAdd,
                     ty: Ty::Float(64),
-                    lhs: ValueId(2),
-                    rhs: ValueId(2),
+                    lhs: Operand::Value(ValueId(2)),
+                    rhs: Operand::Value(ValueId(2)),
                 },
                 results: vec![ValueId(3)],
                 proofs: vec![],
@@ -3019,15 +3040,15 @@ mod tests {
                             instr: Instr::BinOp {
                                 op: BinOp::FAdd,
                                 ty: Ty::Array(Box::new(Ty::Float(64)), 2),
-                                lhs: ValueId(0),
-                                rhs: ValueId(1),
+                                lhs: Operand::Value(ValueId(0)),
+                                rhs: Operand::Value(ValueId(1)),
                             },
                             results: vec![ValueId(2)],
                             proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
-                                values: vec![ValueId(2)],
+                                values: vec![Operand::Value(ValueId(2))],
                             },
                             results: vec![],
                             proofs: vec![],
@@ -3135,15 +3156,15 @@ mod tests {
                             instr: Instr::BinOp {
                                 op: BinOp::And,
                                 ty: Ty::Array(Box::new(Ty::Int(32)), 100_000),
-                                lhs: ValueId(0),
-                                rhs: ValueId(1),
+                                lhs: Operand::Value(ValueId(0)),
+                                rhs: Operand::Value(ValueId(1)),
                             },
                             results: vec![ValueId(2)],
                             proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
-                                values: vec![ValueId(2)],
+                                values: vec![Operand::Value(ValueId(2))],
                             },
                             results: vec![],
                             proofs: vec![],

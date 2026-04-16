@@ -16,7 +16,7 @@ use llvm2_codegen::pipeline::{self, OptLevel};
 
 // Multi-block test imports
 use tmir_func::{Block as TmirBlock, Function as TmirFunction};
-use tmir_instrs::{CmpOp, UnOp};
+use tmir_instrs::{CmpOp, UnOp, Operand};
 use tmir_types::{BlockId, FuncId, FuncTy};
 
 // =============================================================================
@@ -60,15 +60,15 @@ fn build_tmir_add_module() -> tmir_func::Module {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
                         ty: Ty::Int(32),
-                        lhs: ValueId(0),
-                        rhs: ValueId(1),
+                        lhs: Operand::Value(ValueId(0)),
+                        rhs: Operand::Value(ValueId(1)),
                     },
                     results: vec![ValueId(2)],
                     proofs: vec![],
                 },
                 InstrNode {
                     instr: Instr::Return {
-                        values: vec![ValueId(2)],
+                        values: vec![Operand::Value(ValueId(2))],
                     },
                     results: vec![],
                     proofs: vec![],
@@ -112,7 +112,7 @@ fn build_tmir_const_module() -> tmir_func::Module {
                 },
                 InstrNode {
                     instr: Instr::Return {
-                        values: vec![ValueId(0)],
+                        values: vec![Operand::Value(ValueId(0))],
                     },
                     results: vec![],
                     proofs: vec![],
@@ -153,15 +153,15 @@ fn build_tmir_sub_module() -> tmir_func::Module {
                     instr: Instr::BinOp {
                         op: BinOp::Sub,
                         ty: Ty::Int(64),
-                        lhs: ValueId(0),
-                        rhs: ValueId(1),
+                        lhs: Operand::Value(ValueId(0)),
+                        rhs: Operand::Value(ValueId(1)),
                     },
                     results: vec![ValueId(2)],
                     proofs: vec![],
                 },
                 InstrNode {
                     instr: Instr::Return {
-                        values: vec![ValueId(2)],
+                        values: vec![Operand::Value(ValueId(2))],
                     },
                     results: vec![],
                     proofs: vec![],
@@ -772,15 +772,15 @@ fn build_tmir_max_module() -> tmir_func::Module {
                         instr: Instr::Cmp {
                             op: CmpOp::Sgt,
                             ty: Ty::Int(64),
-                            lhs: ValueId(0), // a
-                            rhs: ValueId(1), // b
+                            lhs: Operand::Value(ValueId(0)), // a
+                            rhs: Operand::Value(ValueId(1)), // b
                         },
                         results: vec![ValueId(2)],
                         proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::CondBr {
-                            cond: ValueId(2),
+                            cond: Operand::Value(ValueId(2)),
                             then_target: BlockId(1), // a > b => return a
                             then_args: vec![],
                             else_target: BlockId(2), // else return b
@@ -797,7 +797,7 @@ fn build_tmir_max_module() -> tmir_func::Module {
                 params: vec![],
                 body: vec![InstrNode {
                     instr: Instr::Return {
-                        values: vec![ValueId(0)],
+                        values: vec![Operand::Value(ValueId(0))],
                     },
                     results: vec![],
                     proofs: vec![],
@@ -809,7 +809,7 @@ fn build_tmir_max_module() -> tmir_func::Module {
                 params: vec![],
                 body: vec![InstrNode {
                     instr: Instr::Return {
-                        values: vec![ValueId(1)],
+                        values: vec![Operand::Value(ValueId(1))],
                     },
                     results: vec![],
                     proofs: vec![],
@@ -868,15 +868,15 @@ fn build_tmir_abs_module() -> tmir_func::Module {
                         instr: Instr::Cmp {
                             op: CmpOp::Slt,
                             ty: Ty::Int(64),
-                            lhs: ValueId(0), // x
-                            rhs: ValueId(1), // 0
+                            lhs: Operand::Value(ValueId(0)), // x
+                            rhs: Operand::Value(ValueId(1)), // 0
                         },
                         results: vec![ValueId(2)],
                         proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::CondBr {
-                            cond: ValueId(2),
+                            cond: Operand::Value(ValueId(2)),
                             then_target: BlockId(1), // negate
                             then_args: vec![],
                             else_target: BlockId(2), // return x
@@ -896,15 +896,15 @@ fn build_tmir_abs_module() -> tmir_func::Module {
                         instr: Instr::BinOp {
                             op: BinOp::Sub,
                             ty: Ty::Int(64),
-                            lhs: ValueId(1), // 0 from bb0
-                            rhs: ValueId(0), // x from bb0
+                            lhs: Operand::Value(ValueId(1)), // 0 from bb0
+                            rhs: Operand::Value(ValueId(0)), // x from bb0
                         },
                         results: vec![ValueId(3)],
                         proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(3)],
+                            values: vec![Operand::Value(ValueId(3))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -917,7 +917,7 @@ fn build_tmir_abs_module() -> tmir_func::Module {
                 params: vec![],
                 body: vec![InstrNode {
                     instr: Instr::Return {
-                        values: vec![ValueId(0)],
+                        values: vec![Operand::Value(ValueId(0))],
                     },
                     results: vec![],
                     proofs: vec![],
@@ -982,15 +982,15 @@ fn build_tmir_fibonacci_module() -> tmir_func::Module {
                         instr: Instr::Cmp {
                             op: CmpOp::Sle,
                             ty: Ty::Int(64),
-                            lhs: ValueId(0), // n
-                            rhs: ValueId(1), // 1
+                            lhs: Operand::Value(ValueId(0)), // n
+                            rhs: Operand::Value(ValueId(1)), // 1
                         },
                         results: vec![ValueId(2)],
                         proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::CondBr {
-                            cond: ValueId(2),
+                            cond: Operand::Value(ValueId(2)),
                             then_target: BlockId(1), // ret_n
                             then_args: vec![],
                             else_target: BlockId(2), // loop_init
@@ -1007,7 +1007,7 @@ fn build_tmir_fibonacci_module() -> tmir_func::Module {
                 params: vec![],
                 body: vec![InstrNode {
                     instr: Instr::Return {
-                        values: vec![ValueId(0)],
+                        values: vec![Operand::Value(ValueId(0))],
                     },
                     results: vec![],
                     proofs: vec![],
@@ -1045,7 +1045,7 @@ fn build_tmir_fibonacci_module() -> tmir_func::Module {
                     InstrNode {
                         instr: Instr::Br {
                             target: BlockId(3),
-                            args: vec![ValueId(10), ValueId(11), ValueId(12)],
+                            args: vec![Operand::Value(ValueId(10)), Operand::Value(ValueId(11)), Operand::Value(ValueId(12))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -1066,8 +1066,8 @@ fn build_tmir_fibonacci_module() -> tmir_func::Module {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
                             ty: Ty::Int(64),
-                            lhs: ValueId(20), // a
-                            rhs: ValueId(21), // b
+                            lhs: Operand::Value(ValueId(20)), // a
+                            rhs: Operand::Value(ValueId(21)), // b
                         },
                         results: vec![ValueId(23)], // tmp
                         proofs: vec![],
@@ -1085,8 +1085,8 @@ fn build_tmir_fibonacci_module() -> tmir_func::Module {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
                             ty: Ty::Int(64),
-                            lhs: ValueId(22), // i
-                            rhs: ValueId(24), // 1
+                            lhs: Operand::Value(ValueId(22)), // i
+                            rhs: Operand::Value(ValueId(24)), // 1
                         },
                         results: vec![ValueId(25)], // new_i
                         proofs: vec![],
@@ -1096,8 +1096,8 @@ fn build_tmir_fibonacci_module() -> tmir_func::Module {
                         instr: Instr::Cmp {
                             op: CmpOp::Sle,
                             ty: Ty::Int(64),
-                            lhs: ValueId(25), // new_i
-                            rhs: ValueId(0),  // n (from entry)
+                            lhs: Operand::Value(ValueId(25)), // new_i
+                            rhs: Operand::Value(ValueId(0)),  // n (from entry)
                         },
                         results: vec![ValueId(26)],
                         proofs: vec![],
@@ -1105,11 +1105,11 @@ fn build_tmir_fibonacci_module() -> tmir_func::Module {
                     // condbr: loop back or exit
                     InstrNode {
                         instr: Instr::CondBr {
-                            cond: ValueId(26),
+                            cond: Operand::Value(ValueId(26)),
                             then_target: BlockId(3), // loop (b, tmp, new_i)
-                            then_args: vec![ValueId(21), ValueId(23), ValueId(25)],
+                            then_args: vec![Operand::Value(ValueId(21)), Operand::Value(ValueId(23)), Operand::Value(ValueId(25))],
                             else_target: BlockId(4), // exit (tmp)
-                            else_args: vec![ValueId(23)],
+                            else_args: vec![Operand::Value(ValueId(23))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -1122,7 +1122,7 @@ fn build_tmir_fibonacci_module() -> tmir_func::Module {
                 params: vec![(ValueId(30), Ty::Int(64))],
                 body: vec![InstrNode {
                     instr: Instr::Return {
-                        values: vec![ValueId(30)],
+                        values: vec![Operand::Value(ValueId(30))],
                     },
                     results: vec![],
                     proofs: vec![],
@@ -1191,7 +1191,7 @@ fn build_tmir_sum_1_to_n_module() -> tmir_func::Module {
                     InstrNode {
                         instr: Instr::Br {
                             target: BlockId(1),
-                            args: vec![ValueId(1), ValueId(2)],
+                            args: vec![Operand::Value(ValueId(1)), Operand::Value(ValueId(2))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -1210,15 +1210,15 @@ fn build_tmir_sum_1_to_n_module() -> tmir_func::Module {
                         instr: Instr::Cmp {
                             op: CmpOp::Sle,
                             ty: Ty::Int(64),
-                            lhs: ValueId(11), // i
-                            rhs: ValueId(0),  // n
+                            lhs: Operand::Value(ValueId(11)), // i
+                            rhs: Operand::Value(ValueId(0)),  // n
                         },
                         results: vec![ValueId(12)],
                         proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::CondBr {
-                            cond: ValueId(12),
+                            cond: Operand::Value(ValueId(12)),
                             then_target: BlockId(2), // body
                             then_args: vec![],
                             else_target: BlockId(3), // exit
@@ -1238,8 +1238,8 @@ fn build_tmir_sum_1_to_n_module() -> tmir_func::Module {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
                             ty: Ty::Int(64),
-                            lhs: ValueId(10), // sum
-                            rhs: ValueId(11), // i
+                            lhs: Operand::Value(ValueId(10)), // sum
+                            rhs: Operand::Value(ValueId(11)), // i
                         },
                         results: vec![ValueId(20)], // new_sum
                         proofs: vec![],
@@ -1256,8 +1256,8 @@ fn build_tmir_sum_1_to_n_module() -> tmir_func::Module {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
                             ty: Ty::Int(64),
-                            lhs: ValueId(11), // i
-                            rhs: ValueId(21), // 1
+                            lhs: Operand::Value(ValueId(11)), // i
+                            rhs: Operand::Value(ValueId(21)), // 1
                         },
                         results: vec![ValueId(22)], // new_i
                         proofs: vec![],
@@ -1265,7 +1265,7 @@ fn build_tmir_sum_1_to_n_module() -> tmir_func::Module {
                     InstrNode {
                         instr: Instr::Br {
                             target: BlockId(1),
-                            args: vec![ValueId(20), ValueId(22)],
+                            args: vec![Operand::Value(ValueId(20)), Operand::Value(ValueId(22))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -1278,7 +1278,7 @@ fn build_tmir_sum_1_to_n_module() -> tmir_func::Module {
                 params: vec![],
                 body: vec![InstrNode {
                     instr: Instr::Return {
-                        values: vec![ValueId(10)], // sum from bb1
+                        values: vec![Operand::Value(ValueId(10))], // sum from bb1
                     },
                     results: vec![],
                     proofs: vec![],
