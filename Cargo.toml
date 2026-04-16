@@ -33,7 +33,8 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Verification (z4 SMT solver)
-# z4 = { git = "https://github.com/ayates_dbx/z4" }
+# For git dep: z4 = { git = "https://github.com/ayates_dbx/z4" }
+z4 = { path = "/Users/ayates/z4/crates/z4" }
 
 # Input IR (tMIR) — in-tree stubs for development.
 # When the real tMIR repo is available, update paths to "../tMIR/crates/...".
