@@ -208,6 +208,8 @@ mod tests {
                     params: vec![],
                     returns: vec![],
                 },
+                calling_conv: tmir_types::CallingConv::default(),
+                visibility: tmir_types::Visibility::default(),
                 entry: BlockId(99), // does not exist
                 blocks: vec![],
                 proofs: vec![],

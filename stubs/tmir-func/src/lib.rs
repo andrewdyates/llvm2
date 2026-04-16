@@ -13,7 +13,7 @@ pub mod reader;
 
 use serde::{Deserialize, Serialize};
 use tmir_instrs::InstrNode;
-use tmir_types::{BlockId, DataLayout, FuncId, FuncTy, GlobalDef, StructDef, TmirProof, Ty, ValueId};
+use tmir_types::{BlockId, CallingConv, DataLayout, FuncId, FuncTy, GlobalDef, StructDef, TmirProof, Ty, ValueId, Visibility};
 
 /// A basic block in a tMIR function.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -31,6 +31,14 @@ pub struct Function {
     pub id: FuncId,
     pub name: String,
     pub ty: FuncTy,
+    /// Calling convention for this function.
+    /// Defaults to `CallingConv::C` for backward compatibility.
+    #[serde(default)]
+    pub calling_conv: CallingConv,
+    /// Symbol visibility for the linker/dynamic loader.
+    /// Defaults to `Visibility::Default` for backward compatibility.
+    #[serde(default)]
+    pub visibility: Visibility,
     /// Entry block (always the first block).
     pub entry: BlockId,
     /// Basic blocks in layout order.

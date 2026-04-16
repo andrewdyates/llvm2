@@ -164,6 +164,8 @@ fn test_validation_rejects_missing_entry_block() {
                 params: vec![],
                 returns: vec![],
             },
+            calling_conv: tmir_types::CallingConv::default(),
+            visibility: tmir_types::Visibility::default(),
             entry: BlockId(99),
             blocks: vec![],
             proofs: vec![],
