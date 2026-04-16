@@ -153,7 +153,11 @@ impl InstrSemantics for ConcreteSemantics {
             | Instr::Index { ty, .. }
             | Instr::Phi { ty, .. }
             | Instr::Const { ty, .. }
-            | Instr::FConst { ty, .. } => vec![ty.clone()],
+            | Instr::FConst { ty, .. }
+            | Instr::AtomicLoad { ty, .. }
+            | Instr::AtomicRmw { ty, .. } => vec![ty.clone()],
+            // CmpXchg returns (old_value: ty, success: bool).
+            Instr::CmpXchg { ty, .. } => vec![ty.clone(), Ty::bool_ty()],
             Instr::Select { ty, .. } => vec![ty.clone()],
             Instr::GetElementPtr { .. } => vec![Ty::ptr(Ty::void())],
             Instr::Cmp { .. } | Instr::IsUnique { .. } => vec![Ty::bool_ty()],
@@ -161,6 +165,8 @@ impl InstrSemantics for ConcreteSemantics {
             Instr::Call { ret_ty, .. } | Instr::CallIndirect { ret_ty, .. } => ret_ty.clone(),
             // Void instructions
             Instr::Store { .. }
+            | Instr::AtomicStore { .. }
+            | Instr::Fence { .. }
             | Instr::Dealloc { .. }
             | Instr::EndBorrow { .. }
             | Instr::Retain { .. }

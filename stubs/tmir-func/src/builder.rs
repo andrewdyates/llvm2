@@ -11,7 +11,10 @@
 // Operand::Value internally. For tests that need inline constants, use the
 // _operand variants or construct Operand directly.
 
-use tmir_instrs::{BinOp, CastOp, CmpOp, Instr, InstrNode, Operand, SwitchCase, UnOp};
+use tmir_instrs::{
+    AtomicRmwOp, BinOp, CastOp, CmpOp, Instr, InstrNode, MemoryOrdering, Operand, SwitchCase,
+    UnOp,
+};
 use tmir_types::{BlockId, FuncId, FuncTy, StructDef, TmirProof, Ty, ValueId};
 
 use crate::{Block, Function, Module};
@@ -415,6 +418,135 @@ pub fn index(ty: Ty, base: ValueId, index_val: ValueId, result: ValueId) -> Inst
             ty,
             base,
             index: Operand::Value(index_val),
+        },
+        vec![result],
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Atomic operation helpers
+// ---------------------------------------------------------------------------
+
+/// Create an atomic load instruction.
+pub fn atomic_load(ty: Ty, ptr: ValueId, ordering: MemoryOrdering, result: ValueId) -> InstrNode {
+    InstrNode::new(Instr::AtomicLoad { ty, ptr, ordering }, vec![result])
+}
+
+/// Create an atomic store instruction.
+pub fn atomic_store(ty: Ty, ptr: ValueId, value: ValueId, ordering: MemoryOrdering) -> InstrNode {
+    InstrNode::new(
+        Instr::AtomicStore {
+            ty,
+            ptr,
+            value: Operand::Value(value),
+            ordering,
+        },
+        vec![],
+    )
+}
+
+/// Create an atomic read-modify-write instruction.
+pub fn atomic_rmw(
+    op: AtomicRmwOp,
+    ty: Ty,
+    ptr: ValueId,
+    value: ValueId,
+    ordering: MemoryOrdering,
+    result: ValueId,
+) -> InstrNode {
+    InstrNode::new(
+        Instr::AtomicRmw {
+            op,
+            ty,
+            ptr,
+            value: Operand::Value(value),
+            ordering,
+        },
+        vec![result],
+    )
+}
+
+/// Create a compare-and-exchange instruction.
+/// Returns (old_value, success_bool) via the results vector.
+pub fn cmpxchg(
+    ty: Ty,
+    ptr: ValueId,
+    expected: ValueId,
+    desired: ValueId,
+    success_ordering: MemoryOrdering,
+    failure_ordering: MemoryOrdering,
+    results: Vec<ValueId>,
+) -> InstrNode {
+    InstrNode::new(
+        Instr::CmpXchg {
+            ty,
+            ptr,
+            expected: Operand::Value(expected),
+            desired: Operand::Value(desired),
+            success_ordering,
+            failure_ordering,
+        },
+        results,
+    )
+}
+
+/// Create a memory fence instruction.
+pub fn fence(ordering: MemoryOrdering) -> InstrNode {
+    InstrNode::new(Instr::Fence { ordering }, vec![])
+}
+
+// ---------------------------------------------------------------------------
+// Ownership / borrow helpers
+// ---------------------------------------------------------------------------
+
+/// Create an immutable borrow instruction: result = &value.
+pub fn borrow_val(ty: Ty, value: ValueId, result: ValueId) -> InstrNode {
+    InstrNode::new(Instr::Borrow { ty, value }, vec![result])
+}
+
+/// Create a mutable borrow instruction: result = &mut value.
+pub fn borrow_mut(ty: Ty, value: ValueId, result: ValueId) -> InstrNode {
+    InstrNode::new(Instr::BorrowMut { ty, value }, vec![result])
+}
+
+/// Create an end-borrow instruction (terminates a borrow lifetime).
+pub fn end_borrow(borrow: ValueId) -> InstrNode {
+    InstrNode::new(Instr::EndBorrow { borrow }, vec![])
+}
+
+/// Create a retain (ARC increment) instruction.
+pub fn retain(value: ValueId) -> InstrNode {
+    InstrNode::new(Instr::Retain { value }, vec![])
+}
+
+/// Create a release (ARC decrement) instruction.
+pub fn release(value: ValueId) -> InstrNode {
+    InstrNode::new(Instr::Release { value }, vec![])
+}
+
+/// Create an is-unique check instruction (for COW optimization).
+pub fn is_unique(value: ValueId, result: ValueId) -> InstrNode {
+    InstrNode::new(Instr::IsUnique { value }, vec![result])
+}
+
+/// Create a deallocation hint instruction.
+pub fn dealloc(ptr: ValueId) -> InstrNode {
+    InstrNode::new(Instr::Dealloc { ptr }, vec![])
+}
+
+// ---------------------------------------------------------------------------
+// SSA helpers
+// ---------------------------------------------------------------------------
+
+/// Create a phi (SSA merge) instruction.
+pub fn phi(ty: Ty, incoming: Vec<(BlockId, ValueId)>, result: ValueId) -> InstrNode {
+    InstrNode::new(
+        Instr::Phi {
+            ty,
+            incoming: incoming
+                .into_iter()
+                .map(|(block, value)| (block, Operand::Value(value)))
+                .collect(),
         },
         vec![result],
     )
