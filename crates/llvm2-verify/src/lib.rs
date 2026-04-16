@@ -138,7 +138,9 @@ pub use lowering_proof::{ProofObligation, TransvalCheckKind, verify_by_evaluatio
 pub use smt::{SmtError, SmtExpr, SmtSort, RoundingMode};
 pub use z4_bridge::{Z4Config, Z4Result, verify_with_z4, serialize_to_smt2, verify_with_z4_cli,
     parse_z4_output, generate_smt2_query, verify_with_cli, z3_available,
-    verify_proof_database_with_z4, ProofDatabaseZ4Report, Z4CategoryBreakdown};
+    verify_proof_database_with_z4, ProofDatabaseZ4Report, Z4CategoryBreakdown,
+    expand_bounded_quantifiers, expand_bounded_quantifiers_with_limit,
+    prepare_formula_for_smt, has_quantifiers, BOUNDED_QUANTIFIER_EXPANSION_LIMIT};
 pub use cegis::{CegisLoop, CegisResult, ConcreteInput};
 pub use rule_discovery::{RuleDiscovery, RuleProposal, RuleResult, RuleDatabase, DiscoveryStats};
 pub use proof_database::{ProofDatabase, ProofCategory, CategorizedProof, ProofSummary};

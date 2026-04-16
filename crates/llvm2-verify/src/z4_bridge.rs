@@ -130,47 +130,75 @@ impl Z4Config {
 // SMT-LIB2 generation (enhanced version of ProofObligation::to_smt2)
 // ---------------------------------------------------------------------------
 
+/// Maximum bound size for expanding bounded quantifiers into conjunctions/disjunctions.
+///
+/// When a `ForAll` or `Exists` quantifier has constant bounds and the range
+/// `upper - lower` is at most this limit, the quantifier is expanded into a
+/// conjunction (ForAll) or disjunction (Exists) of concrete instances. This
+/// keeps the formula in a quantifier-free logic (QF_*), which is faster for
+/// SMT solvers.
+///
+/// When the range exceeds this limit, the quantifier is emitted as a true
+/// SMT-LIB2 `(forall ...)` / `(exists ...)` and the logic is upgraded from
+/// `QF_*` to its quantified variant (e.g., `QF_ABV` -> `ABV`).
+pub const BOUNDED_QUANTIFIER_EXPANSION_LIMIT: u64 = 256;
+
 /// Infer the minimal SMT-LIB2 logic string needed for an expression.
 ///
 /// Walks the expression tree and returns the appropriate logic:
 /// - `QF_BV` -- bitvectors only (default)
-/// - `QF_ABV` -- bitvectors + arrays
-/// - `QF_BVFP` -- bitvectors + floating-point
-/// - `QF_ABVFP` -- bitvectors + arrays + floating-point
-/// - `QF_UFBV` -- bitvectors + uninterpreted functions
-/// - `ALL` -- when multiple theories are combined
+/// - `QF_ABV` -- bitvectors + arrays (quantifier-free)
+/// - `QF_BVFP` -- bitvectors + floating-point (quantifier-free)
+/// - `QF_ABVFP` -- bitvectors + arrays + floating-point (quantifier-free)
+/// - `QF_UFBV` -- bitvectors + uninterpreted functions (quantifier-free)
+/// - `BV` -- bitvectors with quantifiers
+/// - `ABV` -- bitvectors + arrays with quantifiers
+/// - `BVFP` -- bitvectors + floating-point with quantifiers
+/// - `ALL` -- when multiple theories are combined or quantified mixed theories
 pub fn infer_logic(expr: &SmtExpr) -> &'static str {
     let mut has_array = false;
     let mut has_fp = false;
     let mut has_uf = false;
-    infer_logic_walk(expr, &mut has_array, &mut has_fp, &mut has_uf);
+    let mut has_quantifier = false;
+    infer_logic_walk(expr, &mut has_array, &mut has_fp, &mut has_uf, &mut has_quantifier);
 
-    match (has_array, has_fp, has_uf) {
-        (false, false, false) => "QF_BV",
-        (true, false, false)  => "QF_ABV",
-        (false, true, false)  => "QF_BVFP",
-        (true, true, false)   => "QF_ABVFP",
-        (false, false, true)  => "QF_UFBV",
-        _                     => "ALL",
+    match (has_quantifier, has_array, has_fp, has_uf) {
+        // Quantifier-free logics
+        (false, false, false, false) => "QF_BV",
+        (false, true, false, false)  => "QF_ABV",
+        (false, false, true, false)  => "QF_BVFP",
+        (false, true, true, false)   => "QF_ABVFP",
+        (false, false, false, true)  => "QF_UFBV",
+        // Quantified logics (no QF_ prefix)
+        (true, false, false, false)  => "BV",
+        (true, true, false, false)   => "ABV",
+        (true, false, true, false)   => "BVFP",
+        _                            => "ALL",
     }
 }
 
-fn infer_logic_walk(expr: &SmtExpr, has_array: &mut bool, has_fp: &mut bool, has_uf: &mut bool) {
+fn infer_logic_walk(
+    expr: &SmtExpr,
+    has_array: &mut bool,
+    has_fp: &mut bool,
+    has_uf: &mut bool,
+    has_quantifier: &mut bool,
+) {
     match expr {
         SmtExpr::Select { array, index } => {
             *has_array = true;
-            infer_logic_walk(array, has_array, has_fp, has_uf);
-            infer_logic_walk(index, has_array, has_fp, has_uf);
+            infer_logic_walk(array, has_array, has_fp, has_uf, has_quantifier);
+            infer_logic_walk(index, has_array, has_fp, has_uf, has_quantifier);
         }
         SmtExpr::Store { array, index, value } => {
             *has_array = true;
-            infer_logic_walk(array, has_array, has_fp, has_uf);
-            infer_logic_walk(index, has_array, has_fp, has_uf);
-            infer_logic_walk(value, has_array, has_fp, has_uf);
+            infer_logic_walk(array, has_array, has_fp, has_uf, has_quantifier);
+            infer_logic_walk(index, has_array, has_fp, has_uf, has_quantifier);
+            infer_logic_walk(value, has_array, has_fp, has_uf, has_quantifier);
         }
         SmtExpr::ConstArray { value, .. } => {
             *has_array = true;
-            infer_logic_walk(value, has_array, has_fp, has_uf);
+            infer_logic_walk(value, has_array, has_fp, has_uf, has_quantifier);
         }
         SmtExpr::FPAdd { lhs, rhs, .. }
         | SmtExpr::FPSub { lhs, rhs, .. }
@@ -182,14 +210,14 @@ fn infer_logic_walk(expr: &SmtExpr, has_array: &mut bool, has_fp: &mut bool, has
         | SmtExpr::FPGe { lhs, rhs }
         | SmtExpr::FPLe { lhs, rhs } => {
             *has_fp = true;
-            infer_logic_walk(lhs, has_array, has_fp, has_uf);
-            infer_logic_walk(rhs, has_array, has_fp, has_uf);
+            infer_logic_walk(lhs, has_array, has_fp, has_uf, has_quantifier);
+            infer_logic_walk(rhs, has_array, has_fp, has_uf, has_quantifier);
         }
         SmtExpr::FPFma { a, b, c, .. } => {
             *has_fp = true;
-            infer_logic_walk(a, has_array, has_fp, has_uf);
-            infer_logic_walk(b, has_array, has_fp, has_uf);
-            infer_logic_walk(c, has_array, has_fp, has_uf);
+            infer_logic_walk(a, has_array, has_fp, has_uf, has_quantifier);
+            infer_logic_walk(b, has_array, has_fp, has_uf, has_quantifier);
+            infer_logic_walk(c, has_array, has_fp, has_uf, has_quantifier);
         }
         SmtExpr::FPNeg { operand }
         | SmtExpr::FPAbs { operand }
@@ -203,7 +231,7 @@ fn infer_logic_walk(expr: &SmtExpr, has_array: &mut bool, has_fp: &mut bool, has
         | SmtExpr::BvToFP { operand, .. }
         | SmtExpr::FPToFP { operand, .. } => {
             *has_fp = true;
-            infer_logic_walk(operand, has_array, has_fp, has_uf);
+            infer_logic_walk(operand, has_array, has_fp, has_uf, has_quantifier);
         }
         SmtExpr::FPConst { .. } => {
             *has_fp = true;
@@ -211,7 +239,7 @@ fn infer_logic_walk(expr: &SmtExpr, has_array: &mut bool, has_fp: &mut bool, has
         SmtExpr::UF { args, .. } => {
             *has_uf = true;
             for arg in args {
-                infer_logic_walk(arg, has_array, has_fp, has_uf);
+                infer_logic_walk(arg, has_array, has_fp, has_uf, has_quantifier);
             }
         }
         SmtExpr::UFDecl { .. } => {
@@ -240,31 +268,32 @@ fn infer_logic_walk(expr: &SmtExpr, has_array: &mut bool, has_fp: &mut bool, has
         | SmtExpr::BvUle { lhs, rhs, .. }
         | SmtExpr::And { lhs, rhs }
         | SmtExpr::Or { lhs, rhs } => {
-            infer_logic_walk(lhs, has_array, has_fp, has_uf);
-            infer_logic_walk(rhs, has_array, has_fp, has_uf);
+            infer_logic_walk(lhs, has_array, has_fp, has_uf, has_quantifier);
+            infer_logic_walk(rhs, has_array, has_fp, has_uf, has_quantifier);
         }
         SmtExpr::BvNeg { operand, .. }
         | SmtExpr::Not { operand }
         | SmtExpr::Extract { operand, .. }
         | SmtExpr::ZeroExtend { operand, .. }
         | SmtExpr::SignExtend { operand, .. } => {
-            infer_logic_walk(operand, has_array, has_fp, has_uf);
+            infer_logic_walk(operand, has_array, has_fp, has_uf, has_quantifier);
         }
         SmtExpr::Concat { hi, lo, .. } => {
-            infer_logic_walk(hi, has_array, has_fp, has_uf);
-            infer_logic_walk(lo, has_array, has_fp, has_uf);
+            infer_logic_walk(hi, has_array, has_fp, has_uf, has_quantifier);
+            infer_logic_walk(lo, has_array, has_fp, has_uf, has_quantifier);
         }
         SmtExpr::Ite { cond, then_expr, else_expr } => {
-            infer_logic_walk(cond, has_array, has_fp, has_uf);
-            infer_logic_walk(then_expr, has_array, has_fp, has_uf);
-            infer_logic_walk(else_expr, has_array, has_fp, has_uf);
+            infer_logic_walk(cond, has_array, has_fp, has_uf, has_quantifier);
+            infer_logic_walk(then_expr, has_array, has_fp, has_uf, has_quantifier);
+            infer_logic_walk(else_expr, has_array, has_fp, has_uf, has_quantifier);
         }
         SmtExpr::Var { .. } | SmtExpr::BvConst { .. } | SmtExpr::BoolConst(_) => {}
         SmtExpr::ForAll { lower, upper, body, .. }
         | SmtExpr::Exists { lower, upper, body, .. } => {
-            infer_logic_walk(lower, has_array, has_fp, has_uf);
-            infer_logic_walk(upper, has_array, has_fp, has_uf);
-            infer_logic_walk(body, has_array, has_fp, has_uf);
+            *has_quantifier = true;
+            infer_logic_walk(lower, has_array, has_fp, has_uf, has_quantifier);
+            infer_logic_walk(upper, has_array, has_fp, has_uf, has_quantifier);
+            infer_logic_walk(body, has_array, has_fp, has_uf, has_quantifier);
         }
     }
 }
@@ -388,6 +417,458 @@ fn collect_uf_declarations(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Bounded quantifier expansion
+// ---------------------------------------------------------------------------
+
+/// Try to extract a constant u64 value from a `BvConst` expression.
+fn try_const_value(expr: &SmtExpr) -> Option<u64> {
+    match expr {
+        SmtExpr::BvConst { value, .. } => Some(*value),
+        _ => None,
+    }
+}
+
+/// Substitute all occurrences of a named variable with a constant value.
+///
+/// Performs a deep clone of the expression tree, replacing every `Var { name, width }`
+/// node matching `var_name` with `BvConst { value, width }`.
+fn substitute_var(expr: &SmtExpr, var_name: &str, value: u64) -> SmtExpr {
+    match expr {
+        SmtExpr::Var { name, width } if name == var_name => {
+            SmtExpr::bv_const(value, *width)
+        }
+        // For non-matching leaves, clone
+        SmtExpr::Var { .. } | SmtExpr::BvConst { .. } | SmtExpr::BoolConst(_)
+        | SmtExpr::FPConst { .. } | SmtExpr::UFDecl { .. } => expr.clone(),
+        // Binary BV/Bool ops
+        SmtExpr::BvAdd { lhs, rhs, width } => SmtExpr::BvAdd {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvSub { lhs, rhs, width } => SmtExpr::BvSub {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvMul { lhs, rhs, width } => SmtExpr::BvMul {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvSDiv { lhs, rhs, width } => SmtExpr::BvSDiv {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvUDiv { lhs, rhs, width } => SmtExpr::BvUDiv {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvAnd { lhs, rhs, width } => SmtExpr::BvAnd {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvOr { lhs, rhs, width } => SmtExpr::BvOr {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvXor { lhs, rhs, width } => SmtExpr::BvXor {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvShl { lhs, rhs, width } => SmtExpr::BvShl {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvLshr { lhs, rhs, width } => SmtExpr::BvLshr {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvAshr { lhs, rhs, width } => SmtExpr::BvAshr {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::Eq { lhs, rhs } => SmtExpr::Eq {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+        },
+        SmtExpr::BvSlt { lhs, rhs, width } => SmtExpr::BvSlt {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvSge { lhs, rhs, width } => SmtExpr::BvSge {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvSgt { lhs, rhs, width } => SmtExpr::BvSgt {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvSle { lhs, rhs, width } => SmtExpr::BvSle {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvUlt { lhs, rhs, width } => SmtExpr::BvUlt {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvUge { lhs, rhs, width } => SmtExpr::BvUge {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvUgt { lhs, rhs, width } => SmtExpr::BvUgt {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvUle { lhs, rhs, width } => SmtExpr::BvUle {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::And { lhs, rhs } => SmtExpr::And {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+        },
+        SmtExpr::Or { lhs, rhs } => SmtExpr::Or {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+        },
+        // Unary operators
+        SmtExpr::BvNeg { operand, width } => SmtExpr::BvNeg {
+            operand: Box::new(substitute_var(operand, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::Not { operand } => SmtExpr::Not {
+            operand: Box::new(substitute_var(operand, var_name, value)),
+        },
+        SmtExpr::Extract { operand, high, low, width } => SmtExpr::Extract {
+            operand: Box::new(substitute_var(operand, var_name, value)),
+            high: *high,
+            low: *low,
+            width: *width,
+        },
+        SmtExpr::ZeroExtend { operand, extra_bits, width } => SmtExpr::ZeroExtend {
+            operand: Box::new(substitute_var(operand, var_name, value)),
+            extra_bits: *extra_bits,
+            width: *width,
+        },
+        SmtExpr::SignExtend { operand, extra_bits, width } => SmtExpr::SignExtend {
+            operand: Box::new(substitute_var(operand, var_name, value)),
+            extra_bits: *extra_bits,
+            width: *width,
+        },
+        SmtExpr::Concat { hi, lo, width } => SmtExpr::Concat {
+            hi: Box::new(substitute_var(hi, var_name, value)),
+            lo: Box::new(substitute_var(lo, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::Ite { cond, then_expr, else_expr } => SmtExpr::Ite {
+            cond: Box::new(substitute_var(cond, var_name, value)),
+            then_expr: Box::new(substitute_var(then_expr, var_name, value)),
+            else_expr: Box::new(substitute_var(else_expr, var_name, value)),
+        },
+        // Array operations
+        SmtExpr::Select { array, index } => SmtExpr::Select {
+            array: Box::new(substitute_var(array, var_name, value)),
+            index: Box::new(substitute_var(index, var_name, value)),
+        },
+        SmtExpr::Store { array, index, value: val } => SmtExpr::Store {
+            array: Box::new(substitute_var(array, var_name, value)),
+            index: Box::new(substitute_var(index, var_name, value)),
+            value: Box::new(substitute_var(val, var_name, value)),
+        },
+        SmtExpr::ConstArray { index_sort, value: val } => SmtExpr::ConstArray {
+            index_sort: index_sort.clone(),
+            value: Box::new(substitute_var(val, var_name, value)),
+        },
+        // FP operations
+        SmtExpr::FPAdd { lhs, rhs, rm } => SmtExpr::FPAdd {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            rm: rm.clone(),
+        },
+        SmtExpr::FPSub { lhs, rhs, rm } => SmtExpr::FPSub {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            rm: rm.clone(),
+        },
+        SmtExpr::FPMul { lhs, rhs, rm } => SmtExpr::FPMul {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            rm: rm.clone(),
+        },
+        SmtExpr::FPDiv { lhs, rhs, rm } => SmtExpr::FPDiv {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+            rm: rm.clone(),
+        },
+        SmtExpr::FPEq { lhs, rhs } => SmtExpr::FPEq {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+        },
+        SmtExpr::FPLt { lhs, rhs } => SmtExpr::FPLt {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+        },
+        SmtExpr::FPGt { lhs, rhs } => SmtExpr::FPGt {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+        },
+        SmtExpr::FPGe { lhs, rhs } => SmtExpr::FPGe {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+        },
+        SmtExpr::FPLe { lhs, rhs } => SmtExpr::FPLe {
+            lhs: Box::new(substitute_var(lhs, var_name, value)),
+            rhs: Box::new(substitute_var(rhs, var_name, value)),
+        },
+        SmtExpr::FPFma { a, b, c, rm } => SmtExpr::FPFma {
+            a: Box::new(substitute_var(a, var_name, value)),
+            b: Box::new(substitute_var(b, var_name, value)),
+            c: Box::new(substitute_var(c, var_name, value)),
+            rm: rm.clone(),
+        },
+        SmtExpr::FPNeg { operand } => SmtExpr::FPNeg {
+            operand: Box::new(substitute_var(operand, var_name, value)),
+        },
+        SmtExpr::FPAbs { operand } => SmtExpr::FPAbs {
+            operand: Box::new(substitute_var(operand, var_name, value)),
+        },
+        SmtExpr::FPSqrt { operand, rm } => SmtExpr::FPSqrt {
+            operand: Box::new(substitute_var(operand, var_name, value)),
+            rm: rm.clone(),
+        },
+        SmtExpr::FPIsNaN { operand } => SmtExpr::FPIsNaN {
+            operand: Box::new(substitute_var(operand, var_name, value)),
+        },
+        SmtExpr::FPIsInf { operand } => SmtExpr::FPIsInf {
+            operand: Box::new(substitute_var(operand, var_name, value)),
+        },
+        SmtExpr::FPIsZero { operand } => SmtExpr::FPIsZero {
+            operand: Box::new(substitute_var(operand, var_name, value)),
+        },
+        SmtExpr::FPIsNormal { operand } => SmtExpr::FPIsNormal {
+            operand: Box::new(substitute_var(operand, var_name, value)),
+        },
+        SmtExpr::FPToSBv { rm, operand, width } => SmtExpr::FPToSBv {
+            rm: rm.clone(),
+            operand: Box::new(substitute_var(operand, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::FPToUBv { rm, operand, width } => SmtExpr::FPToUBv {
+            rm: rm.clone(),
+            operand: Box::new(substitute_var(operand, var_name, value)),
+            width: *width,
+        },
+        SmtExpr::BvToFP { rm, operand, eb, sb } => SmtExpr::BvToFP {
+            rm: rm.clone(),
+            operand: Box::new(substitute_var(operand, var_name, value)),
+            eb: *eb,
+            sb: *sb,
+        },
+        SmtExpr::FPToFP { operand, eb, sb, rm } => SmtExpr::FPToFP {
+            operand: Box::new(substitute_var(operand, var_name, value)),
+            eb: *eb,
+            sb: *sb,
+            rm: rm.clone(),
+        },
+        // UF
+        SmtExpr::UF { name, args, ret_sort } => SmtExpr::UF {
+            name: name.clone(),
+            args: args.iter().map(|a| substitute_var(a, var_name, value)).collect(),
+            ret_sort: ret_sort.clone(),
+        },
+        // Nested quantifiers
+        SmtExpr::ForAll { var, var_width, lower, upper, body } => {
+            if var == var_name {
+                // Shadowed -- do not substitute inside
+                expr.clone()
+            } else {
+                SmtExpr::ForAll {
+                    var: var.clone(),
+                    var_width: *var_width,
+                    lower: Box::new(substitute_var(lower, var_name, value)),
+                    upper: Box::new(substitute_var(upper, var_name, value)),
+                    body: Box::new(substitute_var(body, var_name, value)),
+                }
+            }
+        }
+        SmtExpr::Exists { var, var_width, lower, upper, body } => {
+            if var == var_name {
+                expr.clone()
+            } else {
+                SmtExpr::Exists {
+                    var: var.clone(),
+                    var_width: *var_width,
+                    lower: Box::new(substitute_var(lower, var_name, value)),
+                    upper: Box::new(substitute_var(upper, var_name, value)),
+                    body: Box::new(substitute_var(body, var_name, value)),
+                }
+            }
+        }
+    }
+}
+
+/// Expand bounded quantifiers with small constant ranges into conjunctions/disjunctions.
+///
+/// For a `ForAll { var, lower: L, upper: U, body }` where `L` and `U` are constants
+/// and `U - L <= BOUNDED_QUANTIFIER_EXPANSION_LIMIT`:
+/// ```text
+/// body[var/L] AND body[var/L+1] AND ... AND body[var/U-1]
+/// ```
+///
+/// For `Exists`, the expansion uses OR instead of AND.
+///
+/// Quantifiers with non-constant bounds or ranges exceeding the limit are left as-is.
+/// This allows the formula to remain in a quantifier-free logic (QF_*) for better
+/// solver performance.
+///
+/// Returns the transformed expression. Non-quantifier expressions are returned unchanged.
+pub fn expand_bounded_quantifiers(expr: &SmtExpr) -> SmtExpr {
+    expand_bounded_quantifiers_with_limit(expr, BOUNDED_QUANTIFIER_EXPANSION_LIMIT)
+}
+
+/// Like [`expand_bounded_quantifiers`] but with a configurable expansion limit.
+pub fn expand_bounded_quantifiers_with_limit(expr: &SmtExpr, limit: u64) -> SmtExpr {
+    match expr {
+        SmtExpr::ForAll { var, var_width, lower, upper, body } => {
+            // First expand any nested quantifiers in bounds and body
+            let lower_exp = expand_bounded_quantifiers_with_limit(lower, limit);
+            let upper_exp = expand_bounded_quantifiers_with_limit(upper, limit);
+            let body_exp = expand_bounded_quantifiers_with_limit(body, limit);
+
+            if let (Some(lo), Some(hi)) = (try_const_value(&lower_exp), try_const_value(&upper_exp)) {
+                if hi > lo && (hi - lo) <= limit {
+                    // Expand into conjunction: body[var/lo] AND body[var/lo+1] AND ... AND body[var/hi-1]
+                    let mut result = substitute_var(&body_exp, var, lo);
+                    for i in (lo + 1)..hi {
+                        let instance = substitute_var(&body_exp, var, i);
+                        result = result.and_expr(instance);
+                    }
+                    return result;
+                }
+                if hi <= lo {
+                    // Empty range: vacuously true
+                    return SmtExpr::bool_const(true);
+                }
+            }
+            // Cannot expand: return with recursively expanded children
+            SmtExpr::ForAll {
+                var: var.clone(),
+                var_width: *var_width,
+                lower: Box::new(lower_exp),
+                upper: Box::new(upper_exp),
+                body: Box::new(body_exp),
+            }
+        }
+        SmtExpr::Exists { var, var_width, lower, upper, body } => {
+            let lower_exp = expand_bounded_quantifiers_with_limit(lower, limit);
+            let upper_exp = expand_bounded_quantifiers_with_limit(upper, limit);
+            let body_exp = expand_bounded_quantifiers_with_limit(body, limit);
+
+            if let (Some(lo), Some(hi)) = (try_const_value(&lower_exp), try_const_value(&upper_exp)) {
+                if hi > lo && (hi - lo) <= limit {
+                    // Expand into disjunction: body[var/lo] OR body[var/lo+1] OR ... OR body[var/hi-1]
+                    let mut result = substitute_var(&body_exp, var, lo);
+                    for i in (lo + 1)..hi {
+                        let instance = substitute_var(&body_exp, var, i);
+                        result = result.or_expr(instance);
+                    }
+                    return result;
+                }
+                if hi <= lo {
+                    // Empty range: vacuously false
+                    return SmtExpr::bool_const(false);
+                }
+            }
+            SmtExpr::Exists {
+                var: var.clone(),
+                var_width: *var_width,
+                lower: Box::new(lower_exp),
+                upper: Box::new(upper_exp),
+                body: Box::new(body_exp),
+            }
+        }
+        // Recurse into all other expression types
+        SmtExpr::BvAdd { lhs, rhs, width } => SmtExpr::BvAdd {
+            lhs: Box::new(expand_bounded_quantifiers_with_limit(lhs, limit)),
+            rhs: Box::new(expand_bounded_quantifiers_with_limit(rhs, limit)),
+            width: *width,
+        },
+        SmtExpr::And { lhs, rhs } => SmtExpr::And {
+            lhs: Box::new(expand_bounded_quantifiers_with_limit(lhs, limit)),
+            rhs: Box::new(expand_bounded_quantifiers_with_limit(rhs, limit)),
+        },
+        SmtExpr::Or { lhs, rhs } => SmtExpr::Or {
+            lhs: Box::new(expand_bounded_quantifiers_with_limit(lhs, limit)),
+            rhs: Box::new(expand_bounded_quantifiers_with_limit(rhs, limit)),
+        },
+        SmtExpr::Not { operand } => SmtExpr::Not {
+            operand: Box::new(expand_bounded_quantifiers_with_limit(operand, limit)),
+        },
+        SmtExpr::Eq { lhs, rhs } => SmtExpr::Eq {
+            lhs: Box::new(expand_bounded_quantifiers_with_limit(lhs, limit)),
+            rhs: Box::new(expand_bounded_quantifiers_with_limit(rhs, limit)),
+        },
+        SmtExpr::Ite { cond, then_expr, else_expr } => SmtExpr::Ite {
+            cond: Box::new(expand_bounded_quantifiers_with_limit(cond, limit)),
+            then_expr: Box::new(expand_bounded_quantifiers_with_limit(then_expr, limit)),
+            else_expr: Box::new(expand_bounded_quantifiers_with_limit(else_expr, limit)),
+        },
+        SmtExpr::Select { array, index } => SmtExpr::Select {
+            array: Box::new(expand_bounded_quantifiers_with_limit(array, limit)),
+            index: Box::new(expand_bounded_quantifiers_with_limit(index, limit)),
+        },
+        SmtExpr::Store { array, index, value } => SmtExpr::Store {
+            array: Box::new(expand_bounded_quantifiers_with_limit(array, limit)),
+            index: Box::new(expand_bounded_quantifiers_with_limit(index, limit)),
+            value: Box::new(expand_bounded_quantifiers_with_limit(value, limit)),
+        },
+        // Leaves and other nodes without quantifiers: return as-is
+        _ => expr.clone(),
+    }
+}
+
+/// Check whether an expression contains quantifiers (`ForAll` or `Exists`).
+pub fn has_quantifiers(expr: &SmtExpr) -> bool {
+    let mut has_array = false;
+    let mut has_fp = false;
+    let mut has_uf = false;
+    let mut has_q = false;
+    infer_logic_walk(expr, &mut has_array, &mut has_fp, &mut has_uf, &mut has_q);
+    has_q
+}
+
+/// Prepare a formula for SMT-LIB2 emission by expanding small bounded quantifiers.
+///
+/// This is the recommended entry point for SMT-LIB2 generation. It:
+/// 1. Tries to expand bounded quantifiers with constant bounds <= limit into
+///    conjunctions/disjunctions (keeping the formula quantifier-free for better perf)
+/// 2. If quantifiers remain after expansion (non-constant bounds or large ranges),
+///    the formula is returned as-is and `infer_logic` will select a quantified logic
+///
+/// Returns the (potentially expanded) formula. Use `infer_logic` on the result
+/// to determine the correct `(set-logic ...)` declaration.
+pub fn prepare_formula_for_smt(expr: &SmtExpr) -> SmtExpr {
+    expand_bounded_quantifiers(expr)
+}
+
 /// Serialize a rounding mode to SMT-LIB2.
 pub fn rounding_mode_to_smt2(rm: &RoundingMode) -> &'static str {
     match rm {
@@ -440,8 +921,16 @@ pub fn generate_smt2_query_with_arrays(
 ) -> String {
     let mut lines = Vec::new();
 
-    // Logic declaration -- infer from the formula content.
-    let formula = obligation.negated_equivalence();
+    // Build the negated equivalence formula, then try to expand bounded
+    // quantifiers into conjunctions/disjunctions. This keeps the formula
+    // in a quantifier-free logic (QF_*) when possible, which is faster.
+    // If quantifiers remain (non-constant bounds or large ranges), the
+    // formula is used as-is and infer_logic will select the quantified
+    // variant (e.g., ABV instead of QF_ABV).
+    let raw_formula = obligation.negated_equivalence();
+    let formula = prepare_formula_for_smt(&raw_formula);
+
+    // Logic declaration -- infer from the (potentially expanded) formula.
     let logic = infer_logic(&formula);
     lines.push(format!("(set-logic {})", logic));
 
@@ -492,7 +981,7 @@ pub fn generate_smt2_query_with_arrays(
         ));
     }
 
-    // Assert the negated equivalence
+    // Assert the negated equivalence (with quantifiers expanded where possible)
     lines.push(format!("(assert {})", formula));
 
     // Check satisfiability
@@ -813,8 +1302,9 @@ fn extract_bv_value(model_text: &str, var_name: &str) -> Option<u64> {
 pub fn verify_with_z4_api(obligation: &ProofObligation, config: &Z4Config) -> Z4Result {
     use z4::{Logic, SolveResult, Sort, Solver, BitVecSort};
 
-    // Infer the correct logic from the formula content.
-    let formula = obligation.negated_equivalence();
+    // Build formula, expand small bounded quantifiers, then infer logic.
+    let raw_formula = obligation.negated_equivalence();
+    let formula = prepare_formula_for_smt(&raw_formula);
     let logic_str = infer_logic(&formula);
     let logic = match logic_str {
         "QF_BV" => Logic::QfBv,
@@ -823,6 +1313,8 @@ pub fn verify_with_z4_api(obligation: &ProofObligation, config: &Z4Config) -> Z4
         // z4 does not have a dedicated QF_ABVFP logic; fall back to ALL
         "QF_ABVFP" => Logic::All,
         "QF_UFBV" => Logic::QfUfbv,
+        // Quantified logics: z4 handles these via ALL
+        "ABV" | "BV" | "BVFP" => Logic::All,
         // z4 doesn't have QfAbvfp; use All as fallback for combined theories
         _ => Logic::All,
     };
@@ -3477,7 +3969,8 @@ mod tests {
         // 1. AtomicOperations non-interference: missing addr disjointness precondition
         // 2. FpConversion NaN: incorrect NaN handling encoding
         // 3. ConstantMaterialization exhaustive: BV sort width mismatch (16 vs 24)
-        // 4. Memory quantifier proofs: use ForAll/Exists with QF_ABV (quantifier-free) logic
+        // 4. (FIXED) Memory quantifier proofs: bounded quantifiers now expanded to
+        //    conjunctions, keeping formulas in QF_ABV; large ranges use ABV logic
         // 5. Memory range non-interference: missing address range disjointness precondition
         let is_known_issue = |name: &str, detail: &str| -> bool {
             // Atomic non-interference missing precondition
@@ -3486,8 +3979,6 @@ mod tests {
             || name.contains("NaN")
             // ConstMat BV sort mismatch
             || name.contains("exhaustive")
-            // Memory proofs using quantifiers with QF_ABV logic
-            || detail.contains("does not support quantifiers")
             // Memory range non-interference missing range disjointness
             || name.contains("RangeNonInterference")
             // Sort mismatch errors (pre-existing encoding issues)
@@ -4136,6 +4627,275 @@ mod tests {
             SmtExpr::const_array(SmtSort::BitVec(64), SmtExpr::bv_const(0, 8)),
             SmtExpr::var("a", 64),
         )), "QF_ABV");
+    }
+
+    // -----------------------------------------------------------------------
+    // Quantifier detection and bounded expansion tests (#249)
+    //
+    // These tests verify that:
+    // 1. infer_logic detects ForAll/Exists and selects quantified logics (ABV)
+    // 2. Bounded quantifiers with small constant ranges are expanded to
+    //    conjunctions/disjunctions (staying in QF_* logic)
+    // 3. Non-expandable quantifiers upgrade the logic to a quantified variant
+    // 4. Memory proofs with quantifiers produce correct SMT-LIB2 output
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_logic_forall_bv_only() {
+        // ForAll over bitvectors (no arrays) should get "BV" (not "QF_BV")
+        let body = SmtExpr::var("i", 8).bvult(SmtExpr::bv_const(4, 8));
+        let expr = SmtExpr::forall("i", 8, SmtExpr::bv_const(0, 8), SmtExpr::bv_const(4, 8), body);
+        assert_eq!(infer_logic(&expr), "BV");
+    }
+
+    #[test]
+    fn test_infer_logic_forall_with_array() {
+        // ForAll over array operations should get "ABV" (not "QF_ABV")
+        let mem = SmtExpr::const_array(SmtSort::BitVec(64), SmtExpr::bv_const(0, 8));
+        let body = SmtExpr::select(mem, SmtExpr::var("i", 64))
+            .eq_expr(SmtExpr::bv_const(0, 8));
+        let expr = SmtExpr::forall(
+            "i", 64,
+            SmtExpr::bv_const(0, 64),
+            SmtExpr::bv_const(16, 64),
+            body,
+        );
+        assert_eq!(infer_logic(&expr), "ABV");
+    }
+
+    #[test]
+    fn test_infer_logic_no_quantifier_still_qf() {
+        // Without quantifiers, arrays still get QF_ABV
+        let mem = SmtExpr::const_array(SmtSort::BitVec(64), SmtExpr::bv_const(0, 8));
+        let expr = SmtExpr::select(mem, SmtExpr::var("a", 64));
+        assert_eq!(infer_logic(&expr), "QF_ABV");
+    }
+
+    #[test]
+    fn test_has_quantifiers_true() {
+        let body = SmtExpr::bool_const(true);
+        let expr = SmtExpr::forall("i", 8, SmtExpr::bv_const(0, 8), SmtExpr::bv_const(4, 8), body);
+        assert!(has_quantifiers(&expr));
+    }
+
+    #[test]
+    fn test_has_quantifiers_false() {
+        let expr = SmtExpr::var("x", 32).bvadd(SmtExpr::bv_const(1, 32));
+        assert!(!has_quantifiers(&expr));
+    }
+
+    #[test]
+    fn test_expand_forall_small_range() {
+        // ForAll i in [0, 3): i < 10  -->  (0 < 10) AND (1 < 10) AND (2 < 10)
+        let body = SmtExpr::var("i", 8).bvult(SmtExpr::bv_const(10, 8));
+        let forall = SmtExpr::forall("i", 8, SmtExpr::bv_const(0, 8), SmtExpr::bv_const(3, 8), body);
+        let expanded = expand_bounded_quantifiers(&forall);
+        // After expansion, should not contain quantifiers
+        assert!(!has_quantifiers(&expanded), "Expanded forall should be quantifier-free");
+        // Should still infer QF logic
+        let logic = infer_logic(&expanded);
+        assert!(logic.starts_with("QF_"), "Expanded forall should use QF logic, got: {}", logic);
+    }
+
+    #[test]
+    fn test_expand_forall_empty_range() {
+        // ForAll i in [5, 3): body --> true (vacuously)
+        let body = SmtExpr::var("i", 8).bvult(SmtExpr::bv_const(10, 8));
+        let forall = SmtExpr::forall("i", 8, SmtExpr::bv_const(5, 8), SmtExpr::bv_const(3, 8), body);
+        let expanded = expand_bounded_quantifiers(&forall);
+        assert_eq!(expanded, SmtExpr::bool_const(true));
+    }
+
+    #[test]
+    fn test_expand_exists_small_range() {
+        // Exists i in [0, 3): i == 1  -->  (0 == 1) OR (1 == 1) OR (2 == 1)
+        let body = SmtExpr::var("i", 8).eq_expr(SmtExpr::bv_const(1, 8));
+        let exists = SmtExpr::Exists {
+            var: "i".to_string(),
+            var_width: 8,
+            lower: Box::new(SmtExpr::bv_const(0, 8)),
+            upper: Box::new(SmtExpr::bv_const(3, 8)),
+            body: Box::new(body),
+        };
+        let expanded = expand_bounded_quantifiers(&exists);
+        assert!(!has_quantifiers(&expanded));
+    }
+
+    #[test]
+    fn test_expand_forall_non_constant_bounds_preserved() {
+        // ForAll with non-constant bound cannot be expanded
+        let body = SmtExpr::var("i", 8).bvult(SmtExpr::bv_const(10, 8));
+        let forall = SmtExpr::forall(
+            "i", 8,
+            SmtExpr::bv_const(0, 8),
+            SmtExpr::var("n", 8), // non-constant upper bound
+            body,
+        );
+        let expanded = expand_bounded_quantifiers(&forall);
+        // Should still have quantifiers
+        assert!(has_quantifiers(&expanded), "Non-constant bound should preserve quantifier");
+    }
+
+    #[test]
+    fn test_expand_forall_large_range_preserved() {
+        // ForAll with range > limit should not be expanded
+        let body = SmtExpr::var("i", 32).bvult(SmtExpr::bv_const(1000, 32));
+        let forall = SmtExpr::forall(
+            "i", 32,
+            SmtExpr::bv_const(0, 32),
+            SmtExpr::bv_const(1000, 32), // exceeds BOUNDED_QUANTIFIER_EXPANSION_LIMIT (256)
+            body,
+        );
+        let expanded = expand_bounded_quantifiers(&forall);
+        assert!(has_quantifiers(&expanded), "Large range should preserve quantifier");
+        assert_eq!(infer_logic(&expanded), "BV");
+    }
+
+    #[test]
+    fn test_prepare_formula_expands_memory_proof_quantifiers() {
+        // Memory proofs like memset use ForAll with small constant bounds.
+        // After prepare_formula_for_smt, these should be expanded and
+        // the formula should stay in QF_ABV.
+        let obligation = crate::memory_proofs::proof_memset_correctness(4);
+        let raw = obligation.negated_equivalence();
+        // Raw formula has quantifiers (from the ForAll in the proof)
+        assert!(has_quantifiers(&raw), "Raw memset proof should have quantifiers");
+
+        let prepared = prepare_formula_for_smt(&raw);
+        // After expansion, no quantifiers remain (N=4 < 256)
+        assert!(!has_quantifiers(&prepared), "Expanded memset proof should be quantifier-free");
+
+        // Logic should be QF_ABV (not ABV)
+        let logic = infer_logic(&prepared);
+        assert_eq!(logic, "QF_ABV",
+            "Expanded memset proof should use QF_ABV, got: {}", logic);
+    }
+
+    #[test]
+    fn test_smt2_memory_proof_with_quantifiers_correct_logic() {
+        // End-to-end: generate SMT-LIB2 for a memset proof.
+        // The small quantifier should be expanded, yielding QF_ABV.
+        let obligation = crate::memory_proofs::proof_memset_correctness(4);
+        let config = Z4Config::default();
+        let smt2 = generate_smt2_query(&obligation, &config);
+
+        // After expansion, should use QF_ABV (quantifier-free)
+        assert!(smt2.contains("(set-logic QF_ABV)"),
+            "Expanded memset proof should use QF_ABV in SMT-LIB2, got: {}", smt2);
+        // Should NOT contain forall keyword (expanded)
+        assert!(!smt2.contains("(forall"),
+            "Expanded memset proof should not contain forall in SMT-LIB2");
+    }
+
+    #[test]
+    fn test_smt2_memcpy_proof_expanded_correctly() {
+        let obligation = crate::memory_proofs::proof_memcpy_correctness(4);
+        let config = Z4Config::default();
+        let smt2 = generate_smt2_query(&obligation, &config);
+
+        // Memcpy with N=4 should be expanded (4 < 256)
+        assert!(smt2.contains("(set-logic QF_ABV)"),
+            "Expanded memcpy proof should use QF_ABV, got: {}", smt2);
+        assert!(!smt2.contains("(forall"),
+            "Expanded memcpy proof should not contain forall");
+    }
+
+    #[test]
+    fn test_smt2_non_quantified_proof_unchanged() {
+        // Non-quantified proofs should still get QF_ABV
+        let obligation = crate::memory_proofs::proof_roundtrip_i32();
+        let config = Z4Config::default();
+        let smt2 = generate_smt2_query(&obligation, &config);
+        assert!(smt2.contains("(set-logic QF_ABV)"),
+            "Non-quantified memory proof should use QF_ABV, got: {}", smt2);
+    }
+
+    #[test]
+    fn test_to_smt2_memory_proof_with_quantifiers() {
+        // Test ProofObligation::to_smt2() path for quantified proofs
+        let obligation = crate::memory_proofs::proof_buffer_init_zero(8);
+        let smt2 = obligation.to_smt2();
+
+        // Should be expanded (N=8 < 256), yielding QF_ABV
+        assert!(smt2.contains("(set-logic QF_ABV)"),
+            "Expanded buffer init proof should use QF_ABV via to_smt2(), got: {}", smt2);
+        assert!(!smt2.contains("(forall"),
+            "Expanded buffer init proof should not contain forall via to_smt2()");
+    }
+
+    #[test]
+    fn test_large_quantifier_uses_abv_logic() {
+        // A quantifier with range > 256 should not be expanded and should use ABV
+        let mem = SmtExpr::const_array(SmtSort::BitVec(64), SmtExpr::bv_const(0, 8));
+        let body = SmtExpr::select(mem, SmtExpr::var("i", 64))
+            .eq_expr(SmtExpr::bv_const(0, 8));
+        let forall = SmtExpr::forall(
+            "i", 64,
+            SmtExpr::bv_const(0, 64),
+            SmtExpr::bv_const(1000, 64),
+            body,
+        );
+        let obligation = ProofObligation {
+            name: "large_quantifier_test".to_string(),
+            tmir_expr: SmtExpr::bool_const(true),
+            aarch64_expr: forall,
+            inputs: vec![],
+            preconditions: vec![],
+            fp_inputs: vec![],
+            category: None,
+        };
+
+        let config = Z4Config::default();
+        let smt2 = generate_smt2_query(&obligation, &config);
+
+        // Large range: should NOT be expanded, should use ABV (quantified arrays+bv)
+        assert!(smt2.contains("(set-logic ABV)"),
+            "Large quantifier should use ABV logic, got: {}", smt2);
+        assert!(smt2.contains("(forall"),
+            "Large quantifier should contain forall in SMT-LIB2");
+    }
+
+    #[test]
+    fn test_cli_verify_expanded_memset() {
+        // Integration test: verify memset proof through z3 with expanded quantifiers
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let obligation = crate::memory_proofs::proof_memset_correctness(4);
+        let config = Z4Config::default();
+        let result = verify_with_cli(&obligation, &config);
+        assert_eq!(result, Z4Result::Verified,
+            "Memset correctness proof should verify with expanded quantifiers");
+    }
+
+    #[test]
+    fn test_cli_verify_expanded_buffer_init() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let obligation = crate::memory_proofs::proof_buffer_init_zero(8);
+        let config = Z4Config::default();
+        let result = verify_with_cli(&obligation, &config);
+        assert_eq!(result, Z4Result::Verified,
+            "Buffer init zero proof should verify with expanded quantifiers");
+    }
+
+    #[test]
+    fn test_cli_verify_expanded_memcpy() {
+        let solver = find_solver_binary();
+        if solver.is_empty() {
+            return;
+        }
+
+        let obligation = crate::memory_proofs::proof_memcpy_correctness(4);
+        let config = Z4Config::default().with_timeout(30000);
+        let result = verify_with_cli(&obligation, &config);
+        assert_eq!(result, Z4Result::Verified,
+            "Memcpy correctness proof should verify with expanded quantifiers");
     }
 
     #[test]
