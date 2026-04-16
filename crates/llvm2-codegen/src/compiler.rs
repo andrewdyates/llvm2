@@ -144,7 +144,7 @@ pub struct ProofCertificate {
 /// The result of compiling a tMIR module through the LLVM2 pipeline.
 #[derive(Debug, Clone)]
 pub struct CompilationResult {
-    /// Mach-O object file bytes (one per function for now).
+    /// Mach-O object file bytes containing all compiled functions.
     pub object_code: Vec<u8>,
     /// Compilation metrics.
     pub metrics: CompilationMetrics,
@@ -187,6 +187,10 @@ impl Compiler {
     /// Translates each function in the module through the full pipeline:
     /// tMIR adapter -> ISel -> optimization -> regalloc -> frame lowering
     /// -> encoding -> Mach-O emission.
+    ///
+    /// All functions are compiled into a single Mach-O object file with each
+    /// function as a separate symbol in the `__text` section. Cross-function
+    /// calls are represented as relocations for the linker.
     ///
     /// Returns the compiled object code, metrics, optional trace, and
     /// optional proof certificates.
