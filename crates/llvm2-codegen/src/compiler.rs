@@ -71,7 +71,13 @@ pub struct CompilerConfig {
     pub opt_level: OptLevel,
     /// Target architecture.
     pub target: Target,
-    /// Whether to emit proof certificates (placeholder for z4 integration).
+    /// Whether to emit proof certificates for each compiled function.
+    ///
+    /// When true, the compiler runs the llvm2-verify function verifier on
+    /// each prepared MachFunction and produces a [`ProofCertificate`] per
+    /// verified instruction. Currently uses mock evaluation (exhaustive for
+    /// 8-bit, statistical for 32/64-bit); will upgrade to formal z4 proofs
+    /// when z4 integration is complete.
     pub emit_proofs: bool,
     /// Compilation trace verbosity.
     pub trace_level: CompilerTraceLevel,
@@ -129,16 +135,26 @@ pub struct CompilerTrace {
     pub total_duration: Duration,
 }
 
-/// A proof certificate for a single lowering rule (placeholder).
+/// A proof certificate for a single lowering rule.
 ///
-/// When z4 integration is complete, each certificate will contain an SMT
-/// proof that a specific lowering rule preserves semantics.
+/// Each certificate records the result of verifying one instruction's
+/// lowering against its proof obligation from the [`ProofDatabase`].
+/// When `verified` is true, the proof obligation passed (exhaustive for
+/// small bit-widths, statistical sampling for 32/64-bit). When z4
+/// integration is complete, formal SMT proofs will upgrade certificates
+/// to [`llvm2_verify::VerificationStrength::Formal`].
 #[derive(Debug, Clone)]
 pub struct ProofCertificate {
-    /// Name of the verified lowering rule (e.g., "add_rr_i64").
+    /// Name of the verified lowering rule (e.g., "iadd_i32").
     pub rule_name: String,
     /// Whether the proof was successfully verified.
     pub verified: bool,
+    /// Proof category (e.g., Arithmetic, Memory, Branch).
+    pub category: String,
+    /// Verification strength achieved (e.g., "Exhaustive", "Statistical(100000)").
+    pub strength: String,
+    /// Name of the function this instruction belongs to.
+    pub function_name: String,
 }
 
 /// The result of compiling a tMIR module through the LLVM2 pipeline.
@@ -183,9 +199,56 @@ fn count_real_instructions(func: &llvm2_ir::MachFunction) -> usize {
 /// The LLVM2 compiler — top-level API for compiling tMIR to machine code.
 ///
 /// Wraps the internal [`Pipeline`] with a clean configuration interface,
-/// structured results, optional tracing, and placeholder proof emission.
+/// structured results, optional tracing, and proof certificate emission.
 pub struct Compiler {
     config: CompilerConfig,
+}
+
+/// Generate proof certificates for a MachFunction by running the function
+/// verifier from llvm2-verify. Each verified instruction produces a
+/// certificate recording the proof obligation name, category, and strength.
+fn generate_proof_certificates(
+    func: &llvm2_ir::MachFunction,
+) -> Vec<ProofCertificate> {
+    use llvm2_verify::function_verifier::{verify_function, InstructionVerificationResult};
+
+    let report = verify_function(func);
+    let mut certs = Vec::new();
+
+    for inst_report in &report.instructions {
+        match &inst_report.result {
+            InstructionVerificationResult::Verified {
+                proof_name,
+                category,
+                strength,
+            } => {
+                certs.push(ProofCertificate {
+                    rule_name: proof_name.clone(),
+                    verified: true,
+                    category: format!("{}", category),
+                    strength: format!("{:?}", strength),
+                    function_name: report.function_name.clone(),
+                });
+            }
+            InstructionVerificationResult::Failed {
+                proof_name,
+                detail,
+            } => {
+                certs.push(ProofCertificate {
+                    rule_name: proof_name.clone(),
+                    verified: false,
+                    category: String::new(),
+                    strength: format!("Failed: {}", detail),
+                    function_name: report.function_name.clone(),
+                });
+            }
+            // Skipped (pseudo-ops) and Unverified (no proof mapping) do not
+            // produce certificates — they are not claims of correctness.
+            _ => {}
+        }
+    }
+
+    certs
 }
 
 impl Compiler {
@@ -320,9 +383,14 @@ impl Compiler {
             None
         };
 
-        // Proof certificates: placeholder for z4 integration.
+        // Proof certificates: run llvm2-verify function verifier on each
+        // prepared function to produce per-instruction proof certificates.
         let proofs = if self.config.emit_proofs {
-            Some(Vec::new()) // Empty until z4 is wired up
+            let mut all_certs = Vec::new();
+            for func in &prepared_funcs {
+                all_certs.extend(generate_proof_certificates(func));
+            }
+            Some(all_certs)
         } else {
             None
         };
@@ -386,7 +454,7 @@ impl Compiler {
         };
 
         let proofs = if self.config.emit_proofs {
-            Some(Vec::new())
+            Some(generate_proof_certificates(ir_func))
         } else {
             None
         };
@@ -512,8 +580,18 @@ mod tests {
         let result = compiler.compile_ir_function(&mut ir_func).unwrap();
 
         assert!(result.proofs.is_some(), "proofs field should be Some when emit_proofs is true");
-        // Empty for now until z4 integration
-        assert!(result.proofs.unwrap().is_empty());
+        let proofs = result.proofs.unwrap();
+        // The add test function contains an AddRR instruction which has a
+        // verified proof obligation in the proof database.
+        assert!(!proofs.is_empty(), "proof certificates should be non-empty for add function");
+        // Every certificate that was emitted should be verified (no failures).
+        for cert in &proofs {
+            assert!(cert.verified, "certificate '{}' should be verified", cert.rule_name);
+            assert!(!cert.rule_name.is_empty(), "rule_name should not be empty");
+            assert!(!cert.category.is_empty(), "category should not be empty");
+            assert!(!cert.strength.is_empty(), "strength should not be empty");
+            assert!(!cert.function_name.is_empty(), "function_name should not be empty");
+        }
     }
 
     #[test]
