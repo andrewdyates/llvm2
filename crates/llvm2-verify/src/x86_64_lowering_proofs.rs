@@ -48,6 +48,7 @@ pub fn proof_x86_iadd_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -68,6 +69,7 @@ pub fn proof_x86_isub_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -91,6 +93,7 @@ pub fn proof_x86_imul_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -109,6 +112,7 @@ pub fn proof_x86_neg_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -133,6 +137,7 @@ pub fn proof_x86_iadd_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -153,6 +158,7 @@ pub fn proof_x86_isub_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -173,6 +179,7 @@ pub fn proof_x86_imul_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -191,6 +198,7 @@ pub fn proof_x86_neg_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -224,6 +232,7 @@ pub fn proof_x86_sdiv_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions,
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -249,6 +258,7 @@ pub fn proof_x86_sdiv_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions,
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -274,6 +284,7 @@ pub fn proof_x86_udiv_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions,
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -299,6 +310,7 @@ pub fn proof_x86_udiv_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions,
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -323,6 +335,7 @@ pub fn proof_x86_band_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -343,6 +356,7 @@ pub fn proof_x86_bor_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -363,6 +377,7 @@ pub fn proof_x86_bxor_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -381,6 +396,7 @@ pub fn proof_x86_bnot_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -405,6 +421,7 @@ pub fn proof_x86_band_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -425,6 +442,7 @@ pub fn proof_x86_bor_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -445,6 +463,7 @@ pub fn proof_x86_bxor_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -463,6 +482,7 @@ pub fn proof_x86_bnot_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -491,6 +511,7 @@ pub fn proof_x86_ishl_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -511,6 +532,7 @@ pub fn proof_x86_ushr_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -531,6 +553,7 @@ pub fn proof_x86_sshr_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -555,6 +578,7 @@ pub fn proof_x86_ishl_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -575,6 +599,7 @@ pub fn proof_x86_ushr_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -595,6 +620,7 @@ pub fn proof_x86_sshr_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -621,6 +647,7 @@ pub fn proof_x86_iadd_i8() -> ProofObligation {
         inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -641,6 +668,7 @@ pub fn proof_x86_isub_i8() -> ProofObligation {
         inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
@@ -661,6 +689,7 @@ pub fn proof_x86_imul_i8() -> ProofObligation {
         inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+        category: None,
     }
 }
 
