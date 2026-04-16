@@ -127,7 +127,7 @@ fn cleanup(dir: &Path) {
 // For simple leaf functions that don't need a frame, this helper encodes
 // raw instructions directly without prologue/epilogue overhead.
 // For tests that need frame lowering, use Pipeline::encode_and_emit
-// (see test_full_pipeline_frame_lowering_encoding_gaps).
+// (see test_full_pipeline_frame_lowering).
 // ---------------------------------------------------------------------------
 
 /// Encode an IR function into a Mach-O .o file WITHOUT frame lowering.
@@ -671,12 +671,11 @@ int main(void) {
 ///   LDP X29, X30, [SP], #16     (post-index writeback via LdpPostIndex)
 ///   RET
 ///
-/// Previously, encoding bugs caused STP/LDP to use signed-offset form
-/// (no writeback) and MOV X29, SP to encode as ORR X29, XZR, XZR (X29=0).
-/// Fixed by introducing StpPreIndex/LdpPostIndex opcodes and using ADD
-/// for SP-to-register moves.
+/// Frame lowering works correctly: STP/LDP use pre/post-index writeback
+/// forms (StpPreIndex/LdpPostIndex opcodes) and SP-to-register moves
+/// use ADD (avoiding the XZR/SP ambiguity in ORR encoding).
 #[test]
-fn test_full_pipeline_frame_lowering_encoding_gaps() {
+fn test_full_pipeline_frame_lowering() {
     // Build the add function and run it through encode_and_emit (includes
     // frame lowering).
     let mut func = build_add_function();
