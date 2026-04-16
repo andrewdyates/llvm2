@@ -14,6 +14,11 @@ members = [
     "crates/llvm2-codegen",
     "crates/llvm2-regalloc",
     "crates/llvm2-cli",
+    # tMIR stubs — included for testing; will be replaced by real tMIR crate
+    "stubs/tmir-types",
+    "stubs/tmir-instrs",
+    "stubs/tmir-func",
+    "stubs/tmir-semantics",
 ]
 
 [workspace.package]
