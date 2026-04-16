@@ -395,22 +395,26 @@ fn translate_int_cmp(op: &CmpOp) -> Option<IntCC> {
 }
 
 /// Map tMIR float comparison predicates to internal `FloatCC`.
+///
+/// IEEE 754 ordered predicates return false for NaN; unordered predicates
+/// return true for NaN. Both categories are preserved through to the ISel,
+/// which emits the correct AArch64 condition codes for each.
 fn translate_float_cmp(op: &CmpOp) -> Option<FloatCC> {
     match op {
+        // Ordered comparisons (false when NaN)
         CmpOp::FOeq => Some(FloatCC::Equal),
         CmpOp::FOne => Some(FloatCC::NotEqual),
         CmpOp::FOlt => Some(FloatCC::LessThan),
         CmpOp::FOle => Some(FloatCC::LessThanOrEqual),
         CmpOp::FOgt => Some(FloatCC::GreaterThan),
         CmpOp::FOge => Some(FloatCC::GreaterThanOrEqual),
-        // Unordered float comparisons: map to closest ordered variant.
-        // The ISel will handle the NaN-aware lowering via CSEL chains.
-        CmpOp::FUeq => Some(FloatCC::Equal),
-        CmpOp::FUne => Some(FloatCC::NotEqual),
-        CmpOp::FUlt => Some(FloatCC::LessThan),
-        CmpOp::FUle => Some(FloatCC::LessThanOrEqual),
-        CmpOp::FUgt => Some(FloatCC::GreaterThan),
-        CmpOp::FUge => Some(FloatCC::GreaterThanOrEqual),
+        // Unordered comparisons (true when NaN)
+        CmpOp::FUeq => Some(FloatCC::UnorderedEqual),
+        CmpOp::FUne => Some(FloatCC::UnorderedNotEqual),
+        CmpOp::FUlt => Some(FloatCC::UnorderedLessThan),
+        CmpOp::FUle => Some(FloatCC::UnorderedLessThanOrEqual),
+        CmpOp::FUgt => Some(FloatCC::UnorderedGreaterThan),
+        CmpOp::FUge => Some(FloatCC::UnorderedGreaterThanOrEqual),
         _ => None, // Integer comparisons handled separately
     }
 }
@@ -4364,13 +4368,13 @@ mod tests {
             (CmpOp::FOle, FloatCC::LessThanOrEqual),
             (CmpOp::FOgt, FloatCC::GreaterThan),
             (CmpOp::FOge, FloatCC::GreaterThanOrEqual),
-            // Unordered variants map to ordered for now
-            (CmpOp::FUeq, FloatCC::Equal),
-            (CmpOp::FUne, FloatCC::NotEqual),
-            (CmpOp::FUlt, FloatCC::LessThan),
-            (CmpOp::FUle, FloatCC::LessThanOrEqual),
-            (CmpOp::FUgt, FloatCC::GreaterThan),
-            (CmpOp::FUge, FloatCC::GreaterThanOrEqual),
+            // Unordered variants preserve IEEE 754 unordered semantics
+            (CmpOp::FUeq, FloatCC::UnorderedEqual),
+            (CmpOp::FUne, FloatCC::UnorderedNotEqual),
+            (CmpOp::FUlt, FloatCC::UnorderedLessThan),
+            (CmpOp::FUle, FloatCC::UnorderedLessThanOrEqual),
+            (CmpOp::FUgt, FloatCC::UnorderedGreaterThan),
+            (CmpOp::FUge, FloatCC::UnorderedGreaterThanOrEqual),
         ];
 
         for (tmir_op, expected_cc) in float_cmp_ops {

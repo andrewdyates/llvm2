@@ -196,8 +196,20 @@ pub enum Opcode {
 }
 
 /// Floating-point comparison conditions.
+///
+/// IEEE 754 defines both ordered and unordered comparison predicates:
+/// - **Ordered** comparisons return false when either operand is NaN.
+/// - **Unordered** comparisons return true when either operand is NaN.
+///
+/// The relationship is: `Unordered_X(a,b) = Ordered_X(a,b) || isNaN(a) || isNaN(b)`.
+/// Equivalently: `Unordered_X(a,b) = !Ordered_NOT_X(a,b)`.
+///
+/// On AArch64, FCMP sets NZCV=0011 (C=1,V=1) for NaN inputs. Ordered predicates
+/// use condition codes that exclude V=1; unordered predicates use inverted ordered
+/// condition codes so that V=1 (NaN) falls through as true.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FloatCC {
+    // Ordered comparisons (false when NaN)
     Equal,
     NotEqual,
     LessThan,
@@ -206,6 +218,13 @@ pub enum FloatCC {
     GreaterThanOrEqual,
     Ordered,    // Neither operand is NaN
     Unordered,  // At least one operand is NaN
+    // Unordered comparisons (true when NaN)
+    UnorderedEqual,
+    UnorderedNotEqual,
+    UnorderedLessThan,
+    UnorderedLessThanOrEqual,
+    UnorderedGreaterThan,
+    UnorderedGreaterThanOrEqual,
 }
 
 /// Integer comparison conditions.

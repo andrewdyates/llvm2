@@ -183,13 +183,27 @@ impl AArch64CC {
 
     /// Map tMIR floating-point comparison condition to AArch64 condition code.
     ///
-    /// AArch64 FCMP sets NZCV as follows for ordered comparisons:
-    ///   Equal: EQ (Z=1)
-    ///   LessThan: MI (N=1)
-    ///   GreaterThan: GT (Z=0, N=V)
-    ///   Unordered (NaN): VS (V=1)
+    /// AArch64 FCMP sets NZCV as follows:
+    ///   Equal:     NZCV = 0110 (Z=1, C=1)
+    ///   LessThan:  NZCV = 1000 (N=1)
+    ///   GreaterThan: NZCV = 0010 (C=1)
+    ///   Unordered (NaN): NZCV = 0011 (C=1, V=1)
+    ///
+    /// Ordered predicates return false for NaN. Unordered predicates return
+    /// true for NaN, implemented by inverting the complementary ordered CC:
+    ///   UnorderedNotEqual = !Equal => NE  (NaN: Z=0, NE true)
+    ///   UnorderedLessThan = !GreaterThanOrEqual => LT  (NaN: N!=V, LT true)
+    ///   UnorderedLessThanOrEqual = !GreaterThan => LE  (NaN: !(Z=0&&N=V), LE true)
+    ///   UnorderedGreaterThan = !LessThanOrEqual => HI  (NaN: C=1&&Z=0, HI true)
+    ///   UnorderedGreaterThanOrEqual = !LessThan => PL  (NaN: N=0, PL true)
+    ///
+    /// Note: UnorderedEqual (EQ||VS) cannot be a single CC. The ISel emits
+    /// a CSET+CSINC sequence for this case (see `select_fcmp`).
+    /// The CC returned here (VS) is only used as the second condition in that
+    /// sequence — the first condition (EQ) is handled directly by select_fcmp.
     pub fn from_floatcc(cc: FloatCC) -> Self {
         match cc {
+            // Ordered (false for NaN)
             FloatCC::Equal => AArch64CC::EQ,
             FloatCC::NotEqual => AArch64CC::NE,
             FloatCC::LessThan => AArch64CC::MI,
@@ -198,6 +212,15 @@ impl AArch64CC {
             FloatCC::GreaterThanOrEqual => AArch64CC::GE,
             FloatCC::Ordered => AArch64CC::VC,
             FloatCC::Unordered => AArch64CC::VS,
+            // Unordered (true for NaN) — invert complementary ordered CC
+            FloatCC::UnorderedNotEqual => AArch64CC::NE,    // !OEQ
+            FloatCC::UnorderedLessThan => AArch64CC::LT,    // !OGE
+            FloatCC::UnorderedLessThanOrEqual => AArch64CC::LE, // !OGT
+            FloatCC::UnorderedGreaterThan => AArch64CC::HI,  // !OLE
+            FloatCC::UnorderedGreaterThanOrEqual => AArch64CC::PL, // !OLT
+            // UnorderedEqual needs two CCs (EQ || VS); select_fcmp handles
+            // this specially. Return VS here as the secondary condition.
+            FloatCC::UnorderedEqual => AArch64CC::VS,
         }
     }
 
@@ -3174,7 +3197,12 @@ impl InstructionSelector {
         Ok(())
     }
 
-    /// Select floating-point comparison: FCMP + CSET.
+    /// Select floating-point comparison: FCMP + CSET (+ CSINC for two-CC cases).
+    ///
+    /// Most float conditions map to a single AArch64 condition code after FCMP.
+    /// `UnorderedEqual` (EQ || VS) needs a two-instruction materialization:
+    ///   CSET tmp, EQ; CSINC dst, tmp, WZR, VS
+    /// When VS (NaN): dst = WZR+1 = 1. When !VS: dst = tmp (1 if EQ, 0 otherwise).
     fn select_fcmp(&mut self, cond: FloatCC, inst: &Instruction, block: Block) -> Result<(), ISelError> {
         Self::require_args(inst, 2, "Fcmp")?;
         Self::require_result(inst, "Fcmp")?;
@@ -3200,7 +3228,35 @@ impl InstructionSelector {
             ISelInst::new(cmp_opc, vec![lhs, rhs]),
         );
 
-        // CSET to materialize result
+        // UnorderedEqual needs two condition codes: EQ || VS.
+        // Emit: CSET tmp, EQ; CSINC dst, tmp, WZR, VS
+        if cond == FloatCC::UnorderedEqual {
+            let tmp = self.new_vreg(RegClass::Gpr32);
+            self.func.push_inst(
+                block,
+                ISelInst::new(
+                    AArch64Opcode::CSet,
+                    vec![ISelOperand::VReg(tmp), ISelOperand::CondCode(AArch64CC::EQ)],
+                ),
+            );
+            let dst = self.new_vreg(RegClass::Gpr32);
+            self.func.push_inst(
+                block,
+                ISelInst::new(
+                    AArch64Opcode::Csinc,
+                    vec![
+                        ISelOperand::VReg(dst),
+                        ISelOperand::VReg(tmp),
+                        ISelOperand::Imm(0), // WZR
+                        ISelOperand::CondCode(AArch64CC::VS),
+                    ],
+                ),
+            );
+            self.define_value(result_val, ISelOperand::VReg(dst), Type::B1);
+            return Ok(());
+        }
+
+        // Single-CC case: CSET to materialize result
         let cc = AArch64CC::from_floatcc(cond);
         let dst = self.new_vreg(RegClass::Gpr32);
         self.func.push_inst(
