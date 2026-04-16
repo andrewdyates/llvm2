@@ -64,7 +64,7 @@ pub fn coalesce_copies(
 
         for &inst_id in &block.insts {
             let inst = &func.insts[inst_id.0 as usize];
-            if inst.opcode != phi_elim::PSEUDO_COPY {
+            if !phi_elim::is_copy_opcode(inst.opcode) {
                 continue;
             }
 
@@ -472,7 +472,7 @@ impl CopyCoalescer {
 
             for &inst_id in &block.insts {
                 let inst = &func.insts[inst_id.0 as usize];
-                if inst.opcode != phi_elim::PSEUDO_COPY {
+                if !phi_elim::is_copy_opcode(inst.opcode) {
                     continue;
                 }
 

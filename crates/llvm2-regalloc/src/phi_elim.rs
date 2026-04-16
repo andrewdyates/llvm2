@@ -35,6 +35,25 @@ pub const PSEUDO_PARALLEL_COPY: u16 = 0xFFE0;
 /// Pseudo-opcode for a sequential copy.
 pub const PSEUDO_COPY: u16 = 0xFFE1;
 
+/// The u16 discriminant value of `AArch64Opcode::Copy` (the ISel-level copy
+/// pseudo). This is the value produced by `AArch64Opcode::Copy as u16` when
+/// the IR is converted to regalloc format via `ir_to_regalloc()`.
+///
+/// Copy coalescing and post-RA coalescing must recognize both this value AND
+/// `PSEUDO_COPY` to handle copies from ISel (which use `AArch64Opcode::Copy`)
+/// and copies from phi elimination (which use `PSEUDO_COPY`).
+pub const IR_COPY_OPCODE: u16 = llvm2_ir::inst::AArch64Opcode::Copy as u16;
+
+/// Returns true if the given u16 opcode represents a copy pseudo-instruction.
+///
+/// Matches both `PSEUDO_COPY` (inserted by phi elimination) and
+/// `IR_COPY_OPCODE` (from `AArch64Opcode::Copy` in ISel). Both must be
+/// recognized by copy coalescing and post-RA coalescing.
+#[inline]
+pub fn is_copy_opcode(opcode: u16) -> bool {
+    opcode == PSEUDO_COPY || opcode == IR_COPY_OPCODE
+}
+
 /// A parallel copy: multiple simultaneous assignments.
 ///
 /// All sources are read before any destination is written.

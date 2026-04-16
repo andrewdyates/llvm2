@@ -169,6 +169,20 @@ pub fn expand_pseudos(func: &mut IrMachFunction) {
                 inst.opcode = AArch64Opcode::Nop;
                 inst.operands.clear();
             }
+            AArch64Opcode::Copy => {
+                // Copy pseudo-instruction: expand to real MovR (ORR Rd, XZR, Rm).
+                // Normally lower_copies() in pipeline.rs handles this before we
+                // get here, but if a Copy survives (e.g., standalone lowering
+                // path), expand it now.
+                if inst.operands.len() >= 2 && inst.operands[0] == inst.operands[1] {
+                    // Identity copy: src == dst, convert to NOP.
+                    inst.opcode = AArch64Opcode::Nop;
+                    inst.operands.clear();
+                } else {
+                    inst.opcode = AArch64Opcode::MovR;
+                    inst.flags.remove(InstFlags::IS_PSEUDO);
+                }
+            }
             AArch64Opcode::Nop => {
                 // Already a no-op; will be skipped during encoding.
             }
