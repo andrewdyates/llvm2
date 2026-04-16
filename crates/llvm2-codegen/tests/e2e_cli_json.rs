@@ -75,14 +75,14 @@ fn e2e_json_wire_format_return_42() {
     let mut mb = ModuleBuilder::new("cli_e2e_test");
     // Function names use leading underscore per Mach-O convention:
     // tMIR name "_return_42" -> Mach-O symbol "__return_42" -> C sees "_return_42"
-    let mut fb = mb.function("_return_42", vec![], vec![Ty::Int(64)]);
+    let mut fb = mb.function("_return_42", vec![], vec![Ty::int(64)]);
     let (entry_id, _params) = fb.entry_block();
     let result_val = fb.fresh_value();
     fb.add_block(
         entry_id,
         vec![],
         vec![
-            builder::iconst(Ty::Int(64), 42, result_val),
+            builder::iconst(Ty::int(64), 42, result_val),
             builder::ret(vec![result_val]),
         ],
     );
@@ -243,14 +243,14 @@ fn e2e_json_wire_format_add_args() {
     // Build module: fn _add_i64(a: i64, b: i64) -> i64 { a + b }
     // Leading underscore for Mach-O convention.
     let mut mb = ModuleBuilder::new("cli_e2e_add");
-    let mut fb = mb.function("_add_i64", vec![Ty::Int(64), Ty::Int(64)], vec![Ty::Int(64)]);
+    let mut fb = mb.function("_add_i64", vec![Ty::int(64), Ty::int(64)], vec![Ty::int(64)]);
     let (entry_id, params) = fb.entry_block();
     let result_val = fb.fresh_value();
     fb.add_block(
         entry_id,
-        vec![(params[0], Ty::Int(64)), (params[1], Ty::Int(64))],
+        vec![(params[0], Ty::int(64)), (params[1], Ty::int(64))],
         vec![
-            builder::binop(BinOp::Add, Ty::Int(64), params[0], params[1], result_val),
+            builder::binop(BinOp::Add, Ty::int(64), params[0], params[1], result_val),
             builder::ret(vec![result_val]),
         ],
     );
@@ -339,11 +339,11 @@ int main() {
 fn e2e_json_file_roundtrip_compile() {
     // Build a simple tMIR module.
     let mut mb = ModuleBuilder::new("file_roundtrip_test");
-    let mut fb = mb.function("identity", vec![Ty::Int(64)], vec![Ty::Int(64)]);
+    let mut fb = mb.function("identity", vec![Ty::int(64)], vec![Ty::int(64)]);
     let (entry_id, params) = fb.entry_block();
     fb.add_block(
         entry_id,
-        vec![(params[0], Ty::Int(64))],
+        vec![(params[0], Ty::int(64))],
         vec![builder::ret(vec![params[0]])],
     );
     let func = fb.build();
@@ -405,27 +405,27 @@ fn e2e_json_multi_function_module() {
     let mut mb = ModuleBuilder::new("multi_func_json");
 
     // Leading underscore for Mach-O convention.
-    let mut fb1 = mb.function("_const_10", vec![], vec![Ty::Int(64)]);
+    let mut fb1 = mb.function("_const_10", vec![], vec![Ty::int(64)]);
     let (entry1, _) = fb1.entry_block();
     let r1 = fb1.fresh_value();
     fb1.add_block(
         entry1,
         vec![],
         vec![
-            builder::iconst(Ty::Int(64), 10, r1),
+            builder::iconst(Ty::int(64), 10, r1),
             builder::ret(vec![r1]),
         ],
     );
     mb.add_function(fb1.build());
 
-    let mut fb2 = mb.function("_const_32", vec![], vec![Ty::Int(64)]);
+    let mut fb2 = mb.function("_const_32", vec![], vec![Ty::int(64)]);
     let (entry2, _) = fb2.entry_block();
     let r2 = fb2.fresh_value();
     fb2.add_block(
         entry2,
         vec![],
         vec![
-            builder::iconst(Ty::Int(64), 32, r2),
+            builder::iconst(Ty::int(64), 32, r2),
             builder::ret(vec![r2]),
         ],
     );
@@ -504,27 +504,27 @@ fn e2e_json_multi_function_link_run() {
     let mut mb = ModuleBuilder::new("multi_link");
 
     // Leading underscore for Mach-O convention.
-    let mut fb1 = mb.function("_const_10", vec![], vec![Ty::Int(64)]);
+    let mut fb1 = mb.function("_const_10", vec![], vec![Ty::int(64)]);
     let (entry1, _) = fb1.entry_block();
     let r1 = fb1.fresh_value();
     fb1.add_block(
         entry1,
         vec![],
         vec![
-            builder::iconst(Ty::Int(64), 10, r1),
+            builder::iconst(Ty::int(64), 10, r1),
             builder::ret(vec![r1]),
         ],
     );
     mb.add_function(fb1.build());
 
-    let mut fb2 = mb.function("_const_32", vec![], vec![Ty::Int(64)]);
+    let mut fb2 = mb.function("_const_32", vec![], vec![Ty::int(64)]);
     let (entry2, _) = fb2.entry_block();
     let r2 = fb2.fresh_value();
     fb2.add_block(
         entry2,
         vec![],
         vec![
-            builder::iconst(Ty::Int(64), 32, r2),
+            builder::iconst(Ty::int(64), 32, r2),
             builder::ret(vec![r2]),
         ],
     );

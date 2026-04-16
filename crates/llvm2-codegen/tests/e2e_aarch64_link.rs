@@ -1899,20 +1899,20 @@ fn build_tmir_classify_module() -> tmir_func::Module {
         id: FuncId(0),
         name: "_classify".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![
             // bb0 (entry): check x < 0
             TmirBlock {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::Int(64))], // x
+                params: vec![(ValueId(0), Ty::int(64))], // x
                 body: vec![
                     // const 0 for comparison
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: 0,
                         },
                         results: vec![ValueId(1)], // zero
@@ -1922,7 +1922,7 @@ fn build_tmir_classify_module() -> tmir_func::Module {
                     InstrNode {
                         instr: Instr::Cmp {
                             op: CmpOp::Slt,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(0)),
                             rhs: Operand::Value(ValueId(1)),
                         },
@@ -1950,7 +1950,7 @@ fn build_tmir_classify_module() -> tmir_func::Module {
                 body: vec![
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: -1_i64 as i64,
                         },
                         results: vec![ValueId(10)],
@@ -1973,7 +1973,7 @@ fn build_tmir_classify_module() -> tmir_func::Module {
                     InstrNode {
                         instr: Instr::Cmp {
                             op: CmpOp::Eq,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(0)),
                             rhs: Operand::Value(ValueId(1)), // zero from bb0
                         },
@@ -2012,7 +2012,7 @@ fn build_tmir_classify_module() -> tmir_func::Module {
                 body: vec![
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: 1,
                         },
                         results: vec![ValueId(30)],
@@ -2062,19 +2062,19 @@ fn build_tmir_sum_to_n_module() -> tmir_func::Module {
         id: FuncId(0),
         name: "_sum_to_n".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![
             // bb0 (entry): acc=0, i=1, jump to loop
             TmirBlock {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::Int(64))], // n
+                params: vec![(ValueId(0), Ty::int(64))], // n
                 body: vec![
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: 0,
                         },
                         results: vec![ValueId(1)], // acc_init = 0
@@ -2082,7 +2082,7 @@ fn build_tmir_sum_to_n_module() -> tmir_func::Module {
                     },
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: 1,
                         },
                         results: vec![ValueId(2)], // i_init = 1
@@ -2105,14 +2105,14 @@ fn build_tmir_sum_to_n_module() -> tmir_func::Module {
             TmirBlock {
                 id: BlockId(1),
                 params: vec![
-                    (ValueId(10), Ty::Int(64)), // acc
-                    (ValueId(11), Ty::Int(64)), // i
+                    (ValueId(10), Ty::int(64)), // acc
+                    (ValueId(11), Ty::int(64)), // i
                 ],
                 body: vec![
                     InstrNode {
                         instr: Instr::Cmp {
                             op: CmpOp::Sle,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(11)), // i
                             rhs: Operand::Value(ValueId(0)),  // n
                         },
@@ -2141,7 +2141,7 @@ fn build_tmir_sum_to_n_module() -> tmir_func::Module {
                     InstrNode {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(10)), // acc
                             rhs: Operand::Value(ValueId(11)), // i
                         },
@@ -2151,7 +2151,7 @@ fn build_tmir_sum_to_n_module() -> tmir_func::Module {
                     // new_i = i + 1
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: 1,
                         },
                         results: vec![ValueId(21)],
@@ -2160,7 +2160,7 @@ fn build_tmir_sum_to_n_module() -> tmir_func::Module {
                     InstrNode {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(11)), // i
                             rhs: Operand::Value(ValueId(21)), // 1
                         },
@@ -2228,8 +2228,8 @@ fn build_tmir_clamp_module() -> tmir_func::Module {
         id: FuncId(0),
         name: "_clamp".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64), Ty::Int(64), Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64), Ty::int(64), Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![
@@ -2237,15 +2237,15 @@ fn build_tmir_clamp_module() -> tmir_func::Module {
             TmirBlock {
                 id: BlockId(0),
                 params: vec![
-                    (ValueId(0), Ty::Int(64)), // x
-                    (ValueId(1), Ty::Int(64)), // lo
-                    (ValueId(2), Ty::Int(64)), // hi
+                    (ValueId(0), Ty::int(64)), // x
+                    (ValueId(1), Ty::int(64)), // lo
+                    (ValueId(2), Ty::int(64)), // hi
                 ],
                 body: vec![
                     InstrNode {
                         instr: Instr::Cmp {
                             op: CmpOp::Slt,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(0)), // x
                             rhs: Operand::Value(ValueId(1)), // lo
                         },
@@ -2285,7 +2285,7 @@ fn build_tmir_clamp_module() -> tmir_func::Module {
                     InstrNode {
                         instr: Instr::Cmp {
                             op: CmpOp::Sgt,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(0)), // x
                             rhs: Operand::Value(ValueId(2)), // hi
                         },
@@ -2367,19 +2367,19 @@ fn build_tmir_factorial_module() -> tmir_func::Module {
         id: FuncId(0),
         name: "_factorial".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![
             // bb0 (entry): check n <= 1
             TmirBlock {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::Int(64))], // n
+                params: vec![(ValueId(0), Ty::int(64))], // n
                 body: vec![
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: 1,
                         },
                         results: vec![ValueId(1)], // const_1
@@ -2388,7 +2388,7 @@ fn build_tmir_factorial_module() -> tmir_func::Module {
                     InstrNode {
                         instr: Instr::Cmp {
                             op: CmpOp::Sle,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(0)), // n
                             rhs: Operand::Value(ValueId(1)), // 1
                         },
@@ -2427,7 +2427,7 @@ fn build_tmir_factorial_module() -> tmir_func::Module {
                 body: vec![
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: 1,
                         },
                         results: vec![ValueId(10)], // acc_init = 1
@@ -2435,7 +2435,7 @@ fn build_tmir_factorial_module() -> tmir_func::Module {
                     },
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: 2,
                         },
                         results: vec![ValueId(11)], // i_init = 2
@@ -2458,14 +2458,14 @@ fn build_tmir_factorial_module() -> tmir_func::Module {
             TmirBlock {
                 id: BlockId(3),
                 params: vec![
-                    (ValueId(20), Ty::Int(64)), // acc
-                    (ValueId(21), Ty::Int(64)), // i
+                    (ValueId(20), Ty::int(64)), // acc
+                    (ValueId(21), Ty::int(64)), // i
                 ],
                 body: vec![
                     InstrNode {
                         instr: Instr::Cmp {
                             op: CmpOp::Sle,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(21)), // i
                             rhs: Operand::Value(ValueId(0)),  // n
                         },
@@ -2494,7 +2494,7 @@ fn build_tmir_factorial_module() -> tmir_func::Module {
                     InstrNode {
                         instr: Instr::BinOp {
                             op: BinOp::Mul,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(20)), // acc
                             rhs: Operand::Value(ValueId(21)), // i
                         },
@@ -2504,7 +2504,7 @@ fn build_tmir_factorial_module() -> tmir_func::Module {
                     // new_i = i + 1
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: 1,
                         },
                         results: vec![ValueId(31)],
@@ -2513,7 +2513,7 @@ fn build_tmir_factorial_module() -> tmir_func::Module {
                     InstrNode {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(21)), // i
                             rhs: Operand::Value(ValueId(31)), // 1
                         },
