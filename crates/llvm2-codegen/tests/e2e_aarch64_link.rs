@@ -1643,3 +1643,228 @@ fn e2e_aarch64_multiblock_all_opt_levels() {
         }
     }
 }
+
+// =============================================================================
+// Cross-function call tests (BRANCH26 relocation)
+//
+// Part of #241 -- BL relocation for cross-function calls
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Builder: two functions where caller BLs to callee
+//
+// fn _callee(x: i32) -> i32 { x + 10 }
+// fn _caller(x: i32) -> i32 { _callee(x) }
+//
+// The key: _caller uses a BL instruction with a Symbol operand targeting
+// _callee. When compiled into one .o via compile_module(), this BL must
+// get an ARM64_RELOC_BRANCH26 relocation so the linker patches the offset.
+// ---------------------------------------------------------------------------
+
+fn build_tmir_cross_call_module() -> tmir_func::Module {
+    use tmir_instrs::{BinOp, Instr, InstrNode};
+    use tmir_types::{Ty, ValueId};
+
+    // fn _callee(x: i32) -> i32 { x + 10 }
+    let callee = TmirFunction {
+        id: FuncId(0),
+        name: "_callee".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(32)],
+            returns: vec![Ty::Int(32)],
+        },
+        entry: BlockId(0),
+        blocks: vec![TmirBlock {
+            id: BlockId(0),
+            params: vec![(ValueId(0), Ty::Int(32))],
+            body: vec![
+                InstrNode {
+                    instr: Instr::Const {
+                        ty: Ty::Int(32),
+                        value: 10,
+                    },
+                    results: vec![ValueId(1)],
+                    proofs: vec![],
+                },
+                InstrNode {
+                    instr: Instr::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::Int(32),
+                        lhs: ValueId(0),
+                        rhs: ValueId(1),
+                    },
+                    results: vec![ValueId(2)],
+                    proofs: vec![],
+                },
+                InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(2)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                },
+            ],
+        }],
+        proofs: vec![],
+    };
+
+    // fn _caller(x: i32) -> i32 { _callee(x) }
+    let caller = TmirFunction {
+        id: FuncId(1),
+        name: "_caller".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(32)],
+            returns: vec![Ty::Int(32)],
+        },
+        entry: BlockId(0),
+        blocks: vec![TmirBlock {
+            id: BlockId(0),
+            params: vec![(ValueId(0), Ty::Int(32))],
+            body: vec![
+                InstrNode {
+                    instr: Instr::Call {
+                        func: FuncId(0), // calls _callee
+                        args: vec![ValueId(0)],
+                        ret_ty: vec![Ty::Int(32)],
+                    },
+                    results: vec![ValueId(1)],
+                    proofs: vec![],
+                },
+                InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(1)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                },
+            ],
+        }],
+        proofs: vec![],
+    };
+
+    tmir_func::Module {
+        name: "e2e_cross_call_test".to_string(),
+        functions: vec![callee, caller],
+        structs: vec![],
+    }
+}
+
+// =============================================================================
+// Test 20: Cross-function call -- compile to valid Mach-O with both symbols
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_cross_call_compile() {
+    let module = build_tmir_cross_call_module();
+    let compiler = Compiler::new(CompilerConfig {
+        opt_level: OptLevel::O0,
+        trace_level: CompilerTraceLevel::Full,
+        ..CompilerConfig::default()
+    });
+
+    let result = compiler.compile(&module).expect("cross-call compilation should succeed");
+
+    assert!(
+        !result.object_code.is_empty(),
+        "cross-call must produce non-empty object code"
+    );
+    // Module has 2 functions
+    assert_eq!(result.metrics.function_count, 2);
+
+    // Valid Mach-O magic
+    let obj = &result.object_code;
+    let magic = u32::from_le_bytes([obj[0], obj[1], obj[2], obj[3]]);
+    assert_eq!(magic, 0xFEED_FACF, "must be valid Mach-O");
+
+    // Write to temp and verify both symbols are present via nm
+    let obj_path = write_temp_file("cross_call", ".o", obj);
+    let nm_out = Command::new("nm")
+        .args([obj_path.to_str().unwrap()])
+        .output()
+        .expect("nm should be available");
+    let nm_stdout = String::from_utf8_lossy(&nm_out.stdout);
+
+    assert!(
+        nm_stdout.contains("__callee"),
+        "nm should show __callee symbol. Got:\n{}",
+        nm_stdout
+    );
+    assert!(
+        nm_stdout.contains("__caller"),
+        "nm should show __caller symbol. Got:\n{}",
+        nm_stdout
+    );
+
+    // Verify relocations via otool -r (should show BRANCH26)
+    let reloc_out = Command::new("otool")
+        .args(["-r", obj_path.to_str().unwrap()])
+        .output()
+        .expect("otool -r should be available");
+    let reloc_stdout = String::from_utf8_lossy(&reloc_out.stdout);
+
+    eprintln!("nm output:\n{}", nm_stdout);
+    eprintln!("otool -r output:\n{}", reloc_stdout);
+    eprintln!(
+        "cross-call: {} bytes, {} functions",
+        result.metrics.code_size_bytes,
+        result.metrics.function_count
+    );
+
+    // The relocation output should contain a BRANCH26 entry for the BL.
+    // otool -r shows ARM64_RELOC_BRANCH26 as type value "2" in numeric output.
+    // Check for both the symbolic name and the numeric type.
+    let has_branch26_reloc = reloc_stdout.contains("ARM64_RELOC_BRANCH26")
+        || reloc_stdout.contains("BRANCH26")
+        // otool -r numeric format: columns are
+        //   address pcrel length extern type scattered symbolnum
+        // For BRANCH26: pcrel=1, length=2, extern=1, type=2
+        || (reloc_stdout.contains("Relocation information")
+            && reloc_stdout.contains("1     2      1      2"));
+    assert!(
+        has_branch26_reloc,
+        "otool -r should show ARM64_RELOC_BRANCH26 (type 2) for the cross-function BL. Got:\n{}",
+        reloc_stdout
+    );
+}
+
+// =============================================================================
+// Test 21: Cross-function call -- link and run
+//
+// fn _callee(x: i32) -> i32 { x + 10 }
+// fn _caller(x: i32) -> i32 { _callee(x) }
+//
+// C driver calls _caller(32), expects 42 (32 + 10).
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_cross_call_link_and_run() {
+    let module = build_tmir_cross_call_module();
+    let obj_bytes = compile_tmir_module_to_obj(&module);
+
+    let driver = r#"
+#include <stdio.h>
+
+extern int _caller(int x);
+
+int main(void) {
+    int r1 = _caller(32);
+    int r2 = _caller(0);
+    int r3 = _caller(-10);
+    printf("caller(32)=%d caller(0)=%d caller(-10)=%d\n", r1, r2, r3);
+    if (r1 != 42) return 1;
+    if (r2 != 10) return 2;
+    if (r3 != 0) return 3;
+    return 0;
+}
+"#;
+
+    let (exit_code, stdout) = link_and_run("cross_call", "cross_call", &obj_bytes, driver);
+    eprintln!("cross_call link+run stdout: {}", stdout.trim());
+    assert_eq!(
+        exit_code, 0,
+        "cross_call link+run failed (exit {}). \
+         1=caller(32)!=42, 2=caller(0)!=10, 3=caller(-10)!=0. \
+         stdout: {}",
+        exit_code, stdout
+    );
+}
