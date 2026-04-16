@@ -1380,12 +1380,43 @@ impl ComputeGraph {
 // Tests
 // ---------------------------------------------------------------------------
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tmir_func::{Block as TmirBlock, Function as TmirFunction, Module};
-    use tmir_instrs::{BinOp, Instr, InstrNode, Operand};
-    use tmir_types::{BlockId, FuncId, FuncTy, Ty, ValueId};
+    use tmir::{
+        Block as TmirBlock, Function as TmirFunction, Module,
+        FuncTy, FuncId, ProofAnnotation,
+    };
+
+    fn v(n: u32) -> ValueId { ValueId::new(n) }
+    fn b(n: u32) -> BlockId { BlockId::new(n) }
+
+    fn node(inst: Inst, results: Vec<ValueId>, proofs: Vec<ProofAnnotation>) -> InstrNode {
+        InstrNode { inst, results, proofs, span: None }
+    }
+
+    /// Helper: build a module from a single function with given params, returns, blocks.
+    fn single_func_module(
+        name: &str,
+        func_name: &str,
+        params: Vec<Ty>,
+        returns: Vec<Ty>,
+        blocks: Vec<TmirBlock>,
+    ) -> Module {
+        let mut module = Module::new(name);
+        let ft_id = module.add_func_type(FuncTy { params, returns, is_vararg: false });
+        let entry = blocks.first().map(|b| b.id).unwrap_or(BlockId::new(0));
+        module.add_function(TmirFunction {
+            id: FuncId::new(0),
+            name: func_name.to_string(),
+            ty: ft_id,
+            entry,
+            blocks,
+            proofs: vec![],
+        });
+        module
+    }
 
     // -------------------------------------------------------------------
     // Test helpers
@@ -1393,343 +1424,169 @@ mod tests {
 
     /// Build a simple tMIR module: fn add(a: i32, b: i32) -> i32 { a + b }
     fn build_scalar_add_module() -> Module {
-        Module {
-            name: "scalar_add".to_string(),
-            functions: vec![TmirFunction {
-                id: FuncId(0),
-                name: "add".to_string(),
-                ty: FuncTy {
-                    params: vec![Ty::I32, Ty::I32],
-                    returns: vec![Ty::I32],
-                },
-                entry: BlockId(0),
-                blocks: vec![TmirBlock {
-                    id: BlockId(0),
-                    params: vec![
-                        (ValueId(0), Ty::I32),
-                        (ValueId(1), Ty::I32),
-                    ],
-                    body: vec![
-                        InstrNode {
-                            instr: Inst::BinOp {
-                                op: BinOp::Add,
-                                ty: Ty::I32,
-                                lhs: Operand::Value(ValueId(0)),
-                                rhs: Operand::Value(ValueId(1)),
-                            },
-                            results: vec![ValueId(2)],
-                            proofs: vec![],
-                        },
-                        InstrNode {
-                            instr: Inst::Return {
-                                values: vec![Operand::Value(ValueId(2))],
-                            },
-                            results: vec![],
-                            proofs: vec![],
-                        },
-                    ],
-                }],
-                proofs: vec![],
+        single_func_module(
+            "scalar_add", "add",
+            vec![Ty::I32, Ty::I32], vec![Ty::I32],
+            vec![TmirBlock {
+                id: b(0),
+                params: vec![(v(0), Ty::I32), (v(1), Ty::I32)],
+                body: vec![
+                    node(Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
+                    node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
+                ],
             }],
-            structs: vec![],
-            globals: vec![],
-            data_layout: None,
-        }
+        )
     }
 
     /// Build a tMIR module with array FAdd operations (data-parallel pattern).
+    /// Uses Ty::Array(TyId, len) -- register F64 as type 0 in module.
     fn build_data_parallel_module() -> Module {
-        Module {
-            name: "data_parallel".to_string(),
-            functions: vec![TmirFunction {
-                id: FuncId(0),
-                name: "vec_add".to_string(),
-                ty: FuncTy {
-                    params: vec![
-                        Ty::array(Ty::float(64), 1000),
-                        Ty::array(Ty::float(64), 1000),
-                    ],
-                    returns: vec![Ty::float(64)],
-                },
-                entry: BlockId(0),
-                blocks: vec![TmirBlock {
-                    id: BlockId(0),
-                    params: vec![
-                        (ValueId(0), Ty::array(Ty::float(64), 1000)),
-                        (ValueId(1), Ty::array(Ty::float(64), 1000)),
-                    ],
-                    body: vec![
-                        InstrNode {
-                            instr: Inst::BinOp {
-                                op: BinOp::FAdd,
-                                ty: Ty::array(Ty::float(64), 1000),
-                                lhs: Operand::Value(ValueId(0)),
-                                rhs: Operand::Value(ValueId(1)),
-                            },
-                            results: vec![ValueId(2)],
-                            proofs: vec![],
-                        },
-                        InstrNode {
-                            instr: Inst::Return {
-                                values: vec![Operand::Value(ValueId(2))],
-                            },
-                            results: vec![],
-                            proofs: vec![],
-                        },
-                    ],
-                }],
-                proofs: vec![],
+        let mut module = Module::new("data_parallel");
+        let f64_ty_id = module.add_type(Ty::F64);
+        let arr_ty = Ty::Array(f64_ty_id, 1000);
+        let ft_id = module.add_func_type(FuncTy {
+            params: vec![arr_ty, arr_ty],
+            returns: vec![Ty::F64],
+            is_vararg: false,
+        });
+        module.add_function(TmirFunction {
+            id: FuncId::new(0),
+            name: "vec_add".to_string(),
+            ty: ft_id,
+            entry: b(0),
+            blocks: vec![TmirBlock {
+                id: b(0),
+                params: vec![(v(0), arr_ty), (v(1), arr_ty)],
+                body: vec![
+                    node(Inst::BinOp { op: BinOp::FAdd, ty: arr_ty, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
+                    node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
+                ],
             }],
-            structs: vec![],
-            globals: vec![],
-            data_layout: None,
-        }
+            proofs: vec![],
+        });
+        module
     }
 
     /// Build a tMIR module with FMul+FAdd pattern (matrix-heavy / MAC).
     fn build_matrix_heavy_module() -> Module {
-        Module {
-            name: "matrix_heavy".to_string(),
-            functions: vec![TmirFunction {
-                id: FuncId(0),
-                name: "dot_product".to_string(),
-                ty: FuncTy {
-                    params: vec![
-                        Ty::array(Ty::float(64), 1000),
-                        Ty::array(Ty::float(64), 1000),
-                    ],
-                    returns: vec![Ty::float(64)],
-                },
-                entry: BlockId(0),
-                blocks: vec![TmirBlock {
-                    id: BlockId(0),
-                    params: vec![
-                        (ValueId(0), Ty::array(Ty::float(64), 1000)),
-                        (ValueId(1), Ty::array(Ty::float(64), 1000)),
-                    ],
-                    body: vec![
-                        // FMul: multiply elements
-                        InstrNode {
-                            instr: Inst::BinOp {
-                                op: BinOp::FMul,
-                                ty: Ty::array(Ty::float(64), 1000),
-                                lhs: Operand::Value(ValueId(0)),
-                                rhs: Operand::Value(ValueId(1)),
-                            },
-                            results: vec![ValueId(2)],
-                            proofs: vec![],
-                        },
-                        // FAdd: accumulate (MAC pattern)
-                        InstrNode {
-                            instr: Inst::BinOp {
-                                op: BinOp::FAdd,
-                                ty: Ty::float(64),
-                                lhs: Operand::Value(ValueId(2)),
-                                rhs: Operand::Value(ValueId(2)),
-                            },
-                            results: vec![ValueId(3)],
-                            proofs: vec![],
-                        },
-                        InstrNode {
-                            instr: Inst::Return {
-                                values: vec![Operand::Value(ValueId(3))],
-                            },
-                            results: vec![],
-                            proofs: vec![],
-                        },
-                    ],
-                }],
-                proofs: vec![],
+        let mut module = Module::new("matrix_heavy");
+        let f64_ty_id = module.add_type(Ty::F64);
+        let arr_ty = Ty::Array(f64_ty_id, 1000);
+        let ft_id = module.add_func_type(FuncTy {
+            params: vec![arr_ty, arr_ty],
+            returns: vec![Ty::F64],
+            is_vararg: false,
+        });
+        module.add_function(TmirFunction {
+            id: FuncId::new(0),
+            name: "dot_product".to_string(),
+            ty: ft_id,
+            entry: b(0),
+            blocks: vec![TmirBlock {
+                id: b(0),
+                params: vec![(v(0), arr_ty), (v(1), arr_ty)],
+                body: vec![
+                    node(Inst::BinOp { op: BinOp::FMul, ty: arr_ty, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
+                    node(Inst::BinOp { op: BinOp::FAdd, ty: Ty::F64, lhs: v(2), rhs: v(2) }, vec![v(3)], vec![]),
+                    node(Inst::Return { values: vec![v(3)] }, vec![], vec![]),
+                ],
             }],
-            structs: vec![],
-            globals: vec![],
-            data_layout: None,
-        }
+            proofs: vec![],
+        });
+        module
     }
 
     /// Build a large data-parallel module (100K-element arrays).
-    /// Workload large enough for GPU profitability thresholds.
     fn build_large_data_parallel_module() -> Module {
-        Module {
-            name: "large_data_parallel".to_string(),
-            functions: vec![TmirFunction {
-                id: FuncId(0),
-                name: "large_vec_add".to_string(),
-                ty: FuncTy {
-                    params: vec![
-                        Ty::array(Ty::float(64), 100_000),
-                        Ty::array(Ty::float(64), 100_000),
-                    ],
-                    returns: vec![Ty::float(64)],
-                },
-                entry: BlockId(0),
-                blocks: vec![TmirBlock {
-                    id: BlockId(0),
-                    params: vec![
-                        (ValueId(0), Ty::array(Ty::float(64), 100_000)),
-                        (ValueId(1), Ty::array(Ty::float(64), 100_000)),
-                    ],
-                    body: vec![
-                        InstrNode {
-                            instr: Inst::BinOp {
-                                op: BinOp::FAdd,
-                                ty: Ty::array(Ty::float(64), 100_000),
-                                lhs: Operand::Value(ValueId(0)),
-                                rhs: Operand::Value(ValueId(1)),
-                            },
-                            results: vec![ValueId(2)],
-                            proofs: vec![],
-                        },
-                        InstrNode {
-                            instr: Inst::Return {
-                                values: vec![Operand::Value(ValueId(2))],
-                            },
-                            results: vec![],
-                            proofs: vec![],
-                        },
-                    ],
-                }],
-                proofs: vec![],
+        let mut module = Module::new("large_data_parallel");
+        let f64_ty_id = module.add_type(Ty::F64);
+        let arr_ty = Ty::Array(f64_ty_id, 100_000);
+        let ft_id = module.add_func_type(FuncTy {
+            params: vec![arr_ty, arr_ty],
+            returns: vec![Ty::F64],
+            is_vararg: false,
+        });
+        module.add_function(TmirFunction {
+            id: FuncId::new(0),
+            name: "large_vec_add".to_string(),
+            ty: ft_id,
+            entry: b(0),
+            blocks: vec![TmirBlock {
+                id: b(0),
+                params: vec![(v(0), arr_ty), (v(1), arr_ty)],
+                body: vec![
+                    node(Inst::BinOp { op: BinOp::FAdd, ty: arr_ty, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
+                    node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
+                ],
             }],
-            structs: vec![],
-            globals: vec![],
-            data_layout: None,
-        }
+            proofs: vec![],
+        });
+        module
     }
 
     /// Build a large matrix-heavy module (100K-element arrays).
-    /// Workload large enough for GPU/ANE profitability thresholds.
     fn build_large_matrix_heavy_module() -> Module {
-        Module {
-            name: "large_matrix_heavy".to_string(),
-            functions: vec![TmirFunction {
-                id: FuncId(0),
-                name: "large_dot_product".to_string(),
-                ty: FuncTy {
-                    params: vec![
-                        Ty::array(Ty::float(64), 100_000),
-                        Ty::array(Ty::float(64), 100_000),
-                    ],
-                    returns: vec![Ty::float(64)],
-                },
-                entry: BlockId(0),
-                blocks: vec![TmirBlock {
-                    id: BlockId(0),
-                    params: vec![
-                        (ValueId(0), Ty::array(Ty::float(64), 100_000)),
-                        (ValueId(1), Ty::array(Ty::float(64), 100_000)),
-                    ],
-                    body: vec![
-                        // FMul: multiply elements
-                        InstrNode {
-                            instr: Inst::BinOp {
-                                op: BinOp::FMul,
-                                ty: Ty::array(Ty::float(64), 100_000),
-                                lhs: Operand::Value(ValueId(0)),
-                                rhs: Operand::Value(ValueId(1)),
-                            },
-                            results: vec![ValueId(2)],
-                            proofs: vec![],
-                        },
-                        // FAdd: accumulate (MAC pattern)
-                        InstrNode {
-                            instr: Inst::BinOp {
-                                op: BinOp::FAdd,
-                                ty: Ty::float(64),
-                                lhs: Operand::Value(ValueId(2)),
-                                rhs: Operand::Value(ValueId(2)),
-                            },
-                            results: vec![ValueId(3)],
-                            proofs: vec![],
-                        },
-                        InstrNode {
-                            instr: Inst::Return {
-                                values: vec![Operand::Value(ValueId(3))],
-                            },
-                            results: vec![],
-                            proofs: vec![],
-                        },
-                    ],
-                }],
-                proofs: vec![],
+        let mut module = Module::new("large_matrix_heavy");
+        let f64_ty_id = module.add_type(Ty::F64);
+        let arr_ty = Ty::Array(f64_ty_id, 100_000);
+        let ft_id = module.add_func_type(FuncTy {
+            params: vec![arr_ty, arr_ty],
+            returns: vec![Ty::F64],
+            is_vararg: false,
+        });
+        module.add_function(TmirFunction {
+            id: FuncId::new(0),
+            name: "large_dot_product".to_string(),
+            ty: ft_id,
+            entry: b(0),
+            blocks: vec![TmirBlock {
+                id: b(0),
+                params: vec![(v(0), arr_ty), (v(1), arr_ty)],
+                body: vec![
+                    node(Inst::BinOp { op: BinOp::FMul, ty: arr_ty, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
+                    node(Inst::BinOp { op: BinOp::FAdd, ty: Ty::F64, lhs: v(2), rhs: v(2) }, vec![v(3)], vec![]),
+                    node(Inst::Return { values: vec![v(3)] }, vec![], vec![]),
+                ],
             }],
-            structs: vec![],
-            globals: vec![],
-            data_layout: None,
-        }
+            proofs: vec![],
+        });
+        module
     }
 
-    /// Build a module with two functions that have a data dependency
-    /// (second function consumes values from the first).
+    /// Build a module with two blocks (branch between them).
     fn build_two_block_module() -> Module {
-        Module {
-            name: "two_block".to_string(),
-            functions: vec![TmirFunction {
-                id: FuncId(0),
-                name: "two_blocks".to_string(),
-                ty: FuncTy {
-                    params: vec![Ty::I32, Ty::I32],
-                    returns: vec![Ty::I32],
+        let mut module = Module::new("two_block");
+        let ft_id = module.add_func_type(FuncTy {
+            params: vec![Ty::I32, Ty::I32],
+            returns: vec![Ty::I32],
+            is_vararg: false,
+        });
+        module.add_function(TmirFunction {
+            id: FuncId::new(0),
+            name: "two_blocks".to_string(),
+            ty: ft_id,
+            entry: b(0),
+            blocks: vec![
+                TmirBlock {
+                    id: b(0),
+                    params: vec![(v(0), Ty::I32), (v(1), Ty::I32)],
+                    body: vec![
+                        node(Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
+                        node(Inst::Br { target: b(1), args: vec![v(2)] }, vec![], vec![]),
+                    ],
                 },
-                entry: BlockId(0),
-                blocks: vec![
-                    TmirBlock {
-                        id: BlockId(0),
-                        params: vec![
-                            (ValueId(0), Ty::I32),
-                            (ValueId(1), Ty::I32),
-                        ],
-                        body: vec![
-                            InstrNode {
-                                instr: Inst::BinOp {
-                                    op: BinOp::Add,
-                                    ty: Ty::I32,
-                                    lhs: Operand::Value(ValueId(0)),
-                                    rhs: Operand::Value(ValueId(1)),
-                                },
-                                results: vec![ValueId(2)],
-                                proofs: vec![],
-                            },
-                            InstrNode {
-                                instr: Inst::Br {
-                                    target: BlockId(1),
-                                    args: vec![Operand::Value(ValueId(2))],
-                                },
-                                results: vec![],
-                                proofs: vec![],
-                            },
-                        ],
-                    },
-                    TmirBlock {
-                        id: BlockId(1),
-                        params: vec![(ValueId(3), Ty::I32)],
-                        body: vec![
-                            InstrNode {
-                                instr: Inst::BinOp {
-                                    op: BinOp::Mul,
-                                    ty: Ty::I32,
-                                    lhs: Operand::Value(ValueId(3)),
-                                    rhs: Operand::Value(ValueId(3)),
-                                },
-                                results: vec![ValueId(4)],
-                                proofs: vec![],
-                            },
-                            InstrNode {
-                                instr: Inst::Return {
-                                    values: vec![Operand::Value(ValueId(4))],
-                                },
-                                results: vec![],
-                                proofs: vec![],
-                            },
-                        ],
-                    },
-                ],
-                proofs: vec![],
-            }],
-            structs: vec![],
-            globals: vec![],
-            data_layout: None,
-        }
+                TmirBlock {
+                    id: b(1),
+                    params: vec![(v(3), Ty::I32)],
+                    body: vec![
+                        node(Inst::BinOp { op: BinOp::Mul, ty: Ty::I32, lhs: v(3), rhs: v(3) }, vec![v(4)], vec![]),
+                        node(Inst::Return { values: vec![v(4)] }, vec![], vec![]),
+                    ],
+                },
+            ],
+            proofs: vec![],
+        });
+        module
     }
 
     // -------------------------------------------------------------------
@@ -1746,10 +1603,6 @@ mod tests {
         assert!(graph.nodes[0].legal_targets.contains(&ComputeTarget::CpuScalar));
     }
 
-    // -------------------------------------------------------------------
-    // Test: Data-parallel module detection
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_data_parallel_detection() {
         let module = build_data_parallel_module();
@@ -1758,10 +1611,6 @@ mod tests {
         assert_eq!(graph.num_nodes(), 1);
         assert_eq!(graph.nodes[0].kind, NodeKind::DataParallel);
     }
-
-    // -------------------------------------------------------------------
-    // Test: Matrix-heavy module detection (FMul + FAdd pattern)
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_matrix_heavy_detection() {
@@ -1772,30 +1621,18 @@ mod tests {
         assert_eq!(graph.nodes[0].kind, NodeKind::MatrixHeavy);
     }
 
-    // -------------------------------------------------------------------
-    // Test: Two-block module produces edges
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_two_block_produces_edges() {
         let module = build_two_block_module();
         let graph = ComputeGraph::from_module(&module);
 
-        // Two blocks -> two nodes
         assert_eq!(graph.num_nodes(), 2);
-
-        // Block 1 consumes ValueId(2) produced by block 0 (via branch args)
-        // So there should be an edge from node 0 to node 1
         assert!(graph.num_edges() >= 1, "Expected at least 1 edge, got {}", graph.num_edges());
 
         let edge = &graph.edges[0];
         assert_eq!(edge.from, ComputeNodeId(0));
         assert_eq!(edge.to, ComputeNodeId(1));
     }
-
-    // -------------------------------------------------------------------
-    // Test: Partition cost calculation — all on CPU scalar
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_partition_cost_all_cpu() {
@@ -1810,26 +1647,17 @@ mod tests {
         assert!(cost.unwrap() > 0, "Cost should be positive");
     }
 
-    // -------------------------------------------------------------------
-    // Test: Partition cost with illegal target returns None
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_partition_cost_illegal_target() {
         let module = build_scalar_add_module();
         let graph = ComputeGraph::from_module(&module);
 
-        // Without proofs, GPU is not legal for scalar ops
         let mut assignment = HashMap::new();
         assignment.insert(ComputeNodeId(0), ComputeTarget::Gpu);
 
         let cost = graph.partition_cost(&assignment);
         assert!(cost.is_none(), "GPU should be illegal without proofs");
     }
-
-    // -------------------------------------------------------------------
-    // Test: Partition cost with missing node returns None
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_partition_cost_missing_node() {
@@ -1841,48 +1669,24 @@ mod tests {
         assert!(cost.is_none(), "Missing node assignment should return None");
     }
 
-    // -------------------------------------------------------------------
-    // Test: Transfer cost between same targets is zero
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_transfer_cost_same_target_zero() {
         let cost = estimate_transfer_cost(1000, ComputeTarget::CpuScalar, ComputeTarget::CpuScalar);
         assert_eq!(cost.total_cycles, 0);
     }
 
-    // -------------------------------------------------------------------
-    // Test: Transfer cost CPU <-> SIMD is zero (same core)
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_transfer_cost_cpu_simd_zero() {
-        let cost = estimate_transfer_cost(
-            8000,
-            ComputeTarget::CpuScalar,
-            ComputeTarget::CpuSimd,
-        );
+        let cost = estimate_transfer_cost(8000, ComputeTarget::CpuScalar, ComputeTarget::CpuSimd);
         assert_eq!(cost.total_cycles, 0);
     }
 
-    // -------------------------------------------------------------------
-    // Test: Transfer cost CPU <-> GPU has overhead
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_transfer_cost_cpu_gpu_has_overhead() {
-        let cost = estimate_transfer_cost(
-            8000,
-            ComputeTarget::CpuScalar,
-            ComputeTarget::Gpu,
-        );
+        let cost = estimate_transfer_cost(8000, ComputeTarget::CpuScalar, ComputeTarget::Gpu);
         assert!(cost.total_cycles >= 5000, "GPU transfer should have launch overhead");
         assert!(cost.overhead_cycles == 5000);
     }
-
-    // -------------------------------------------------------------------
-    // Test: Transfer cost CPU <-> ANE has higher overhead than GPU
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_transfer_cost_cpu_ane_higher_than_gpu() {
@@ -1891,14 +1695,9 @@ mod tests {
         assert!(
             ane_cost.total_cycles > gpu_cost.total_cycles,
             "ANE transfer should cost more than GPU: ANE={}, GPU={}",
-            ane_cost.total_cycles,
-            gpu_cost.total_cycles,
+            ane_cost.total_cycles, gpu_cost.total_cycles,
         );
     }
-
-    // -------------------------------------------------------------------
-    // Test: GPU <-> ANE double-hop cost
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_transfer_cost_gpu_ane_double_hop() {
@@ -1913,45 +1712,30 @@ mod tests {
         );
     }
 
-    // -------------------------------------------------------------------
-    // Test: Two-block partition cost with mixed targets includes transfer
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_partition_cost_with_transfer() {
         let module = build_two_block_module();
         let graph = ComputeGraph::from_module(&module);
 
-        // Both on CpuScalar: no transfer cost
         let mut all_cpu = HashMap::new();
         for node in &graph.nodes {
             all_cpu.insert(node.id, ComputeTarget::CpuScalar);
         }
         let cost_all_cpu = graph.partition_cost(&all_cpu).unwrap();
 
-        // One on CpuScalar, one on CpuSimd: still no transfer cost (same core)
         let mut mixed_cpu_simd = HashMap::new();
         mixed_cpu_simd.insert(graph.nodes[0].id, ComputeTarget::CpuScalar);
         mixed_cpu_simd.insert(graph.nodes[1].id, ComputeTarget::CpuSimd);
         let cost_mixed = graph.partition_cost(&mixed_cpu_simd).unwrap();
 
-        // Both should be computable
         assert!(cost_all_cpu > 0);
         assert!(cost_mixed > 0);
     }
-
-    // -------------------------------------------------------------------
-    // Test: ComputeNodeId display
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_compute_node_id_display() {
         assert_eq!(format!("{}", ComputeNodeId(42)), "node_42");
     }
-
-    // -------------------------------------------------------------------
-    // Test: NodeKind display
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_node_kind_display() {
@@ -1959,10 +1743,6 @@ mod tests {
         assert_eq!(format!("{}", NodeKind::DataParallel), "DataParallel");
         assert_eq!(format!("{}", NodeKind::MatrixHeavy), "MatrixHeavy");
     }
-
-    // -------------------------------------------------------------------
-    // Test: Empty module produces empty graph
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_empty_module_empty_graph() {
@@ -1972,10 +1752,6 @@ mod tests {
         assert_eq!(graph.num_edges(), 0);
     }
 
-    // -------------------------------------------------------------------
-    // Test: Partition cost of empty graph
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_empty_graph_partition_cost() {
         let graph = ComputeGraph::new();
@@ -1983,10 +1759,6 @@ mod tests {
         let cost = graph.partition_cost(&assignment);
         assert_eq!(cost, Some(0));
     }
-
-    // -------------------------------------------------------------------
-    // Test: TransferCost::zero
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_transfer_cost_zero() {
@@ -1996,20 +1768,12 @@ mod tests {
         assert_eq!(zero.per_byte_nanocycles, 0);
     }
 
-    // -------------------------------------------------------------------
-    // Test: ComputeCost default
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_compute_cost_default() {
         let cost = ComputeCost::default();
         assert_eq!(cost.latency_cycles, 1);
         assert_eq!(cost.throughput_ops_per_kcycle, 1000);
     }
-
-    // -------------------------------------------------------------------
-    // Test: Graph outgoing/incoming edges
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_graph_edge_queries() {
@@ -2024,404 +1788,234 @@ mod tests {
         }
     }
 
-    // -------------------------------------------------------------------
-    // Test: Pattern detection helper - scalar instructions
-    // -------------------------------------------------------------------
+    // Pattern detection helper tests
 
     #[test]
     fn test_detect_data_parallel_requires_arrays() {
-        let instrs = [InstrNode {
-            instr: Inst::BinOp {
-                op: BinOp::Add,
-                ty: Ty::I32,
-                lhs: Operand::Value(ValueId(0)),
-                rhs: Operand::Value(ValueId(1)),
-            },
-            results: vec![ValueId(2)],
-            proofs: vec![],
-        }];
+        let instrs = [node(
+            Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) },
+            vec![v(2)], vec![],
+        )];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::I32);
-        types.insert(ValueId(1), Ty::I32);
+        types.insert(v(0), Ty::I32);
+        types.insert(v(1), Ty::I32);
 
         assert!(!detect_data_parallel(&refs, &types));
     }
 
-    // -------------------------------------------------------------------
-    // Test: Pattern detection helper - array FAdd is data-parallel
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_detect_data_parallel_with_arrays() {
-        let instrs = [InstrNode {
-            instr: Inst::BinOp {
-                op: BinOp::FAdd,
-                ty: Ty::array(Ty::float(64), 100),
-                lhs: Operand::Value(ValueId(0)),
-                rhs: Operand::Value(ValueId(1)),
-            },
-            results: vec![ValueId(2)],
-            proofs: vec![],
-        }];
+        let f64_ty_id = tmir::TyId::new(0);
+        let arr_ty = Ty::Array(f64_ty_id, 100);
+        let instrs = [node(
+            Inst::BinOp { op: BinOp::FAdd, ty: arr_ty, lhs: v(0), rhs: v(1) },
+            vec![v(2)], vec![],
+        )];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 100));
-        types.insert(ValueId(1), Ty::array(Ty::float(64), 100));
+        types.insert(v(0), arr_ty);
+        types.insert(v(1), arr_ty);
 
         assert!(detect_data_parallel(&refs, &types));
     }
 
-    // -------------------------------------------------------------------
-    // Test: Pattern detection - MAC pattern requires both FMul and FAdd
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_detect_matrix_heavy_requires_mac() {
-        // FMul alone is not matrix-heavy
-        let instrs = [InstrNode {
-            instr: Inst::BinOp {
-                op: BinOp::FMul,
-                ty: Ty::array(Ty::float(64), 100),
-                lhs: Operand::Value(ValueId(0)),
-                rhs: Operand::Value(ValueId(1)),
-            },
-            results: vec![ValueId(2)],
-            proofs: vec![],
-        }];
+        let f64_ty_id = tmir::TyId::new(0);
+        let arr_ty = Ty::Array(f64_ty_id, 100);
+        let instrs = [node(
+            Inst::BinOp { op: BinOp::FMul, ty: arr_ty, lhs: v(0), rhs: v(1) },
+            vec![v(2)], vec![],
+        )];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 100));
+        types.insert(v(0), arr_ty);
 
         assert!(!detect_matrix_heavy(&refs, &types));
     }
 
-    // -------------------------------------------------------------------
-    // Test: classify_node prioritizes MatrixHeavy over DataParallel
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_classify_node_matrix_over_parallel() {
-        let instrs = [InstrNode {
-                instr: Inst::BinOp {
-                    op: BinOp::FMul,
-                    ty: Ty::array(Ty::float(64), 100),
-                    lhs: Operand::Value(ValueId(0)),
-                    rhs: Operand::Value(ValueId(1)),
-                },
-                results: vec![ValueId(2)],
-                proofs: vec![],
-            },
-            InstrNode {
-                instr: Inst::BinOp {
-                    op: BinOp::FAdd,
-                    ty: Ty::float(64),
-                    lhs: Operand::Value(ValueId(2)),
-                    rhs: Operand::Value(ValueId(2)),
-                },
-                results: vec![ValueId(3)],
-                proofs: vec![],
-            }];
+        let f64_ty_id = tmir::TyId::new(0);
+        let arr_ty = Ty::Array(f64_ty_id, 100);
+        let instrs = [
+            node(Inst::BinOp { op: BinOp::FMul, ty: arr_ty, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
+            node(Inst::BinOp { op: BinOp::FAdd, ty: Ty::F64, lhs: v(2), rhs: v(2) }, vec![v(3)], vec![]),
+        ];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 100));
-        types.insert(ValueId(1), Ty::array(Ty::float(64), 100));
+        types.insert(v(0), arr_ty);
+        types.insert(v(1), arr_ty);
 
-        // MAC pattern on arrays -> MatrixHeavy takes priority
         assert_eq!(classify_node(&refs, &types), NodeKind::MatrixHeavy);
     }
-
-    // -------------------------------------------------------------------
-    // Test: estimate_type_bytes
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_estimate_type_bytes() {
         assert_eq!(estimate_type_bytes(&Ty::Bool), 1);
-        assert_eq!(estimate_type_bytes(&Ty::int(8)), 1);
-        assert_eq!(estimate_type_bytes(&Ty::int(16)), 2);
+        assert_eq!(estimate_type_bytes(&Ty::I8), 1);
+        assert_eq!(estimate_type_bytes(&Ty::I16), 2);
         assert_eq!(estimate_type_bytes(&Ty::I32), 4);
         assert_eq!(estimate_type_bytes(&Ty::I64), 8);
-        assert_eq!(estimate_type_bytes(&Ty::float(32)), 4);
-        assert_eq!(estimate_type_bytes(&Ty::float(64)), 8);
-        assert_eq!(
-            estimate_type_bytes(&Ty::array(Ty::float(64), 100)),
-            800
-        );
-        assert_eq!(estimate_type_bytes(&Ty::ptr(Ty::I32)), 8);
+        assert_eq!(estimate_type_bytes(&Ty::F32), 4);
+        assert_eq!(estimate_type_bytes(&Ty::F64), 8);
+        // Array: 8 bytes per element (rough estimate in production code)
+        let f64_ty_id = tmir::TyId::new(0);
+        assert_eq!(estimate_type_bytes(&Ty::Array(f64_ty_id, 100)), 800);
+        assert_eq!(estimate_type_bytes(&Ty::Ptr), 8);
     }
-
-    // -------------------------------------------------------------------
-    // Test: ComputeGraph manual construction
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_manual_graph_construction() {
         let mut graph = ComputeGraph::new();
 
         let mut costs_a = HashMap::new();
-        costs_a.insert(ComputeTarget::CpuScalar, ComputeCost {
-            latency_cycles: 10,
-            throughput_ops_per_kcycle: 1000,
-        });
-        costs_a.insert(ComputeTarget::CpuSimd, ComputeCost {
-            latency_cycles: 5,
-            throughput_ops_per_kcycle: 2000,
-        });
+        costs_a.insert(ComputeTarget::CpuScalar, ComputeCost { latency_cycles: 10, throughput_ops_per_kcycle: 1000 });
+        costs_a.insert(ComputeTarget::CpuSimd, ComputeCost { latency_cycles: 5, throughput_ops_per_kcycle: 2000 });
 
         graph.add_node(ComputeNode {
-            id: ComputeNodeId(0),
-            instructions: vec![],
-            costs: costs_a,
+            id: ComputeNodeId(0), instructions: vec![], costs: costs_a,
             legal_targets: vec![ComputeTarget::CpuScalar, ComputeTarget::CpuSimd],
-            kind: NodeKind::DataParallel,
-            data_size_bytes: 1000,
-            produced_values: vec![],
-            consumed_values: vec![],
-            dominant_op: "ADD".to_string(),
-            target_legality: None,
+            kind: NodeKind::DataParallel, data_size_bytes: 1000,
+            produced_values: vec![], consumed_values: vec![],
+            dominant_op: "ADD".to_string(), target_legality: None,
         });
 
         let mut costs_b = HashMap::new();
-        costs_b.insert(ComputeTarget::CpuScalar, ComputeCost {
-            latency_cycles: 20,
-            throughput_ops_per_kcycle: 1000,
-        });
-        costs_b.insert(ComputeTarget::CpuSimd, ComputeCost {
-            latency_cycles: 8,
-            throughput_ops_per_kcycle: 2000,
-        });
+        costs_b.insert(ComputeTarget::CpuScalar, ComputeCost { latency_cycles: 20, throughput_ops_per_kcycle: 1000 });
+        costs_b.insert(ComputeTarget::CpuSimd, ComputeCost { latency_cycles: 8, throughput_ops_per_kcycle: 2000 });
 
         graph.add_node(ComputeNode {
-            id: ComputeNodeId(1),
-            instructions: vec![],
-            costs: costs_b,
+            id: ComputeNodeId(1), instructions: vec![], costs: costs_b,
             legal_targets: vec![ComputeTarget::CpuScalar, ComputeTarget::CpuSimd],
-            kind: NodeKind::DataParallel,
-            data_size_bytes: 2000,
-            produced_values: vec![],
-            consumed_values: vec![],
-            dominant_op: "ADD".to_string(),
-            target_legality: None,
+            kind: NodeKind::DataParallel, data_size_bytes: 2000,
+            produced_values: vec![], consumed_values: vec![],
+            dominant_op: "ADD".to_string(), target_legality: None,
         });
 
         graph.add_edge(DataEdge {
-            from: ComputeNodeId(0),
-            to: ComputeNodeId(1),
-            transfer_bytes: 1000,
-            transfer_cost: TransferCost::zero(),
+            from: ComputeNodeId(0), to: ComputeNodeId(1),
+            transfer_bytes: 1000, transfer_cost: TransferCost::zero(),
         });
 
         assert_eq!(graph.num_nodes(), 2);
         assert_eq!(graph.num_edges(), 1);
 
-        // All on CpuScalar: 10 + 20 = 30 (no transfer cost between CPU nodes)
         let mut all_cpu = HashMap::new();
         all_cpu.insert(ComputeNodeId(0), ComputeTarget::CpuScalar);
         all_cpu.insert(ComputeNodeId(1), ComputeTarget::CpuScalar);
         assert_eq!(graph.partition_cost(&all_cpu), Some(30));
 
-        // All on CpuSimd: 5 + 8 = 13
         let mut all_simd = HashMap::new();
         all_simd.insert(ComputeNodeId(0), ComputeTarget::CpuSimd);
         all_simd.insert(ComputeNodeId(1), ComputeTarget::CpuSimd);
         assert_eq!(graph.partition_cost(&all_simd), Some(13));
 
-        // Mixed CPU/SIMD: 10 + 8 = 18 + 0 transfer (CPU<->SIMD is zero)
         let mut mixed = HashMap::new();
         mixed.insert(ComputeNodeId(0), ComputeTarget::CpuScalar);
         mixed.insert(ComputeNodeId(1), ComputeTarget::CpuSimd);
         assert_eq!(graph.partition_cost(&mixed), Some(18));
     }
 
-    // -------------------------------------------------------------------
-    // Test: Cost estimation varies by node kind and target
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_cost_estimation_scalar_vs_parallel() {
         let scalar_cpu = estimate_compute_cost(NodeKind::Scalar, 10, 80, ComputeTarget::CpuScalar);
         let parallel_cpu = estimate_compute_cost(NodeKind::DataParallel, 10, 80, ComputeTarget::CpuScalar);
 
-        // Data-parallel on CPU scalar is more expensive than scalar (iterates over data)
         assert!(
             parallel_cpu.latency_cycles >= scalar_cpu.latency_cycles,
             "DataParallel should cost >= Scalar on CPU: parallel={}, scalar={}",
-            parallel_cpu.latency_cycles,
-            scalar_cpu.latency_cycles,
+            parallel_cpu.latency_cycles, scalar_cpu.latency_cycles,
         );
     }
 
-    // -------------------------------------------------------------------
-    // Test: GPU cost lower than CPU for data-parallel
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_gpu_cheaper_for_data_parallel() {
-        let data_size = 8000; // large enough for GPU
+        let data_size = 8000;
         let n_instrs = 5;
 
-        let cpu_cost = estimate_compute_cost(
-            NodeKind::DataParallel, n_instrs, data_size, ComputeTarget::CpuScalar,
-        );
-        let gpu_cost = estimate_compute_cost(
-            NodeKind::DataParallel, n_instrs, data_size, ComputeTarget::Gpu,
-        );
+        let cpu_cost = estimate_compute_cost(NodeKind::DataParallel, n_instrs, data_size, ComputeTarget::CpuScalar);
+        let gpu_cost = estimate_compute_cost(NodeKind::DataParallel, n_instrs, data_size, ComputeTarget::Gpu);
 
         assert!(
             gpu_cost.latency_cycles < cpu_cost.latency_cycles,
             "GPU should be cheaper for data-parallel: GPU={}, CPU={}",
-            gpu_cost.latency_cycles,
-            cpu_cost.latency_cycles,
+            gpu_cost.latency_cycles, cpu_cost.latency_cycles,
         );
     }
-
-    // -------------------------------------------------------------------
-    // Test: ANE cheapest for matrix-heavy
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_ane_cheapest_for_matrix_heavy() {
         let data_size = 8000;
         let n_instrs = 5;
 
-        let cpu_cost = estimate_compute_cost(
-            NodeKind::MatrixHeavy, n_instrs, data_size, ComputeTarget::CpuScalar,
-        );
-        let gpu_cost = estimate_compute_cost(
-            NodeKind::MatrixHeavy, n_instrs, data_size, ComputeTarget::Gpu,
-        );
-        let ane_cost = estimate_compute_cost(
-            NodeKind::MatrixHeavy, n_instrs, data_size, ComputeTarget::NeuralEngine,
-        );
+        let cpu_cost = estimate_compute_cost(NodeKind::MatrixHeavy, n_instrs, data_size, ComputeTarget::CpuScalar);
+        let gpu_cost = estimate_compute_cost(NodeKind::MatrixHeavy, n_instrs, data_size, ComputeTarget::Gpu);
+        let ane_cost = estimate_compute_cost(NodeKind::MatrixHeavy, n_instrs, data_size, ComputeTarget::NeuralEngine);
 
-        assert!(
-            ane_cost.latency_cycles <= gpu_cost.latency_cycles,
-            "ANE should be <= GPU for matrix-heavy: ANE={}, GPU={}",
-            ane_cost.latency_cycles,
-            gpu_cost.latency_cycles,
-        );
-        assert!(
-            gpu_cost.latency_cycles < cpu_cost.latency_cycles,
-            "GPU should be < CPU for matrix-heavy: GPU={}, CPU={}",
-            gpu_cost.latency_cycles,
-            cpu_cost.latency_cycles,
-        );
+        assert!(ane_cost.latency_cycles <= gpu_cost.latency_cycles);
+        assert!(gpu_cost.latency_cycles < cpu_cost.latency_cycles);
     }
-
-    // -------------------------------------------------------------------
-    // Test: Multiple functions in module produce separate nodes
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_multiple_functions_produce_nodes() {
-        let module = Module {
-            name: "multi".to_string(),
-            functions: vec![
-                TmirFunction {
-                    id: FuncId(0),
-                    name: "foo".to_string(),
-                    ty: FuncTy {
-                        params: vec![Ty::I32],
-                        returns: vec![Ty::I32],
-                    },
-                    entry: BlockId(0),
-                    blocks: vec![TmirBlock {
-                        id: BlockId(0),
-                        params: vec![(ValueId(0), Ty::I32)],
-                        body: vec![InstrNode {
-                            instr: Inst::Return { values: vec![Operand::Value(ValueId(0))] },
-                            results: vec![],
-                            proofs: vec![],
-                        }],
-                    }],
-                    proofs: vec![],
-                },
-                TmirFunction {
-                    id: FuncId(1),
-                    name: "bar".to_string(),
-                    ty: FuncTy {
-                        params: vec![Ty::I64],
-                        returns: vec![Ty::I64],
-                    },
-                    entry: BlockId(0),
-                    blocks: vec![TmirBlock {
-                        id: BlockId(0),
-                        params: vec![(ValueId(10), Ty::I64)],
-                        body: vec![InstrNode {
-                            instr: Inst::Return { values: vec![Operand::Value(ValueId(10))] },
-                            results: vec![],
-                            proofs: vec![],
-                        }],
-                    }],
-                    proofs: vec![],
-                },
-            ],
-            structs: vec![],
-            globals: vec![],
-            data_layout: None,
-        };
+        let mut module = Module::new("multi");
+        let ft0 = module.add_func_type(FuncTy { params: vec![Ty::I32], returns: vec![Ty::I32], is_vararg: false });
+        let ft1 = module.add_func_type(FuncTy { params: vec![Ty::I64], returns: vec![Ty::I64], is_vararg: false });
+        module.add_function(TmirFunction {
+            id: FuncId::new(0), name: "foo".to_string(), ty: ft0, entry: b(0),
+            blocks: vec![TmirBlock { id: b(0), params: vec![(v(0), Ty::I32)], body: vec![
+                node(Inst::Return { values: vec![v(0)] }, vec![], vec![]),
+            ]}],
+            proofs: vec![],
+        });
+        module.add_function(TmirFunction {
+            id: FuncId::new(1), name: "bar".to_string(), ty: ft1, entry: b(0),
+            blocks: vec![TmirBlock { id: b(0), params: vec![(v(10), Ty::I64)], body: vec![
+                node(Inst::Return { values: vec![v(10)] }, vec![], vec![]),
+            ]}],
+            proofs: vec![],
+        });
 
         let graph = ComputeGraph::from_module(&module);
         assert_eq!(graph.num_nodes(), 2, "Two functions should produce two nodes");
     }
 
     // ===================================================================
-    // Proof-graph bridge tests (Gap 1: ProofAnalyzer <-> ComputeGraph)
+    // Proof-graph bridge tests
     // ===================================================================
 
-    // -------------------------------------------------------------------
-    // Test helpers for proof-guided construction
-    // -------------------------------------------------------------------
-
     use crate::adapter::{Proof, ProofContext};
-    use crate::target_analysis::{
-        SubgraphProof, TargetProofContext, SubgraphId,
-    };
+    use crate::target_analysis::{SubgraphProof, TargetProofContext, SubgraphId};
     use crate::instructions::Value;
 
-    /// Build a TargetProofContext with Pure subgraph proof on node 0,
-    /// plus InBounds+ValidBorrow on the first two values.
     fn full_proof_context() -> TargetProofContext {
         let mut proof_ctx = ProofContext::default();
-        // Add InBounds + ValidBorrow proofs on LIR Values 0 and 1.
-        // These correspond to the consumed_values mapped as Value(0), Value(1)
-        // by the graph builder.
         for i in 0..2 {
             proof_ctx.value_proofs.insert(
                 Value(i),
                 vec![
-                    Proof::InBounds {
-                        base: tmir_types::ValueId(i),
-                        index: tmir_types::ValueId(i + 100),
-                    },
-                    Proof::ValidBorrow {
-                        borrow: tmir_types::ValueId(i),
-                    },
+                    Proof::InBounds { base: ValueId::new(i), index: ValueId::new(i + 100) },
+                    Proof::ValidBorrow { borrow: ValueId::new(i) },
                 ],
             );
         }
         let mut ctx = TargetProofContext::new(proof_ctx);
-        // Add Pure proof on subgraph 0 (corresponds to first node).
         ctx.add_subgraph_proof(SubgraphId(0), SubgraphProof::Pure);
         ctx
     }
 
-    /// Build a TargetProofContext with full proofs for GPU+parallel reduction.
     fn full_gpu_proof_context() -> TargetProofContext {
         let mut ctx = full_proof_context();
         ctx.add_subgraph_proof(SubgraphId(0), SubgraphProof::Associative);
         ctx.add_subgraph_proof(SubgraphId(0), SubgraphProof::Commutative);
         ctx
     }
-
-    // -------------------------------------------------------------------
-    // Test: with_proof_context propagates Pure proof to unlock SIMD+GPU
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_with_proof_context_unlocks_gpu() {
@@ -2434,25 +2028,13 @@ mod tests {
         assert_eq!(graph.num_nodes(), 1);
         let node = &graph.nodes[0];
 
-        // With Pure + InBounds + ValidBorrow, GPU should be legal for
-        // data-parallel array operations (data size is large enough).
-        assert!(
-            node.legal_targets.contains(&ComputeTarget::Gpu),
-            "GPU should be legal with full proofs, got: {:?}",
-            node.legal_targets
-        );
+        assert!(node.legal_targets.contains(&ComputeTarget::Gpu), "GPU should be legal with full proofs, got: {:?}", node.legal_targets);
         assert!(node.legal_targets.contains(&ComputeTarget::CpuScalar));
         assert!(node.legal_targets.contains(&ComputeTarget::CpuSimd));
-
-        // target_legality should be populated.
         assert!(node.target_legality.is_some());
         let legality = node.target_legality.as_ref().unwrap();
         assert!(legality.is_legal(ComputeTarget::Gpu));
     }
-
-    // -------------------------------------------------------------------
-    // Test: without proofs, GPU is illegal
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_without_proofs_cpu_only() {
@@ -2462,26 +2044,14 @@ mod tests {
         assert_eq!(graph.num_nodes(), 1);
         let node = &graph.nodes[0];
 
-        // Without proofs, side effects are not proven absent -> CPU/SIMD only.
         assert!(node.legal_targets.contains(&ComputeTarget::CpuScalar));
         assert!(node.legal_targets.contains(&ComputeTarget::CpuSimd));
-        assert!(
-            !node.legal_targets.contains(&ComputeTarget::Gpu),
-            "GPU should be illegal without proofs"
-        );
-        assert!(
-            !node.legal_targets.contains(&ComputeTarget::NeuralEngine),
-            "ANE should be illegal without proofs"
-        );
+        assert!(!node.legal_targets.contains(&ComputeTarget::Gpu));
+        assert!(!node.legal_targets.contains(&ComputeTarget::NeuralEngine));
     }
-
-    // -------------------------------------------------------------------
-    // Test: target_recommendations picks cheapest legal target
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_target_recommendations_prefer_gpu() {
-        // Use large module so workload exceeds GPU profitability thresholds.
         let module = build_large_data_parallel_module();
         let proof_ctx = full_proof_context();
         let analyzer = ProofAnalyzer::with_defaults();
@@ -2491,27 +2061,10 @@ mod tests {
 
         assert_eq!(recs.len(), 1);
         let rec = &recs[0];
-
-        // For large data-parallel workloads with full proofs, GPU should pass
-        // profitability check and be in the filtered legal targets.
-        assert!(
-            rec.legal_targets.contains(&ComputeTarget::Gpu),
-            "GPU should be in legal targets for large workload"
-        );
-
-        // The recommendation should be GPU because it has the lowest latency
-        // for large data-parallel workloads.
-        assert_eq!(
-            rec.recommended_target,
-            ComputeTarget::Gpu,
-            "Should recommend GPU for large data-parallel with full proofs, got: {}",
-            rec.recommended_target
-        );
+        assert!(rec.legal_targets.contains(&ComputeTarget::Gpu));
+        assert_eq!(rec.recommended_target, ComputeTarget::Gpu,
+            "Should recommend GPU for large data-parallel with full proofs, got: {}", rec.recommended_target);
     }
-
-    // -------------------------------------------------------------------
-    // Test: target_recommendations without proofs -> CPU recommendation
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_target_recommendations_no_proofs_cpu() {
@@ -2521,19 +2074,10 @@ mod tests {
 
         assert_eq!(recs.len(), 1);
         let rec = &recs[0];
-
-        // Without proofs, should recommend CpuScalar (cheapest for scalar ops).
         assert_eq!(rec.recommended_target, ComputeTarget::CpuScalar);
         assert!(!rec.parallel_reduction_legal);
-        assert!(
-            !rec.legal_targets.contains(&ComputeTarget::Gpu),
-            "GPU should not be in legal targets without proofs"
-        );
+        assert!(!rec.legal_targets.contains(&ComputeTarget::Gpu));
     }
-
-    // -------------------------------------------------------------------
-    // Test: proof_guided_partition_cost returns a valid cost
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_proof_guided_partition_cost() {
@@ -2543,14 +2087,9 @@ mod tests {
 
         let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
         let cost = graph.proof_guided_partition_cost();
-
         assert!(cost.is_some(), "Should produce a valid partition cost");
         assert!(cost.unwrap() > 0, "Cost should be positive");
     }
-
-    // -------------------------------------------------------------------
-    // Test: proof_guided_partition_cost on empty graph
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_proof_guided_partition_cost_empty_graph() {
@@ -2559,10 +2098,6 @@ mod tests {
         assert_eq!(cost, Some(0));
     }
 
-    // -------------------------------------------------------------------
-    // Test: subgraph proofs from TargetProofContext propagate to nodes
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_subgraph_proofs_propagate_to_nodes() {
         let module = build_data_parallel_module();
@@ -2570,20 +2105,10 @@ mod tests {
         let analyzer = ProofAnalyzer::with_defaults();
 
         let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
-
         let node = &graph.nodes[0];
         let legality = node.target_legality.as_ref().unwrap();
-
-        // With Associative + Commutative proofs, parallel reduction should be legal.
-        assert!(
-            legality.parallel_reduction_legal,
-            "Parallel reduction should be legal with Associative + Commutative proofs"
-        );
+        assert!(legality.parallel_reduction_legal);
     }
-
-    // -------------------------------------------------------------------
-    // Test: target_recommendations reports parallel reduction
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_recommendations_include_parallel_reduction() {
@@ -2593,62 +2118,34 @@ mod tests {
 
         let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
         let recs = graph.target_recommendations();
-
         assert_eq!(recs.len(), 1);
-        assert!(
-            recs[0].parallel_reduction_legal,
-            "Recommendation should report parallel reduction legal"
-        );
+        assert!(recs[0].parallel_reduction_legal);
     }
-
-    // -------------------------------------------------------------------
-    // Test: annotate_with_proofs upgrades node legality post-construction
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_annotate_with_proofs_upgrades_legality() {
         let module = build_data_parallel_module();
-
-        // Build graph without proofs first.
         let mut graph = ComputeGraph::from_module(&module);
-        assert!(
-            !graph.nodes[0].legal_targets.contains(&ComputeTarget::Gpu),
-            "GPU should be illegal before annotation"
-        );
+        assert!(!graph.nodes[0].legal_targets.contains(&ComputeTarget::Gpu));
 
-        // Now annotate with full proofs.
         let proof_ctx = full_proof_context();
         let analyzer = ProofAnalyzer::with_defaults();
         graph.annotate_with_proofs(&module, &proof_ctx, &analyzer);
 
-        assert!(
-            graph.nodes[0].legal_targets.contains(&ComputeTarget::Gpu),
-            "GPU should be legal after annotation with proofs"
-        );
+        assert!(graph.nodes[0].legal_targets.contains(&ComputeTarget::Gpu));
         assert!(graph.nodes[0].target_legality.is_some());
     }
 
-    // -------------------------------------------------------------------
-    // Test: matrix-heavy with full proofs recommends GPU or ANE
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_matrix_heavy_with_proofs_recommends_accelerator() {
-        // Use large module so workload exceeds GPU/ANE profitability thresholds.
         let module = build_large_matrix_heavy_module();
-
         let mut proof_ctx = ProofContext::default();
         for i in 0..2 {
             proof_ctx.value_proofs.insert(
                 Value(i),
                 vec![
-                    Proof::InBounds {
-                        base: tmir_types::ValueId(i),
-                        index: tmir_types::ValueId(i + 100),
-                    },
-                    Proof::ValidBorrow {
-                        borrow: tmir_types::ValueId(i),
-                    },
+                    Proof::InBounds { base: ValueId::new(i), index: ValueId::new(i + 100) },
+                    Proof::ValidBorrow { borrow: ValueId::new(i) },
                 ],
             );
         }
@@ -2661,20 +2158,11 @@ mod tests {
 
         assert_eq!(recs.len(), 1);
         let rec = &recs[0];
-
-        // Matrix-heavy with large workload: GPU should be recommended
-        // (profitability thresholds exceeded).
         assert!(
-            rec.recommended_target == ComputeTarget::Gpu
-                || rec.recommended_target == ComputeTarget::NeuralEngine,
-            "Large matrix-heavy with proofs should recommend GPU or ANE, got: {}",
-            rec.recommended_target
+            rec.recommended_target == ComputeTarget::Gpu || rec.recommended_target == ComputeTarget::NeuralEngine,
+            "Large matrix-heavy with proofs should recommend GPU or ANE, got: {}", rec.recommended_target
         );
     }
-
-    // -------------------------------------------------------------------
-    // Test: from_module_with_proofs builds graph with proof context
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_from_module_with_proofs() {
@@ -2682,15 +2170,9 @@ mod tests {
         let proof_ctx = full_proof_context();
 
         let graph = ComputeGraph::from_module_with_proofs(&module, proof_ctx);
-
         assert_eq!(graph.num_nodes(), 1);
-        // from_module_with_proofs uses the default analyzer, but passes proofs.
         assert!(graph.nodes[0].target_legality.is_some());
     }
-
-    // -------------------------------------------------------------------
-    // Test: proof_guided_partition_cost < naive CPU-only cost
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_proof_guided_cost_beats_cpu_only() {
@@ -2699,28 +2181,16 @@ mod tests {
         let analyzer = ProofAnalyzer::with_defaults();
 
         let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
-
-        // Compute proof-guided cost (should pick GPU for data-parallel).
         let guided_cost = graph.proof_guided_partition_cost().unwrap();
 
-        // Compute CPU-only cost.
         let mut cpu_assignment = HashMap::new();
         for node in &graph.nodes {
             cpu_assignment.insert(node.id, ComputeTarget::CpuScalar);
         }
         let cpu_cost = graph.partition_cost(&cpu_assignment).unwrap();
 
-        assert!(
-            guided_cost <= cpu_cost,
-            "Proof-guided cost ({}) should be <= CPU-only cost ({})",
-            guided_cost,
-            cpu_cost
-        );
+        assert!(guided_cost <= cpu_cost, "Proof-guided cost ({}) should be <= CPU-only cost ({})", guided_cost, cpu_cost);
     }
-
-    // -------------------------------------------------------------------
-    // Test: target_legality carries justification strings
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_legality_justification_strings() {
@@ -2732,17 +2202,12 @@ mod tests {
         let node = &graph.nodes[0];
         let legality = node.target_legality.as_ref().unwrap();
 
-        // GPU reason should mention proof-related justification.
         let gpu_reason = legality.reason(ComputeTarget::Gpu);
-        assert!(
-            gpu_reason.is_some(),
-            "GPU should have a justification string"
-        );
+        assert!(gpu_reason.is_some(), "GPU should have a justification string");
         let reason_text = gpu_reason.unwrap();
         assert!(
             reason_text.contains("Pure") || reason_text.contains("legal") || reason_text.contains("InBounds"),
-            "GPU justification should reference proofs: {}",
-            reason_text
+            "GPU justification should reference proofs: {}", reason_text
         );
     }
 
@@ -2750,331 +2215,155 @@ mod tests {
     // False-positive prevention tests (#159)
     // ===================================================================
 
-    // -------------------------------------------------------------------
-    // Test: scalar ops with small array params should NOT be data-parallel
-    // -------------------------------------------------------------------
-
     #[test]
     fn test_small_array_not_data_parallel() {
-        // An array of 2 elements is too small to justify vectorization
-        let instrs = [InstrNode {
-            instr: Inst::BinOp {
-                op: BinOp::FAdd,
-                ty: Ty::array(Ty::float(64), 2),
-                lhs: Operand::Value(ValueId(0)),
-                rhs: Operand::Value(ValueId(1)),
-            },
-            results: vec![ValueId(2)],
-            proofs: vec![],
-        }];
+        let f64_ty_id = tmir::TyId::new(0);
+        let arr_ty = Ty::Array(f64_ty_id, 2);
+        let instrs = [node(
+            Inst::BinOp { op: BinOp::FAdd, ty: arr_ty, lhs: v(0), rhs: v(1) },
+            vec![v(2)], vec![],
+        )];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 2));
-        types.insert(ValueId(1), Ty::array(Ty::float(64), 2));
+        types.insert(v(0), arr_ty);
+        types.insert(v(1), arr_ty);
 
-        assert!(
-            !detect_data_parallel(&refs, &types),
-            "Arrays with < MIN_VECTORIZABLE_ELEMENTS should not be classified as data-parallel"
-        );
+        assert!(!detect_data_parallel(&refs, &types), "Small arrays should not be data-parallel");
     }
-
-    // -------------------------------------------------------------------
-    // Test: scalar binary op coexisting with array param is NOT data-parallel
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_scalar_op_with_array_param_not_data_parallel() {
-        // The binary op operates on scalar i32 values, even though an array
-        // parameter exists in the value types. This should NOT match.
-        let instrs = [InstrNode {
-            instr: Inst::BinOp {
-                op: BinOp::Add,
-                ty: Ty::I32,
-                lhs: Operand::Value(ValueId(0)),
-                rhs: Operand::Value(ValueId(1)),
-            },
-            results: vec![ValueId(2)],
-            proofs: vec![],
-        }];
+        let f64_ty_id = tmir::TyId::new(0);
+        let arr_ty = Ty::Array(f64_ty_id, 1000);
+        let instrs = [node(
+            Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) },
+            vec![v(2)], vec![],
+        )];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::I32); // operand is scalar
-        types.insert(ValueId(1), Ty::I32); // operand is scalar
-        // Some other value is array-typed but not an operand of the Add
-        types.insert(ValueId(10), Ty::array(Ty::float(64), 1000));
+        types.insert(v(0), Ty::I32);
+        types.insert(v(1), Ty::I32);
+        types.insert(v(10), arr_ty);
 
-        assert!(
-            !detect_data_parallel(&refs, &types),
-            "Scalar op with array in scope should not match data-parallel pattern"
-        );
+        assert!(!detect_data_parallel(&refs, &types));
     }
-
-    // -------------------------------------------------------------------
-    // Test: FMul without subsequent FAdd is NOT matrix-heavy
-    // (already tested, but verify the strengthened check still works)
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_fmul_only_with_array_not_matrix_heavy() {
-        let instrs = [InstrNode {
-            instr: Inst::BinOp {
-                op: BinOp::FMul,
-                ty: Ty::array(Ty::float(64), 100),
-                lhs: Operand::Value(ValueId(0)),
-                rhs: Operand::Value(ValueId(1)),
-            },
-            results: vec![ValueId(2)],
-            proofs: vec![],
-        }];
+        let f64_ty_id = tmir::TyId::new(0);
+        let arr_ty = Ty::Array(f64_ty_id, 100);
+        let instrs = [node(
+            Inst::BinOp { op: BinOp::FMul, ty: arr_ty, lhs: v(0), rhs: v(1) },
+            vec![v(2)], vec![],
+        )];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 100));
-        types.insert(ValueId(1), Ty::array(Ty::float(64), 100));
+        types.insert(v(0), arr_ty);
+        types.insert(v(1), arr_ty);
 
-        assert!(
-            !detect_matrix_heavy(&refs, &types),
-            "FMul alone (no FAdd consuming result) should not be matrix-heavy"
-        );
+        assert!(!detect_matrix_heavy(&refs, &types));
     }
-
-    // -------------------------------------------------------------------
-    // Test: FMul + FAdd with no data dependency is NOT matrix-heavy
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_independent_fmul_fadd_not_matrix_heavy() {
-        // FMul produces ValueId(2), but FAdd does NOT consume it --
-        // it consumes ValueId(3) and ValueId(4) instead.
+        let f64_ty_id = tmir::TyId::new(0);
+        let arr_ty = Ty::Array(f64_ty_id, 100);
         let instrs = vec![
-            InstrNode {
-                instr: Inst::BinOp {
-                    op: BinOp::FMul,
-                    ty: Ty::array(Ty::float(64), 100),
-                    lhs: Operand::Value(ValueId(0)),
-                    rhs: Operand::Value(ValueId(1)),
-                },
-                results: vec![ValueId(2)],
-                proofs: vec![],
-            },
-            InstrNode {
-                instr: Inst::BinOp {
-                    op: BinOp::FAdd,
-                    ty: Ty::float(64),
-                    lhs: Operand::Value(ValueId(3)), // NOT ValueId(2)
-                    rhs: Operand::Value(ValueId(4)), // NOT ValueId(2)
-                },
-                results: vec![ValueId(5)],
-                proofs: vec![],
-            },
+            node(Inst::BinOp { op: BinOp::FMul, ty: arr_ty, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
+            node(Inst::BinOp { op: BinOp::FAdd, ty: Ty::F64, lhs: v(3), rhs: v(4) }, vec![v(5)], vec![]),
         ];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 100));
-        types.insert(ValueId(1), Ty::array(Ty::float(64), 100));
-        types.insert(ValueId(3), Ty::float(64));
-        types.insert(ValueId(4), Ty::float(64));
+        types.insert(v(0), arr_ty);
+        types.insert(v(1), arr_ty);
+        types.insert(v(3), Ty::F64);
+        types.insert(v(4), Ty::F64);
 
-        assert!(
-            !detect_matrix_heavy(&refs, &types),
-            "FMul + FAdd without data dependency should not be matrix-heavy"
-        );
+        assert!(!detect_matrix_heavy(&refs, &types));
     }
-
-    // -------------------------------------------------------------------
-    // Test: FMul on scalar + FAdd consuming result is NOT matrix-heavy
-    //       (neither FMul operand is array-typed)
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_scalar_fmul_fadd_not_matrix_heavy() {
-        let instrs = [InstrNode {
-                instr: Inst::BinOp {
-                    op: BinOp::FMul,
-                    ty: Ty::float(64),
-                    lhs: Operand::Value(ValueId(0)),
-                    rhs: Operand::Value(ValueId(1)),
-                },
-                results: vec![ValueId(2)],
-                proofs: vec![],
-            },
-            InstrNode {
-                instr: Inst::BinOp {
-                    op: BinOp::FAdd,
-                    ty: Ty::float(64),
-                    lhs: Operand::Value(ValueId(2)),
-                    rhs: Operand::Value(ValueId(2)),
-                },
-                results: vec![ValueId(3)],
-                proofs: vec![],
-            }];
+        let f64_ty_id = tmir::TyId::new(0);
+        let arr_ty = Ty::Array(f64_ty_id, 1000);
+        let instrs = [
+            node(Inst::BinOp { op: BinOp::FMul, ty: Ty::F64, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
+            node(Inst::BinOp { op: BinOp::FAdd, ty: Ty::F64, lhs: v(2), rhs: v(2) }, vec![v(3)], vec![]),
+        ];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::float(64)); // scalar
-        types.insert(ValueId(1), Ty::float(64)); // scalar
-        // There IS an array in scope, but the FMul operands are not array-typed
-        types.insert(ValueId(10), Ty::array(Ty::float(64), 1000));
+        types.insert(v(0), Ty::F64);
+        types.insert(v(1), Ty::F64);
+        types.insert(v(10), arr_ty);
 
-        assert!(
-            !detect_matrix_heavy(&refs, &types),
-            "Scalar FMul + FAdd with array in scope should not be matrix-heavy"
-        );
+        assert!(!detect_matrix_heavy(&refs, &types));
     }
-
-    // -------------------------------------------------------------------
-    // Test: small array with MAC pattern is NOT matrix-heavy
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_small_array_mac_not_matrix_heavy() {
-        // Array has only 2 elements -- below MIN_VECTORIZABLE_ELEMENTS
-        let instrs = [InstrNode {
-                instr: Inst::BinOp {
-                    op: BinOp::FMul,
-                    ty: Ty::array(Ty::float(64), 2),
-                    lhs: Operand::Value(ValueId(0)),
-                    rhs: Operand::Value(ValueId(1)),
-                },
-                results: vec![ValueId(2)],
-                proofs: vec![],
-            },
-            InstrNode {
-                instr: Inst::BinOp {
-                    op: BinOp::FAdd,
-                    ty: Ty::float(64),
-                    lhs: Operand::Value(ValueId(2)),
-                    rhs: Operand::Value(ValueId(2)),
-                },
-                results: vec![ValueId(3)],
-                proofs: vec![],
-            }];
+        let f64_ty_id = tmir::TyId::new(0);
+        let arr_ty = Ty::Array(f64_ty_id, 2);
+        let instrs = [
+            node(Inst::BinOp { op: BinOp::FMul, ty: arr_ty, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
+            node(Inst::BinOp { op: BinOp::FAdd, ty: Ty::F64, lhs: v(2), rhs: v(2) }, vec![v(3)], vec![]),
+        ];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 2));
-        types.insert(ValueId(1), Ty::array(Ty::float(64), 2));
+        types.insert(v(0), arr_ty);
+        types.insert(v(1), arr_ty);
 
-        assert!(
-            !detect_matrix_heavy(&refs, &types),
-            "Small arrays (< MIN_VECTORIZABLE_ELEMENTS) should not match matrix-heavy"
-        );
+        assert!(!detect_matrix_heavy(&refs, &types));
     }
-
-    // -------------------------------------------------------------------
-    // Test: Confirm valid MAC pattern with data dep still matches
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_valid_mac_with_dependency_matches() {
-        // FMul produces ValueId(2), FAdd consumes ValueId(2) -- valid MAC
-        let instrs = [InstrNode {
-                instr: Inst::BinOp {
-                    op: BinOp::FMul,
-                    ty: Ty::array(Ty::float(64), 100),
-                    lhs: Operand::Value(ValueId(0)),
-                    rhs: Operand::Value(ValueId(1)),
-                },
-                results: vec![ValueId(2)],
-                proofs: vec![],
-            },
-            InstrNode {
-                instr: Inst::BinOp {
-                    op: BinOp::FAdd,
-                    ty: Ty::float(64),
-                    lhs: Operand::Value(ValueId(2)),
-                    rhs: Operand::Value(ValueId(2)),
-                },
-                results: vec![ValueId(3)],
-                proofs: vec![],
-            }];
+        let f64_ty_id = tmir::TyId::new(0);
+        let arr_ty = Ty::Array(f64_ty_id, 100);
+        let instrs = [
+            node(Inst::BinOp { op: BinOp::FMul, ty: arr_ty, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
+            node(Inst::BinOp { op: BinOp::FAdd, ty: Ty::F64, lhs: v(2), rhs: v(2) }, vec![v(3)], vec![]),
+        ];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 100));
-        types.insert(ValueId(1), Ty::array(Ty::float(64), 100));
+        types.insert(v(0), arr_ty);
+        types.insert(v(1), arr_ty);
 
-        assert!(
-            detect_matrix_heavy(&refs, &types),
-            "Valid MAC pattern with array operands and data dep should match"
-        );
+        assert!(detect_matrix_heavy(&refs, &types));
     }
-
-    // -------------------------------------------------------------------
-    // Test: Module with small array ops classifies as Scalar
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_small_array_module_classifies_scalar() {
-        // A module with 2-element arrays should be classified as Scalar
-        // (below the MIN_VECTORIZABLE_ELEMENTS threshold)
-        let module = Module {
-            name: "small_array".to_string(),
-            functions: vec![TmirFunction {
-                id: FuncId(0),
-                name: "tiny_add".to_string(),
-                ty: FuncTy {
-                    params: vec![
-                        Ty::array(Ty::float(64), 2),
-                        Ty::array(Ty::float(64), 2),
-                    ],
-                    returns: vec![Ty::float(64)],
-                },
-                entry: BlockId(0),
-                blocks: vec![TmirBlock {
-                    id: BlockId(0),
-                    params: vec![
-                        (ValueId(0), Ty::array(Ty::float(64), 2)),
-                        (ValueId(1), Ty::array(Ty::float(64), 2)),
-                    ],
-                    body: vec![
-                        InstrNode {
-                            instr: Inst::BinOp {
-                                op: BinOp::FAdd,
-                                ty: Ty::array(Ty::float(64), 2),
-                                lhs: Operand::Value(ValueId(0)),
-                                rhs: Operand::Value(ValueId(1)),
-                            },
-                            results: vec![ValueId(2)],
-                            proofs: vec![],
-                        },
-                        InstrNode {
-                            instr: Inst::Return {
-                                values: vec![Operand::Value(ValueId(2))],
-                            },
-                            results: vec![],
-                            proofs: vec![],
-                        },
-                    ],
-                }],
-                proofs: vec![],
-            }],
-            structs: vec![],
-            globals: vec![],
-            data_layout: None,
-        };
+        let mut module = Module::new("small_array");
+        let f64_ty_id = module.add_type(Ty::F64);
+        let arr_ty = Ty::Array(f64_ty_id, 2);
+        let ft_id = module.add_func_type(FuncTy {
+            params: vec![arr_ty, arr_ty], returns: vec![Ty::F64], is_vararg: false,
+        });
+        module.add_function(TmirFunction {
+            id: FuncId::new(0), name: "tiny_add".to_string(), ty: ft_id, entry: b(0),
+            blocks: vec![TmirBlock { id: b(0), params: vec![(v(0), arr_ty), (v(1), arr_ty)], body: vec![
+                node(Inst::BinOp { op: BinOp::FAdd, ty: arr_ty, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
+                node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
+            ]}],
+            proofs: vec![],
+        });
 
         let graph = ComputeGraph::from_module(&module);
         assert_eq!(graph.num_nodes(), 1);
-        assert_eq!(
-            graph.nodes[0].kind,
-            NodeKind::Scalar,
-            "Small array operations should be classified as Scalar, not DataParallel"
-        );
+        assert_eq!(graph.nodes[0].kind, NodeKind::Scalar);
     }
 
-    // -------------------------------------------------------------------
     // ProfitabilityAnalyzer integration tests
-    // -------------------------------------------------------------------
 
     #[test]
     fn test_small_workload_filters_gpu_ane() {
-        // Small data-parallel module (1000-element arrays, ~16KB data).
-        // GPU requires >= 4096 elements; ANE requires >= 32KB.
-        // Both should be filtered out by ProfitabilityAnalyzer.
         let module = build_data_parallel_module();
         let proof_ctx = full_proof_context();
         let analyzer = ProofAnalyzer::with_defaults();
@@ -3084,30 +2373,16 @@ mod tests {
 
         assert_eq!(recs.len(), 1);
         let rec = &recs[0];
-
-        // GPU and ANE should be filtered out by profitability checks.
+        assert!(!rec.legal_targets.contains(&ComputeTarget::Gpu));
+        assert!(!rec.legal_targets.contains(&ComputeTarget::NeuralEngine));
         assert!(
-            !rec.legal_targets.contains(&ComputeTarget::Gpu),
-            "GPU should be filtered for small workload (profitability)"
-        );
-        assert!(
-            !rec.legal_targets.contains(&ComputeTarget::NeuralEngine),
-            "ANE should be filtered for small workload (profitability)"
-        );
-
-        // Should recommend CPU target instead.
-        assert!(
-            rec.recommended_target == ComputeTarget::CpuScalar
-                || rec.recommended_target == ComputeTarget::CpuSimd,
-            "Small workload should recommend CPU, got: {}",
-            rec.recommended_target
+            rec.recommended_target == ComputeTarget::CpuScalar || rec.recommended_target == ComputeTarget::CpuSimd,
+            "Small workload should recommend CPU, got: {}", rec.recommended_target
         );
     }
 
     #[test]
     fn test_large_workload_includes_gpu() {
-        // Large data-parallel module (100K-element arrays, ~1.6MB data).
-        // Well above GPU thresholds.
         let module = build_large_data_parallel_module();
         let proof_ctx = full_proof_context();
         let analyzer = ProofAnalyzer::with_defaults();
@@ -3116,144 +2391,70 @@ mod tests {
         let recs = graph.target_recommendations();
 
         assert_eq!(recs.len(), 1);
-        let rec = &recs[0];
-
-        // Large workload: GPU should pass profitability check.
-        assert!(
-            rec.legal_targets.contains(&ComputeTarget::Gpu),
-            "GPU should be profitable for large workload"
-        );
+        assert!(recs[0].legal_targets.contains(&ComputeTarget::Gpu));
     }
 
     #[test]
     fn test_target_legality_filters_bitwise_from_ane() {
-        // Build a module with bitwise operations (AND).
-        // ANE does not support bitwise ops per ProfitabilityAnalyzer::target_legality.
-        let module = Module {
-            name: "bitwise".to_string(),
-            functions: vec![TmirFunction {
-                id: FuncId(0),
-                name: "bitwise_and".to_string(),
-                ty: FuncTy {
-                    params: vec![
-                        Ty::array(Ty::I32, 100_000),
-                        Ty::array(Ty::I32, 100_000),
-                    ],
-                    returns: vec![Ty::I32],
-                },
-                entry: BlockId(0),
-                blocks: vec![TmirBlock {
-                    id: BlockId(0),
-                    params: vec![
-                        (ValueId(0), Ty::array(Ty::I32, 100_000)),
-                        (ValueId(1), Ty::array(Ty::I32, 100_000)),
-                    ],
-                    body: vec![
-                        InstrNode {
-                            instr: Inst::BinOp {
-                                op: BinOp::And,
-                                ty: Ty::array(Ty::I32, 100_000),
-                                lhs: Operand::Value(ValueId(0)),
-                                rhs: Operand::Value(ValueId(1)),
-                            },
-                            results: vec![ValueId(2)],
-                            proofs: vec![],
-                        },
-                        InstrNode {
-                            instr: Inst::Return {
-                                values: vec![Operand::Value(ValueId(2))],
-                            },
-                            results: vec![],
-                            proofs: vec![],
-                        },
-                    ],
-                }],
-                proofs: vec![],
-            }],
-            structs: vec![],
-            globals: vec![],
-            data_layout: None,
-        };
+        let mut module = Module::new("bitwise");
+        let i32_ty_id = module.add_type(Ty::I32);
+        let arr_ty = Ty::Array(i32_ty_id, 100_000);
+        let ft_id = module.add_func_type(FuncTy {
+            params: vec![arr_ty, arr_ty], returns: vec![Ty::I32], is_vararg: false,
+        });
+        module.add_function(TmirFunction {
+            id: FuncId::new(0), name: "bitwise_and".to_string(), ty: ft_id, entry: b(0),
+            blocks: vec![TmirBlock { id: b(0), params: vec![(v(0), arr_ty), (v(1), arr_ty)], body: vec![
+                node(Inst::BinOp { op: BinOp::And, ty: arr_ty, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
+                node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
+            ]}],
+            proofs: vec![],
+        });
 
-        // Give full proofs so GPU/ANE are at least proof-legal.
         let proof_ctx = full_proof_context();
         let analyzer = ProofAnalyzer::with_defaults();
-
         let graph = ComputeGraph::with_proof_context(&module, proof_ctx, &analyzer);
         let recs = graph.target_recommendations();
 
         assert_eq!(recs.len(), 1);
-        let rec = &recs[0];
-
-        // ANE should be filtered: ProfitabilityAnalyzer says AND is not
-        // ANE-legal (bitwise ops are not supported by the Neural Engine).
-        assert!(
-            !rec.legal_targets.contains(&ComputeTarget::NeuralEngine),
-            "ANE should not be legal for bitwise AND (hardware limitation)"
-        );
+        assert!(!recs[0].legal_targets.contains(&ComputeTarget::NeuralEngine));
     }
 
     #[test]
     fn test_profitability_set_and_get() {
-        // Verify that setting a ProfitabilityAnalyzer on a graph affects
-        // target_recommendations() behavior.
         let module = build_data_parallel_module();
         let proof_ctx = full_proof_context();
         let analyzer = ProofAnalyzer::with_defaults();
 
-        // Build graph WITHOUT profitability analyzer.
         let mut builder = GraphBuilder::new(analyzer.clone(), proof_ctx.clone());
         let mut graph = builder.build_from_module(&module);
 
-        // Without profitability: GPU should appear in recommendations
-        // (it's proof-legal and has lowest latency).
         let recs_without = graph.target_recommendations();
-        let has_gpu_without = recs_without.iter().any(|r|
-            r.legal_targets.contains(&ComputeTarget::Gpu)
-        );
+        let has_gpu_without = recs_without.iter().any(|r| r.legal_targets.contains(&ComputeTarget::Gpu));
 
-        // Now set the profitability analyzer.
         graph.set_profitability(ProfitabilityAnalyzer::new(CostModelGen::M1));
 
-        // With profitability: GPU should be filtered for this small workload.
         let recs_with = graph.target_recommendations();
-        let has_gpu_with = recs_with.iter().any(|r|
-            r.legal_targets.contains(&ComputeTarget::Gpu)
-        );
+        let has_gpu_with = recs_with.iter().any(|r| r.legal_targets.contains(&ComputeTarget::Gpu));
 
-        // The small workload should see GPU removed after profitability filtering.
         if has_gpu_without {
-            assert!(
-                !has_gpu_with,
-                "ProfitabilityAnalyzer should filter GPU for small workload"
-            );
+            assert!(!has_gpu_with, "ProfitabilityAnalyzer should filter GPU for small workload");
         }
     }
 
     #[test]
     fn test_dominant_op_derived_from_instructions() {
-        // Build modules and verify the dominant_op field is set correctly.
         let module = build_data_parallel_module();
         let graph = ComputeGraph::from_module(&module);
 
         assert_eq!(graph.num_nodes(), 1);
-        // data_parallel module has a single FAdd -> dominant op is "FADD"
-        assert_eq!(
-            graph.nodes[0].dominant_op, "FADD",
-            "Data-parallel module should have dominant_op FADD"
-        );
+        assert_eq!(graph.nodes[0].dominant_op, "FADD");
 
-        // Matrix-heavy module has FMul + FAdd -> dominant is tied,
-        // HashMap iteration order is nondeterministic but both are valid.
         let mat_module = build_matrix_heavy_module();
         let mat_graph = ComputeGraph::from_module(&mat_module);
 
         assert_eq!(mat_graph.num_nodes(), 1);
         let dom = &mat_graph.nodes[0].dominant_op;
-        assert!(
-            dom == "FMUL" || dom == "FADD",
-            "Matrix-heavy module should have dominant_op FMUL or FADD, got: {}",
-            dom
-        );
+        assert!(dom == "FMUL" || dom == "FADD", "Got: {}", dom);
     }
 }
