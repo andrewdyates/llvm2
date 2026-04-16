@@ -24,7 +24,7 @@ pub mod x86_64_isel;
 pub use types::Type;
 pub use function::{Function, StackSlotInfo};
 pub use abi::{
-    AppleAArch64ABI, ArgLocation, PReg, gpr,
+    AppleAArch64ABI, ArgLocation, ClassifyResult, HfaBaseType, PReg, gpr,
     UnwindInfo, SavedRegister, CompactUnwindEntry, DwarfCfiOp,
     generate_compact_unwind, generate_dwarf_cfi,
 };

@@ -60,6 +60,17 @@ pub enum ArgLocation {
     /// Caller allocates memory, callee accesses via pointer.
     /// For returns, X8 holds the pointer (sret convention).
     Indirect { ptr_reg: PReg },
+    /// Multiple consecutive typed registers for HFA (Homogeneous Floating-point
+    /// Aggregate) passing. Each register is listed explicitly with the correct
+    /// register class (S0-S3 for F32 HFA, D0-D3 for F64 HFA).
+    ///
+    /// Per AAPCS64, HFA members are passed in consecutive FPR registers of the
+    /// element type's width. A 2-member F32 HFA uses S0, S1 (not V0, V1).
+    ///
+    /// This variant replaces the previous encoding where HFAs were represented
+    /// as a single `Reg(V0)` with an implicit count. Explicit register lists
+    /// enable unambiguous code generation.
+    RegSequence(Vec<PReg>),
 }
 
 // ---------------------------------------------------------------------------
@@ -360,15 +371,28 @@ impl AppleAArch64ABI {
 
                 // Aggregate types: check for HFA first, then size-based classification.
                 Type::Struct(_) | Type::Array(_, _) => {
-                    // HFA: 1-4 same-type FP fields -> consecutive FPR registers.
-                    // Per AAPCS64, if there aren't enough FPR slots for the
-                    // entire HFA, the whole thing goes on the stack.
-                    if let Some((_base_ty, count)) = Self::detect_hfa(ty) {
+                    // HFA: 1-4 same-type FP fields -> consecutive typed FPR registers.
+                    // Per AAPCS64, HFA members use the element type's register class:
+                    //   F32 HFA -> S0-S7 (Fpr32 class)
+                    //   F64 HFA -> D0-D7 (Fpr64 class)
+                    // If there aren't enough FPR slots for the entire HFA, the
+                    // whole thing goes on the stack (all-or-nothing rule).
+                    //
+                    // Reference: AAPCS64 sec. 6.4.2, Apple ARM64 ABI
+                    // Reference: LLVM AArch64CallingConvention.td line 390+
+                    if let Some((base_ty, count)) = Self::detect_hfa(ty) {
                         if fpr_idx + count <= FPR_ARG_REGS.len() {
-                            // Pass in consecutive FPR registers.
-                            // We record the first register; the ABI lowering
-                            // layer knows to use `count` consecutive V registers.
-                            result.push(ArgLocation::Reg(FPR_ARG_REGS[fpr_idx]));
+                            // Select the typed register array based on HFA element type.
+                            let typed_regs: &[PReg] = match base_ty {
+                                Type::F32 => &S_ARG_REGS,
+                                Type::F64 => &D_ARG_REGS,
+                                _ => &FPR_ARG_REGS, // fallback (shouldn't happen)
+                            };
+                            // Build explicit register sequence for code generation.
+                            let regs: Vec<PReg> = (fpr_idx..fpr_idx + count)
+                                .map(|i| typed_regs[i])
+                                .collect();
+                            result.push(ArgLocation::RegSequence(regs));
                             fpr_idx += count;
                         } else {
                             // Not enough FPR slots: entire HFA goes on stack.
@@ -485,13 +509,22 @@ impl AppleAArch64ABI {
                     }
                 }
 
-                // Aggregate returns: HFA in V regs, small structs in X regs, large via sret.
+                // Aggregate returns: HFA in typed FPR regs, small structs in X regs, large via sret.
                 Type::Struct(_) | Type::Array(_, _) => {
-                    // Check for HFA: return in consecutive V registers.
-                    if let Some((_base_ty, count)) = Self::detect_hfa(ty) {
+                    // Check for HFA: return in consecutive typed FPR registers.
+                    // F32 HFA -> S0-S3, F64 HFA -> D0-D3.
+                    if let Some((base_ty, count)) = Self::detect_hfa(ty) {
                         if fpr_idx + count <= 4 {
-                            // HFA return in V0-V3 (max 4 FPR return registers).
-                            result.push(ArgLocation::Reg(FPR_ARG_REGS[fpr_idx]));
+                            // HFA return in typed FPR registers (max 4).
+                            let typed_regs: &[PReg] = match base_ty {
+                                Type::F32 => &S_ARG_REGS,
+                                Type::F64 => &D_ARG_REGS,
+                                _ => &FPR_ARG_REGS,
+                            };
+                            let regs: Vec<PReg> = (fpr_idx..fpr_idx + count)
+                                .map(|i| typed_regs[i])
+                                .collect();
+                            result.push(ArgLocation::RegSequence(regs));
                             fpr_idx += count;
                         } else {
                             result.push(ArgLocation::Indirect { ptr_reg: gpr::X8 });
@@ -2027,31 +2060,32 @@ mod tests {
 
     #[test]
     fn classify_hfa_param_two_f32_in_v_regs() {
-        // struct { float, float } passed as HFA -> V0 (consumes V0 + V1)
+        // struct { float, float } passed as HFA -> S0, S1 (typed FPR registers)
         let hfa = Type::Struct(vec![Type::F32, Type::F32]);
         let locs = AppleAArch64ABI::classify_params(&[hfa]);
         assert_eq!(locs.len(), 1);
-        // First FPR register is V0; the ABI layer knows 2 consecutive are consumed.
-        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+        // F32 HFA uses S registers (Fpr32 class), not V registers.
+        assert_eq!(locs[0], ArgLocation::RegSequence(vec![gpr::S0, gpr::S1]));
     }
 
     #[test]
     fn classify_hfa_param_four_f32_in_v_regs() {
-        // struct { float, float, float, float } -> V0 (consumes V0-V3)
+        // struct { float, float, float, float } -> S0-S3 (typed FPR registers)
         let hfa = Type::Struct(vec![Type::F32, Type::F32, Type::F32, Type::F32]);
         let locs = AppleAArch64ABI::classify_params(&[hfa]);
         assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+        assert_eq!(locs[0], ArgLocation::RegSequence(vec![gpr::S0, gpr::S1, gpr::S2, gpr::S3]));
     }
 
     #[test]
     fn classify_hfa_param_with_preceding_floats() {
-        // fn(f64, HFA{f32, f32}) -> V0 for f64, V1 for HFA (consumes V1+V2)
+        // fn(f64, HFA{f32, f32}) -> V0 for f64, then HFA in S1+S2
+        // The f64 scalar consumes FPR slot 0, HFA starts at slot 1.
         let hfa = Type::Struct(vec![Type::F32, Type::F32]);
         let locs = AppleAArch64ABI::classify_params(&[Type::F64, hfa]);
         assert_eq!(locs.len(), 2);
         assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
-        assert_eq!(locs[1], ArgLocation::Reg(gpr::V1));
+        assert_eq!(locs[1], ArgLocation::RegSequence(vec![gpr::S1, gpr::S2]));
     }
 
     #[test]
@@ -2112,29 +2146,29 @@ mod tests {
 
     #[test]
     fn return_hfa_two_f32_in_v0() {
-        // struct { float, float } -> HFA return in V0 (consumes V0+V1)
+        // struct { float, float } -> HFA return in S0, S1 (typed FPR registers)
         let hfa = Type::Struct(vec![Type::F32, Type::F32]);
         let locs = AppleAArch64ABI::classify_returns(&[hfa]);
         assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+        assert_eq!(locs[0], ArgLocation::RegSequence(vec![gpr::S0, gpr::S1]));
     }
 
     #[test]
     fn return_hfa_four_f64_in_v0() {
-        // struct { double, double, double, double } -> HFA return in V0 (consumes V0-V3)
+        // struct { double, double, double, double } -> HFA return in D0-D3
         let hfa = Type::Struct(vec![Type::F64, Type::F64, Type::F64, Type::F64]);
         let locs = AppleAArch64ABI::classify_returns(&[hfa]);
         assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+        assert_eq!(locs[0], ArgLocation::RegSequence(vec![gpr::D0, gpr::D1, gpr::D2, gpr::D3]));
     }
 
     #[test]
     fn return_hfa_array_three_f32() {
-        // float[3] -> HFA return in V0
+        // float[3] -> HFA return in S0-S2
         let hfa = Type::Array(Box::new(Type::F32), 3);
         let locs = AppleAArch64ABI::classify_returns(&[hfa]);
         assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+        assert_eq!(locs[0], ArgLocation::RegSequence(vec![gpr::S0, gpr::S1, gpr::S2]));
     }
 
     #[test]
@@ -2982,29 +3016,29 @@ mod tests {
 
     #[test]
     fn classify_hfa_return_two_f32() {
-        // struct { f32, f32 } -> HFA return, V0 (consumes V0+V1)
+        // struct { f32, f32 } -> HFA return in S0, S1 (typed FPR registers)
         let hfa = Type::Struct(vec![Type::F32, Type::F32]);
         let ret = AppleAArch64ABI::classify_returns(&[hfa]);
         assert_eq!(ret.len(), 1);
-        assert_eq!(ret[0], ArgLocation::Reg(gpr::V0));
+        assert_eq!(ret[0], ArgLocation::RegSequence(vec![gpr::S0, gpr::S1]));
     }
 
     #[test]
     fn classify_hfa_return_three_f64() {
-        // struct { f64, f64, f64 } -> HFA return, V0 (consumes V0+V1+V2)
+        // struct { f64, f64, f64 } -> HFA return in D0, D1, D2
         let hfa = Type::Struct(vec![Type::F64, Type::F64, Type::F64]);
         let ret = AppleAArch64ABI::classify_returns(&[hfa]);
         assert_eq!(ret.len(), 1);
-        assert_eq!(ret[0], ArgLocation::Reg(gpr::V0));
+        assert_eq!(ret[0], ArgLocation::RegSequence(vec![gpr::D0, gpr::D1, gpr::D2]));
     }
 
     #[test]
     fn classify_hfa_return_four_f32() {
-        // struct { f32, f32, f32, f32 } -> HFA, V0 (consumes V0-V3)
+        // struct { f32, f32, f32, f32 } -> HFA in S0-S3
         let hfa = Type::Struct(vec![Type::F32, Type::F32, Type::F32, Type::F32]);
         let ret = AppleAArch64ABI::classify_returns(&[hfa]);
         assert_eq!(ret.len(), 1);
-        assert_eq!(ret[0], ArgLocation::Reg(gpr::V0));
+        assert_eq!(ret[0], ArgLocation::RegSequence(vec![gpr::S0, gpr::S1, gpr::S2, gpr::S3]));
     }
 
     // --- classify_fp_arg() typed register helper ---
@@ -3519,6 +3553,251 @@ mod tests {
             Type::Struct(vec![Type::F64]),
         ]);
         assert_eq!(AppleAArch64ABI::classify_hfa(&ty), None);
+    }
+
+    // ===================================================================
+    // HFA typed register and RegSequence tests (issue #140)
+    // ===================================================================
+
+    #[test]
+    fn classify_hfa_param_f64_uses_d_registers() {
+        // struct { f64, f64 } -> HFA in D0, D1
+        let hfa = Type::Struct(vec![Type::F64, Type::F64]);
+        let locs = AppleAArch64ABI::classify_params(&[hfa]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::RegSequence(vec![gpr::D0, gpr::D1]));
+    }
+
+    #[test]
+    fn classify_hfa_param_f64_four_members() {
+        // struct { f64, f64, f64, f64 } -> HFA in D0-D3
+        let hfa = Type::Struct(vec![Type::F64, Type::F64, Type::F64, Type::F64]);
+        let locs = AppleAArch64ABI::classify_params(&[hfa]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::RegSequence(vec![gpr::D0, gpr::D1, gpr::D2, gpr::D3]));
+    }
+
+    #[test]
+    fn classify_hfa_param_single_f32() {
+        // struct { f32 } -> single-member HFA in S0
+        let hfa = Type::Struct(vec![Type::F32]);
+        let locs = AppleAArch64ABI::classify_params(&[hfa]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::RegSequence(vec![gpr::S0]));
+    }
+
+    #[test]
+    fn classify_hfa_param_single_f64() {
+        // struct { f64 } -> single-member HFA in D0
+        let hfa = Type::Struct(vec![Type::F64]);
+        let locs = AppleAArch64ABI::classify_params(&[hfa]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::RegSequence(vec![gpr::D0]));
+    }
+
+    #[test]
+    fn classify_hfa_param_mixed_with_gpr_args() {
+        // fn(i64, HFA{f32, f32, f32}, i32) -> X0, S0-S2, X1
+        // GPR and FPR allocation are independent.
+        let hfa = Type::Struct(vec![Type::F32, Type::F32, Type::F32]);
+        let locs = AppleAArch64ABI::classify_params(&[Type::I64, hfa, Type::I32]);
+        assert_eq!(locs.len(), 3);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::X0));
+        assert_eq!(locs[1], ArgLocation::RegSequence(vec![gpr::S0, gpr::S1, gpr::S2]));
+        assert_eq!(locs[2], ArgLocation::Reg(gpr::X1));
+    }
+
+    #[test]
+    fn classify_hfa_param_after_f64_scalar_uses_d_regs() {
+        // fn(f64, HFA{f64, f64}) -> V0 for scalar f64, D1+D2 for HFA
+        let hfa = Type::Struct(vec![Type::F64, Type::F64]);
+        let locs = AppleAArch64ABI::classify_params(&[Type::F64, hfa]);
+        assert_eq!(locs.len(), 2);
+        assert_eq!(locs[0], ArgLocation::Reg(gpr::V0));
+        assert_eq!(locs[1], ArgLocation::RegSequence(vec![gpr::D1, gpr::D2]));
+    }
+
+    #[test]
+    fn classify_hfa_param_three_f64_after_five_scalars() {
+        // fn(f64, f64, f64, f64, f64, HFA{f64, f64, f64})
+        // Scalars consume FPR slots 0-4. HFA needs 3 slots (5,6,7) -> fits.
+        let mut params: Vec<Type> = vec![Type::F64; 5];
+        params.push(Type::Struct(vec![Type::F64, Type::F64, Type::F64]));
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 6);
+        assert_eq!(locs[5], ArgLocation::RegSequence(vec![gpr::D5, gpr::D6, gpr::D7]));
+    }
+
+    #[test]
+    fn classify_hfa_param_overflow_when_partially_fits() {
+        // fn(f64, f64, f64, f64, f64, f64, HFA{f64, f64, f64})
+        // 6 scalars consume FPR 0-5. HFA needs 3 but only 2 left -> stack.
+        let mut params: Vec<Type> = vec![Type::F64; 6];
+        params.push(Type::Struct(vec![Type::F64, Type::F64, Type::F64]));
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 7);
+        assert!(matches!(locs[6], ArgLocation::Stack { .. }));
+    }
+
+    #[test]
+    fn classify_hfa_return_single_f32() {
+        // struct { f32 } -> return in S0
+        let hfa = Type::Struct(vec![Type::F32]);
+        let ret = AppleAArch64ABI::classify_returns(&[hfa]);
+        assert_eq!(ret.len(), 1);
+        assert_eq!(ret[0], ArgLocation::RegSequence(vec![gpr::S0]));
+    }
+
+    #[test]
+    fn classify_hfa_return_single_f64() {
+        // struct { f64 } -> return in D0
+        let hfa = Type::Struct(vec![Type::F64]);
+        let ret = AppleAArch64ABI::classify_returns(&[hfa]);
+        assert_eq!(ret.len(), 1);
+        assert_eq!(ret[0], ArgLocation::RegSequence(vec![gpr::D0]));
+    }
+
+    #[test]
+    fn classify_hfa_return_four_f64() {
+        // struct { f64, f64, f64, f64 } -> return in D0-D3
+        let hfa = Type::Struct(vec![Type::F64, Type::F64, Type::F64, Type::F64]);
+        let ret = AppleAArch64ABI::classify_returns(&[hfa]);
+        assert_eq!(ret.len(), 1);
+        assert_eq!(ret[0], ArgLocation::RegSequence(vec![gpr::D0, gpr::D1, gpr::D2, gpr::D3]));
+    }
+
+    #[test]
+    fn classify_hfa_return_array_of_f64() {
+        // f64[2] -> HFA return in D0, D1
+        let hfa = Type::Array(Box::new(Type::F64), 2);
+        let ret = AppleAArch64ABI::classify_returns(&[hfa]);
+        assert_eq!(ret.len(), 1);
+        assert_eq!(ret[0], ArgLocation::RegSequence(vec![gpr::D0, gpr::D1]));
+    }
+
+    // ===================================================================
+    // Large struct passing/return tests (issue #140)
+    // ===================================================================
+
+    #[test]
+    fn classify_large_struct_32_bytes_indirect_via_gpr() {
+        // struct { i64, i64, i64, i64 } = 32 bytes > 16 -> indirect
+        let large = Type::Struct(vec![Type::I64, Type::I64, Type::I64, Type::I64]);
+        assert_eq!(large.bytes(), 32);
+        let locs = AppleAArch64ABI::classify_params(&[large]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Indirect { ptr_reg: gpr::X0 });
+    }
+
+    #[test]
+    fn classify_large_struct_param_after_gprs_used() {
+        // fn(i64, i64, i64, i64, i64, i64, i64, large_struct)
+        // All 7 GPR slots X0-X6 used, large struct uses X7.
+        let large = Type::Struct(vec![Type::I64, Type::I64, Type::I64]);
+        let mut params: Vec<Type> = vec![Type::I64; 7];
+        params.push(large);
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 8);
+        assert_eq!(locs[7], ArgLocation::Indirect { ptr_reg: gpr::X7 });
+    }
+
+    #[test]
+    fn classify_large_struct_param_no_gprs_left_goes_to_stack() {
+        // fn(i64 x8, large_struct) -> all 8 GPRs used, pointer goes on stack
+        let large = Type::Struct(vec![Type::I64, Type::I64, Type::I64]);
+        let mut params: Vec<Type> = vec![Type::I64; 8];
+        params.push(large);
+        let locs = AppleAArch64ABI::classify_params(&params);
+        assert_eq!(locs.len(), 9);
+        // Large struct: pointer on stack (8 bytes for the pointer)
+        assert!(matches!(locs[8], ArgLocation::Stack { size: 8, .. }));
+    }
+
+    #[test]
+    fn classify_large_struct_return_via_x8() {
+        // Return struct > 16 bytes via sret (X8)
+        let large = Type::Struct(vec![Type::I64, Type::I64, Type::I64, Type::I64]);
+        assert!(large.bytes() > 16);
+        let locs = AppleAArch64ABI::classify_returns(&[large]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Indirect { ptr_reg: gpr::X8 });
+    }
+
+    #[test]
+    fn classify_17_byte_struct_indirect() {
+        // Struct of exactly 17 bytes (just over the 16-byte threshold)
+        // struct { i64, i64, i8 } -> size depends on alignment/padding
+        // Actually: 8 + 8 + 1 = 17 bytes, padded to 24 with alignment
+        let ty = Type::Struct(vec![Type::I64, Type::I64, Type::I8]);
+        let size = ty.bytes();
+        assert!(size > 16, "expected > 16 bytes, got {}", size);
+        let locs = AppleAArch64ABI::classify_params(&[ty]);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0], ArgLocation::Indirect { ptr_reg: gpr::X0 });
+    }
+
+    #[test]
+    fn classify_large_struct_mixed_with_hfa() {
+        // fn(large_struct, HFA{f32, f32}) -> X0 indirect, S0+S1 for HFA
+        // GPR and FPR allocation are independent.
+        let large = Type::Struct(vec![Type::I64, Type::I64, Type::I64]);
+        let hfa = Type::Struct(vec![Type::F32, Type::F32]);
+        let locs = AppleAArch64ABI::classify_params(&[large, hfa]);
+        assert_eq!(locs.len(), 2);
+        assert_eq!(locs[0], ArgLocation::Indirect { ptr_reg: gpr::X0 });
+        assert_eq!(locs[1], ArgLocation::RegSequence(vec![gpr::S0, gpr::S1]));
+    }
+
+    #[test]
+    fn classify_hfa_and_large_struct_interleaved() {
+        // fn(HFA{f64, f64}, i32, large_struct, f32, HFA{f32, f32, f32})
+        // HFA{f64,f64} -> D0, D1 (FPR 0-1)
+        // i32 -> X0 (GPR 0)
+        // large_struct -> X1 indirect (GPR 1)
+        // f32 -> V2 (FPR 2)
+        // HFA{f32,f32,f32} -> S3, S4, S5 (FPR 3-5)
+        let hfa_f64 = Type::Struct(vec![Type::F64, Type::F64]);
+        let large = Type::Struct(vec![Type::I64, Type::I64, Type::I64]);
+        let hfa_f32 = Type::Struct(vec![Type::F32, Type::F32, Type::F32]);
+        let locs = AppleAArch64ABI::classify_params(&[hfa_f64, Type::I32, large, Type::F32, hfa_f32]);
+        assert_eq!(locs.len(), 5);
+        assert_eq!(locs[0], ArgLocation::RegSequence(vec![gpr::D0, gpr::D1]));
+        assert_eq!(locs[1], ArgLocation::Reg(gpr::X0));
+        assert_eq!(locs[2], ArgLocation::Indirect { ptr_reg: gpr::X1 });
+        assert_eq!(locs[3], ArgLocation::Reg(gpr::V2));
+        assert_eq!(locs[4], ArgLocation::RegSequence(vec![gpr::S3, gpr::S4, gpr::S5]));
+    }
+
+    // ===================================================================
+    // RegSequence variant tests
+    // ===================================================================
+
+    #[test]
+    fn arg_location_reg_sequence_equality() {
+        let a = ArgLocation::RegSequence(vec![gpr::S0, gpr::S1]);
+        let b = ArgLocation::RegSequence(vec![gpr::S0, gpr::S1]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn arg_location_reg_sequence_inequality() {
+        let a = ArgLocation::RegSequence(vec![gpr::S0, gpr::S1]);
+        let b = ArgLocation::RegSequence(vec![gpr::D0, gpr::D1]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn arg_location_reg_sequence_clone() {
+        let a = ArgLocation::RegSequence(vec![gpr::D0, gpr::D1, gpr::D2]);
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn arg_location_reg_sequence_debug() {
+        let loc = ArgLocation::RegSequence(vec![gpr::S0]);
+        let debug_str = format!("{:?}", loc);
+        assert!(debug_str.contains("RegSequence"));
     }
 
     // ===================================================================
