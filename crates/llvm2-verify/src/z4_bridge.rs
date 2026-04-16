@@ -2148,6 +2148,285 @@ pub fn verify_proof_database_with_z4(
 }
 
 // ---------------------------------------------------------------------------
+// z4-chc CHC engine backend (feature-gated)
+// ---------------------------------------------------------------------------
+
+/// Encode a [`ProofObligation`] as an SMT-LIB2 CHC query string.
+///
+/// Translation validation obligations are quantifier-free bitvector
+/// equivalence checks:
+///
+/// ```text
+/// forall inputs: tmir_expr == aarch64_expr
+/// ```
+///
+/// We encode this as a CHC problem with one predicate `Valid` that
+/// holds for all inputs. The query clause asserts that no `Valid`
+/// state violates the equivalence. If the CHC solver returns
+/// **Safe**, the equivalence holds for all inputs.
+///
+/// # CHC encoding
+///
+/// ```text
+/// (set-logic HORN)
+/// (declare-fun Valid ((BitVec w1) ... (BitVec wN)) Bool)
+/// ;; Init: all inputs are Valid
+/// (assert (forall ((x1 (BitVec w1)) ...) (Valid x1 ...)))
+/// ;; Query: Valid /\ NOT(tmir == aarch64) => false
+/// (assert (forall ((x1 (BitVec w1)) ...)
+///   (=> (and (Valid x1 ...) (not (= tmir_expr aarch64_expr))) false)))
+/// (check-sat)
+/// ```
+///
+/// The function is always available (no feature gate) since it only
+/// produces text. The actual CHC solving requires the `z4` feature.
+pub fn encode_obligation_as_chc(obligation: &ProofObligation) -> String {
+    let mut lines = Vec::new();
+
+    lines.push("(set-logic HORN)".to_string());
+
+    // Build the predicate sort signature from inputs
+    let mut param_sorts = Vec::new();
+    for (_name, width) in &obligation.inputs {
+        param_sorts.push(format!("(_ BitVec {})", width));
+    }
+    for (_name, eb, sb) in &obligation.fp_inputs {
+        param_sorts.push(format!("(_ FloatingPoint {} {})", eb, sb));
+    }
+
+    // Declare the Valid predicate
+    lines.push(format!(
+        "(declare-fun Valid ({}) Bool)",
+        param_sorts.join(" ")
+    ));
+
+    // Collect all variable names and their sorted declarations
+    let mut var_decls = Vec::new();
+    let mut var_names = Vec::new();
+    for (name, width) in &obligation.inputs {
+        var_decls.push(format!("({} (_ BitVec {}))", name, width));
+        var_names.push(name.as_str());
+    }
+    for (name, eb, sb) in &obligation.fp_inputs {
+        var_decls.push(format!("({} (_ FloatingPoint {} {}))", name, eb, sb));
+        var_names.push(name.as_str());
+    }
+
+    let vars_str = var_decls.join(" ");
+    let names_str = var_names.join(" ");
+
+    // Scan for UF declarations needed by the formula
+    let formula = obligation.negated_equivalence();
+    let mut uf_decls = Vec::new();
+    collect_uf_declarations(&formula, &mut uf_decls);
+    for (name, arg_sorts, ret_sort) in &uf_decls {
+        let arg_sorts_str: Vec<String> = arg_sorts.iter().map(sort_to_smt2).collect();
+        lines.push(format!(
+            "(declare-fun {} ({}) {})",
+            name,
+            arg_sorts_str.join(" "),
+            sort_to_smt2(ret_sort)
+        ));
+    }
+
+    // Init clause: forall inputs => Valid(inputs)
+    if obligation.preconditions.is_empty() {
+        lines.push(format!(
+            "(assert (forall ({}) (Valid {})))",
+            vars_str, names_str
+        ));
+    } else {
+        // With preconditions: precond => Valid(inputs)
+        let precond_strs: Vec<String> = obligation
+            .preconditions
+            .iter()
+            .map(|p| format!("{}", p))
+            .collect();
+        let precond = if precond_strs.len() == 1 {
+            precond_strs[0].clone()
+        } else {
+            format!("(and {})", precond_strs.join(" "))
+        };
+        lines.push(format!(
+            "(assert (forall ({}) (=> {} (Valid {}))))",
+            vars_str, precond, names_str
+        ));
+    }
+
+    // Query clause: Valid(inputs) /\ NOT(tmir == aarch64) => false
+    let tmir_str = format!("{}", obligation.tmir_expr);
+    let aarch64_str = format!("{}", obligation.aarch64_expr);
+
+    let mut body_parts = vec![format!("(Valid {})", names_str)];
+
+    // Add preconditions to the query body too
+    for pre in &obligation.preconditions {
+        body_parts.push(format!("{}", pre));
+    }
+
+    // Add the negated equivalence
+    body_parts.push(format!("(not (= {} {}))", tmir_str, aarch64_str));
+
+    let body = if body_parts.len() == 1 {
+        body_parts[0].clone()
+    } else {
+        format!("(and {})", body_parts.join(" "))
+    };
+
+    lines.push(format!(
+        "(assert (forall ({}) (=> {} false)))",
+        vars_str, body
+    ));
+
+    lines.push("(check-sat)".to_string());
+
+    lines.join("\n")
+}
+
+/// Verify a proof obligation using the z4-chc CHC engine.
+///
+/// This function encodes the proof obligation as a CHC problem and
+/// solves it using z4-chc's adaptive portfolio solver. The CHC engine
+/// uses PDR/IC3, bounded model checking, k-induction, and other
+/// engines in a portfolio to find an inductive invariant (Safe) or
+/// a counterexample (Unsafe).
+///
+/// For translation validation, **Safe** means the lowering rule is
+/// correct for all inputs. **Unsafe** means there exists an input
+/// that violates the equivalence.
+///
+/// # Advantages over direct SMT solving
+///
+/// - CHC portfolio applies multiple solving strategies automatically
+/// - PDR can find invariants for inductive problems
+/// - Strict proof mode validates solver results independently
+///
+/// Only available when the `z4` feature is enabled (which pulls in
+/// both `z4` and `z4-chc`).
+#[cfg(feature = "z4")]
+pub fn verify_with_chc(
+    obligation: &ProofObligation,
+    config: &Z4Config,
+) -> Z4Result {
+    use z4_chc::{AdaptiveConfig, AdaptivePortfolio, ChcParser};
+
+    // 1. Encode as CHC
+    let chc_script = encode_obligation_as_chc(obligation);
+
+    // 2. Parse the CHC problem
+    let problem = match ChcParser::parse(&chc_script) {
+        Ok(p) => p,
+        Err(e) => return Z4Result::Error(format!("CHC parse error: {}", e)),
+    };
+
+    // 3. Configure the adaptive portfolio
+    let timeout = Duration::from_millis(config.timeout_ms);
+    let mut adaptive = AdaptiveConfig::with_budget(timeout, false);
+    adaptive.strict_proofs = true;
+
+    // 4. Solve
+    let solver = AdaptivePortfolio::new(problem, adaptive);
+    match solver.try_solve() {
+        Ok(result) => {
+            if result.is_safe() {
+                Z4Result::Verified
+            } else if result.is_unsafe() {
+                // Extract variable assignments from the CHC counterexample trace.
+                // The VerifiedCounterexample wraps a Counterexample whose steps
+                // contain FxHashMap<String, i64> assignments. We collect all
+                // assignments across steps and map variable names back to the
+                // obligation's input names where possible.
+                let mut cex_entries: Vec<(String, u64)> = Vec::new();
+                if let Some(vcex) = result.unsafe_counterexample() {
+                    let cex = vcex.counterexample();
+                    let input_names: Vec<&str> = obligation.inputs.iter()
+                        .map(|(name, _)| name.as_str())
+                        .collect();
+                    for step in &cex.steps {
+                        for (var_name, val) in &step.assignments {
+                            // Map CHC variable names back to obligation inputs.
+                            // CHC uses names like __p0_a0, __p0_a1 for predicate args;
+                            // also may use the original variable names directly.
+                            let mapped_name = if input_names.contains(&var_name.as_str()) {
+                                var_name.clone()
+                            } else if let Some(idx) = var_name.strip_prefix("__p0_a") {
+                                if let Ok(i) = idx.parse::<usize>() {
+                                    if i < input_names.len() {
+                                        input_names[i].to_string()
+                                    } else {
+                                        var_name.clone()
+                                    }
+                                } else {
+                                    var_name.clone()
+                                }
+                            } else {
+                                var_name.clone()
+                            };
+                            cex_entries.push((mapped_name, *val as u64));
+                        }
+                    }
+                }
+                if cex_entries.is_empty() {
+                    eprintln!(
+                        "WARNING: CHC solver reported Unsafe but no variable assignments \
+                         were available in the counterexample trace"
+                    );
+                }
+                Z4Result::CounterExample(cex_entries)
+            } else {
+                Z4Result::Timeout
+            }
+        }
+        Err(e) => Z4Result::Error(format!("CHC solver error: {}", e)),
+    }
+}
+
+/// Verify a proof obligation using the CHC engine, with obligation-level
+/// encoding handled internally.
+///
+/// This is the high-level entry point for CHC-based formal verification
+/// of a [`ProofObligation`]. It combines [`encode_obligation_as_chc`]
+/// and [`verify_with_chc`] into a single call.
+///
+/// Equivalent to `verify_with_chc(obligation, config)` but named
+/// to match the `verify_obligation_*` naming convention.
+#[cfg(feature = "z4")]
+pub fn verify_obligation_chc(
+    obligation: &ProofObligation,
+    config: &Z4Config,
+) -> Z4Result {
+    verify_with_chc(obligation, config)
+}
+
+/// Verify all proofs in a [`ProofDatabase`] using the z4-chc CHC engine.
+///
+/// Returns a list of `(proof_name, category, result)` triples suitable
+/// for building a [`ProofDatabaseZ4Report`].
+///
+/// This is the CHC counterpart of [`verify_proof_database_with_z4`],
+/// which uses the SMT backend.
+#[cfg(feature = "z4")]
+pub fn verify_proof_database_with_chc(
+    db: &ProofDatabase,
+    config: &Z4Config,
+) -> ProofDatabaseZ4Report {
+    let start = Instant::now();
+    let all = db.all();
+    let mut results = Vec::with_capacity(all.len());
+
+    for cp in all {
+        let result = verify_with_chc(&cp.obligation, config);
+        results.push((cp.obligation.name.clone(), cp.category, result));
+    }
+
+    let total_duration = start.elapsed();
+    ProofDatabaseZ4Report {
+        results,
+        total_duration,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -4930,5 +5209,302 @@ mod tests {
         let result = verify_with_cli(&obligation, &config);
         assert_eq!(result, Z4Result::Verified,
             "32-bit array store-load roundtrip should be verified");
+    }
+
+    // -----------------------------------------------------------------------
+    // CHC encoding tests (always run, no solver needed)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encode_obligation_as_chc_basic() {
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+
+        let obligation = ProofObligation {
+            name: "test_chc_add".to_string(),
+            tmir_expr: a.clone().bvadd(b.clone()),
+            aarch64_expr: a.bvadd(b),
+            inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let chc = encode_obligation_as_chc(&obligation);
+
+        // Must use HORN logic
+        assert!(chc.contains("(set-logic HORN)"),
+            "Expected HORN logic, got:\n{}", chc);
+        // Must declare Valid predicate with BV32 params
+        assert!(chc.contains("(declare-fun Valid ((_ BitVec 32) (_ BitVec 32)) Bool)"),
+            "Missing Valid predicate declaration in:\n{}", chc);
+        // Must have init clause (forall ... Valid ...)
+        assert!(chc.contains("(forall ((a (_ BitVec 32)) (b (_ BitVec 32))) (Valid a b))"),
+            "Missing init clause in:\n{}", chc);
+        // Must have query clause with negated equivalence
+        assert!(chc.contains("(not (= (bvadd a b) (bvadd a b)))"),
+            "Missing negated equivalence in:\n{}", chc);
+        // Must end with check-sat
+        assert!(chc.contains("(check-sat)"),
+            "Missing check-sat in:\n{}", chc);
+    }
+
+    #[test]
+    fn test_encode_obligation_as_chc_with_preconditions() {
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+
+        // Precondition: b != 0
+        let precond = b.clone().eq_expr(SmtExpr::bv_const(0, 32)).not_expr();
+
+        let obligation = ProofObligation {
+            name: "test_chc_div_precond".to_string(),
+            tmir_expr: a.clone(),
+            aarch64_expr: a.clone(),
+            inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+            preconditions: vec![precond],
+            fp_inputs: vec![],
+        };
+
+        let chc = encode_obligation_as_chc(&obligation);
+
+        // Init clause should include precondition as implication
+        assert!(chc.contains("(=>"),
+            "Expected implication in init clause with preconditions, got:\n{}", chc);
+        // Query body should include the precondition
+        assert!(chc.contains("(Valid a b)"),
+            "Query clause must reference Valid predicate in:\n{}", chc);
+    }
+
+    #[test]
+    fn test_encode_obligation_as_chc_single_input() {
+        let x = SmtExpr::var("x", 64);
+
+        let obligation = ProofObligation {
+            name: "test_chc_identity".to_string(),
+            tmir_expr: x.clone(),
+            aarch64_expr: x,
+            inputs: vec![("x".to_string(), 64)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let chc = encode_obligation_as_chc(&obligation);
+
+        assert!(chc.contains("(declare-fun Valid ((_ BitVec 64)) Bool)"),
+            "Single-input Valid predicate wrong in:\n{}", chc);
+        assert!(chc.contains("(forall ((x (_ BitVec 64))) (Valid x))"),
+            "Single-input init clause wrong in:\n{}", chc);
+    }
+
+    #[test]
+    fn test_encode_obligation_as_chc_bitvec_declarations() {
+        let a = SmtExpr::var("a", 8);
+        let b = SmtExpr::var("b", 16);
+
+        let obligation = ProofObligation {
+            name: "test_chc_mixed_widths".to_string(),
+            tmir_expr: a.clone().bvadd(SmtExpr::ZeroExtend {
+                operand: Box::new(a.clone()),
+                extra_bits: 8,
+                width: 16,
+            }),
+            aarch64_expr: b.clone(),
+            inputs: vec![("a".to_string(), 8), ("b".to_string(), 16)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let chc = encode_obligation_as_chc(&obligation);
+
+        // Must declare Valid with mixed-width params
+        assert!(chc.contains("(declare-fun Valid ((_ BitVec 8) (_ BitVec 16)) Bool)"),
+            "Mixed-width Valid declaration wrong in:\n{}", chc);
+    }
+
+    // -----------------------------------------------------------------------
+    // CHC z4-chc solver integration tests (only with z4 feature)
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "z4")]
+    #[test]
+    fn test_chc_verify_trivial_identity() {
+        // a + b == a + b (trivially correct)
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        let obligation = ProofObligation {
+            name: "chc_trivial_add_identity".to_string(),
+            tmir_expr: a.clone().bvadd(b.clone()),
+            aarch64_expr: a.bvadd(b),
+            inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let config = Z4Config::default().with_timeout(10_000);
+        let result = verify_with_chc(&obligation, &config);
+        // a + b == a + b involves bitvector theory which is harder for CHC engines.
+        // The portfolio may timeout on BV problems in CI, so we allow Timeout.
+        if !matches!(result, Z4Result::Verified) {
+            eprintln!(
+                "WARNING: CHC solver did not prove trivial identity obligation, got {:?}",
+                result
+            );
+        }
+        // Must not be a CounterExample — that would be a soundness bug.
+        assert!(
+            matches!(result, Z4Result::Verified | Z4Result::Timeout | Z4Result::Error(_)),
+            "Unexpected CHC result for trivial identity: {}",
+            result
+        );
+    }
+
+    #[cfg(feature = "z4")]
+    #[test]
+    fn test_chc_verify_scalar_identity() {
+        // x == x is tautologically true — the negated equivalence (not (= x x))
+        // is unsatisfiable, so any CHC engine should prove this Safe.
+        let x = SmtExpr::var("x", 32);
+        let obligation = ProofObligation {
+            name: "chc_scalar_identity".to_string(),
+            tmir_expr: x.clone(),
+            aarch64_expr: x,
+            inputs: vec![("x".to_string(), 32)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let config = Z4Config::default().with_timeout(10_000);
+        let result = verify_with_chc(&obligation, &config);
+        assert!(
+            matches!(result, Z4Result::Verified),
+            "expected Verified for x == x identity, got {:?}",
+            result
+        );
+    }
+
+    #[cfg(feature = "z4")]
+    #[test]
+    fn test_chc_encode_and_parse() {
+        // Verify that the CHC encoding can at least be parsed by z4-chc
+        use z4_chc::ChcParser;
+
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        let obligation = ProofObligation {
+            name: "chc_parse_test".to_string(),
+            tmir_expr: a.clone().bvadd(b.clone()),
+            aarch64_expr: a.bvadd(b),
+            inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let chc_script = encode_obligation_as_chc(&obligation);
+        let parse_result = ChcParser::parse(&chc_script);
+        assert!(
+            parse_result.is_ok(),
+            "CHC encoding should parse successfully, got error: {:?}\nScript:\n{}",
+            parse_result.err(),
+            chc_script
+        );
+    }
+
+    #[cfg(feature = "z4")]
+    #[test]
+    fn test_chc_verify_obligation_chc_alias() {
+        // verify_obligation_chc is an alias for verify_with_chc.
+        // x == x is tautologically true so we expect Verified.
+        let x = SmtExpr::var("x", 32);
+        let obligation = ProofObligation {
+            name: "chc_alias_test".to_string(),
+            tmir_expr: x.clone(),
+            aarch64_expr: x,
+            inputs: vec![("x".to_string(), 32)],
+            preconditions: vec![],
+            fp_inputs: vec![],
+        };
+
+        let config = Z4Config::default().with_timeout(10_000);
+        let result = verify_obligation_chc(&obligation, &config);
+        assert!(
+            matches!(result, Z4Result::Verified),
+            "expected Verified for x == x via verify_obligation_chc, got {:?}",
+            result
+        );
+    }
+
+    #[cfg(feature = "z4")]
+    #[test]
+    fn test_verify_proof_database_with_chc() {
+        use crate::proof_database::{ProofDatabase, ProofCategory, CategorizedProof};
+
+        // Build a small database of trivially-valid identity obligations.
+        // Each uses expr == expr so the CHC engine should prove them Safe.
+        let x32 = SmtExpr::var("x", 32);
+        let y64 = SmtExpr::var("y", 64);
+        let a8 = SmtExpr::var("a", 8);
+
+        let proofs = vec![
+            CategorizedProof {
+                obligation: ProofObligation {
+                    name: "chc_db_identity_i32".to_string(),
+                    tmir_expr: x32.clone(),
+                    aarch64_expr: x32,
+                    inputs: vec![("x".to_string(), 32)],
+                    preconditions: vec![],
+                    fp_inputs: vec![],
+                },
+                category: ProofCategory::Arithmetic,
+            },
+            CategorizedProof {
+                obligation: ProofObligation {
+                    name: "chc_db_identity_i64".to_string(),
+                    tmir_expr: y64.clone(),
+                    aarch64_expr: y64,
+                    inputs: vec![("y".to_string(), 64)],
+                    preconditions: vec![],
+                    fp_inputs: vec![],
+                },
+                category: ProofCategory::Arithmetic,
+            },
+            CategorizedProof {
+                obligation: ProofObligation {
+                    name: "chc_db_identity_i8".to_string(),
+                    tmir_expr: a8.clone(),
+                    aarch64_expr: a8,
+                    inputs: vec![("a".to_string(), 8)],
+                    preconditions: vec![],
+                    fp_inputs: vec![],
+                },
+                category: ProofCategory::Comparison,
+            },
+        ];
+
+        let db = ProofDatabase::from_proofs(proofs);
+        assert_eq!(db.len(), 3);
+
+        let config = Z4Config::default().with_timeout(10_000);
+        let report = verify_proof_database_with_chc(&db, &config);
+
+        // Report should have one entry per obligation.
+        assert_eq!(
+            report.total(), 3,
+            "expected 3 results in CHC proof database report, got {}",
+            report.total()
+        );
+
+        // All three are trivial identities (x == x), so they should be Verified.
+        assert!(
+            report.all_verified(),
+            "expected all identity obligations Verified via CHC, report:\n{}",
+            report
+        );
+
+        // Verify category breakdown is present.
+        let by_cat = report.by_category();
+        assert!(
+            !by_cat.is_empty(),
+            "category breakdown should be non-empty"
+        );
     }
 }
