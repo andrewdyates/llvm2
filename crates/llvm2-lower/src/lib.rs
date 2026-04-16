@@ -22,7 +22,7 @@ pub mod dispatch;
 pub mod x86_64_isel;
 
 pub use types::Type;
-pub use function::Function;
+pub use function::{Function, StackSlotInfo};
 pub use abi::{
     AppleAArch64ABI, ArgLocation, PReg, gpr,
     UnwindInfo, SavedRegister, CompactUnwindEntry, DwarfCfiOp,

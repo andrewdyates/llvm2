@@ -1104,6 +1104,9 @@ impl Pipeline {
 
         let mut isel = InstructionSelector::new(input.name.clone(), sig.clone());
 
+        // Propagate stack slot metadata from the LIR function to the ISel.
+        isel.set_stack_slots(input.stack_slots.clone());
+
         // Lower formal arguments at entry: copies ABI physical registers into
         // VRegs and populates the value_map for function parameters.
         isel.lower_formal_arguments(&sig, input.entry_block)

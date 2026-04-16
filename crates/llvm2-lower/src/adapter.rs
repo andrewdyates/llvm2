@@ -25,7 +25,7 @@ use tmir_func::{Block as TmirBlock, Function as TmirFunction, Module as TmirModu
 use tmir_instrs::{AtomicRmwOp as TmirAtomicRmwOp, BinOp, CastOp, CmpOp, Constant, Instr, InstrNode, MemoryOrdering, Operand, SwitchCase, UnOp};
 use tmir_types::{BlockId, FloatWidth, FuncId, IntWidth, PrimitiveType, StructDef, TmirProof, Ty, ValueId};
 
-use crate::function::{BasicBlock, Function, Signature};
+use crate::function::{BasicBlock, Function, Signature, StackSlotInfo};
 use crate::instructions::{AtomicOrdering, AtomicRmwOp, Block, FloatCC, Instruction, IntCC, Opcode, Value};
 use crate::types::Type;
 
@@ -458,6 +458,13 @@ struct TmirAdapter<'a> {
     ///
     /// Each entry: (predecessor tMIR BlockId, source Value, destination Value).
     pending_phi_copies: Vec<(BlockId, Value, Value)>,
+
+    /// Stack slot metadata collected during translation.
+    ///
+    /// Each Alloc instruction and struct construction allocates a unique
+    /// stack slot. The index into this Vec is the slot number used in
+    /// `Opcode::StackAddr { slot }`.
+    stack_slots: Vec<StackSlotInfo>,
 }
 
 impl<'a> TmirAdapter<'a> {
@@ -472,6 +479,7 @@ impl<'a> TmirAdapter<'a> {
             tmir_func: None,
             func_names,
             pending_phi_copies: Vec::new(),
+            stack_slots: Vec::new(),
         }
     }
 
@@ -480,6 +488,16 @@ impl<'a> TmirAdapter<'a> {
         let v = Value(self.next_value);
         self.next_value += 1;
         v
+    }
+
+    /// Allocate a new stack slot with the given size and alignment.
+    ///
+    /// Returns the slot index for use in `Opcode::StackAddr { slot }`.
+    /// Each call returns a unique, incrementing index.
+    fn alloc_stack_slot(&mut self, size: u32, align: u32) -> u32 {
+        let idx = self.stack_slots.len() as u32;
+        self.stack_slots.push(StackSlotInfo { size, align });
+        idx
     }
 
     /// Map a tMIR ValueId to an internal Value, creating a fresh one if needed.
@@ -674,6 +692,9 @@ impl<'a> TmirAdapter<'a> {
                 }
             }
         }
+
+        // Propagate stack slot metadata to the LIR function.
+        lir_func.stack_slots = self.stack_slots.clone();
 
         Ok((lir_func, self.proof_ctx.clone()))
     }
@@ -1273,14 +1294,16 @@ impl<'a> TmirAdapter<'a> {
         _count: &Option<ValueId>,
         results: &[ValueId],
     ) -> Result<Vec<Instruction>, AdapterError> {
-        let _lir_ty = translate_type(ty)?;
+        let lir_ty = self.translate_ty(ty)?;
         let dst = self.map_result(results)?;
 
-        // Stack allocation: emit a StackAddr reference.
-        // The actual stack slot allocation happens during frame lowering.
-        // For now, use slot 0 as a placeholder.
+        // Allocate a unique stack slot for this Alloc instruction.
+        let size = lir_ty.bytes();
+        let align = lir_ty.align();
+        let slot = self.alloc_stack_slot(size, align);
+
         Ok(vec![Instruction {
-            opcode: Opcode::StackAddr { slot: 0 },
+            opcode: Opcode::StackAddr { slot },
             args: vec![],
             results: vec![dst],
         }])
@@ -1431,10 +1454,13 @@ impl<'a> TmirAdapter<'a> {
         let dst = self.map_result(results)?;
         let mut instrs = Vec::new();
 
-        // Allocate a stack slot (placeholder slot 0; real allocation in frame lowering).
+        // Allocate a unique stack slot for this struct.
+        let size = struct_ty.bytes();
+        let align = struct_ty.align();
+        let slot = self.alloc_stack_slot(size, align);
         let base_ptr = self.fresh_value();
         instrs.push(Instruction {
-            opcode: Opcode::StackAddr { slot: 0 },
+            opcode: Opcode::StackAddr { slot },
             args: vec![],
             results: vec![base_ptr],
         });
@@ -4985,5 +5011,271 @@ mod tests {
         assert!(matches!(proofs[1], Proof::Associative));
         assert!(matches!(proofs[2], Proof::Commutative));
         assert!(matches!(proofs[3], Proof::Idempotent));
+    }
+
+    // ----- Stack slot aliasing fix (issue #278) -----
+
+    /// Build a tMIR function with 3 Alloc instructions of different types.
+    ///
+    /// ```pseudo
+    /// fn multi_alloc() {
+    ///   %0 = alloca i32      // 4 bytes, align 4
+    ///   %1 = alloca i64      // 8 bytes, align 8
+    ///   %2 = alloca i8       // 1 byte, align 1
+    ///   return
+    /// }
+    /// ```
+    fn build_multi_alloc_func() -> TmirFunc {
+        TmirFunc {
+            id: FuncId(0),
+            name: "multi_alloc".to_string(),
+            ty: FuncTy {
+                params: vec![],
+                returns: vec![],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Alloc {
+                            ty: Ty::int(32),
+                            count: None,
+                        },
+                        results: vec![ValueId(0)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Alloc {
+                            ty: Ty::int(64),
+                            count: None,
+                        },
+                        results: vec![ValueId(1)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Alloc {
+                            ty: Ty::int(8),
+                            count: None,
+                        },
+                        results: vec![ValueId(2)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return { values: vec![] },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            }],
+            proofs: vec![],
+        }
+    }
+
+    #[test]
+    fn test_alloc_unique_slot_indices() {
+        // Issue #278: multiple Alloc instructions must get distinct slot indices.
+        let func = build_multi_alloc_func();
+        let (lir_func, _) = translate_function(&func, &[]).unwrap();
+
+        // Collect all StackAddr slot indices from the LIR instructions.
+        let mut slot_indices = Vec::new();
+        for (_block_id, bb) in &lir_func.blocks {
+            for inst in &bb.instructions {
+                if let Opcode::StackAddr { slot } = inst.opcode {
+                    slot_indices.push(slot);
+                }
+            }
+        }
+
+        // We should have exactly 3 StackAddr instructions (one per Alloc).
+        assert_eq!(
+            slot_indices.len(),
+            3,
+            "Expected 3 StackAddr instructions, got {}",
+            slot_indices.len()
+        );
+
+        // All slot indices must be distinct.
+        slot_indices.sort();
+        assert_eq!(slot_indices[0], 0, "First slot should be 0");
+        assert_eq!(slot_indices[1], 1, "Second slot should be 1");
+        assert_eq!(slot_indices[2], 2, "Third slot should be 2");
+    }
+
+    #[test]
+    fn test_alloc_stack_slots_populated() {
+        // Issue #278: LIR Function.stack_slots must have entries for all allocated slots.
+        let func = build_multi_alloc_func();
+        let (lir_func, _) = translate_function(&func, &[]).unwrap();
+
+        assert_eq!(
+            lir_func.stack_slots.len(),
+            3,
+            "Expected 3 stack slot entries, got {}",
+            lir_func.stack_slots.len()
+        );
+
+        // Verify sizes and alignments match the Alloc types.
+        // Slot 0: i32 -> 4 bytes, align 4
+        assert_eq!(lir_func.stack_slots[0].size, 4);
+        assert_eq!(lir_func.stack_slots[0].align, 4);
+        // Slot 1: i64 -> 8 bytes, align 8
+        assert_eq!(lir_func.stack_slots[1].size, 8);
+        assert_eq!(lir_func.stack_slots[1].align, 8);
+        // Slot 2: i8 -> 1 byte, align 1
+        assert_eq!(lir_func.stack_slots[2].size, 1);
+        assert_eq!(lir_func.stack_slots[2].align, 1);
+    }
+
+    #[test]
+    fn test_alloc_single_slot_is_zero() {
+        // A single Alloc should get slot 0.
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "single_alloc".to_string(),
+            ty: FuncTy {
+                params: vec![],
+                returns: vec![],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Alloc {
+                            ty: Ty::int(64),
+                            count: None,
+                        },
+                        results: vec![ValueId(0)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return { values: vec![] },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
+
+        let (lir_func, _) = translate_function(&func, &[]).unwrap();
+
+        // Should have exactly 1 stack slot.
+        assert_eq!(lir_func.stack_slots.len(), 1);
+        assert_eq!(lir_func.stack_slots[0].size, 8);
+        assert_eq!(lir_func.stack_slots[0].align, 8);
+
+        // The StackAddr instruction should reference slot 0.
+        let slot = lir_func.blocks.values()
+            .flat_map(|bb| &bb.instructions)
+            .find_map(|inst| {
+                if let Opcode::StackAddr { slot } = inst.opcode {
+                    Some(slot)
+                } else {
+                    None
+                }
+            })
+            .expect("Should have a StackAddr instruction");
+        assert_eq!(slot, 0);
+    }
+
+    #[test]
+    fn test_struct_construct_gets_unique_slot() {
+        // Struct construction should also get a unique slot that doesn't
+        // conflict with Alloc slots.
+        use tmir_types::{StructId, StructDef as TmirStructDef, FieldDef};
+
+        let struct_def = TmirStructDef {
+            id: StructId(0),
+            name: "MyStruct".to_string(),
+            fields: vec![
+                FieldDef { name: "x".to_string(), ty: Ty::int(32), offset: None },
+                FieldDef { name: "y".to_string(), ty: Ty::int(64), offset: None },
+            ],
+            size: None,
+            align: None,
+        };
+
+        let struct_ty = Ty::Struct(StructId(0));
+
+        let func = TmirFunc {
+            id: FuncId(0),
+            name: "alloc_and_struct".to_string(),
+            ty: FuncTy {
+                params: vec![Ty::int(32), Ty::int(64)],
+                returns: vec![],
+            },
+            entry: BlockId(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId(0),
+                params: vec![
+                    (ValueId(0), Ty::int(32)),
+                    (ValueId(1), Ty::int(64)),
+                ],
+                body: vec![
+                    // First: a regular Alloc
+                    InstrNode {
+                        instr: Instr::Alloc {
+                            ty: Ty::int(32),
+                            count: None,
+                        },
+                        results: vec![ValueId(2)],
+                        proofs: vec![],
+                    },
+                    // Second: a Struct construction (also allocates a slot)
+                    InstrNode {
+                        instr: Instr::Struct {
+                            ty: struct_ty,
+                            fields: vec![
+                                Operand::Value(ValueId(0)),
+                                Operand::Value(ValueId(1)),
+                            ],
+                        },
+                        results: vec![ValueId(3)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return { values: vec![] },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
+
+        let (lir_func, _) = translate_function(&func, &[struct_def]).unwrap();
+
+        // Should have 2 stack slots (one for Alloc, one for Struct).
+        assert_eq!(
+            lir_func.stack_slots.len(),
+            2,
+            "Expected 2 stack slots, got {}",
+            lir_func.stack_slots.len()
+        );
+
+        // Collect all StackAddr slot indices.
+        let slot_indices: Vec<u32> = lir_func.blocks.values()
+            .flat_map(|bb| &bb.instructions)
+            .filter_map(|inst| {
+                if let Opcode::StackAddr { slot } = inst.opcode {
+                    Some(slot)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(slot_indices.len(), 2);
+        // They must be distinct.
+        assert_ne!(
+            slot_indices[0], slot_indices[1],
+            "Alloc and Struct slots must be distinct, but both are {}",
+            slot_indices[0]
+        );
     }
 }
