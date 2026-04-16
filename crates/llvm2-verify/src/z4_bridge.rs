@@ -94,7 +94,7 @@ impl fmt::Display for Z4Result {
 
 /// Configuration for the z4/z3 solver.
 pub struct Z4Config {
-    /// Path to the solver binary for CLI fallback (default: search PATH for z3, then z4).
+    /// Path to the solver binary for CLI fallback (default: search for z4, then z3).
     pub solver_path: Option<String>,
     /// Timeout in milliseconds (default: 5000).
     pub timeout_ms: u64,
@@ -602,7 +602,7 @@ pub fn verify_with_cli(obligation: &ProofObligation, config: &Z4Config) -> Z4Res
 
     if solver_path.is_empty() {
         return Z4Result::Error(
-            "No SMT solver found. Install z3 (brew install z3) or set solver_path.".to_string(),
+            "No SMT solver found. Build z4 (cd ~/z4 && cargo build --release -p z4) or install z3 (brew install z3), or set solver_path.".to_string(),
         );
     }
 
@@ -631,18 +631,38 @@ pub fn verify_with_cli(obligation: &ProofObligation, config: &Z4Config) -> Z4Res
     }
 }
 
-/// Search PATH for z3 or z4 binary.
+/// Search for z4 or z3 binary. Prefers z4 (our verified solver), falls back to z3.
+///
+/// Search order:
+/// 1. z4 on PATH
+/// 2. z4 at well-known build locations (~/z4/target/{user/,}{release,debug}/z4)
+/// 3. z3 on PATH (legacy fallback)
 fn find_solver_binary() -> String {
-    // Prefer z3 (widely available, well-tested SMT-LIB2 support)
-    if let Ok(output) = std::process::Command::new("which").arg("z3").output()
+    // Prefer z4 (our verified SMT solver, z3-compatible CLI interface)
+    if let Ok(output) = std::process::Command::new("which").arg("z4").output()
         && output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
                 return path;
             }
         }
-    // Fallback: z4 binary
-    if let Ok(output) = std::process::Command::new("which").arg("z4").output()
+    // Check well-known z4 build locations (includes cargo wrapper CARGO_TARGET_DIR variants)
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::Path::new(&home);
+        for subdir in &[
+            "target/user/release/z4",
+            "target/user/debug/z4",
+            "target/release/z4",
+            "target/debug/z4",
+        ] {
+            let candidate = home.join("z4").join(subdir);
+            if candidate.is_file() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+    }
+    // Fallback: z3 binary (legacy, unverified)
+    if let Ok(output) = std::process::Command::new("which").arg("z3").output()
         && output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
@@ -1396,11 +1416,12 @@ impl fmt::Display for VerificationSummary {
 // z3/z4 availability check
 // ---------------------------------------------------------------------------
 
-/// Check whether a z3 or z4 solver binary is available on the system.
+/// Check whether an SMT solver binary (z4 or z3) is available on the system.
 ///
-/// Returns `true` if at least one solver binary (z3 or z4) can be found
-/// in PATH. Useful for tests and the verification runner to gracefully
-/// degrade when no solver is installed.
+/// Returns `true` if at least one solver binary can be found via PATH or
+/// well-known build locations. Prefers z4; falls back to z3. Useful for
+/// tests and the verification runner to gracefully degrade when no solver
+/// is installed.
 pub fn z3_available() -> bool {
     !find_solver_binary().is_empty()
 }
