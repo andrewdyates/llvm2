@@ -12,7 +12,7 @@
 
 //! tMIR to internal LIR adapter layer.
 //!
-//! This module translates `tmir_func::Module` / `tmir_func::Function` into the
+//! This module translates `tmir::Module` / `tmir::Function` into the
 //! internal `llvm2_lower::function::Function` representation, mapping each tMIR
 //! instruction to one or more internal `Instruction`s.
 //!

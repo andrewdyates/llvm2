@@ -11,22 +11,15 @@
 // It encodes tMIR opcodes (from llvm2-lower's `Opcode` enum) directly as
 // `SmtExpr` bitvector formulas for SMT-based equivalence checking.
 //
-// RELATIONSHIP TO `stubs/tmir-semantics/`:
+// DESIGN NOTE:
 //
-//   There are two complementary semantic implementations in LLVM2:
+//   This module is the canonical SMT encoder for tMIR instruction semantics.
+//   It encodes tMIR opcodes (via llvm2-lower's `Opcode` enum, which maps from
+//   `tmir::Inst`) as `SmtExpr` bitvector formulas for SMT-based equivalence
+//   proofs.
 //
-//   - `stubs/tmir-semantics/` (ConcreteSemantics): Concrete evaluator. Given
-//     concrete input values, computes concrete output values. Used for testing,
-//     interpretation, and as a reference implementation. Operates on the
-//     `tmir-instrs` instruction set directly.
-//
-//   - THIS MODULE (tmir_semantics.rs): SMT encoder. Encodes tMIR opcodes as
-//     `SmtExpr` bitvector formulas for SMT-based equivalence proofs. Operates
-//     on llvm2-lower's `Opcode` enum (which maps from tmir-instrs).
-//
-//   Both encode the SAME semantics in different representations. Any divergence
-//   is a bug. Both will be replaced when the real tMIR semantics crate
-//   (ayates_dbx/tMIR, #283) is integrated.
+//   The old `stubs/tmir-semantics/` concrete evaluator is deprecated and
+//   scheduled for removal once all references are cleaned up (see #291).
 //
 // Reference: designs/2026-04-13-verification-architecture.md, "SMT Encoding:
 // tMIR Instruction Semantics" section.

@@ -1,12 +1,14 @@
-// llvm2-lower/tmir_compat.rs - Backward compatibility layer for tMIR stub migration
+// llvm2-lower/tmir_compat.rs - Compatibility layer for tMIR API
 //
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
-// This module provides re-exports and compatibility types to bridge the gap
-// between the old 4-crate tMIR stubs (tmir-types, tmir-instrs, tmir-func,
-// tmir-semantics) and the new unified tmir crate. It allows existing LLVM2
-// code to compile with minimal changes during the migration.
+// This module provides re-exports and compatibility types that bridge the
+// unified tmir crate API with LLVM2-internal types. The old 4-crate tMIR
+// stubs (tmir-types, tmir-instrs, tmir-func, tmir-semantics) have been
+// replaced by the real tmir crate. This module preserves backward-compatible
+// types (CmpOp, Operand, CallingConv, etc.) that are LLVM2-internal and
+// don't exist in the real tmir crate.
 
 #![allow(dead_code)]
 
@@ -43,11 +45,11 @@ pub use tmir::{Module, Function, Block, Global};
 // CmpOp compatibility enum
 // ---------------------------------------------------------------------------
 
-/// Unified comparison operation (backward-compatible with old tmir_instrs::CmpOp).
+/// Unified comparison operation (LLVM2 extension).
 ///
 /// The real tmir crate splits comparisons into `ICmpOp` (integer) and `FCmpOp`
-/// (float). This enum preserves the old unified API for code that hasn't been
-/// migrated yet.
+/// (float). This unified enum is used by the LLVM2 ISel and adapter layers
+/// where a single comparison type is more convenient.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CmpOp {
     // Integer comparisons
@@ -172,11 +174,11 @@ impl CmpOp {
 // Operand compatibility type
 // ---------------------------------------------------------------------------
 
-/// Backward-compatible operand type.
+/// LLVM2-internal operand type.
 ///
-/// Old tMIR stubs used `Operand` (Value | Constant) for instruction inputs.
-/// The new tmir crate uses bare `ValueId`. This type is provided for backward
-/// compatibility with test code and the adapter layer during migration.
+/// The real tmir crate uses bare `ValueId` for instruction operands.
+/// This `Operand` type (Value | Constant) is an LLVM2 extension used
+/// by the adapter layer and test code.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operand {
     /// Reference to an SSA value.
@@ -241,7 +243,7 @@ impl From<ValueId> for Operand {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy type aliases for types that were in tmir_types but don't exist in new tmir
+// LLVM2-internal types not present in the tmir crate
 // ---------------------------------------------------------------------------
 
 /// Calling convention (LLVM2 extension, not in real tmir).
