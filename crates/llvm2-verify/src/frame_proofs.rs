@@ -122,6 +122,7 @@ pub fn proof_frame_offset_computation() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -144,6 +145,7 @@ pub fn proof_frame_offset_computation_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -198,6 +200,7 @@ pub fn proof_frame_12bit_range_check() -> ProofObligation {
         inputs: vec![("offset".to_string(), width)],
         preconditions: vec![in_range],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -230,6 +233,7 @@ pub fn proof_frame_12bit_range_check_8bit() -> ProofObligation {
         inputs: vec![("offset".to_string(), width)],
         preconditions: vec![in_range],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -283,6 +287,7 @@ pub fn proof_frame_large_offset_materialization() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -305,6 +310,7 @@ pub fn proof_frame_large_offset_materialization_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -368,6 +374,7 @@ pub fn proof_frame_sp_alignment() -> ProofObligation {
         ],
         preconditions: vec![sp_aligned, fs_aligned],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -405,6 +412,7 @@ pub fn proof_frame_sp_alignment_8bit() -> ProofObligation {
         ],
         preconditions: vec![sp_aligned, fs_aligned],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -470,6 +478,7 @@ pub fn proof_frame_callee_save_no_overlap() -> ProofObligation {
         ],
         preconditions: vec![offsets_differ],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -502,6 +511,7 @@ pub fn proof_frame_callee_save_no_overlap_8bit() -> ProofObligation {
         ],
         preconditions: vec![offsets_differ],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -540,6 +550,7 @@ pub fn proof_frame_outgoing_arg_offset() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -562,6 +573,7 @@ pub fn proof_frame_outgoing_arg_offset_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -620,6 +632,7 @@ pub fn proof_frame_slot_distinct_offsets() -> ProofObligation {
         ],
         preconditions: vec![slots_differ],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -652,6 +665,7 @@ pub fn proof_frame_slot_distinct_offsets_8bit() -> ProofObligation {
         ],
         preconditions: vec![slots_differ],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -682,6 +696,7 @@ pub fn proof_frame_callee_save_restore_identity() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -705,6 +720,7 @@ pub fn proof_frame_callee_save_restore_identity_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -744,6 +760,7 @@ pub fn proof_frame_sp_alignment_32byte() -> ProofObligation {
         ],
         preconditions: vec![sp_aligned, fs_aligned],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -775,6 +792,7 @@ pub fn proof_frame_sp_alignment_32byte_8bit() -> ProofObligation {
         ],
         preconditions: vec![sp_aligned, fs_aligned],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -804,6 +822,7 @@ pub fn proof_frame_red_zone_offset() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -826,6 +845,7 @@ pub fn proof_frame_red_zone_offset_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -861,6 +881,7 @@ pub fn proof_frame_fp_sp_equivalence() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -888,6 +909,7 @@ pub fn proof_frame_fp_sp_equivalence_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -936,6 +958,7 @@ pub fn proof_frame_triple_callee_save_no_overlap() -> ProofObligation {
         ],
         preconditions: vec![off_a_ne_b, off_a_ne_c],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -976,6 +999,7 @@ pub fn proof_frame_triple_callee_save_no_overlap_8bit() -> ProofObligation {
         ],
         preconditions: vec![off_a_ne_b, off_a_ne_c],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1005,6 +1029,7 @@ pub fn proof_frame_emergency_spill_slot() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1027,6 +1052,7 @@ pub fn proof_frame_emergency_spill_slot_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1473,6 +1499,7 @@ mod tests {
             inputs: vec![("sp_val".to_string(), width)],
             preconditions: vec![sp_aligned],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1510,6 +1537,7 @@ mod tests {
             ],
             preconditions: vec![vals_differ],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

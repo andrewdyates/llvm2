@@ -130,6 +130,7 @@ fn proof_vector_add(arrangement: VectorArrangement, label: &str) -> ProofObligat
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -164,6 +165,7 @@ fn proof_vector_sub(arrangement: VectorArrangement, label: &str) -> ProofObligat
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -200,6 +202,7 @@ fn proof_vector_mul(arrangement: VectorArrangement, label: &str) -> ProofObligat
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -230,6 +233,7 @@ fn proof_vector_neg(arrangement: VectorArrangement, label: &str) -> ProofObligat
         inputs: vector_inputs("vn", arrangement),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -264,6 +268,7 @@ fn proof_vector_and(width: u32, label: &str) -> ProofObligation {
         inputs: bitwise_inputs(width),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -295,6 +300,7 @@ fn proof_vector_orr(width: u32, label: &str) -> ProofObligation {
         inputs: bitwise_inputs(width),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -326,6 +332,7 @@ fn proof_vector_eor(width: u32, label: &str) -> ProofObligation {
         inputs: bitwise_inputs(width),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -374,6 +381,7 @@ fn proof_vector_bic(width: u32, label: &str) -> ProofObligation {
         inputs: bitwise_inputs(width),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -407,6 +415,7 @@ fn proof_vector_shl(arrangement: VectorArrangement, imm: u32, label: &str) -> Pr
         inputs: vector_inputs("vn", arrangement),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -440,6 +449,7 @@ fn proof_vector_ushr(arrangement: VectorArrangement, imm: u32, label: &str) -> P
         inputs: vector_inputs("vn", arrangement),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -473,6 +483,7 @@ fn proof_vector_sshr(arrangement: VectorArrangement, imm: u32, label: &str) -> P
         inputs: vector_inputs("vn", arrangement),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -739,6 +750,7 @@ mod tests {
             inputs,
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

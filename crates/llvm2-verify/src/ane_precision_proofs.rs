@@ -212,6 +212,7 @@ pub fn proof_fp16_elementwise_error(
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -256,6 +257,7 @@ pub fn proof_fp16_elementwise_error_comprehensive(
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         });
     }
 
@@ -379,6 +381,7 @@ pub fn proof_fp16_gemm_accumulation(
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -458,6 +461,7 @@ pub fn proof_fp16_relu_safe(test_values: Option<&[f64]>) -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -543,6 +547,7 @@ pub fn proof_fp16_range_check(
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 

@@ -91,6 +91,7 @@ pub fn proof_const_fold_add() -> ProofObligation {
         inputs: vec![("k1".to_string(), width), ("k2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -107,6 +108,7 @@ pub fn proof_const_fold_add_8bit() -> ProofObligation {
         inputs: vec![("k1".to_string(), width), ("k2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -128,6 +130,7 @@ pub fn proof_const_fold_sub() -> ProofObligation {
         inputs: vec![("k1".to_string(), width), ("k2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -144,6 +147,7 @@ pub fn proof_const_fold_sub_8bit() -> ProofObligation {
         inputs: vec![("k1".to_string(), width), ("k2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -169,6 +173,7 @@ pub fn proof_and_absorb() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -184,6 +189,7 @@ pub fn proof_and_absorb_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -207,6 +213,7 @@ pub fn proof_or_absorb() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -223,6 +230,7 @@ pub fn proof_or_absorb_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -269,6 +277,7 @@ pub fn proof_dce_safety() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -289,6 +298,7 @@ pub fn proof_dce_safety_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -323,6 +333,7 @@ pub fn proof_copy_prop_identity() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -338,6 +349,7 @@ pub fn proof_copy_prop_identity_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -357,6 +369,7 @@ pub fn proof_and_absorb_w32() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -373,6 +386,7 @@ pub fn proof_or_absorb_w32() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -548,6 +562,7 @@ mod tests {
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -570,6 +585,7 @@ mod tests {
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -593,6 +609,7 @@ mod tests {
             inputs: vec![("k1".to_string(), width), ("k2".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -615,6 +632,7 @@ mod tests {
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

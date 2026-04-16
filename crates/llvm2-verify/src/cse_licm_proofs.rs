@@ -136,6 +136,7 @@ pub fn proof_cse_add() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -152,6 +153,7 @@ pub fn proof_cse_add_8bit() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -170,6 +172,7 @@ pub fn proof_cse_sub() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -186,6 +189,7 @@ pub fn proof_cse_sub_8bit() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -204,6 +208,7 @@ pub fn proof_cse_mul() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -220,6 +225,7 @@ pub fn proof_cse_mul_8bit() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -238,6 +244,7 @@ pub fn proof_cse_and() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -254,6 +261,7 @@ pub fn proof_cse_and_8bit() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -272,6 +280,7 @@ pub fn proof_cse_or() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -288,6 +297,7 @@ pub fn proof_cse_or_8bit() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -306,6 +316,7 @@ pub fn proof_cse_xor() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -322,6 +333,7 @@ pub fn proof_cse_xor_8bit() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -344,6 +356,7 @@ pub fn proof_cse_commutative_add() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -360,6 +373,7 @@ pub fn proof_cse_commutative_add_8bit() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -378,6 +392,7 @@ pub fn proof_cse_commutative_mul() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -396,6 +411,7 @@ pub fn proof_cse_commutative_and() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -414,6 +430,7 @@ pub fn proof_cse_commutative_or() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -432,6 +449,7 @@ pub fn proof_cse_commutative_xor() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -474,6 +492,7 @@ pub fn proof_licm_pure_add() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -490,6 +509,7 @@ pub fn proof_licm_pure_add_8bit() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -508,6 +528,7 @@ pub fn proof_licm_pure_mul() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -524,6 +545,7 @@ pub fn proof_licm_pure_mul_8bit() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -542,6 +564,7 @@ pub fn proof_licm_pure_and() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -560,6 +583,7 @@ pub fn proof_licm_pure_or() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -578,6 +602,7 @@ pub fn proof_licm_pure_xor() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -596,6 +621,7 @@ pub fn proof_licm_pure_sub() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -626,6 +652,7 @@ pub fn proof_pure_determinism_add() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -644,6 +671,7 @@ pub fn proof_pure_determinism_mul() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1113,6 +1141,7 @@ mod tests {
             inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1140,6 +1169,7 @@ mod tests {
             inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1165,6 +1195,7 @@ mod tests {
             inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1194,6 +1225,7 @@ mod tests {
             inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1217,6 +1249,7 @@ mod tests {
             inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

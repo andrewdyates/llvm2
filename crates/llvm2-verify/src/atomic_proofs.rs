@@ -112,6 +112,7 @@ fn proof_atomic_load(name: &str, size_bytes: u32) -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -187,6 +188,7 @@ fn proof_atomic_store_load_roundtrip(name: &str, size_bytes: u32) -> ProofObliga
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -281,6 +283,7 @@ where
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -321,6 +324,7 @@ where
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -503,6 +507,7 @@ pub fn proof_cas_success_i32() -> ProofObligation {
         ],
         preconditions: vec![precond],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -528,6 +533,7 @@ pub fn proof_cas_returns_old_i32() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -563,6 +569,7 @@ pub fn proof_cas_failure_i32() -> ProofObligation {
         ],
         preconditions: vec![precond_neq],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -594,6 +601,7 @@ pub fn proof_cas_success_i64() -> ProofObligation {
         ],
         preconditions: vec![precond],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -620,6 +628,7 @@ pub fn proof_fence_dmb_ish() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -635,6 +644,7 @@ pub fn proof_fence_dmb_ishld() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -650,6 +660,7 @@ pub fn proof_fence_dmb_ishst() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -685,6 +696,7 @@ pub fn proof_atomic_sub_via_neg_ldadd_i32() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -707,6 +719,7 @@ pub fn proof_atomic_sub_via_neg_ldadd_i64() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -751,6 +764,7 @@ pub fn proof_atomic_and_via_mvn_ldclr_i32() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -776,6 +790,7 @@ pub fn proof_atomic_and_via_mvn_ldclr_i64() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -836,6 +851,7 @@ fn proof_atomic_store_non_interference(name: &str, size_bytes: u32) -> ProofObli
         ],
         preconditions: vec![precond_distinct, precond_a_safe, precond_b_safe, precond_disjoint],
         fp_inputs: vec![],
+            category: None,
     }
 }
 

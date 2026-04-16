@@ -130,8 +130,9 @@ pub mod verification_runner;
 pub mod function_verifier;
 
 pub use verify::{VerificationResult, VerificationReport, ProofResult, Verifier, VerificationStrength};
-pub use lowering_proof::{ProofObligation, verify_by_evaluation, verify_by_evaluation_with_config,
-    verify_fp_by_evaluation, VerificationConfig, DEFAULT_SAMPLE_COUNT, EXHAUSTIVE_WIDTH_THRESHOLD};
+pub use lowering_proof::{ProofObligation, TransvalCheckKind, verify_by_evaluation,
+    verify_by_evaluation_with_config, verify_fp_by_evaluation, VerificationConfig,
+    DEFAULT_SAMPLE_COUNT, EXHAUSTIVE_WIDTH_THRESHOLD};
 pub use smt::{SmtError, SmtExpr, SmtSort, RoundingMode};
 pub use z4_bridge::{Z4Config, Z4Result, verify_with_z4, serialize_to_smt2, verify_with_z4_cli,
     parse_z4_output, generate_smt2_query, verify_with_cli, z3_available,

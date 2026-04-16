@@ -156,6 +156,7 @@ fn proof_add_lane_decomposition(
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -194,6 +195,7 @@ fn proof_sub_lane_decomposition(
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -232,6 +234,7 @@ fn proof_mul_lane_decomposition(
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -266,6 +269,7 @@ fn proof_and_bitwise(width: u32, label: &str) -> ProofObligation {
         inputs: bitwise_inputs(width),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -297,6 +301,7 @@ fn proof_orr_bitwise(width: u32, label: &str) -> ProofObligation {
         inputs: bitwise_inputs(width),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -328,6 +333,7 @@ fn proof_eor_bitwise(width: u32, label: &str) -> ProofObligation {
         inputs: bitwise_inputs(width),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -372,6 +378,7 @@ fn proof_not_bitwise(width: u32, label: &str) -> ProofObligation {
         inputs: unary_bitwise_inputs(width),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -410,6 +417,7 @@ fn proof_dup_broadcast(arrangement: VectorArrangement, label: &str) -> ProofObli
         inputs: vec![("scalar".to_string(), lane_bits)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -467,6 +475,7 @@ fn proof_ins_lane(
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -518,6 +527,7 @@ fn proof_cmeq_comparison(
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -564,6 +574,7 @@ fn proof_movi_immediate(width: u32, label: &str) -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -612,6 +623,7 @@ fn proof_ld1_st1_roundtrip(width: u32, label: &str) -> ProofObligation {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         }
     } else {
         // 128-bit: store as two 64-bit halves, load back and reassemble
@@ -645,6 +657,7 @@ fn proof_ld1_st1_roundtrip(width: u32, label: &str) -> ProofObligation {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         }
     }
 }
@@ -678,6 +691,7 @@ fn proof_not_involution(width: u32, label: &str) -> ProofObligation {
         inputs: unary_bitwise_inputs(width),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -717,6 +731,7 @@ fn proof_dup_lane_consistency(
         inputs: vec![("scalar".to_string(), lane_bits)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1042,6 +1057,7 @@ mod tests {
             inputs,
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

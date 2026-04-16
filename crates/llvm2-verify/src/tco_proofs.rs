@@ -98,6 +98,7 @@ fn proof_self_recursive_semantics_width(width: u32) -> ProofObligation {
         inputs: vec![("arg".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -142,6 +143,7 @@ fn proof_argument_shuffle_correctness_n(arg_idx: u32, width: u32) -> ProofObliga
         inputs: vec![(format!("new_arg_{}", arg_idx), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -193,6 +195,7 @@ fn proof_sibling_call_semantics_width(width: u32) -> ProofObligation {
         inputs: vec![("arg".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -254,6 +257,7 @@ fn proof_guard_store_blocks_tco_width(width: u32) -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -306,6 +310,7 @@ fn proof_stack_frame_reuse_n(iterations: u64, width: u32) -> ProofObligation {
         inputs: vec![("sp_initial".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -355,6 +360,7 @@ fn proof_return_value_preservation_width(width: u32) -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -412,6 +418,7 @@ fn proof_callee_saved_register_safety_width(width: u32) -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -458,6 +465,7 @@ fn proof_idempotence_width(width: u32) -> ProofObligation {
         inputs: vec![("arg".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -507,6 +515,7 @@ fn proof_non_tail_call_rejection_width(width: u32) -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -566,6 +575,7 @@ fn proof_indirect_call_rejection_width(width: u32) -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -606,6 +616,7 @@ fn proof_self_recursive_multi_arg_width(width: u32) -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -664,6 +675,7 @@ fn proof_sibling_different_callee_width(callee_id: u32, width: u32) -> ProofObli
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 

@@ -122,6 +122,7 @@ pub fn proof_sxtb_8_to_32() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -144,6 +145,7 @@ pub fn proof_sxtb_8_to_64() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -166,6 +168,7 @@ pub fn proof_sxth_16_to_32() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -188,6 +191,7 @@ pub fn proof_sxth_16_to_64() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -210,6 +214,7 @@ pub fn proof_sxtw_32_to_64() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -241,6 +246,7 @@ pub fn proof_uxtb_8_to_32() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -262,6 +268,7 @@ pub fn proof_uxtb_8_to_64() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -283,6 +290,7 @@ pub fn proof_uxth_16_to_32() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -304,6 +312,7 @@ pub fn proof_uxth_16_to_64() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -328,6 +337,7 @@ pub fn proof_uxtw_32_to_64() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -358,6 +368,7 @@ pub fn proof_trunc_to_i8() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -379,6 +390,7 @@ pub fn proof_trunc_to_i16() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -400,6 +412,7 @@ pub fn proof_trunc_to_i8_from_64() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -421,6 +434,7 @@ pub fn proof_trunc_to_i16_from_64() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -450,6 +464,7 @@ pub fn proof_roundtrip_zext_trunc_8() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -471,6 +486,7 @@ pub fn proof_roundtrip_zext_trunc_16() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -494,6 +510,7 @@ pub fn proof_roundtrip_sext_trunc_8() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -515,6 +532,7 @@ pub fn proof_roundtrip_sext_trunc_16() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -544,6 +562,7 @@ pub fn proof_sxtb_idempotent() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -565,6 +584,7 @@ pub fn proof_sxth_idempotent() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -589,6 +609,7 @@ pub fn proof_uxtb_idempotent() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -610,6 +631,7 @@ pub fn proof_uxth_idempotent() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 

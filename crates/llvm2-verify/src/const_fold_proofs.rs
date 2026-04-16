@@ -148,6 +148,7 @@ pub fn proof_const_fold_add() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -164,6 +165,7 @@ pub fn proof_const_fold_add_8bit() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -185,6 +187,7 @@ pub fn proof_const_fold_sub() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -201,6 +204,7 @@ pub fn proof_const_fold_sub_8bit() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -222,6 +226,7 @@ pub fn proof_const_fold_mul() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -238,6 +243,7 @@ pub fn proof_const_fold_mul_8bit() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -259,6 +265,7 @@ pub fn proof_const_fold_and() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -275,6 +282,7 @@ pub fn proof_const_fold_and_8bit() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -295,6 +303,7 @@ pub fn proof_const_fold_or() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -311,6 +320,7 @@ pub fn proof_const_fold_or_8bit() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -331,6 +341,7 @@ pub fn proof_const_fold_xor() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -347,6 +358,7 @@ pub fn proof_const_fold_xor_8bit() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -376,6 +388,7 @@ pub fn proof_const_fold_shl() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![precond],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -394,6 +407,7 @@ pub fn proof_const_fold_shl_8bit() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![precond],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -422,6 +436,7 @@ pub fn proof_const_fold_sdiv() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![precond],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -440,6 +455,7 @@ pub fn proof_const_fold_sdiv_8bit() -> ProofObligation {
         inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
         preconditions: vec![precond],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -464,6 +480,7 @@ pub fn proof_const_fold_neg() -> ProofObligation {
         inputs: vec![("c".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -479,6 +496,7 @@ pub fn proof_const_fold_neg_8bit() -> ProofObligation {
         inputs: vec![("c".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -499,6 +517,7 @@ pub fn proof_const_fold_not() -> ProofObligation {
         inputs: vec![("c".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -514,6 +533,7 @@ pub fn proof_const_fold_not_8bit() -> ProofObligation {
         inputs: vec![("c".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -539,6 +559,7 @@ pub fn proof_identity_add_zero() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -554,6 +575,7 @@ pub fn proof_identity_add_zero_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -574,6 +596,7 @@ pub fn proof_identity_mul_one() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -589,6 +612,7 @@ pub fn proof_identity_mul_one_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -609,6 +633,7 @@ pub fn proof_identity_mul_zero() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -624,6 +649,7 @@ pub fn proof_identity_mul_zero_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -644,6 +670,7 @@ pub fn proof_identity_and_zero() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -659,6 +686,7 @@ pub fn proof_identity_and_zero_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -679,6 +707,7 @@ pub fn proof_identity_or_zero() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -694,6 +723,7 @@ pub fn proof_identity_or_zero_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -714,6 +744,7 @@ pub fn proof_identity_xor_zero() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -729,6 +760,7 @@ pub fn proof_identity_xor_zero_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -750,6 +782,7 @@ pub fn proof_identity_sub_self() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -765,6 +798,7 @@ pub fn proof_identity_sub_self_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1098,6 +1132,7 @@ mod tests {
             inputs: vec![("c1".to_string(), width), ("c2".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1120,6 +1155,7 @@ mod tests {
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1142,6 +1178,7 @@ mod tests {
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1164,6 +1201,7 @@ mod tests {
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1186,6 +1224,7 @@ mod tests {
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

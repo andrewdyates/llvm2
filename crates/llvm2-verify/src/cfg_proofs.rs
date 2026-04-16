@@ -88,6 +88,7 @@ pub fn proof_uncond_branch_fold_preserves_value() -> ProofObligation {
         inputs: vec![("y".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -103,6 +104,7 @@ pub fn proof_uncond_branch_fold_preserves_value_8bit() -> ProofObligation {
         inputs: vec![("y".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -128,6 +130,7 @@ pub fn proof_uncond_branch_fold_preserves_computation() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -147,6 +150,7 @@ pub fn proof_uncond_branch_fold_preserves_computation_8bit() -> ProofObligation 
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -185,6 +189,7 @@ pub fn proof_const_branch_cbz_zero() -> ProofObligation {
         inputs: vec![], // no free variables — all constants
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -216,6 +221,7 @@ pub fn proof_const_branch_cbz_nonzero() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -245,6 +251,7 @@ pub fn proof_const_branch_cbnz_nonzero() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -274,6 +281,7 @@ pub fn proof_const_branch_cbnz_zero() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -309,6 +317,7 @@ pub fn proof_cbz_deterministic() -> ProofObligation {
         inputs: vec![("v".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -329,6 +338,7 @@ pub fn proof_cbz_deterministic_8bit() -> ProofObligation {
         inputs: vec![("v".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -364,6 +374,7 @@ pub fn proof_dup_branch_same_target() -> ProofObligation {
         inputs: vec![("v".to_string(), width), ("target".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -384,6 +395,7 @@ pub fn proof_dup_branch_same_target_8bit() -> ProofObligation {
         inputs: vec![("v".to_string(), width), ("target".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -412,6 +424,7 @@ pub fn proof_empty_block_redirect() -> ProofObligation {
         inputs: vec![("target".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -427,6 +440,7 @@ pub fn proof_empty_block_redirect_8bit() -> ProofObligation {
         inputs: vec![("target".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -450,6 +464,7 @@ pub fn proof_branch_thread_preserves_target() -> ProofObligation {
         inputs: vec![("target".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -470,6 +485,7 @@ pub fn proof_unreachable_block_removal() -> ProofObligation {
         inputs: vec![("y".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -498,6 +514,7 @@ pub fn proof_tbnz_bit_set_takes_branch() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -522,6 +539,7 @@ pub fn proof_tbnz_bit_clear_falls_through() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -546,6 +564,7 @@ pub fn proof_tbz_bit_clear_takes_branch() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -570,6 +589,7 @@ pub fn proof_tbz_bit_set_falls_through() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -595,6 +615,7 @@ pub fn proof_branch_fold_preserves_sub_computation() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -614,6 +635,7 @@ pub fn proof_branch_fold_preserves_sub_computation_8bit() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -635,6 +657,7 @@ pub fn proof_branch_fold_preserves_mul_computation() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -669,6 +692,7 @@ pub fn proof_phi_value_selection_true_path() -> ProofObligation {
         ],
         preconditions: vec![v_is_zero],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -699,6 +723,7 @@ pub fn proof_phi_value_selection_false_path() -> ProofObligation {
         ],
         preconditions: vec![v_is_nonzero],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -720,6 +745,7 @@ pub fn proof_critical_edge_split_preserves_value() -> ProofObligation {
         inputs: vec![("y".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -735,6 +761,7 @@ pub fn proof_critical_edge_split_preserves_value_8bit() -> ProofObligation {
         inputs: vec![("y".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1030,6 +1057,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1072,6 +1100,7 @@ mod tests {
             ],
             preconditions: vec![v_is_zero, vals_differ],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1106,6 +1135,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1144,6 +1174,7 @@ mod tests {
             ],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

@@ -22,6 +22,107 @@ use crate::smt::{mask, SmtExpr};
 use crate::verify::VerificationResult;
 use std::collections::HashMap;
 
+/// Translation validation check kind, aligned with tRust trust-transval's `CheckKind`.
+///
+/// trust-transval (tRust's translation validation crate) classifies verification
+/// conditions into four categories: ControlFlow, DataFlow, ReturnValue,
+/// Termination. LLVM2 extends this taxonomy with machine-specific categories
+/// for instruction lowering, peephole optimizations, memory model, register
+/// allocation, and SIMD vectorization.
+///
+/// This is distinct from `proof_database::ProofCategory`, which provides a
+/// fine-grained LLVM2-specific classification (36 variants for individual proof
+/// modules). `TransvalCheckKind` is a coarse-grained taxonomy designed for
+/// interoperability with tRust's translation validation pipeline.
+///
+/// Reference: `~/tRust/crates/trust-transval/src/vc_core.rs`
+/// Reference: `trust_types::CheckKind`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransvalCheckKind {
+    /// Data flow preservation: a tMIR expression evaluates to the same value
+    /// as the corresponding AArch64 expression.
+    /// Maps to trust-transval `CheckKind::DataFlow`.
+    DataFlow,
+
+    /// Control flow preservation: branch conditions are preserved across
+    /// the lowering transformation.
+    /// Maps to trust-transval `CheckKind::ControlFlow`.
+    ControlFlow,
+
+    /// Return value preservation: function output is preserved.
+    /// Maps to trust-transval `CheckKind::ReturnValue`.
+    ReturnValue,
+
+    /// Termination preservation: if the source terminates, the target must too.
+    /// Maps to trust-transval `CheckKind::Termination`.
+    Termination,
+
+    /// Instruction lowering: tMIR instruction -> AArch64 instruction sequence.
+    /// LLVM2-specific; trust-transval does not reason about machine instructions.
+    InstructionLowering,
+
+    /// Peephole optimization: machine-level rewrite preserves semantics.
+    PeepholeOptimization,
+
+    /// Memory model: load/store semantics preserved across lowering.
+    MemoryModel,
+
+    /// Register allocation: spill/reload preserves register values.
+    RegisterAllocation,
+
+    /// SIMD vectorization: scalar-to-vector mapping is correct.
+    Vectorization,
+}
+
+impl std::fmt::Display for TransvalCheckKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransvalCheckKind::DataFlow => write!(f, "data_flow"),
+            TransvalCheckKind::ControlFlow => write!(f, "control_flow"),
+            TransvalCheckKind::ReturnValue => write!(f, "return_value"),
+            TransvalCheckKind::Termination => write!(f, "termination"),
+            TransvalCheckKind::InstructionLowering => write!(f, "instruction_lowering"),
+            TransvalCheckKind::PeepholeOptimization => write!(f, "peephole"),
+            TransvalCheckKind::MemoryModel => write!(f, "memory"),
+            TransvalCheckKind::RegisterAllocation => write!(f, "regalloc"),
+            TransvalCheckKind::Vectorization => write!(f, "vectorization"),
+        }
+    }
+}
+
+impl TransvalCheckKind {
+    /// Convert to the category string used by `ProofResult` and `VerificationReport`.
+    ///
+    /// This provides backward compatibility with the existing string-based
+    /// category system while enabling typed categorization.
+    pub fn as_category_str(&self) -> &'static str {
+        match self {
+            TransvalCheckKind::DataFlow => "data_flow",
+            TransvalCheckKind::ControlFlow => "control_flow",
+            TransvalCheckKind::ReturnValue => "return_value",
+            TransvalCheckKind::Termination => "termination",
+            TransvalCheckKind::InstructionLowering => "arithmetic",
+            TransvalCheckKind::PeepholeOptimization => "peephole",
+            TransvalCheckKind::MemoryModel => "memory",
+            TransvalCheckKind::RegisterAllocation => "regalloc",
+            TransvalCheckKind::Vectorization => "vectorization",
+        }
+    }
+
+    /// Returns true if this category has a direct equivalent in trust-transval's
+    /// `CheckKind` enum (i.e., it is one of the four standard translation
+    /// validation check kinds).
+    pub fn is_transval_compatible(&self) -> bool {
+        matches!(
+            self,
+            TransvalCheckKind::DataFlow
+                | TransvalCheckKind::ControlFlow
+                | TransvalCheckKind::ReturnValue
+                | TransvalCheckKind::Termination
+        )
+    }
+}
+
 /// A proof obligation asserting semantic equivalence of a lowering rule.
 ///
 /// Given:
@@ -55,6 +156,16 @@ pub struct ProofObligation {
     /// These are declared as `(_ FloatingPoint eb sb)` in SMT-LIB2.
     /// Empty for purely bitvector proof obligations.
     pub fp_inputs: Vec<(String, u32, u32)>,
+
+    /// Typed proof category, aligned with trust-transval's `CheckKind`.
+    ///
+    /// When set, this provides a structured categorization that can be mapped
+    /// to trust-transval's verification condition taxonomy. When `None`, the
+    /// category is determined by which module creates the proof obligation
+    /// and the string-based category in `ProofResult`.
+    ///
+    /// See [`TransvalCheckKind`] for the full taxonomy.
+    pub category: Option<TransvalCheckKind>,
 }
 
 impl ProofObligation {
@@ -471,6 +582,7 @@ pub fn proof_iadd_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -492,6 +604,7 @@ pub fn proof_iadd_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -513,6 +626,7 @@ pub fn proof_isub_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -534,6 +648,7 @@ pub fn proof_imul_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -556,6 +671,7 @@ pub fn proof_neg_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -582,6 +698,7 @@ pub fn proof_iadd_i8() -> ProofObligation {
         inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -601,6 +718,7 @@ pub fn proof_isub_i8() -> ProofObligation {
         inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -620,6 +738,7 @@ pub fn proof_imul_i8() -> ProofObligation {
         inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -637,6 +756,7 @@ pub fn proof_neg_i8() -> ProofObligation {
         inputs: vec![("a".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -663,6 +783,7 @@ pub fn proof_iadd_i16() -> ProofObligation {
         inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -682,6 +803,7 @@ pub fn proof_isub_i16() -> ProofObligation {
         inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -701,6 +823,7 @@ pub fn proof_imul_i16() -> ProofObligation {
         inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -718,6 +841,7 @@ pub fn proof_neg_i16() -> ProofObligation {
         inputs: vec![("a".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -743,6 +867,7 @@ pub fn proof_isub_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -764,6 +889,7 @@ pub fn proof_imul_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -783,6 +909,7 @@ pub fn proof_neg_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -822,6 +949,7 @@ pub fn proof_sdiv_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions,
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -851,6 +979,7 @@ pub fn proof_sdiv_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions,
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -882,6 +1011,7 @@ pub fn proof_udiv_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions,
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -910,6 +1040,7 @@ pub fn proof_udiv_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
         preconditions,
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -978,6 +1109,7 @@ pub fn proof_fadd_f32() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 8, 24), ("b".to_string(), 8, 24)],
+            category: None,
     }
 }
 
@@ -998,6 +1130,7 @@ pub fn proof_fadd_f64() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 11, 53), ("b".to_string(), 11, 53)],
+            category: None,
     }
 }
 
@@ -1018,6 +1151,7 @@ pub fn proof_fsub_f32() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 8, 24), ("b".to_string(), 8, 24)],
+            category: None,
     }
 }
 
@@ -1038,6 +1172,7 @@ pub fn proof_fsub_f64() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 11, 53), ("b".to_string(), 11, 53)],
+            category: None,
     }
 }
 
@@ -1058,6 +1193,7 @@ pub fn proof_fmul_f32() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 8, 24), ("b".to_string(), 8, 24)],
+            category: None,
     }
 }
 
@@ -1078,6 +1214,7 @@ pub fn proof_fmul_f64() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 11, 53), ("b".to_string(), 11, 53)],
+            category: None,
     }
 }
 
@@ -1096,6 +1233,7 @@ pub fn proof_fneg_f32() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 8, 24)],
+            category: None,
     }
 }
 
@@ -1114,6 +1252,7 @@ pub fn proof_fneg_f64() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 11, 53)],
+            category: None,
     }
 }
 
@@ -1341,6 +1480,7 @@ pub fn proof_nzcv_n_flag_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1369,6 +1509,7 @@ pub fn proof_nzcv_z_flag_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1396,6 +1537,7 @@ pub fn proof_nzcv_c_flag_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1429,6 +1571,7 @@ pub fn proof_nzcv_v_flag_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1471,6 +1614,7 @@ fn proof_icmp_generic(
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1697,6 +1841,7 @@ fn proof_condbr_generic(
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2059,6 +2204,7 @@ pub fn proof_band_i8() -> ProofObligation {
         inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2078,6 +2224,7 @@ pub fn proof_bor_i8() -> ProofObligation {
         inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2097,6 +2244,7 @@ pub fn proof_bxor_i8() -> ProofObligation {
         inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2117,6 +2265,7 @@ pub fn proof_bnot_i8() -> ProofObligation {
         inputs: vec![("a".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2136,6 +2285,7 @@ pub fn proof_ishl_i8() -> ProofObligation {
         inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2155,6 +2305,7 @@ pub fn proof_ushr_i8() -> ProofObligation {
         inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2174,6 +2325,7 @@ pub fn proof_sshr_i8() -> ProofObligation {
         inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2200,6 +2352,7 @@ pub fn proof_band_i16() -> ProofObligation {
         inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2219,6 +2372,7 @@ pub fn proof_bor_i16() -> ProofObligation {
         inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2238,6 +2392,7 @@ pub fn proof_bxor_i16() -> ProofObligation {
         inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2256,6 +2411,7 @@ pub fn proof_bnot_i16() -> ProofObligation {
         inputs: vec![("a".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2275,6 +2431,7 @@ pub fn proof_ishl_i16() -> ProofObligation {
         inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2294,6 +2451,7 @@ pub fn proof_ushr_i16() -> ProofObligation {
         inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2313,6 +2471,7 @@ pub fn proof_sshr_i16() -> ProofObligation {
         inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2721,6 +2880,7 @@ mod tests {
             inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -3042,6 +3202,7 @@ mod tests {
             inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -3064,6 +3225,7 @@ mod tests {
             inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -3125,6 +3287,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         // Even with 0 random samples, edge cases should catch add != sub
@@ -3148,6 +3311,7 @@ mod tests {
             inputs: vec![("a".to_string(), 16)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         // With default threshold (8), 16-bit falls into random sampling
@@ -3259,6 +3423,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![("a".to_string(), 11, 53), ("b".to_string(), 11, 53)],
+            category: None,
         };
 
         let result = verify_fp_by_evaluation(&obligation);
@@ -3502,6 +3667,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

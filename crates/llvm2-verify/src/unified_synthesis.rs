@@ -1286,6 +1286,7 @@ fn verify_gpu_map_candidate(
         inputs: vec![],  // Fully concrete (no symbolic vars)
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     };
 
     matches!(verify_by_evaluation(&obligation), VerificationResult::Valid)
@@ -1351,6 +1352,7 @@ fn verify_gpu_reduce_candidate(
         inputs: vec![],  // Fully concrete
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     };
 
     matches!(verify_by_evaluation(&obligation), VerificationResult::Valid)
@@ -1414,6 +1416,7 @@ fn verify_ane_gemm_candidate(_elem_width: u32, _element_count: u32) -> bool {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     };
 
     matches!(verify_by_evaluation(&obligation), VerificationResult::Valid)
@@ -1453,6 +1456,7 @@ fn verify_ane_elementwise_candidate(op_hint: &str, element_count: u32) -> bool {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     };
 
     matches!(verify_by_evaluation(&obligation), VerificationResult::Valid)
@@ -1485,6 +1489,7 @@ fn verify_ane_activation_relu_candidate(element_count: u32) -> bool {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     };
 
     matches!(verify_by_evaluation(&obligation), VerificationResult::Valid)
@@ -1799,6 +1804,7 @@ fn verify_gpu_simdgroup_reduce_candidate(
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     };
 
     matches!(verify_by_evaluation(&obligation), VerificationResult::Valid)
@@ -1948,6 +1954,7 @@ fn verify_ane_conv2d_candidate(params: &ane_semantics::Conv2dParams, with_bias: 
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     };
 
     matches!(verify_by_evaluation(&obligation), VerificationResult::Valid)
@@ -1981,6 +1988,7 @@ fn verify_ane_activation_leaky_relu_candidate(alpha: f64, element_count: u32) ->
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     };
 
     matches!(verify_by_evaluation(&obligation), VerificationResult::Valid)
@@ -2034,6 +2042,7 @@ fn verify_ane_gemm_then_activation_candidate(activation: ane_semantics::Activati
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     };
 
     matches!(verify_by_evaluation(&obligation), VerificationResult::Valid)
@@ -4633,6 +4642,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         // This should NOT be valid (ops mismatch).
@@ -4675,6 +4685,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         assert!(
@@ -4720,6 +4731,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         assert!(
@@ -4984,6 +4996,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         assert!(
@@ -5018,6 +5031,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         assert!(
@@ -5047,6 +5061,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         assert!(
@@ -5096,6 +5111,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         assert!(
@@ -5120,6 +5136,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         assert!(

@@ -681,6 +681,7 @@ mod tests {
             inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let strength = VerificationStrength::for_obligation(&obligation);
@@ -704,6 +705,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let strength = VerificationStrength::for_obligation(&obligation);
@@ -727,6 +729,7 @@ mod tests {
             inputs: vec![("a".to_string(), 64)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let strength = VerificationStrength::for_obligation(&obligation);
@@ -747,6 +750,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = VerificationConfig::with_sample_count(500_000);

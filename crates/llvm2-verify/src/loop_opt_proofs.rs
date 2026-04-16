@@ -130,6 +130,7 @@ pub fn proof_unroll_preserves_iteration_count() -> ProofObligation {
         inputs: vec![("base".to_string(), width), ("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -149,6 +150,7 @@ pub fn proof_unroll_preserves_iteration_count_8bit() -> ProofObligation {
         inputs: vec![("base".to_string(), width), ("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -185,6 +187,7 @@ pub fn proof_unroll_preserves_body_semantics() -> ProofObligation {
         inputs: vec![("init".to_string(), width), ("step".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -209,6 +212,7 @@ pub fn proof_unroll_preserves_body_semantics_8bit() -> ProofObligation {
         inputs: vec![("init".to_string(), width), ("step".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -239,6 +243,7 @@ pub fn proof_unroll_iv_final_value() -> ProofObligation {
         inputs: vec![("init".to_string(), width), ("step".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -258,6 +263,7 @@ pub fn proof_unroll_iv_final_value_8bit() -> ProofObligation {
         inputs: vec![("init".to_string(), width), ("step".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -287,6 +293,7 @@ pub fn proof_unroll_boundary_count_1() -> ProofObligation {
         inputs: vec![("base".to_string(), width), ("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -306,6 +313,7 @@ pub fn proof_unroll_boundary_count_1_8bit() -> ProofObligation {
         inputs: vec![("base".to_string(), width), ("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -334,6 +342,7 @@ pub fn proof_unroll_boundary_count_0() -> ProofObligation {
         inputs: vec![("base".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -352,6 +361,7 @@ pub fn proof_unroll_boundary_count_0_8bit() -> ProofObligation {
         inputs: vec![("base".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -389,6 +399,7 @@ pub fn proof_strength_reduce_mul_to_add() -> ProofObligation {
         inputs: vec![("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -408,6 +419,7 @@ pub fn proof_strength_reduce_mul_to_add_8bit() -> ProofObligation {
         inputs: vec![("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -441,6 +453,7 @@ pub fn proof_strength_reduce_iv_update() -> ProofObligation {
         inputs: vec![("iv".to_string(), width), ("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -460,6 +473,7 @@ pub fn proof_strength_reduce_iv_update_8bit() -> ProofObligation {
         inputs: vec![("iv".to_string(), width), ("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -492,6 +506,7 @@ pub fn proof_strength_reduce_overflow_safety() -> ProofObligation {
         inputs: vec![("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -511,6 +526,7 @@ pub fn proof_strength_reduce_overflow_safety_8bit() -> ProofObligation {
         inputs: vec![("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -540,6 +556,7 @@ pub fn proof_strength_reduce_base_case() -> ProofObligation {
         inputs: vec![("base".to_string(), width), ("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -560,6 +577,7 @@ pub fn proof_strength_reduce_base_case_8bit() -> ProofObligation {
         inputs: vec![("base".to_string(), width), ("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -615,6 +633,7 @@ pub fn proof_unroll_strength_reduce_composition() -> ProofObligation {
         inputs: vec![("base".to_string(), width), ("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -641,6 +660,7 @@ pub fn proof_unroll_strength_reduce_composition_8bit() -> ProofObligation {
         inputs: vec![("base".to_string(), width), ("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -675,6 +695,7 @@ pub fn proof_dead_iv_elimination() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -696,6 +717,7 @@ pub fn proof_dead_iv_elimination_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 

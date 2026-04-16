@@ -149,6 +149,7 @@ pub fn proof_gvn_reflexivity_add() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -165,6 +166,7 @@ pub fn proof_gvn_reflexivity_add_8bit() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -183,6 +185,7 @@ pub fn proof_gvn_reflexivity_mul() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -199,6 +202,7 @@ pub fn proof_gvn_reflexivity_mul_8bit() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -217,6 +221,7 @@ pub fn proof_gvn_reflexivity_sub() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -235,6 +240,7 @@ pub fn proof_gvn_reflexivity_and() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -253,6 +259,7 @@ pub fn proof_gvn_reflexivity_or() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -271,6 +278,7 @@ pub fn proof_gvn_reflexivity_xor() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -307,6 +315,7 @@ pub fn proof_gvn_consistency_add() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -323,6 +332,7 @@ pub fn proof_gvn_consistency_add_8bit() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -341,6 +351,7 @@ pub fn proof_gvn_consistency_mul() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -359,6 +370,7 @@ pub fn proof_gvn_consistency_sub() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -389,6 +401,7 @@ pub fn proof_gvn_commutativity_add() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -405,6 +418,7 @@ pub fn proof_gvn_commutativity_add_8bit() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -423,6 +437,7 @@ pub fn proof_gvn_commutativity_mul() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -441,6 +456,7 @@ pub fn proof_gvn_commutativity_and() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -459,6 +475,7 @@ pub fn proof_gvn_commutativity_or() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -477,6 +494,7 @@ pub fn proof_gvn_commutativity_xor() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -513,6 +531,7 @@ pub fn proof_gvn_dominance_safety_add() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -531,6 +550,7 @@ pub fn proof_gvn_dominance_safety_mul() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -553,6 +573,7 @@ pub fn proof_gvn_value_preservation_add() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -571,6 +592,7 @@ pub fn proof_gvn_value_preservation_sub() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -891,6 +913,7 @@ pub fn proof_gvn_idempotence_add() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -909,6 +932,7 @@ pub fn proof_gvn_idempotence_mul() -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1232,6 +1256,7 @@ mod tests {
             inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1257,6 +1282,7 @@ mod tests {
             inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1282,6 +1308,7 @@ mod tests {
             inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1314,6 +1341,7 @@ mod tests {
             inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

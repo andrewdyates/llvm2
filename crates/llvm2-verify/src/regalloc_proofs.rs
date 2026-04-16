@@ -238,6 +238,7 @@ pub fn proof_regalloc_non_interference() -> ProofObligation {
         ],
         preconditions: vec![regs_differ],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -269,6 +270,7 @@ pub fn proof_regalloc_non_interference_8bit() -> ProofObligation {
         ],
         preconditions: vec![regs_differ],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -328,6 +330,7 @@ pub fn proof_regalloc_completeness() -> ProofObligation {
         ],
         preconditions: vec![hp_valid, hs_valid, at_least_one],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -358,6 +361,7 @@ pub fn proof_regalloc_completeness_8bit() -> ProofObligation {
         ],
         preconditions: vec![hp_valid, hs_valid, at_least_one],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -410,6 +414,7 @@ pub fn proof_regalloc_spill_store_load() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -433,6 +438,7 @@ pub fn proof_regalloc_spill_store_load_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -486,6 +492,7 @@ pub fn proof_regalloc_parallel_copy_two() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -531,6 +538,7 @@ pub fn proof_regalloc_parallel_copy_swap() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -586,6 +594,7 @@ pub fn proof_regalloc_phi_elimination() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -611,6 +620,7 @@ pub fn proof_regalloc_phi_elimination_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -653,6 +663,7 @@ pub fn proof_regalloc_callee_saved_preserved() -> ProofObligation {
         inputs: vec![("callee_saved_val".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -684,6 +695,7 @@ pub fn proof_regalloc_caller_saved_spill_restore() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -715,6 +727,7 @@ pub fn proof_regalloc_live_through_callee_saved() -> ProofObligation {
         inputs: vec![("val".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -745,6 +758,7 @@ pub fn proof_regalloc_live_through_spill() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -796,6 +810,7 @@ pub fn proof_regalloc_spill_slot_non_aliasing() -> ProofObligation {
         ],
         preconditions: vec![slots_differ],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -828,6 +843,7 @@ pub fn proof_regalloc_spill_slot_non_aliasing_8bit() -> ProofObligation {
         ],
         preconditions: vec![slots_differ],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -903,6 +919,7 @@ pub fn proof_regalloc_spill_reload_semantic() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -932,6 +949,7 @@ pub fn proof_regalloc_spill_reload_semantic_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -986,6 +1004,7 @@ pub fn proof_regalloc_spill_offset_non_interference() -> ProofObligation {
         ],
         preconditions: vec![slots_differ],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1018,6 +1037,7 @@ pub fn proof_regalloc_spill_offset_non_interference_8bit() -> ProofObligation {
         ],
         preconditions: vec![slots_differ],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1079,6 +1099,7 @@ pub fn proof_regalloc_phi_elimination_3pred() -> ProofObligation {
         ],
         preconditions: vec![valid_pred],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1119,6 +1140,7 @@ pub fn proof_regalloc_phi_elimination_3pred_8bit() -> ProofObligation {
         ],
         preconditions: vec![valid_pred],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1167,6 +1189,7 @@ pub fn proof_regalloc_copy_coalescing_soundness() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1190,6 +1213,7 @@ pub fn proof_regalloc_copy_coalescing_soundness_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1253,6 +1277,7 @@ pub fn proof_regalloc_caller_saved_spill_around_call() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1319,6 +1344,7 @@ pub fn proof_regalloc_callee_saved_restore() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1374,6 +1400,7 @@ pub fn proof_regalloc_parallel_copy_3way_cycle() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1415,6 +1442,7 @@ pub fn proof_regalloc_rematerialization_const() -> ProofObligation {
         inputs: vec![("k".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1450,6 +1478,7 @@ pub fn proof_regalloc_rematerialization_add_imm() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1489,6 +1518,7 @@ pub fn proof_regalloc_regfile_write_read_identity() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1512,6 +1542,7 @@ pub fn proof_regalloc_regfile_write_read_identity_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1587,6 +1618,7 @@ pub fn proof_greedy_total_assignment() -> ProofObligation {
         ],
         preconditions: vec![hp_valid, hs_valid, exactly_one],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1644,6 +1676,7 @@ pub fn proof_greedy_no_interference() -> ProofObligation {
         ],
         preconditions: vec![pc_overlap, pc_class, pc_differ],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1694,6 +1727,7 @@ pub fn proof_greedy_class_constraint() -> ProofObligation {
         ],
         preconditions: vec![pc_ge_start, pc_le_end, pc_wellformed],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1737,6 +1771,7 @@ pub fn proof_greedy_fixed_register_respect() -> ProofObligation {
         ],
         preconditions: vec![pc_fixed, pc_respect],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1793,6 +1828,7 @@ pub fn proof_greedy_spill_reload_roundtrip() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1847,6 +1883,7 @@ pub fn proof_greedy_spill_slot_non_interference() -> ProofObligation {
         ],
         preconditions: vec![slots_differ],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1914,6 +1951,7 @@ pub fn proof_greedy_stack_offset_correctness() -> ProofObligation {
         ],
         preconditions: vec![pc_distinct, pc_align_a, pc_align_b],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1966,6 +2004,7 @@ pub fn proof_greedy_split_preserves_value() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2018,6 +2057,7 @@ pub fn proof_greedy_split_boundary_correctness() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2066,6 +2106,7 @@ pub fn proof_greedy_no_lost_definitions() -> ProofObligation {
         ],
         preconditions: vec![pc_def],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2111,6 +2152,7 @@ pub fn proof_greedy_coalesce_preserves_semantics() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2166,6 +2208,7 @@ pub fn proof_greedy_coalesce_legality() -> ProofObligation {
         ],
         preconditions: vec![pc_non_overlap],
         fp_inputs: vec![],
+            category: None,
     }
 }
 

@@ -1658,6 +1658,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -1684,6 +1685,7 @@ mod tests {
             inputs: vec![("x".to_string(), 64)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config {
@@ -1846,6 +1848,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -1871,6 +1874,7 @@ mod tests {
             inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -2066,6 +2070,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -2096,6 +2101,7 @@ mod tests {
             inputs: vec![("a".to_string(), 64)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -2240,6 +2246,7 @@ mod tests {
                 ("a".to_string(), 11, 53),
                 ("b".to_string(), 11, 53),
             ],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -2270,6 +2277,7 @@ mod tests {
             fp_inputs: vec![
                 ("fa".to_string(), 8, 24),
             ],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -2359,6 +2367,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let smt2 = serialize_to_smt2(&obligation);
@@ -2601,6 +2610,7 @@ mod tests {
             inputs: vec![("x".to_string(), 16)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -2624,6 +2634,7 @@ mod tests {
             inputs: vec![("x".to_string(), 8)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -2649,6 +2660,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let smt2 = serialize_to_smt2(&obligation);
@@ -2682,6 +2694,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![precond],
             fp_inputs: vec![],
+            category: None,
         };
 
         let smt2 = serialize_to_smt2(&obligation);
@@ -2709,6 +2722,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![precond],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -2732,6 +2746,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -2755,6 +2770,7 @@ mod tests {
             inputs: vec![("a".to_string(), 16)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -2782,6 +2798,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -3642,6 +3659,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -3684,6 +3702,7 @@ mod tests {
             ],
             preconditions: vec![precond],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -3721,6 +3740,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -3748,6 +3768,7 @@ mod tests {
             inputs: vec![("addr".to_string(), 64)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -3772,6 +3793,7 @@ mod tests {
             inputs: vec![("a".to_string(), 64), ("v".to_string(), 8)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -3808,6 +3830,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -3836,6 +3859,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -3865,6 +3889,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -3894,6 +3919,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -3931,6 +3957,7 @@ mod tests {
                 ("a".to_string(), 5, 11),
                 ("b".to_string(), 5, 11),
             ],
+            category: None,
         };
 
         let config = Z4Config::default().with_timeout(15000);
@@ -3959,6 +3986,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -3981,6 +4009,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -4005,6 +4034,7 @@ mod tests {
             inputs: vec![("x".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -4053,6 +4083,7 @@ mod tests {
             inputs: vec![("x".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();
@@ -4109,6 +4140,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default();

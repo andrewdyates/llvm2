@@ -123,6 +123,7 @@ fn proof_int_arg_placement_n(arg_idx: u32, width: u32) -> ProofObligation {
         inputs: vec![(format!("arg_{}", arg_idx), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -180,6 +181,7 @@ pub fn proof_arg_placement_all_8_regs() -> ProofObligation {
         inputs: (0..8).map(|i| (format!("arg_{}", i), width)).collect(),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -207,6 +209,7 @@ pub fn proof_arg_placement_all_8_regs_8bit() -> ProofObligation {
         inputs: (0..8).map(|i| (format!("arg_{}", i), width)).collect(),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -242,6 +245,7 @@ fn proof_fp_arg_placement_n(arg_idx: u32, width: u32) -> ProofObligation {
         inputs: vec![(format!("farg_{}", arg_idx), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -289,6 +293,7 @@ pub fn proof_fp_arg_all_8_regs() -> ProofObligation {
         inputs: (0..8).map(|i| (format!("farg_{}", i), width)).collect(),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -316,6 +321,7 @@ pub fn proof_fp_arg_all_8_regs_8bit() -> ProofObligation {
         inputs: (0..8).map(|i| (format!("farg_{}", i), width)).collect(),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -346,6 +352,7 @@ fn proof_return_value_gpr_width(width: u32) -> ProofObligation {
         inputs: vec![("ret_val".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -377,6 +384,7 @@ fn proof_return_value_fpr_width(width: u32) -> ProofObligation {
         inputs: vec![("fret_val".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -421,6 +429,7 @@ fn proof_return_pair_gpr_width(width: u32) -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -453,6 +462,7 @@ fn proof_return_pair_fpr_width(width: u32) -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -526,6 +536,7 @@ fn proof_callee_saved_gpr_n(reg_idx: u32, width: u32) -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -578,6 +589,7 @@ fn proof_callee_saved_fpr_n(reg_idx: u32, width: u32) -> ProofObligation {
         inputs: vec![("saved_val".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -635,6 +647,7 @@ pub fn proof_stack_alignment_16() -> ProofObligation {
             sp_base.bvand(SmtExpr::bv_const(0xF, width)).eq_expr(SmtExpr::bv_const(0, width)),
         ],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -666,6 +679,7 @@ pub fn proof_stack_alignment_16_8bit() -> ProofObligation {
             sp_base.bvand(SmtExpr::bv_const(0xF, width)).eq_expr(SmtExpr::bv_const(0, width)),
         ],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -698,6 +712,7 @@ fn proof_stack_overflow_alignment_width(width: u32) -> ProofObligation {
         inputs: vec![("slot_idx".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -742,6 +757,7 @@ fn proof_bl_saves_lr_width(width: u32) -> ProofObligation {
         inputs: vec![("pc".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -780,6 +796,7 @@ fn proof_ret_uses_lr_width(width: u32) -> ProofObligation {
         inputs: vec![("lr_val".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -826,6 +843,7 @@ fn proof_blr_indirect_width(width: u32) -> ProofObligation {
         inputs: vec![("fn_ptr".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -861,6 +879,7 @@ fn proof_blr_saves_lr_width(width: u32) -> ProofObligation {
         inputs: vec![("pc".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -913,6 +932,7 @@ fn proof_gpr_fpr_independent_width(width: u32) -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -964,6 +984,7 @@ fn proof_call_clobbers_gpr_n(reg_idx: u32, width: u32) -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1006,6 +1027,7 @@ fn proof_stack_arg_passthrough_width(width: u32) -> ProofObligation {
         inputs: vec![("arg_val".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1047,6 +1069,7 @@ fn proof_result_copyback_width(width: u32) -> ProofObligation {
         inputs: vec![("result".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 

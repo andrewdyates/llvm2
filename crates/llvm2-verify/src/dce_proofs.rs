@@ -75,6 +75,7 @@ pub fn proof_dce_dead_add_preserves_live() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -95,6 +96,7 @@ pub fn proof_dce_dead_add_preserves_live_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -118,6 +120,7 @@ pub fn proof_dce_dead_mul_preserves_live() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -141,6 +144,7 @@ pub fn proof_dce_dead_and_preserves_live() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -164,6 +168,7 @@ pub fn proof_dce_dead_shift_preserves_live() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -204,6 +209,7 @@ pub fn proof_dce_live_add_preserved() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -226,6 +232,7 @@ pub fn proof_dce_live_add_preserved_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -250,6 +257,7 @@ pub fn proof_dce_live_mul_preserved() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -272,6 +280,7 @@ pub fn proof_dce_live_mul_preserved_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -296,6 +305,7 @@ pub fn proof_dce_live_sub_preserved() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -320,6 +330,7 @@ pub fn proof_dce_live_xor_preserved() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -347,6 +358,7 @@ pub fn proof_dce_dead_or_preserves_live() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -370,6 +382,7 @@ pub fn proof_dce_dead_sub_preserves_live() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -393,6 +406,7 @@ pub fn proof_dce_dead_lshr_preserves_live() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -416,6 +430,7 @@ pub fn proof_dce_dead_ashr_preserves_live() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -439,6 +454,7 @@ pub fn proof_dce_dead_neg_preserves_live() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -468,6 +484,7 @@ pub fn proof_dce_dead_store_preserves_live_values() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -499,6 +516,7 @@ pub fn proof_dce_dead_chain_preserves_live() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -527,6 +545,7 @@ pub fn proof_dce_live_or_preserved() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -551,6 +570,7 @@ pub fn proof_dce_live_and_preserved() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -578,6 +598,7 @@ pub fn proof_dce_live_shl_preserved() -> ProofObligation {
         ],
         preconditions: vec![shift_in_range],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -606,6 +627,7 @@ pub fn proof_dce_live_complex_expr_preserved() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -628,6 +650,7 @@ pub fn proof_dce_live_or_preserved_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -650,6 +673,7 @@ pub fn proof_dce_live_and_preserved_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -914,6 +938,7 @@ mod tests {
             ],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -958,6 +983,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -996,6 +1022,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

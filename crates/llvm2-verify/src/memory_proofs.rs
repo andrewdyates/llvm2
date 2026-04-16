@@ -365,6 +365,7 @@ fn proof_load_equiv(
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -432,6 +433,7 @@ fn proof_store_load_roundtrip(name: &str, size_bytes: u32) -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -509,6 +511,7 @@ fn proof_non_interference(name: &str, size_bytes: u32, gap: u64) -> ProofObligat
         ],
         preconditions: vec![gap_sufficient],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -557,6 +560,7 @@ fn proof_non_interference_cross_size(
         ],
         preconditions: vec![gap_sufficient],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -617,6 +621,7 @@ fn proof_non_interference_symbolic(
         ],
         preconditions: vec![store_no_wrap, load_no_wrap, disjoint],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -711,6 +716,7 @@ fn proof_store_equiv(name: &str, size_bytes: u32, scaled_imm: u64) -> ProofOblig
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -782,6 +788,7 @@ fn proof_aligned_store_load(name: &str, size_bytes: u32) -> ProofObligation {
         ],
         preconditions: vec![aligned],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -840,6 +847,7 @@ pub fn proof_scaled_offset_alignment_i32() -> ProofObligation {
         ],
         preconditions: vec![aligned],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -877,6 +885,7 @@ fn proof_forwarding_with_offset(
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -925,6 +934,7 @@ pub fn proof_forwarding_i64_to_i32_lower() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -963,6 +973,7 @@ fn proof_subword_byte_extract(name: &str, store_size: u32, byte_index: u32) -> P
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1014,6 +1025,7 @@ pub fn proof_subword_i32_halfword_upper() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1071,6 +1083,7 @@ pub fn proof_write_combining_i32() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1110,6 +1123,7 @@ pub fn proof_write_combining_halfwords_to_i32() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1149,6 +1163,7 @@ pub fn proof_write_combining_words_to_i64() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1196,6 +1211,7 @@ pub fn proof_endianness_i32() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1223,6 +1239,7 @@ pub fn proof_endianness_msb_i32() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1248,6 +1265,7 @@ pub fn proof_endianness_i64() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1406,6 +1424,7 @@ pub fn proof_axiom_read_after_write_same_addr_8() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1434,6 +1453,7 @@ pub fn proof_axiom_read_after_write_same_addr_32() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1470,6 +1490,7 @@ pub fn proof_axiom_read_after_write_diff_addr_8() -> ProofObligation {
         ],
         preconditions: vec![i_neq_j],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1508,6 +1529,7 @@ pub fn proof_axiom_read_after_write_diff_addr_32() -> ProofObligation {
         ],
         preconditions: vec![store_no_wrap, load_no_wrap, disjoint],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1544,6 +1566,7 @@ pub fn proof_axiom_write_write_same_addr_8() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1575,6 +1598,7 @@ pub fn proof_axiom_write_write_same_addr_32() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1611,6 +1635,7 @@ pub fn proof_axiom_write_write_preserves_other_8() -> ProofObligation {
         ],
         preconditions: vec![i_neq_j],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1635,6 +1660,7 @@ pub fn proof_axiom_const_array_8() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1657,6 +1683,7 @@ pub fn proof_axiom_const_array_32() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1706,6 +1733,7 @@ pub fn proof_axiom_store_commutativity_8() -> ProofObligation {
         ],
         preconditions: vec![i_neq_j],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1767,6 +1795,7 @@ pub fn proof_memset_correctness(count: u32) -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1833,6 +1862,7 @@ pub fn proof_memset_non_interference(count: u32, check_offset: u64) -> ProofObli
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1907,6 +1937,7 @@ pub fn proof_memcpy_correctness(count: u32) -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1947,6 +1978,7 @@ pub fn proof_memcpy_source_preserved(count: u32) -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1978,6 +2010,7 @@ pub fn proof_buffer_init_zero(count: u32) -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -2414,6 +2447,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_memory_proof(&obligation);
@@ -2453,6 +2487,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_memory_proof(&obligation);
@@ -2492,6 +2527,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_memory_proof(&obligation);
@@ -2531,6 +2567,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_memory_proof(&obligation);
@@ -2627,6 +2664,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_memory_proof(&obligation);
@@ -2662,6 +2700,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_memory_proof(&obligation);
@@ -2696,6 +2735,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_memory_proof(&obligation);
@@ -2987,6 +3027,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_memory_proof(&obligation);

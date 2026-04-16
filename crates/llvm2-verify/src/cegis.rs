@@ -327,6 +327,7 @@ impl CegisLoop {
                 inputs: vars.to_vec(),
                 preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
             };
 
             let result = verify_with_z4(&obligation, &self.solver_config);
