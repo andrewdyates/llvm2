@@ -76,11 +76,8 @@ use crate::smt::SmtExpr;
 /// ARM ARM: "MOVZ moves a 16-bit immediate value to a register, shifting
 /// it left by 0, 16, 32 or 48 bits, and clearing the remaining bits."
 fn encode_movz(imm16: SmtExpr, hw_shift: u32, width: u32) -> SmtExpr {
-    let extended = if width == 64 {
-        imm16.zero_ext(48) // 16 -> 64 bits
-    } else {
-        imm16.zero_ext(16) // 16 -> 32 bits
-    };
+    let imm_width = imm16.bv_width();
+    let extended = imm16.zero_ext(width - imm_width);
     let shift_amount = SmtExpr::bv_const(hw_shift as u64, width);
     extended.bvshl(shift_amount)
 }
@@ -95,11 +92,8 @@ fn encode_movz(imm16: SmtExpr, hw_shift: u32, width: u32) -> SmtExpr {
 /// ARM ARM: "MOVK moves a 16-bit immediate value to the specified halfword
 /// position of the register, keeping all other bits unchanged."
 fn encode_movk(prev: SmtExpr, imm16: SmtExpr, hw_shift: u32, width: u32) -> SmtExpr {
-    let extended = if width == 64 {
-        imm16.zero_ext(48)
-    } else {
-        imm16.zero_ext(16)
-    };
+    let imm_width = imm16.bv_width();
+    let extended = imm16.zero_ext(width - imm_width);
     let shift_amount = SmtExpr::bv_const(hw_shift as u64, width);
     let shifted = extended.bvshl(shift_amount);
 
