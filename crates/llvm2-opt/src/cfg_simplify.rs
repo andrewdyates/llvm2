@@ -122,12 +122,9 @@ fn rebuild_cfg_edges(func: &mut MachFunction) {
         }
 
         // Determine if the block falls through to the next in layout.
-        // Unconditional branches (B) and returns (Ret) do NOT fall through.
+        // Unconditional branches (B, Br) and returns (Ret) do NOT fall through.
         // Conditional branches (BCond, Cbz, Cbnz, Tbz, Tbnz) DO fall through.
-        if last_inst.opcode == AArch64Opcode::B
-            || last_inst.opcode == AArch64Opcode::Ret
-            || last_inst.opcode == AArch64Opcode::Br
-        {
+        if last_inst.is_unconditional_branch() || last_inst.is_return() {
             is_unconditional_jump = true;
         }
 
@@ -206,7 +203,7 @@ fn eliminate_empty_blocks(func: &mut MachFunction) -> bool {
                 return None;
             }
             let inst = func.inst(block.insts[0]);
-            if inst.opcode != AArch64Opcode::B {
+            if !inst.is_unconditional_branch() {
                 return None;
             }
             // Extract target.
@@ -250,7 +247,7 @@ fn simplify_branch_targets(func: &mut MachFunction) -> bool {
         let block = func.block(bid);
         if block.insts.len() == 1 {
             let inst = func.inst(block.insts[0]);
-            if inst.opcode == AArch64Opcode::B {
+            if inst.is_unconditional_branch() {
                 for op in &inst.operands {
                     if let MachOperand::Block(target) = op
                         && *target != bid {
@@ -357,7 +354,7 @@ fn fold_unconditional_branches(func: &mut MachFunction) -> bool {
         // Check if last instruction is unconditional B.
         let last_inst_id = *block.insts.last().unwrap();
         let last_inst = func.inst(last_inst_id);
-        if last_inst.opcode != AArch64Opcode::B {
+        if !last_inst.is_unconditional_branch() {
             continue;
         }
 
@@ -425,7 +422,7 @@ fn fold_constant_branches(func: &mut MachFunction) -> bool {
         let block = func.block(bid);
         for &inst_id in &block.insts {
             let inst = func.inst(inst_id);
-            if inst.opcode == AArch64Opcode::MovI
+            if inst.is_move_imm()
                 && let (Some(MachOperand::VReg(dst)), Some(MachOperand::Imm(val))) =
                     (inst.operands.first(), inst.operands.get(1))
                 {
@@ -443,63 +440,39 @@ fn fold_constant_branches(func: &mut MachFunction) -> bool {
         let last_inst_id = *block.insts.last().unwrap();
         let inst = func.inst(last_inst_id);
 
-        match inst.opcode {
-            AArch64Opcode::Cbz => {
-                // Cbz: [vreg, Block(target)]
-                // Branch to target if vreg == 0.
-                if let Some(MachOperand::VReg(cond)) = inst.operands.first()
-                    && let Some(&val) = constants.get(&cond.id)
-                        && let Some(target) = find_block_operand(&inst.operands) {
-                            if val == 0 {
-                                // Condition is zero: branch IS taken.
-                                *func.inst_mut(last_inst_id) = MachInst::new(
-                                    AArch64Opcode::B,
-                                    vec![MachOperand::Block(target)],
-                                );
-                            } else {
-                                // Condition is non-zero: branch NOT taken.
-                                // Fall through — need to know fallthrough target.
-                                // For simplicity, convert to B to fallthrough block.
-                                if let Some(fallthrough) = get_fallthrough(func, bid) {
-                                    *func.inst_mut(last_inst_id) = MachInst::new(
-                                        AArch64Opcode::B,
-                                        vec![MachOperand::Block(fallthrough)],
-                                    );
-                                } else {
-                                    continue;
-                                }
-                            }
-                            changed = true;
-                        }
-            }
-            AArch64Opcode::Cbnz => {
-                // Cbnz: [vreg, Block(target)]
-                // Branch to target if vreg != 0.
-                if let Some(MachOperand::VReg(cond)) = inst.operands.first()
-                    && let Some(&val) = constants.get(&cond.id)
-                        && let Some(target) = find_block_operand(&inst.operands) {
-                            if val != 0 {
-                                // Condition is non-zero: branch IS taken.
-                                *func.inst_mut(last_inst_id) = MachInst::new(
-                                    AArch64Opcode::B,
-                                    vec![MachOperand::Block(target)],
-                                );
-                            } else {
-                                // Condition is zero: branch NOT taken.
-                                if let Some(fallthrough) = get_fallthrough(func, bid) {
-                                    *func.inst_mut(last_inst_id) = MachInst::new(
-                                        AArch64Opcode::B,
-                                        vec![MachOperand::Block(fallthrough)],
-                                    );
-                                } else {
-                                    continue;
-                                }
-                            }
-                            changed = true;
-                        }
-            }
-            _ => {}
+        // Use generic opcode queries for dispatch; AArch64Opcode::B is
+        // still used to construct the replacement unconditional branch.
+        let is_cbz = inst.opcode.is_cbz();
+        let is_cbnz = inst.opcode.is_cbnz();
+        if !is_cbz && !is_cbnz {
+            continue;
         }
+
+        if let Some(MachOperand::VReg(cond)) = inst.operands.first()
+            && let Some(&val) = constants.get(&cond.id)
+                && let Some(target) = find_block_operand(&inst.operands) {
+                    // Determine if the branch is taken based on the constant value.
+                    let branch_taken = (is_cbz && val == 0) || (is_cbnz && val != 0);
+
+                    if branch_taken {
+                        // Branch IS taken: convert to unconditional B to target.
+                        *func.inst_mut(last_inst_id) = MachInst::new(
+                            AArch64Opcode::B,
+                            vec![MachOperand::Block(target)],
+                        );
+                    } else {
+                        // Branch NOT taken: convert to unconditional B to fallthrough.
+                        if let Some(fallthrough) = get_fallthrough(func, bid) {
+                            *func.inst_mut(last_inst_id) = MachInst::new(
+                                AArch64Opcode::B,
+                                vec![MachOperand::Block(fallthrough)],
+                            );
+                        } else {
+                            continue;
+                        }
+                    }
+                    changed = true;
+                }
     }
 
     changed
@@ -543,13 +516,8 @@ fn eliminate_duplicate_branches(func: &mut MachFunction) -> bool {
         if !inst.is_branch() {
             continue;
         }
-        match inst.opcode {
-            AArch64Opcode::BCond
-            | AArch64Opcode::Cbz
-            | AArch64Opcode::Cbnz
-            | AArch64Opcode::Tbz
-            | AArch64Opcode::Tbnz => {}
-            _ => continue,
+        if !inst.is_conditional_branch() {
+            continue;
         }
 
         // Get the taken target (Block operand).

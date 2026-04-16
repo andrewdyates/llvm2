@@ -60,7 +60,7 @@ impl MachinePass for ConstantFolding {
             let block = func.block(*block_id);
             for &inst_id in &block.insts {
                 let inst = func.inst(inst_id);
-                if inst.opcode == AArch64Opcode::MovI
+                if inst.is_move_imm()
                     && let (Some(MachOperand::VReg(dst)), Some(MachOperand::Imm(val))) =
                         (inst.operands.first(), inst.operands.get(1))
                     {

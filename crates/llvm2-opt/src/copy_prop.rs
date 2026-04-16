@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 
-use llvm2_ir::{AArch64Opcode, MachFunction, MachOperand, VReg};
+use llvm2_ir::{MachFunction, MachOperand, VReg};
 
 use crate::pass_manager::MachinePass;
 
@@ -50,7 +50,7 @@ impl MachinePass for CopyPropagation {
             let block = func.block(*block_id);
             for &inst_id in &block.insts {
                 let inst = func.inst(inst_id);
-                if inst.opcode != AArch64Opcode::MovR {
+                if !inst.is_move() {
                     continue;
                 }
                 if inst.operands.len() < 2 {
@@ -91,7 +91,7 @@ impl MachinePass for CopyPropagation {
                 // the def operand (operand[0]) but DO replace use operands.
                 // For other instructions, replace all VReg operands that are
                 // in the resolved map.
-                let use_start = if is_def_inst(inst) { 1 } else { 0 };
+                let use_start = if inst.produces_value() { 1 } else { 0 };
 
                 for i in use_start..inst.operands.len() {
                     if let MachOperand::VReg(vreg) = &inst.operands[i]
@@ -115,7 +115,7 @@ fn count_defs(func: &MachFunction) -> HashMap<u32, u32> {
         let block = func.block(*block_id);
         for &inst_id in &block.insts {
             let inst = func.inst(inst_id);
-            if is_def_inst(inst)
+            if inst.produces_value()
                 && let Some(MachOperand::VReg(vreg)) = inst.operands.first() {
                     *counts.entry(vreg.id).or_insert(0) += 1;
                 }
@@ -123,19 +123,6 @@ fn count_defs(func: &MachFunction) -> HashMap<u32, u32> {
     }
 
     counts
-}
-
-/// Returns true if this instruction defines a value (operand[0] is a def).
-fn is_def_inst(inst: &llvm2_ir::MachInst) -> bool {
-    use AArch64Opcode::*;
-    match inst.opcode {
-        CmpRR | CmpRI | Tst | Fcmp => false,
-        StrRI | StpRI | StpPreIndex => false,
-        B | BCond | Cbz | Cbnz | Br | Ret => false,
-        Nop => false,
-        Bl | Blr => false,
-        _ => true,
-    }
 }
 
 /// Resolve copy chains. If v0 → v1 → v2, then v0 → v2.

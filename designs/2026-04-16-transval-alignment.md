@@ -420,40 +420,168 @@ Future work can populate this field to enable cross-system VC flow.
 
 ---
 
-## 7. Future Work
+## 7. Concrete Next Steps (Updated 2026-04-16)
 
-1. **Formula <-> SmtExpr conversion**: Implement the bidirectional converter.
-   Requires depending on trust-types (or defining a shared formula trait).
+Based on the proof certificate chain design (`designs/2026-04-16-proof-certificate-chain.md`)
+and the t* stack integration audit, the following concrete steps have been identified.
+These are ordered by dependency (each step enables the next).
 
-2. **Whole-function verification**: Implement `Verifier::verify_transformation`
-   using simulation relations and per-block VC composition.
+### 7.1 Formula <-> SmtExpr Conversion (High Priority)
 
-3. **RefinementVc adapter**: Enable LLVM2 to consume VCs from trust-transval
-   and produce compatible VCs.
+**What:** Implement bidirectional conversion between trust-types `Formula` and
+LLVM2's `SmtExpr`.
 
-4. **tMIR real integration**: Replace tMIR stubs with real tMIR types from
-   the tMIR repo. This is prerequisite for real end-to-end validation.
+**Why:** This is the prerequisite for all VC interoperability. Without it, LLVM2
+cannot consume trust-transval VCs, and trust-transval cannot validate LLVM2
+lowering results.
 
-5. **Shared solver backend**: Consider using trust-router as LLVM2's solver
-   backend (instead of the current mock evaluation + z4 bridge) for unified
-   solver management.
+**Key challenge:** trust-types `Formula` operates on unbounded integers and booleans,
+while `SmtExpr` is bitvector-native (fixed-width). The conversion must:
+- `Formula::Int` -> `SmtExpr::BvConst` with explicit width parameter
+- `Formula::Add/Sub/Mul` -> `SmtExpr::BvAdd/BvSub/BvMul`
+- `Formula::Var` -> `SmtExpr::Var` with width from a type environment
+- Handle `Formula::Bool` / `Formula::Not/And/Or` as 1-bit bitvectors or as
+  separate boolean expressions depending on context
+
+**Approach:** Define a `FormulaContext` that carries bit-width information per
+variable. trust-transval's formulas operate on MIR locals with known types, so the
+width information is available at VC generation time.
+
+**Deliverable:** `llvm2-verify/src/transval_compat.rs` module with:
+```rust
+pub fn formula_to_smt_expr(formula: &Formula, ctx: &FormulaContext) -> SmtExpr;
+pub fn smt_expr_to_formula(expr: &SmtExpr) -> Formula;
+```
+
+### 7.2 Populate TransvalCheckKind on Existing Proofs (High Priority)
+
+**What:** Set the `category` field on ProofObligation across all existing proof
+modules. Currently all obligations have `category: None`.
+
+**Why:** Without category tags, LLVM2 cannot generate structured `RuleProof`
+entries for the certificate chain, and cannot report verification coverage by
+trust-transval CheckKind.
+
+**Scope:** The following modules create ProofObligations and need updates:
+- `lowering_proof.rs`: arithmetic, comparison, branch -> `InstructionLowering`
+- `nzcv_proof.rs`: flag proofs -> `InstructionLowering`
+- `peephole_proof.rs`: rewrite rules -> `PeepholeOptimization`
+- `memory_proof.rs`: load/store -> `MemoryModel`
+- `dce_proof.rs`, `constfold_proof.rs`, `copyprop_proof.rs`: -> `DataFlow`
+- `cse_licm_proof.rs`: -> `DataFlow`
+- `cfg_proof.rs`: branch folding -> `ControlFlow`
+- `neon_proof.rs`, `vectorization_proof.rs`: -> `Vectorization`
+
+### 7.3 Whole-Function Verification via Block Composition (Medium Priority)
+
+**What:** Implement `Verifier::verify_transformation()` by composing per-rule
+proofs into whole-function verification.
+
+**Why:** trust-transval validates whole functions, not individual rules. To
+compose certificates, LLVM2 must be able to certify entire function lowerings,
+not just individual instruction translations.
+
+**Approach:** For each tMIR function and its lowered MachFunction:
+1. Build a block mapping: tMIR BlockId -> MachBlock (positional in Phase 1)
+2. For each mapped block pair, verify all instruction lowerings using existing
+   per-rule proofs
+3. Compose into block-level DataFlow VCs
+4. Generate ControlFlow VCs by checking branch target correspondence
+5. Generate ReturnValue VC by checking return instruction equivalence
+6. Termination: guaranteed for Phase 1 (no loops or bounded loops only)
+
+This creates a per-function `Vec<ProofObligation>` with full TransvalCheckKind
+coverage, suitable for bundling into a `LoweringCertificate`.
+
+### 7.4 RefinementVc Adapter (Medium Priority)
+
+**What:** Implement conversion between trust-transval `RefinementVc` and LLVM2
+`ProofObligation`.
+
+**Why:** Enables the tRust bridge to pass trust-transval VCs to LLVM2 for
+verification (useful when trust-transval validates the MIR-to-tMIR translation
+and wants LLVM2's z4 engine as a solver backend).
+
+**Depends on:** 7.1 (Formula/SmtExpr conversion).
+
+### 7.5 LoweringCertificate Generation (High Priority)
+
+**What:** Implement `LoweringCertificate` and `LoweringCertificateGenerator`
+as designed in `designs/2026-04-16-proof-certificate-chain.md`.
+
+**Why:** This is the LLVM2-side output of the certificate chain. Without it,
+there is nothing to compose with tRust source certificates.
+
+**Depends on:** 7.2 (TransvalCheckKind populated), 7.3 (whole-function
+verification for per-function certificates).
+
+### 7.6 trust-proof-cert Compatibility (Medium Priority)
+
+**What:** Implement `to_proof_certificate()` conversion from LoweringCertificate
+to trust-proof-cert's ProofCertificate.
+
+**Why:** Enables composition with tRust source certificates via trust-proof-cert's
+existing composition module.
+
+**Depends on:** 7.5, upstream addition of `ChainStepType::MachineLowering`.
 
 ---
 
-## 8. Summary
+## 8. Gap Assessment: Proof Obligations vs trust-transval
+
+### 8.1 Current Coverage
+
+LLVM2 has 960+ proof tests across 27 modules, but these are **per-rule** proofs.
+trust-transval generates **per-function** VCs in four categories. The gap:
+
+| trust-transval Category | LLVM2 Coverage | Gap |
+|------------------------|----------------|-----|
+| **DataFlow** | Per-instruction: 200+ proofs for arithmetic, comparisons, memory | Per-instruction only; no per-function composition |
+| **ControlFlow** | CFG simplification proofs (branch folding, constant folding) | No branch-target-correspondence proof for whole functions |
+| **ReturnValue** | Not explicitly verified | No return-value-equivalence proof |
+| **Termination** | Not addressed | Not needed for Phase 1 (no loops in scalar subset) |
+
+### 8.2 Key Finding
+
+The fundamental gap is **granularity**, not coverage. LLVM2 has extensive
+per-rule proofs but no mechanism to compose them into whole-function certificates.
+trust-transval has the whole-function framework but operates at a higher IR level
+(MIR, not machine code).
+
+The alignment work is to make LLVM2's per-rule proofs composable into
+trust-transval-compatible per-function certificates. This is Steps 7.2-7.3 above.
+
+### 8.3 What Is NOT a Gap
+
+- **Solver compatibility**: Both use z4. LLVM2's z4 bridge is operational (28+
+  API mismatches fixed, 158 z4-specific tests pass).
+- **Proof strength types**: Both use ProofStrength with reasoning + assurance.
+  LLVM2's `LoweringProofStrength` maps cleanly to trust-types' `ProofStrength`.
+- **TransvalCheckKind alignment**: Already implemented (Section 6.1).
+- **Category field on ProofObligation**: Already implemented (Section 6.2).
+
+---
+
+## 9. Summary
 
 | Aspect | Status | Priority |
 |--------|--------|----------|
 | Design analysis complete | Done | -- |
 | TransvalCheckKind enum | Implemented | High |
 | ProofObligation.category field | Implemented | High |
-| Formula <-> SmtExpr conversion | Future | High |
-| Whole-function verification | Future | Medium |
-| RefinementVc adapter | Future | Medium |
+| Formula <-> SmtExpr conversion | Next step (7.1) | High |
+| Populate category on all proofs | Next step (7.2) | High |
+| LoweringCertificate generation | Next step (7.5) | High |
+| Whole-function verification | Next step (7.3) | Medium |
+| RefinementVc adapter | Next step (7.4) | Medium |
+| trust-proof-cert compatibility | Next step (7.6) | Medium |
 | Optimization pass parity | Future | Low |
 | Property checking parity | Future | Low |
 
 The two systems are complementary: trust-transval validates MIR transformations,
-llvm2-verify validates machine code generation. The key alignment work is
-establishing a shared vocabulary (ProofCategory, Formula/SmtExpr conversion)
-and building the bridge that allows VCs to flow between the two systems.
+llvm2-verify validates machine code generation. The fundamental gap is
+**granularity** (per-rule vs per-function), not coverage or vocabulary.
+The key alignment work is composing LLVM2's per-rule proofs into
+trust-transval-compatible per-function certificates. The proof certificate
+chain design (`designs/2026-04-16-proof-certificate-chain.md`) provides the
+concrete format and composition protocol for connecting these systems.
