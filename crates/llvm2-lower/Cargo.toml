@@ -16,10 +16,9 @@ authors.workspace = true
 # Shared machine IR model (canonical type definitions)
 llvm2-ir = { workspace = true }
 
-# tMIR (input IR) — stub crates for development
-tmir-types = { workspace = true }
-tmir-instrs = { workspace = true }
-tmir-func = { workspace = true }
+# tMIR (input IR) — real crate from tMIR repo
+tmir = { workspace = true }
+tmir-build = { workspace = true }
 
 # Utilities
 serde = { workspace = true }

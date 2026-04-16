@@ -14,11 +14,7 @@ members = [
     "crates/llvm2-codegen",
     "crates/llvm2-regalloc",
     "crates/llvm2-cli",
-    # tMIR stubs — included for testing; will be replaced by real tMIR crate
-    "stubs/tmir-types",
-    "stubs/tmir-instrs",
-    "stubs/tmir-func",
-    "stubs/tmir-semantics",
+    # stubs/ kept but removed from workspace — being replaced by real tmir
 ]
 
 [workspace.package]
@@ -41,12 +37,9 @@ anyhow = "1.0"
 # For git dep: z4 = { git = "https://github.com/ayates_dbx/z4" }
 z4 = { path = "/Users/ayates/z4/crates/z4" }
 
-# Input IR (tMIR) — in-tree stubs for development.
-# When the real tMIR repo is available, update paths to "../tMIR/crates/...".
-tmir-types = { path = "stubs/tmir-types" }
-tmir-instrs = { path = "stubs/tmir-instrs" }
-tmir-func = { path = "stubs/tmir-func" }
-tmir-semantics = { path = "stubs/tmir-semantics" }
+# Input IR (tMIR) — real crate from the tMIR repo.
+tmir = { git = "ssh://git@github.com/dropbox-ai-prototypes/tMIR.git", rev = "f9b132a" }
+tmir-build = { git = "ssh://git@github.com/dropbox-ai-prototypes/tMIR.git", rev = "f9b132a" }
 
 # Internal crates
 llvm2-ir = { path = "crates/llvm2-ir" }

@@ -674,7 +674,7 @@ mod tests {
     use crate::adapter::Proof;
     use crate::instructions::Value;
     use crate::types::Type;
-    use tmir_types::ValueId;
+    use tmir::ValueId;
 
     /// Helper: build a minimal scalar subgraph (no arrays, no proofs).
     fn scalar_subgraph(id: u32) -> SubgraphDescriptor {

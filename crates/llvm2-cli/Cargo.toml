@@ -19,6 +19,6 @@ path = "src/main.rs"
 [dependencies]
 llvm2-codegen = { workspace = true }
 llvm2-ir = { workspace = true }
-tmir-func = { workspace = true }
+tmir = { workspace = true, features = ["serde"] }
 serde_json = { workspace = true }
 clap = { version = "4", features = ["derive"] }

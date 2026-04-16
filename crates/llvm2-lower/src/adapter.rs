@@ -21,9 +21,14 @@
 
 use std::collections::HashMap;
 
-use tmir_func::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule};
-use tmir_instrs::{AtomicRmwOp as TmirAtomicRmwOp, BinOp, CastOp, CmpOp, Constant, Instr, InstrNode, MemoryOrdering, Operand, SwitchCase, UnOp};
-use tmir_types::{BlockId, FloatWidth, FuncId, IntWidth, PrimitiveType, StructDef, TmirProof, Ty, ValueId};
+use tmir::{
+    Block as TmirBlock, Function as TmirFunction, Module as TmirModule,
+    BinOp, CastOp, UnOp, Inst, InstrNode, Constant,
+    ICmpOp, FCmpOp, Ordering as TmirOrdering, AtomicRMWOp as TmirAtomicRmwOp,
+    SwitchCase, ProofAnnotation,
+    BlockId, FuncId, FuncTyId, StructId, StructDef, Ty, ValueId,
+};
+use crate::tmir_compat::{CmpOp, Operand, OperandConstant, MemoryOrdering};
 
 use crate::function::{BasicBlock, Function, Signature, StackSlotInfo};
 use crate::instructions::{AtomicOrdering, AtomicRmwOp, Block, FloatCC, Instruction, IntCC, Opcode, Value};
@@ -278,21 +283,16 @@ pub fn translate_type_with_structs(
     structs: &[StructDef],
 ) -> Result<Type, AdapterError> {
     match ty {
-        Ty::Primitive(PrimitiveType::Bool) => Ok(Type::B1),
-        Ty::Primitive(PrimitiveType::Int { width, .. }) => match width {
-            IntWidth::I8 => Ok(Type::I8),
-            IntWidth::I16 => Ok(Type::I16),
-            IntWidth::I32 => Ok(Type::I32),
-            IntWidth::I64 => Ok(Type::I64),
-            IntWidth::I128 => Ok(Type::I128),
-        },
-        Ty::Primitive(PrimitiveType::Float(fw)) => match fw {
-            FloatWidth::F32 => Ok(Type::F32),
-            FloatWidth::F64 => Ok(Type::F64),
-        },
-        Ty::Primitive(PrimitiveType::Unit) => Err(AdapterError::VoidValue),
-        Ty::Primitive(PrimitiveType::Never) => Err(AdapterError::UnsupportedType("Never".to_string())),
-        Ty::Ref { .. } => Ok(Type::I64), // All pointers/refs are 64-bit on AArch64
+        Ty::Bool => Ok(Type::B1),
+        Ty::I8 => Ok(Type::I8),
+        Ty::I16 => Ok(Type::I16),
+        Ty::I32 => Ok(Type::I32),
+        Ty::I64 => Ok(Type::I64),
+        Ty::I128 => Ok(Type::I128),
+        Ty::F32 => Ok(Type::F32),
+        Ty::F64 => Ok(Type::F64),
+        Ty::Void => Err(AdapterError::VoidValue),
+        Ty::Ptr => Ok(Type::I64), // All pointers are 64-bit on AArch64
         Ty::Struct(sid) => {
             // Look up the struct definition and translate each field type.
             let sdef = structs
@@ -306,45 +306,29 @@ pub fn translate_type_with_structs(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Type::Struct(field_types))
         }
-        Ty::StructDef { fields, .. } => {
-            let field_types: Vec<Type> = fields
-                .iter()
-                .map(|f| translate_type_with_structs(&f.ty, structs))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Type::Struct(field_types))
+        Ty::Array(elem_ty_id, len) => {
+            // Array uses TyId — for now, treat as unsupported since we'd need the
+            // module's type table to resolve TyId. This can be extended later.
+            Err(AdapterError::UnsupportedType(format!("Array(TyId({}), {})", elem_ty_id.index(), len)))
         }
-        Ty::Array { element, len } => {
-            let elem = translate_type_with_structs(element, structs)?;
-            Ok(Type::Array(Box::new(elem), *len as u32))
-        }
-        Ty::Tuple(fields) => {
-            let field_types: Vec<Type> = fields
-                .iter()
-                .map(|f| translate_type_with_structs(f, structs))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Type::Struct(field_types))
-        }
-        Ty::Vector { .. } | Ty::Enum { .. } => {
-            Err(AdapterError::UnsupportedType(format!("{:?}", ty)))
-        }
-        Ty::FnPtr { .. } | Ty::Func(_) => {
+        Ty::Func(_) => {
             Err(AdapterError::UnsupportedType(format!("{:?}", ty)))
         }
     }
 }
 
-/// Convert a tMIR `MemoryOrdering` to an internal LIR `AtomicOrdering`.
-fn translate_ordering(ordering: &MemoryOrdering) -> AtomicOrdering {
+/// Convert a tMIR `Ordering` to an internal LIR `AtomicOrdering`.
+fn translate_ordering(ordering: &TmirOrdering) -> AtomicOrdering {
     match ordering {
-        MemoryOrdering::Relaxed => AtomicOrdering::Relaxed,
-        MemoryOrdering::Acquire => AtomicOrdering::Acquire,
-        MemoryOrdering::Release => AtomicOrdering::Release,
-        MemoryOrdering::AcqRel => AtomicOrdering::AcqRel,
-        MemoryOrdering::SeqCst => AtomicOrdering::SeqCst,
+        TmirOrdering::Relaxed => AtomicOrdering::Relaxed,
+        TmirOrdering::Acquire => AtomicOrdering::Acquire,
+        TmirOrdering::Release => AtomicOrdering::Release,
+        TmirOrdering::AcqRel => AtomicOrdering::AcqRel,
+        TmirOrdering::SeqCst => AtomicOrdering::SeqCst,
     }
 }
 
-/// Convert a tMIR `AtomicRmwOp` to an internal LIR `AtomicRmwOp`.
+/// Convert a tMIR `AtomicRMWOp` to an internal LIR `AtomicRmwOp`.
 fn translate_atomic_rmw_op(op: &TmirAtomicRmwOp) -> AtomicRmwOp {
     match op {
         TmirAtomicRmwOp::Add => AtomicRmwOp::Add,
@@ -353,19 +337,27 @@ fn translate_atomic_rmw_op(op: &TmirAtomicRmwOp) -> AtomicRmwOp {
         TmirAtomicRmwOp::Or => AtomicRmwOp::Or,
         TmirAtomicRmwOp::Xor => AtomicRmwOp::Xor,
         TmirAtomicRmwOp::Xchg => AtomicRmwOp::Xchg,
+        // New variants in real tmir not yet supported by LIR
+        TmirAtomicRmwOp::Max | TmirAtomicRmwOp::Min
+        | TmirAtomicRmwOp::UMax | TmirAtomicRmwOp::UMin => {
+            // TODO(#283): Add Max/Min/UMax/UMin support to LIR AtomicRmwOp
+            AtomicRmwOp::Add // placeholder
+        }
     }
 }
 
 /// Translate a tMIR function signature to an internal LIR `Signature`.
-fn translate_signature(func: &TmirFunction) -> Result<Signature, AdapterError> {
-    let params: Vec<Type> = func
-        .ty
+///
+/// Since the new tmir crate stores function types by FuncTyId reference,
+/// we need the module's func_types table to resolve the actual FuncTy.
+fn translate_signature(func: &TmirFunction, module: &TmirModule) -> Result<Signature, AdapterError> {
+    let func_ty = &module.func_types[func.ty.index() as usize];
+    let params: Vec<Type> = func_ty
         .params
         .iter()
         .map(translate_type)
         .collect::<Result<Vec<_>, _>>()?;
-    let returns: Vec<Type> = func
-        .ty
+    let returns: Vec<Type> = func_ty
         .returns
         .iter()
         .map(translate_type)
@@ -753,22 +745,22 @@ impl<'a> TmirAdapter<'a> {
         // Buffer for materialized constant instructions from operand resolution.
         let mut pre = Vec::new();
 
-        let instrs = match &node.instr {
-            Instr::BinOp { op, ty, lhs, rhs } => {
+        let instrs = match &node.inst {
+            Inst::BinOp { op, ty, lhs, rhs } => {
                 let lhs_vid = self.resolve_operand(lhs, &mut pre)?;
                 let rhs_vid = self.resolve_operand(rhs, &mut pre)?;
                 self.translate_binop(op, ty, &lhs_vid, &rhs_vid, &node.results)?
             }
-            Instr::UnOp { op, ty, operand } => {
+            Inst::UnOp { op, ty, operand } => {
                 let op_vid = self.resolve_operand(operand, &mut pre)?;
                 self.translate_unop(op, ty, &op_vid, &node.results)?
             }
-            Instr::Cmp { op, ty, lhs, rhs } => {
+            Inst::Cmp { op, ty, lhs, rhs } => {
                 let lhs_vid = self.resolve_operand(lhs, &mut pre)?;
                 let rhs_vid = self.resolve_operand(rhs, &mut pre)?;
                 self.translate_cmp(op, ty, &lhs_vid, &rhs_vid, &node.results)?
             }
-            Instr::Cast {
+            Inst::Cast {
                 op,
                 src_ty,
                 dst_ty,
@@ -777,17 +769,17 @@ impl<'a> TmirAdapter<'a> {
                 let op_vid = self.resolve_operand(operand, &mut pre)?;
                 self.translate_cast(op, src_ty, dst_ty, &op_vid, &node.results)?
             }
-            Instr::Load { ty, ptr } => self.translate_load(ty, ptr, &node.results)?,
-            Instr::Store { ty: _, ptr, value } => {
+            Inst::Load { ty, ptr } => self.translate_load(ty, ptr, &node.results)?,
+            Inst::Store { ty: _, ptr, value } => {
                 let val_vid = self.resolve_operand(value, &mut pre)?;
                 self.translate_store(ptr, &val_vid)?
             }
-            Instr::Alloc { ty, count } => self.translate_alloc(ty, count, &node.results)?,
-            Instr::Br { target, args } => {
+            Inst::Alloc { ty, count } => self.translate_alloc(ty, count, &node.results)?,
+            Inst::Br { target, args } => {
                 let arg_vids = self.resolve_operands(args, &mut pre)?;
                 self.translate_br(target, &arg_vids)?
             }
-            Instr::CondBr {
+            Inst::CondBr {
                 cond,
                 then_target,
                 then_args,
@@ -801,11 +793,11 @@ impl<'a> TmirAdapter<'a> {
                     &cond_vid, then_target, &then_vids, else_target, &else_vids,
                 )?
             }
-            Instr::Return { values } => {
+            Inst::Return { values } => {
                 let ret_vids = self.resolve_operands(values, &mut pre)?;
                 self.translate_return(&ret_vids)?
             }
-            Instr::Call {
+            Inst::Call {
                 func,
                 args,
                 ret_ty,
@@ -813,7 +805,7 @@ impl<'a> TmirAdapter<'a> {
                 let arg_vids = self.resolve_operands(args, &mut pre)?;
                 self.translate_call(func, &arg_vids, ret_ty, &node.results)?
             }
-            Instr::Phi { ty, incoming } => {
+            Inst::Phi { ty, incoming } => {
                 // Resolve operands in phi incoming edges.
                 let mut resolved_incoming = Vec::with_capacity(incoming.len());
                 for (block, op) in incoming {
@@ -822,11 +814,11 @@ impl<'a> TmirAdapter<'a> {
                 }
                 self.translate_phi(ty, &resolved_incoming, &node.results)?
             }
-            Instr::Const { ty, value } => self.translate_const(ty, *value, &node.results)?,
-            Instr::FConst { ty, value } => self.translate_fconst(ty, *value, &node.results)?,
-            Instr::Nop => vec![],
+            Inst::Const { ty, value } => self.translate_const(ty, *value, &node.results)?,
+            Inst::FConst { ty, value } => self.translate_fconst(ty, *value, &node.results)?,
+            Inst::Nop => vec![],
             // Ownership instructions: lower as no-ops or pointer copies for now.
-            Instr::Borrow { ty: _, value } | Instr::BorrowMut { ty: _, value } => {
+            Inst::Borrow { ty: _, value } | Inst::BorrowMut { ty: _, value } => {
                 // Borrow/BorrowMut: result is a copy of the pointer.
                 if node.results.is_empty() {
                     return Ok(vec![]);
@@ -839,14 +831,14 @@ impl<'a> TmirAdapter<'a> {
                     results: vec![dst],
                 }]
             }
-            Instr::EndBorrow { .. }
-            | Instr::Retain { .. }
-            | Instr::Release { .. }
-            | Instr::Dealloc { .. } => {
+            Inst::EndBorrow { .. }
+            | Inst::Retain { .. }
+            | Inst::Release { .. }
+            | Inst::Dealloc { .. } => {
                 // Void ownership ops: no-op in the LIR for now.
                 vec![]
             }
-            Instr::IsUnique { value } => {
+            Inst::IsUnique { value } => {
                 // Lower as a constant true for now (no ARC runtime).
                 if node.results.is_empty() {
                     return Ok(vec![]);
@@ -863,39 +855,39 @@ impl<'a> TmirAdapter<'a> {
                 }]
             }
             // Aggregate operations: lowered to stack allocation + loads/stores.
-            Instr::Struct { ty, fields } => {
+            Inst::Struct { ty, fields } => {
                 let field_vids = self.resolve_operands(fields, &mut pre)?;
                 self.translate_struct_construct(ty, &field_vids, &node.results)?
             }
-            Instr::Field { ty, value, index } => {
+            Inst::Field { ty, value, index } => {
                 self.translate_field_extract(ty, value, *index, &node.results)?
             }
-            Instr::Index { ty, base, index } => {
+            Inst::Index { ty, base, index } => {
                 let idx_vid = self.resolve_operand(index, &mut pre)?;
                 self.translate_array_index(ty, base, &idx_vid, &node.results)?
             }
             // Atomic operations: translate to LIR atomic opcodes.
-            Instr::AtomicLoad { ty, ptr, ordering } => {
+            Inst::AtomicLoad { ty, ptr, ordering } => {
                 self.translate_atomic_load(ty, ptr, ordering, &node.results)?
             }
-            Instr::AtomicStore { ty: _, ptr, value, ordering } => {
+            Inst::AtomicStore { ty: _, ptr, value, ordering } => {
                 let val_vid = self.resolve_operand(value, &mut pre)?;
                 self.translate_atomic_store(ptr, &val_vid, ordering)?
             }
-            Instr::AtomicRmw { op, ty, ptr, value, ordering } => {
+            Inst::AtomicRmw { op, ty, ptr, value, ordering } => {
                 let val_vid = self.resolve_operand(value, &mut pre)?;
                 self.translate_atomic_rmw(op, ty, ptr, &val_vid, ordering, &node.results)?
             }
-            Instr::CmpXchg { ty, ptr, expected, desired, success_ordering, .. } => {
+            Inst::CmpXchg { ty, ptr, expected, desired, success_ordering, .. } => {
                 let exp_vid = self.resolve_operand(expected, &mut pre)?;
                 let des_vid = self.resolve_operand(desired, &mut pre)?;
                 self.translate_cmpxchg(ty, ptr, &exp_vid, &des_vid, success_ordering, &node.results)?
             }
-            Instr::Fence { ordering } => {
+            Inst::Fence { ordering } => {
                 self.translate_fence(ordering)?
             }
             // Switch: multi-way branch.
-            Instr::Switch {
+            Inst::Switch {
                 value,
                 cases,
                 default,
@@ -904,7 +896,7 @@ impl<'a> TmirAdapter<'a> {
                 self.translate_switch(&val_vid, cases, default)?
             }
             // CallIndirect: call through pointer.
-            Instr::CallIndirect {
+            Inst::CallIndirect {
                 callee,
                 args,
                 ret_ty,
@@ -915,7 +907,7 @@ impl<'a> TmirAdapter<'a> {
             // Exception handling: stub lowering (full codegen in #140).
             // Invoke: for now, lower as a regular call + unconditional branch to normal_dest.
             // The unwind path is not yet wired up in the LIR.
-            Instr::Invoke {
+            Inst::Invoke {
                 func,
                 args,
                 ret_ty,
@@ -931,7 +923,7 @@ impl<'a> TmirAdapter<'a> {
                 result
             }
             // LandingPad: no-op stub, result is undefined (exception value placeholder).
-            Instr::LandingPad { .. } => {
+            Inst::LandingPad { .. } => {
                 if node.results.is_empty() {
                     vec![]
                 } else {
@@ -947,9 +939,9 @@ impl<'a> TmirAdapter<'a> {
                 }
             }
             // Resume: no-op stub (unwinding not yet supported in LIR).
-            Instr::Resume { .. } => vec![],
+            Inst::Resume { .. } => vec![],
             // Select: conditional value (branchless).
-            Instr::Select {
+            Inst::Select {
                 ty: _,
                 cond,
                 true_val,
@@ -961,7 +953,7 @@ impl<'a> TmirAdapter<'a> {
                 self.translate_select(&cond_vid, &tv_vid, &fv_vid, &node.results)?
             }
             // GetElementPtr: typed pointer arithmetic.
-            Instr::GetElementPtr {
+            Inst::GetElementPtr {
                 elem_ty,
                 base,
                 index,
@@ -2077,21 +2069,21 @@ mod tests {
             id: FuncId(0),
             name: "add".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32), Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::I32, Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
                 params: vec![
-                    (ValueId(0), Ty::int(32)), // param a
-                    (ValueId(1), Ty::int(32)), // param b
+                    (ValueId(0), Ty::I32), // param a
+                    (ValueId(1), Ty::I32), // param b
                 ],
                 body: vec![
                     InstrNode {
-                        instr: Instr::BinOp {
+                        inst: Inst::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::int(32),
+                            ty: Ty::I32,
                             lhs: Operand::Value(ValueId(0)),
                             rhs: Operand::Value(ValueId(1)),
                         },
@@ -2099,7 +2091,7 @@ mod tests {
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
@@ -2121,12 +2113,12 @@ mod tests {
 
     #[test]
     fn test_translate_type_scalars() {
-        assert_eq!(translate_type(&Ty::bool_ty()).unwrap(), Type::B1);
-        assert_eq!(translate_type(&Ty::int(8)).unwrap(), Type::I8);
-        assert_eq!(translate_type(&Ty::int(16)).unwrap(), Type::I16);
-        assert_eq!(translate_type(&Ty::int(32)).unwrap(), Type::I32);
-        assert_eq!(translate_type(&Ty::int(64)).unwrap(), Type::I64);
-        assert_eq!(translate_type(&Ty::int(128)).unwrap(), Type::I128);
+        assert_eq!(translate_type(&Ty::Bool).unwrap(), Type::B1);
+        assert_eq!(translate_type(&Ty::I8).unwrap(), Type::I8);
+        assert_eq!(translate_type(&Ty::I16).unwrap(), Type::I16);
+        assert_eq!(translate_type(&Ty::I32).unwrap(), Type::I32);
+        assert_eq!(translate_type(&Ty::I64).unwrap(), Type::I64);
+        assert_eq!(translate_type(&Ty::I128).unwrap(), Type::I128);
         assert_eq!(translate_type(&Ty::uint(32)).unwrap(), Type::I32);
         assert_eq!(translate_type(&Ty::uint(64)).unwrap(), Type::I64);
         assert_eq!(translate_type(&Ty::float(32)).unwrap(), Type::F32);
@@ -2135,13 +2127,13 @@ mod tests {
 
     #[test]
     fn test_translate_type_ptr() {
-        let ptr_ty = Ty::ptr(Ty::int(32));
+        let ptr_ty = Ty::ptr(Ty::I32);
         assert_eq!(translate_type(&ptr_ty).unwrap(), Type::I64);
     }
 
     #[test]
     fn test_translate_type_void_errors() {
-        assert!(translate_type(&Ty::void()).is_err());
+        assert!(translate_type(&Ty::Void).is_err());
     }
 
     #[test]
@@ -2154,7 +2146,7 @@ mod tests {
     #[test]
     fn test_translate_type_array() {
         // Array of scalar type should succeed even without struct defs
-        let array_ty = Ty::array(Ty::int(32), 10);
+        let array_ty = Ty::array(Ty::I32, 10);
         let result = translate_type(&array_ty).unwrap();
         assert_eq!(result, Type::Array(Box::new(Type::I32), 10));
     }
@@ -2201,7 +2193,7 @@ mod tests {
             name: "const_42".to_string(),
             ty: FuncTy {
                 params: vec![],
-                returns: vec![Ty::int(32)],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
@@ -2209,15 +2201,15 @@ mod tests {
                 params: vec![],
                 body: vec![
                     InstrNode {
-                        instr: Instr::Const {
-                            ty: Ty::int(32),
+                        inst: Inst::Const {
+                            ty: Ty::I32,
                             value: 42,
                         },
                         results: vec![ValueId(0)],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(0))],
                         },
                         results: vec![],
@@ -2256,7 +2248,7 @@ mod tests {
                 params: vec![],
                 body: vec![
                     InstrNode {
-                        instr: Instr::FConst {
+                        inst: Inst::FConst {
                             ty: Ty::float(64),
                             value: 2.78,
                         },
@@ -2264,7 +2256,7 @@ mod tests {
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(0))],
                         },
                         results: vec![],
@@ -2293,21 +2285,21 @@ mod tests {
             id: FuncId(0),
             name: "cmp_lt".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32), Ty::int(32)],
-                returns: vec![Ty::bool_ty()],
+                params: vec![Ty::I32, Ty::I32],
+                returns: vec![Ty::Bool],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
                 params: vec![
-                    (ValueId(0), Ty::int(32)),
-                    (ValueId(1), Ty::int(32)),
+                    (ValueId(0), Ty::I32),
+                    (ValueId(1), Ty::I32),
                 ],
                 body: vec![
                     InstrNode {
-                        instr: Instr::Cmp {
+                        inst: Inst::Cmp {
                             op: CmpOp::Slt,
-                            ty: Ty::int(32),
+                            ty: Ty::I32,
                             lhs: Operand::Value(ValueId(0)),
                             rhs: Operand::Value(ValueId(1)),
                         },
@@ -2315,7 +2307,7 @@ mod tests {
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
@@ -2344,7 +2336,7 @@ mod tests {
             name: "fcmp_eq".to_string(),
             ty: FuncTy {
                 params: vec![Ty::float(64), Ty::float(64)],
-                returns: vec![Ty::bool_ty()],
+                returns: vec![Ty::Bool],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
@@ -2355,7 +2347,7 @@ mod tests {
                 ],
                 body: vec![
                     InstrNode {
-                        instr: Instr::Cmp {
+                        inst: Inst::Cmp {
                             op: CmpOp::FOeq,
                             ty: Ty::float(64),
                             lhs: Operand::Value(ValueId(0)),
@@ -2365,7 +2357,7 @@ mod tests {
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
@@ -2393,26 +2385,26 @@ mod tests {
             id: FuncId(0),
             name: "sext".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32)],
-                returns: vec![Ty::int(64)],
+                params: vec![Ty::I32],
+                returns: vec![Ty::I64],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::int(32))],
+                params: vec![(ValueId(0), Ty::I32)],
                 body: vec![
                     InstrNode {
-                        instr: Instr::Cast {
+                        inst: Inst::Cast {
                             op: CastOp::SExt,
-                            src_ty: Ty::int(32),
-                            dst_ty: Ty::int(64),
+                            src_ty: Ty::I32,
+                            dst_ty: Ty::I64,
                             operand: Operand::Value(ValueId(0)),
                         },
                         results: vec![ValueId(1)],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
@@ -2441,25 +2433,25 @@ mod tests {
             id: FuncId(0),
             name: "load_store".to_string(),
             ty: FuncTy {
-                params: vec![Ty::ptr(Ty::int(32))],
+                params: vec![Ty::ptr(Ty::I32)],
                 returns: vec![],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::ptr(Ty::int(32)))],
+                params: vec![(ValueId(0), Ty::ptr(Ty::I32))],
                 body: vec![
                     InstrNode {
-                        instr: Instr::Load {
-                            ty: Ty::int(32),
+                        inst: Inst::Load {
+                            ty: Ty::I32,
                             ptr: ValueId(0),
                         },
                         results: vec![ValueId(1)],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Store {
-                            ty: Ty::int(32),
+                        inst: Inst::Store {
+                            ty: Ty::I32,
                             ptr: ValueId(0),
                             value: Operand::Value(ValueId(1)),
                         },
@@ -2467,7 +2459,7 @@ mod tests {
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return { values: vec![] },
+                        inst: Inst::Return { values: vec![] },
                         results: vec![],
                         proofs: vec![],
                     },
@@ -2495,25 +2487,25 @@ mod tests {
             id: FuncId(0),
             name: "neg".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::int(32))],
+                params: vec![(ValueId(0), Ty::I32)],
                 body: vec![
                     InstrNode {
-                        instr: Instr::UnOp {
+                        inst: Inst::UnOp {
                             op: UnOp::Neg,
-                            ty: Ty::int(32),
+                            ty: Ty::I32,
                             operand: Operand::Value(ValueId(0)),
                         },
                         results: vec![ValueId(1)],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
@@ -2539,25 +2531,25 @@ mod tests {
             id: FuncId(0),
             name: "not".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::int(32))],
+                params: vec![(ValueId(0), Ty::I32)],
                 body: vec![
                     InstrNode {
-                        instr: Instr::UnOp {
+                        inst: Inst::UnOp {
                             op: UnOp::Not,
-                            ty: Ty::int(32),
+                            ty: Ty::I32,
                             operand: Operand::Value(ValueId(0)),
                         },
                         results: vec![ValueId(1)],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
@@ -2583,21 +2575,21 @@ mod tests {
             id: FuncId(0),
             name: "srem".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32), Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::I32, Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
                 params: vec![
-                    (ValueId(0), Ty::int(32)),
-                    (ValueId(1), Ty::int(32)),
+                    (ValueId(0), Ty::I32),
+                    (ValueId(1), Ty::I32),
                 ],
                 body: vec![
                     InstrNode {
-                        instr: Instr::BinOp {
+                        inst: Inst::BinOp {
                             op: BinOp::SRem,
-                            ty: Ty::int(32),
+                            ty: Ty::I32,
                             lhs: Operand::Value(ValueId(0)),
                             rhs: Operand::Value(ValueId(1)),
                         },
@@ -2605,7 +2597,7 @@ mod tests {
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
@@ -2632,16 +2624,16 @@ mod tests {
             id: FuncId(0),
             name: "branch_args".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![
                 TmirBlockDef {
                     id: BlockId(0),
-                    params: vec![(ValueId(0), Ty::int(32))],
+                    params: vec![(ValueId(0), Ty::I32)],
                     body: vec![InstrNode {
-                        instr: Instr::Br {
+                        inst: Inst::Br {
                             target: BlockId(1),
                             args: vec![Operand::Value(ValueId(0))],
                         },
@@ -2651,9 +2643,9 @@ mod tests {
                 },
                 TmirBlockDef {
                     id: BlockId(1),
-                    params: vec![(ValueId(1), Ty::int(32))],
+                    params: vec![(ValueId(1), Ty::I32)],
                     body: vec![InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
@@ -2684,20 +2676,20 @@ mod tests {
             id: FuncId(0),
             name: "condbr".to_string(),
             ty: FuncTy {
-                params: vec![Ty::bool_ty(), Ty::int(32), Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::Bool, Ty::I32, Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![
                 TmirBlockDef {
                     id: BlockId(0),
                     params: vec![
-                        (ValueId(0), Ty::bool_ty()),
-                        (ValueId(1), Ty::int(32)),
-                        (ValueId(2), Ty::int(32)),
+                        (ValueId(0), Ty::Bool),
+                        (ValueId(1), Ty::I32),
+                        (ValueId(2), Ty::I32),
                     ],
                     body: vec![InstrNode {
-                        instr: Instr::CondBr {
+                        inst: Inst::CondBr {
                             cond: Operand::Value(ValueId(0)),
                             then_target: BlockId(1),
                             then_args: vec![],
@@ -2712,7 +2704,7 @@ mod tests {
                     id: BlockId(1),
                     params: vec![],
                     body: vec![InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
@@ -2723,7 +2715,7 @@ mod tests {
                     id: BlockId(2),
                     params: vec![],
                     body: vec![InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
@@ -2747,18 +2739,18 @@ mod tests {
     fn test_translate_all_binop_variants() {
         // Test that all BinOp variants translate without error.
         let binops = vec![
-            (BinOp::Add, Ty::int(32)),
-            (BinOp::Sub, Ty::int(32)),
-            (BinOp::Mul, Ty::int(32)),
-            (BinOp::SDiv, Ty::int(32)),
+            (BinOp::Add, Ty::I32),
+            (BinOp::Sub, Ty::I32),
+            (BinOp::Mul, Ty::I32),
+            (BinOp::SDiv, Ty::I32),
             (BinOp::UDiv, Ty::uint(32)),
-            (BinOp::SRem, Ty::int(32)),
+            (BinOp::SRem, Ty::I32),
             (BinOp::URem, Ty::uint(32)),
-            (BinOp::And, Ty::int(32)),
-            (BinOp::Or, Ty::int(32)),
-            (BinOp::Xor, Ty::int(32)),
-            (BinOp::Shl, Ty::int(32)),
-            (BinOp::AShr, Ty::int(32)),
+            (BinOp::And, Ty::I32),
+            (BinOp::Or, Ty::I32),
+            (BinOp::Xor, Ty::I32),
+            (BinOp::Shl, Ty::I32),
+            (BinOp::AShr, Ty::I32),
             (BinOp::LShr, Ty::uint(32)),
             (BinOp::FAdd, Ty::float(64)),
             (BinOp::FSub, Ty::float(64)),
@@ -2783,7 +2775,7 @@ mod tests {
                     ],
                     body: vec![
                         InstrNode {
-                            instr: Instr::BinOp {
+                            inst: Inst::BinOp {
                                 op,
                                 ty: ty.clone(),
                                 lhs: Operand::Value(ValueId(0)),
@@ -2793,7 +2785,7 @@ mod tests {
                             proofs: vec![],
                         },
                         InstrNode {
-                            instr: Instr::Return {
+                            inst: Inst::Return {
                                 values: vec![Operand::Value(ValueId(2))],
                             },
                             results: vec![],
@@ -2834,21 +2826,21 @@ mod tests {
                 id: FuncId(0),
                 name: format!("cmp_{:?}", op),
                 ty: FuncTy {
-                    params: vec![Ty::int(32), Ty::int(32)],
-                    returns: vec![Ty::bool_ty()],
+                    params: vec![Ty::I32, Ty::I32],
+                    returns: vec![Ty::Bool],
                 },
                 entry: BlockId(0),
                 blocks: vec![TmirBlockDef {
                     id: BlockId(0),
                     params: vec![
-                        (ValueId(0), Ty::int(32)),
-                        (ValueId(1), Ty::int(32)),
+                        (ValueId(0), Ty::I32),
+                        (ValueId(1), Ty::I32),
                     ],
                     body: vec![
                         InstrNode {
-                            instr: Instr::Cmp {
+                            inst: Inst::Cmp {
                                 op,
-                                ty: Ty::int(32),
+                                ty: Ty::I32,
                                 lhs: Operand::Value(ValueId(0)),
                                 rhs: Operand::Value(ValueId(1)),
                             },
@@ -2856,7 +2848,7 @@ mod tests {
                             proofs: vec![],
                         },
                         InstrNode {
-                            instr: Instr::Return {
+                            inst: Inst::Return {
                                 values: vec![Operand::Value(ValueId(2))],
                             },
                             results: vec![],
@@ -2900,7 +2892,7 @@ mod tests {
                 name: format!("fcmp_{:?}", op),
                 ty: FuncTy {
                     params: vec![Ty::float(64), Ty::float(64)],
-                    returns: vec![Ty::bool_ty()],
+                    returns: vec![Ty::Bool],
                 },
                 entry: BlockId(0),
                 blocks: vec![TmirBlockDef {
@@ -2911,7 +2903,7 @@ mod tests {
                     ],
                     body: vec![
                         InstrNode {
-                            instr: Instr::Cmp {
+                            inst: Inst::Cmp {
                                 op,
                                 ty: Ty::float(64),
                                 lhs: Operand::Value(ValueId(0)),
@@ -2921,7 +2913,7 @@ mod tests {
                             proofs: vec![],
                         },
                         InstrNode {
-                            instr: Instr::Return {
+                            inst: Inst::Return {
                                 values: vec![Operand::Value(ValueId(2))],
                             },
                             results: vec![],
@@ -2986,12 +2978,12 @@ mod tests {
                 params: vec![],
                 body: vec![
                     InstrNode {
-                        instr: Instr::Nop,
+                        inst: Inst::Nop,
                         results: vec![],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return { values: vec![] },
+                        inst: Inst::Return { values: vec![] },
                         results: vec![],
                         proofs: vec![],
                     },
@@ -3010,9 +3002,9 @@ mod tests {
     #[test]
     fn test_extract_proofs_empty_when_no_annotations() {
         let node = InstrNode {
-            instr: Instr::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::Add,
-                ty: Ty::int(32),
+                ty: Ty::I32,
                 lhs: Operand::Value(ValueId(0)),
                 rhs: Operand::Value(ValueId(1)),
             },
@@ -3027,9 +3019,9 @@ mod tests {
     fn test_extract_proofs_no_overflow() {
         use tmir_types::TmirProof;
         let node = InstrNode {
-            instr: Instr::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::Add,
-                ty: Ty::int(32),
+                ty: Ty::I32,
                 lhs: Operand::Value(ValueId(0)),
                 rhs: Operand::Value(ValueId(1)),
             },
@@ -3045,8 +3037,8 @@ mod tests {
     fn test_extract_proofs_in_bounds() {
         use tmir_types::TmirProof;
         let node = InstrNode {
-            instr: Instr::Index {
-                ty: Ty::array(Ty::int(32), 10),
+            inst: Inst::Index {
+                ty: Ty::array(Ty::I32, 10),
                 base: ValueId(0),
                 index: Operand::Value(ValueId(1)),
             },
@@ -3071,8 +3063,8 @@ mod tests {
     fn test_extract_proofs_not_null() {
         use tmir_types::TmirProof;
         let node = InstrNode {
-            instr: Instr::Load {
-                ty: Ty::int(32),
+            inst: Inst::Load {
+                ty: Ty::I32,
                 ptr: ValueId(0),
             },
             results: vec![ValueId(1)],
@@ -3087,8 +3079,8 @@ mod tests {
     fn test_extract_proofs_valid_borrow() {
         use tmir_types::TmirProof;
         let node = InstrNode {
-            instr: Instr::Borrow {
-                ty: Ty::ptr(Ty::int(32)),
+            inst: Inst::Borrow {
+                ty: Ty::ptr(Ty::I32),
                 value: ValueId(0),
             },
             results: vec![ValueId(1)],
@@ -3110,9 +3102,9 @@ mod tests {
     fn test_extract_proofs_multiple_annotations() {
         use tmir_types::TmirProof;
         let node = InstrNode {
-            instr: Instr::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::Add,
-                ty: Ty::int(32),
+                ty: Ty::I32,
                 lhs: Operand::Value(ValueId(0)),
                 rhs: Operand::Value(ValueId(1)),
             },
@@ -3134,9 +3126,9 @@ mod tests {
         // Pure, Associative, Commutative, Idempotent are now extracted at
         // both instruction and function level.
         let node = InstrNode {
-            instr: Instr::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::Add,
-                ty: Ty::int(32),
+                ty: Ty::I32,
                 lhs: Operand::Value(ValueId(0)),
                 rhs: Operand::Value(ValueId(1)),
             },
@@ -3163,9 +3155,9 @@ mod tests {
     fn test_extract_proofs_non_zero_divisor() {
         use tmir_types::TmirProof;
         let node = InstrNode {
-            instr: Instr::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::SDiv,
-                ty: Ty::int(32),
+                ty: Ty::I32,
                 lhs: Operand::Value(ValueId(0)),
                 rhs: Operand::Value(ValueId(1)),
             },
@@ -3188,9 +3180,9 @@ mod tests {
     fn test_extract_proofs_valid_shift() {
         use tmir_types::TmirProof;
         let node = InstrNode {
-            instr: Instr::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::Shl,
-                ty: Ty::int(64),
+                ty: Ty::I64,
                 lhs: Operand::Value(ValueId(0)),
                 rhs: Operand::Value(ValueId(1)),
             },
@@ -3221,21 +3213,21 @@ mod tests {
             id: FuncId(0),
             name: "add_no_overflow".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32), Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::I32, Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
                 params: vec![
-                    (ValueId(0), Ty::int(32)),
-                    (ValueId(1), Ty::int(32)),
+                    (ValueId(0), Ty::I32),
+                    (ValueId(1), Ty::I32),
                 ],
                 body: vec![
                     InstrNode {
-                        instr: Instr::BinOp {
+                        inst: Inst::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::int(32),
+                            ty: Ty::I32,
                             lhs: Operand::Value(ValueId(0)),
                             rhs: Operand::Value(ValueId(1)),
                         },
@@ -3243,7 +3235,7 @@ mod tests {
                         proofs: vec![TmirProof::NoOverflow { signed: true }],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
@@ -3292,17 +3284,17 @@ mod tests {
             id: FuncId(0),
             name: "safe_load".to_string(),
             ty: FuncTy {
-                params: vec![Ty::ptr(Ty::int(32))],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::ptr(Ty::I32)],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::ptr(Ty::int(32)))],
+                params: vec![(ValueId(0), Ty::ptr(Ty::I32))],
                 body: vec![
                     InstrNode {
-                        instr: Instr::Load {
-                            ty: Ty::int(32),
+                        inst: Inst::Load {
+                            ty: Ty::I32,
                             ptr: ValueId(0),
                         },
                         results: vec![ValueId(1)],
@@ -3315,7 +3307,7 @@ mod tests {
                         ],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
@@ -3396,9 +3388,9 @@ mod tests {
     fn test_all_eleven_proof_types_extract_correctly() {
         use tmir_types::TmirProof;
         let node = InstrNode {
-            instr: Instr::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::Add,
-                ty: Ty::int(32),
+                ty: Ty::I32,
                 lhs: Operand::Value(ValueId(0)),
                 rhs: Operand::Value(ValueId(1)),
             },
@@ -3451,45 +3443,45 @@ mod tests {
             id: FuncId(0),
             name: "ownership".to_string(),
             ty: FuncTy {
-                params: vec![Ty::ptr(Ty::int(32))],
+                params: vec![Ty::ptr(Ty::I32)],
                 returns: vec![],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::ptr(Ty::int(32)))],
+                params: vec![(ValueId(0), Ty::ptr(Ty::I32))],
                 body: vec![
                     InstrNode {
-                        instr: Instr::Borrow {
-                            ty: Ty::ptr(Ty::int(32)),
+                        inst: Inst::Borrow {
+                            ty: Ty::ptr(Ty::I32),
                             value: ValueId(0),
                         },
                         results: vec![ValueId(1)],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::EndBorrow {
+                        inst: Inst::EndBorrow {
                             borrow: ValueId(1),
                         },
                         results: vec![],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Retain {
+                        inst: Inst::Retain {
                             value: ValueId(0),
                         },
                         results: vec![],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Release {
+                        inst: Inst::Release {
                             value: ValueId(0),
                         },
                         results: vec![],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return { values: vec![] },
+                        inst: Inst::Return { values: vec![] },
                         results: vec![],
                         proofs: vec![],
                     },
@@ -3517,15 +3509,15 @@ mod tests {
                     id: FuncId(0),
                     name: "foo".to_string(),
                     ty: FuncTy {
-                        params: vec![Ty::int(32)],
-                        returns: vec![Ty::int(32)],
+                        params: vec![Ty::I32],
+                        returns: vec![Ty::I32],
                     },
                     entry: BlockId(0),
                     blocks: vec![TmirBlockDef {
                         id: BlockId(0),
-                        params: vec![(ValueId(0), Ty::int(32))],
+                        params: vec![(ValueId(0), Ty::I32)],
                         body: vec![InstrNode {
-                            instr: Instr::Return {
+                            inst: Inst::Return {
                                 values: vec![Operand::Value(ValueId(0))],
                             },
                             results: vec![],
@@ -3546,7 +3538,7 @@ mod tests {
                         id: BlockId(0),
                         params: vec![(ValueId(0), Ty::float(64))],
                         body: vec![InstrNode {
-                            instr: Instr::Return {
+                            inst: Inst::Return {
                                 values: vec![Operand::Value(ValueId(0))],
                             },
                             results: vec![],
@@ -3577,15 +3569,15 @@ mod tests {
                     id: FuncId(0),
                     name: "callee".to_string(),
                     ty: FuncTy {
-                        params: vec![Ty::int(32)],
-                        returns: vec![Ty::int(32)],
+                        params: vec![Ty::I32],
+                        returns: vec![Ty::I32],
                     },
                     entry: BlockId(0),
                     blocks: vec![TmirBlockDef {
                         id: BlockId(0),
-                        params: vec![(ValueId(0), Ty::int(32))],
+                        params: vec![(ValueId(0), Ty::I32)],
                         body: vec![InstrNode {
-                            instr: Instr::Return {
+                            inst: Inst::Return {
                                 values: vec![Operand::Value(ValueId(0))],
                             },
                             results: vec![],
@@ -3598,25 +3590,25 @@ mod tests {
                     id: FuncId(1),
                     name: "caller".to_string(),
                     ty: FuncTy {
-                        params: vec![Ty::int(32)],
-                        returns: vec![Ty::int(32)],
+                        params: vec![Ty::I32],
+                        returns: vec![Ty::I32],
                     },
                     entry: BlockId(0),
                     blocks: vec![TmirBlockDef {
                         id: BlockId(0),
-                        params: vec![(ValueId(0), Ty::int(32))],
+                        params: vec![(ValueId(0), Ty::I32)],
                         body: vec![
                             InstrNode {
-                                instr: Instr::Call {
+                                inst: Inst::Call {
                                     func: FuncId(0), // calls "callee"
                                     args: vec![Operand::Value(ValueId(0))],
-                                    ret_ty: vec![Ty::int(32)],
+                                    ret_ty: vec![Ty::I32],
                                 },
                                 results: vec![ValueId(1)],
                                 proofs: vec![],
                             },
                             InstrNode {
-                                instr: Instr::Return {
+                                inst: Inst::Return {
                                     values: vec![Operand::Value(ValueId(1))],
                                 },
                                 results: vec![],
@@ -3662,7 +3654,7 @@ mod tests {
             name: "main".to_string(),
             ty: FuncTy {
                 params: vec![],
-                returns: vec![Ty::int(32)],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
@@ -3670,16 +3662,16 @@ mod tests {
                 params: vec![],
                 body: vec![
                     InstrNode {
-                        instr: Instr::Call {
+                        inst: Inst::Call {
                             func: FuncId(99), // not in module
                             args: vec![],
-                            ret_ty: vec![Ty::int(32)],
+                            ret_ty: vec![Ty::I32],
                         },
                         results: vec![ValueId(0)],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(0))],
                         },
                         results: vec![],
@@ -3710,23 +3702,23 @@ mod tests {
             id: FuncId(0),
             name: "choose".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32), Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::I32, Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![
                 TmirBlockDef {
                     id: BlockId(0),
                     params: vec![
-                        (ValueId(0), Ty::int(32)),
-                        (ValueId(1), Ty::int(32)),
+                        (ValueId(0), Ty::I32),
+                        (ValueId(1), Ty::I32),
                     ],
                     body: vec![
                         // Compare: cond = a < b
                         InstrNode {
-                            instr: Instr::Cmp {
+                            inst: Inst::Cmp {
                                 op: CmpOp::Slt,
-                                ty: Ty::int(32),
+                                ty: Ty::I32,
                                 lhs: Operand::Value(ValueId(0)),
                                 rhs: Operand::Value(ValueId(1)),
                             },
@@ -3735,7 +3727,7 @@ mod tests {
                         },
                         // CondBr: branch on comparison result
                         InstrNode {
-                            instr: Instr::CondBr {
+                            inst: Inst::CondBr {
                                 cond: Operand::Value(ValueId(2)),
                                 then_target: BlockId(1),
                                 then_args: vec![],
@@ -3751,7 +3743,7 @@ mod tests {
                     id: BlockId(1),
                     params: vec![],
                     body: vec![InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(0))],
                         },
                         results: vec![],
@@ -3762,7 +3754,7 @@ mod tests {
                     id: BlockId(2),
                     params: vec![],
                     body: vec![InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
@@ -3811,7 +3803,7 @@ mod tests {
                     name: "func_a".to_string(),
                     ty: FuncTy {
                         params: vec![],
-                        returns: vec![Ty::int(32)],
+                        returns: vec![Ty::I32],
                     },
                     entry: BlockId(0),
                     blocks: vec![TmirBlockDef {
@@ -3819,12 +3811,12 @@ mod tests {
                         params: vec![],
                         body: vec![
                             InstrNode {
-                                instr: Instr::Const { ty: Ty::int(32), value: 1 },
+                                inst: Inst::Const { ty: Ty::I32, value: 1 },
                                 results: vec![ValueId(0)],
                                 proofs: vec![],
                             },
                             InstrNode {
-                                instr: Instr::Return { values: vec![Operand::Value(ValueId(0))] },
+                                inst: Inst::Return { values: vec![Operand::Value(ValueId(0))] },
                                 results: vec![],
                                 proofs: vec![],
                             },
@@ -3837,7 +3829,7 @@ mod tests {
                     name: "func_b".to_string(),
                     ty: FuncTy {
                         params: vec![],
-                        returns: vec![Ty::int(32)],
+                        returns: vec![Ty::I32],
                     },
                     entry: BlockId(0),
                     blocks: vec![TmirBlockDef {
@@ -3845,12 +3837,12 @@ mod tests {
                         params: vec![],
                         body: vec![
                             InstrNode {
-                                instr: Instr::Const { ty: Ty::int(32), value: 2 },
+                                inst: Inst::Const { ty: Ty::I32, value: 2 },
                                 results: vec![ValueId(0)],
                                 proofs: vec![],
                             },
                             InstrNode {
-                                instr: Instr::Return { values: vec![Operand::Value(ValueId(0))] },
+                                inst: Inst::Return { values: vec![Operand::Value(ValueId(0))] },
                                 results: vec![],
                                 proofs: vec![],
                             },
@@ -3863,7 +3855,7 @@ mod tests {
                     name: "func_c".to_string(),
                     ty: FuncTy {
                         params: vec![],
-                        returns: vec![Ty::int(32)],
+                        returns: vec![Ty::I32],
                     },
                     entry: BlockId(0),
                     blocks: vec![TmirBlockDef {
@@ -3871,25 +3863,25 @@ mod tests {
                         params: vec![],
                         body: vec![
                             InstrNode {
-                                instr: Instr::Call {
+                                inst: Inst::Call {
                                     func: FuncId(0), // calls func_a
                                     args: vec![],
-                                    ret_ty: vec![Ty::int(32)],
+                                    ret_ty: vec![Ty::I32],
                                 },
                                 results: vec![ValueId(0)],
                                 proofs: vec![],
                             },
                             InstrNode {
-                                instr: Instr::Call {
+                                inst: Inst::Call {
                                     func: FuncId(1), // calls func_b
                                     args: vec![],
-                                    ret_ty: vec![Ty::int(32)],
+                                    ret_ty: vec![Ty::I32],
                                 },
                                 results: vec![ValueId(1)],
                                 proofs: vec![],
                             },
                             InstrNode {
-                                instr: Instr::Return { values: vec![Operand::Value(ValueId(1))] },
+                                inst: Inst::Return { values: vec![Operand::Value(ValueId(1))] },
                                 results: vec![],
                                 proofs: vec![],
                             },
@@ -3936,7 +3928,7 @@ mod tests {
         // With nested enum representation, invalid bit widths are prevented by
         // construction (IntWidth/FloatWidth enums). Test that other unsupported
         // types produce errors.
-        assert!(translate_type(&Ty::void()).is_err());
+        assert!(translate_type(&Ty::Void).is_err());
         assert!(translate_type(&Ty::never()).is_err());
         assert!(translate_type(&Ty::Func(tmir_types::FuncTy {
             params: vec![],
@@ -3947,8 +3939,8 @@ mod tests {
     #[test]
     fn test_translate_type_func_errors() {
         let func_ty = Ty::Func(tmir_types::FuncTy {
-            params: vec![Ty::int(32)],
-            returns: vec![Ty::int(32)],
+            params: vec![Ty::I32],
+            returns: vec![Ty::I32],
         });
         assert!(translate_type(&func_ty).is_err());
     }
@@ -3956,7 +3948,7 @@ mod tests {
     #[test]
     fn test_translate_type_nested_ptr() {
         // Ptr(Ptr(Int(32))) -> I64 (all pointers are 64-bit)
-        let ty = Ty::ptr(Ty::ptr(Ty::int(32)));
+        let ty = Ty::ptr(Ty::ptr(Ty::I32));
         assert_eq!(translate_type(&ty).unwrap(), Type::I64);
     }
 
@@ -3980,7 +3972,7 @@ mod tests {
     #[test]
     fn test_translate_type_array_of_array() {
         // Array of arrays: [[i32; 3]; 2]
-        let inner = Ty::array(Ty::int(32), 3);
+        let inner = Ty::array(Ty::I32, 3);
         let outer = Ty::array(inner, 2);
         let result = translate_type(&outer).unwrap();
         assert_eq!(result, Type::Array(
@@ -4101,21 +4093,21 @@ mod tests {
             id: FuncId(0),
             name: "no_overflow".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32), Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::I32, Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
                 params: vec![
-                    (ValueId(0), Ty::int(32)),
-                    (ValueId(1), Ty::int(32)),
+                    (ValueId(0), Ty::I32),
+                    (ValueId(1), Ty::I32),
                 ],
                 body: vec![
                     InstrNode {
-                        instr: Instr::BinOp {
+                        inst: Inst::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::int(32),
+                            ty: Ty::I32,
                             lhs: Operand::Value(ValueId(0)),
                             rhs: Operand::Value(ValueId(1)),
                         },
@@ -4123,7 +4115,7 @@ mod tests {
                         proofs: vec![TmirProof::NoOverflow { signed: true }],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
@@ -4162,7 +4154,7 @@ mod tests {
                 params: vec![(ValueId(0), Ty::float(64))],
                 body: vec![
                     InstrNode {
-                        instr: Instr::UnOp {
+                        inst: Inst::UnOp {
                             op: UnOp::FNeg,
                             ty: Ty::float(64),
                             operand: Operand::Value(ValueId(0)),
@@ -4171,7 +4163,7 @@ mod tests {
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
@@ -4199,24 +4191,24 @@ mod tests {
             id: FuncId(0),
             name: "borrow".to_string(),
             ty: FuncTy {
-                params: vec![Ty::ptr(Ty::int(32))],
-                returns: vec![Ty::ptr(Ty::int(32))],
+                params: vec![Ty::ptr(Ty::I32)],
+                returns: vec![Ty::ptr(Ty::I32)],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::ptr(Ty::int(32)))],
+                params: vec![(ValueId(0), Ty::ptr(Ty::I32))],
                 body: vec![
                     InstrNode {
-                        instr: Instr::Borrow {
-                            ty: Ty::ptr(Ty::int(32)),
+                        inst: Inst::Borrow {
+                            ty: Ty::ptr(Ty::I32),
                             value: ValueId(0),
                         },
                         results: vec![ValueId(1)],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
@@ -4255,12 +4247,12 @@ mod tests {
                 params: vec![],
                 body: vec![
                     InstrNode {
-                        instr: Instr::Nop,
+                        inst: Inst::Nop,
                         results: vec![],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return { values: vec![] },
+                        inst: Inst::Return { values: vec![] },
                         results: vec![],
                         proofs: vec![],
                     },
@@ -4288,25 +4280,25 @@ mod tests {
             id: FuncId(0),
             name: "diamond".to_string(),
             ty: FuncTy {
-                params: vec![Ty::bool_ty(), Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::Bool, Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![
                 TmirBlockDef {
                     id: BlockId(0),
                     params: vec![
-                        (ValueId(0), Ty::bool_ty()),
-                        (ValueId(1), Ty::int(32)),
+                        (ValueId(0), Ty::Bool),
+                        (ValueId(1), Ty::I32),
                     ],
                     body: vec![
                         InstrNode {
-                            instr: Instr::Const { ty: Ty::int(32), value: 42 },
+                            inst: Inst::Const { ty: Ty::I32, value: 42 },
                             results: vec![ValueId(2)],
                             proofs: vec![],
                         },
                         InstrNode {
-                            instr: Instr::CondBr {
+                            inst: Inst::CondBr {
                                 cond: Operand::Value(ValueId(0)),
                                 then_target: BlockId(1),
                                 then_args: vec![],
@@ -4322,7 +4314,7 @@ mod tests {
                     id: BlockId(1),
                     params: vec![],
                     body: vec![InstrNode {
-                        instr: Instr::Return { values: vec![Operand::Value(ValueId(1))] },
+                        inst: Inst::Return { values: vec![Operand::Value(ValueId(1))] },
                         results: vec![],
                         proofs: vec![],
                     }],
@@ -4331,7 +4323,7 @@ mod tests {
                     id: BlockId(2),
                     params: vec![],
                     body: vec![InstrNode {
-                        instr: Instr::Return { values: vec![Operand::Value(ValueId(2))] },
+                        inst: Inst::Return { values: vec![Operand::Value(ValueId(2))] },
                         results: vec![],
                         proofs: vec![],
                     }],
@@ -4364,7 +4356,7 @@ mod tests {
                     name: "first".to_string(),
                     ty: FuncTy {
                         params: vec![],
-                        returns: vec![Ty::int(32)],
+                        returns: vec![Ty::I32],
                     },
                     entry: BlockId(0),
                     blocks: vec![TmirBlockDef {
@@ -4372,12 +4364,12 @@ mod tests {
                         params: vec![],
                         body: vec![
                             InstrNode {
-                                instr: Instr::Const { ty: Ty::int(32), value: 1 },
+                                inst: Inst::Const { ty: Ty::I32, value: 1 },
                                 results: vec![ValueId(0)],
                                 proofs: vec![],
                             },
                             InstrNode {
-                                instr: Instr::Return { values: vec![Operand::Value(ValueId(0))] },
+                                inst: Inst::Return { values: vec![Operand::Value(ValueId(0))] },
                                 results: vec![],
                                 proofs: vec![],
                             },
@@ -4397,7 +4389,7 @@ mod tests {
                         id: BlockId(0),
                         params: vec![(ValueId(0), Ty::float(64))],
                         body: vec![InstrNode {
-                            instr: Instr::Return { values: vec![Operand::Value(ValueId(0))] },
+                            inst: Inst::Return { values: vec![Operand::Value(ValueId(0))] },
                             results: vec![],
                             proofs: vec![],
                         }],
@@ -4434,21 +4426,21 @@ mod tests {
             id: FuncId(0),
             name: "is_unique".to_string(),
             ty: FuncTy {
-                params: vec![Ty::ptr(Ty::int(32))],
-                returns: vec![Ty::bool_ty()],
+                params: vec![Ty::ptr(Ty::I32)],
+                returns: vec![Ty::Bool],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::ptr(Ty::int(32)))],
+                params: vec![(ValueId(0), Ty::ptr(Ty::I32))],
                 body: vec![
                     InstrNode {
-                        instr: Instr::IsUnique { value: ValueId(0) },
+                        inst: Inst::IsUnique { value: ValueId(0) },
                         results: vec![ValueId(1)],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return { values: vec![Operand::Value(ValueId(1))] },
+                        inst: Inst::Return { values: vec![Operand::Value(ValueId(1))] },
                         results: vec![],
                         proofs: vec![],
                     },
@@ -4499,7 +4491,7 @@ mod tests {
                 name: format!("fcmp_{:?}", tmir_op),
                 ty: FuncTy {
                     params: vec![Ty::float(64), Ty::float(64)],
-                    returns: vec![Ty::bool_ty()],
+                    returns: vec![Ty::Bool],
                 },
                 entry: BlockId(0),
                 blocks: vec![TmirBlockDef {
@@ -4510,7 +4502,7 @@ mod tests {
                     ],
                     body: vec![
                         InstrNode {
-                            instr: Instr::Cmp {
+                            inst: Inst::Cmp {
                                 op: tmir_op,
                                 ty: Ty::float(64),
                                 lhs: Operand::Value(ValueId(0)),
@@ -4520,7 +4512,7 @@ mod tests {
                             proofs: vec![],
                         },
                         InstrNode {
-                            instr: Instr::Return { values: vec![Operand::Value(ValueId(2))] },
+                            inst: Inst::Return { values: vec![Operand::Value(ValueId(2))] },
                             results: vec![],
                             proofs: vec![],
                         },
@@ -4554,15 +4546,15 @@ mod tests {
             id: FuncId(0),
             name: "pure_fn".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::int(32))],
+                params: vec![(ValueId(0), Ty::I32)],
                 body: vec![InstrNode {
-                    instr: Instr::Return {
+                    inst: Inst::Return {
                         values: vec![Operand::Value(ValueId(0))],
                     },
                     results: vec![],
@@ -4585,21 +4577,21 @@ mod tests {
             id: FuncId(0),
             name: "assoc_commut_fn".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32), Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::I32, Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
                 params: vec![
-                    (ValueId(0), Ty::int(32)),
-                    (ValueId(1), Ty::int(32)),
+                    (ValueId(0), Ty::I32),
+                    (ValueId(1), Ty::I32),
                 ],
                 body: vec![
                     InstrNode {
-                        instr: Instr::BinOp {
+                        inst: Inst::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::int(32),
+                            ty: Ty::I32,
                             lhs: Operand::Value(ValueId(0)),
                             rhs: Operand::Value(ValueId(1)),
                         },
@@ -4607,7 +4599,7 @@ mod tests {
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
@@ -4637,15 +4629,15 @@ mod tests {
             id: FuncId(0),
             name: "idempotent_fn".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::int(32))],
+                params: vec![(ValueId(0), Ty::I32)],
                 body: vec![InstrNode {
-                    instr: Instr::Return {
+                    inst: Inst::Return {
                         values: vec![Operand::Value(ValueId(0))],
                     },
                     results: vec![],
@@ -4674,7 +4666,7 @@ mod tests {
                 id: BlockId(0),
                 params: vec![],
                 body: vec![InstrNode {
-                    instr: Instr::Return { values: vec![] },
+                    inst: Inst::Return { values: vec![] },
                     results: vec![],
                     proofs: vec![],
                 }],
@@ -4703,21 +4695,21 @@ mod tests {
             id: FuncId(0),
             name: "pure_add".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32), Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::I32, Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
                 params: vec![
-                    (ValueId(0), Ty::int(32)),
-                    (ValueId(1), Ty::int(32)),
+                    (ValueId(0), Ty::I32),
+                    (ValueId(1), Ty::I32),
                 ],
                 body: vec![
                     InstrNode {
-                        instr: Instr::BinOp {
+                        inst: Inst::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::int(32),
+                            ty: Ty::I32,
                             lhs: Operand::Value(ValueId(0)),
                             rhs: Operand::Value(ValueId(1)),
                         },
@@ -4725,7 +4717,7 @@ mod tests {
                         proofs: vec![TmirProof::Pure],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
@@ -4758,21 +4750,21 @@ mod tests {
             id: FuncId(0),
             name: "assoc_commut_add".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32), Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::I32, Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
                 params: vec![
-                    (ValueId(0), Ty::int(32)),
-                    (ValueId(1), Ty::int(32)),
+                    (ValueId(0), Ty::I32),
+                    (ValueId(1), Ty::I32),
                 ],
                 body: vec![
                     InstrNode {
-                        instr: Instr::BinOp {
+                        inst: Inst::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::int(32),
+                            ty: Ty::I32,
                             lhs: Operand::Value(ValueId(0)),
                             rhs: Operand::Value(ValueId(1)),
                         },
@@ -4783,7 +4775,7 @@ mod tests {
                         ],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
@@ -4814,21 +4806,21 @@ mod tests {
             id: FuncId(0),
             name: "combined_proofs".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32), Ty::int(32)],
-                returns: vec![Ty::int(32)],
+                params: vec![Ty::I32, Ty::I32],
+                returns: vec![Ty::I32],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
                 params: vec![
-                    (ValueId(0), Ty::int(32)),
-                    (ValueId(1), Ty::int(32)),
+                    (ValueId(0), Ty::I32),
+                    (ValueId(1), Ty::I32),
                 ],
                 body: vec![
                     InstrNode {
-                        instr: Instr::BinOp {
+                        inst: Inst::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::int(32),
+                            ty: Ty::I32,
                             lhs: Operand::Value(ValueId(0)),
                             rhs: Operand::Value(ValueId(1)),
                         },
@@ -4840,7 +4832,7 @@ mod tests {
                         ],
                     },
                     InstrNode {
-                        instr: Instr::Return {
+                        inst: Inst::Return {
                             values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
@@ -4948,8 +4940,8 @@ mod tests {
     fn test_extract_proofs_pure() {
         use tmir_types::TmirProof;
         let node = InstrNode {
-            instr: Instr::Load {
-                ty: Ty::int(32),
+            inst: Inst::Load {
+                ty: Ty::I32,
                 ptr: ValueId(0),
             },
             results: vec![ValueId(1)],
@@ -4964,9 +4956,9 @@ mod tests {
     fn test_extract_proofs_associative() {
         use tmir_types::TmirProof;
         let node = InstrNode {
-            instr: Instr::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::Add,
-                ty: Ty::int(32),
+                ty: Ty::I32,
                 lhs: Operand::Value(ValueId(0)),
                 rhs: Operand::Value(ValueId(1)),
             },
@@ -4982,9 +4974,9 @@ mod tests {
     fn test_extract_proofs_commutative() {
         use tmir_types::TmirProof;
         let node = InstrNode {
-            instr: Instr::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::Mul,
-                ty: Ty::int(32),
+                ty: Ty::I32,
                 lhs: Operand::Value(ValueId(0)),
                 rhs: Operand::Value(ValueId(1)),
             },
@@ -5000,9 +4992,9 @@ mod tests {
     fn test_extract_proofs_idempotent() {
         use tmir_types::TmirProof;
         let node = InstrNode {
-            instr: Instr::UnOp {
+            inst: Inst::UnOp {
                 op: UnOp::Not,
-                ty: Ty::int(32),
+                ty: Ty::I32,
                 operand: Operand::Value(ValueId(0)),
             },
             results: vec![ValueId(1)],
@@ -5028,7 +5020,7 @@ mod tests {
                 id: BlockId(0),
                 params: vec![],
                 body: vec![InstrNode {
-                    instr: Instr::Return { values: vec![] },
+                    inst: Inst::Return { values: vec![] },
                     results: vec![],
                     proofs: vec![],
                 }],
@@ -5075,31 +5067,31 @@ mod tests {
                 params: vec![],
                 body: vec![
                     InstrNode {
-                        instr: Instr::Alloc {
-                            ty: Ty::int(32),
+                        inst: Inst::Alloc {
+                            ty: Ty::I32,
                             count: None,
                         },
                         results: vec![ValueId(0)],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Alloc {
-                            ty: Ty::int(64),
+                        inst: Inst::Alloc {
+                            ty: Ty::I64,
                             count: None,
                         },
                         results: vec![ValueId(1)],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Alloc {
-                            ty: Ty::int(8),
+                        inst: Inst::Alloc {
+                            ty: Ty::I8,
                             count: None,
                         },
                         results: vec![ValueId(2)],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return { values: vec![] },
+                        inst: Inst::Return { values: vec![] },
                         results: vec![],
                         proofs: vec![],
                     },
@@ -5181,15 +5173,15 @@ mod tests {
                 params: vec![],
                 body: vec![
                     InstrNode {
-                        instr: Instr::Alloc {
-                            ty: Ty::int(64),
+                        inst: Inst::Alloc {
+                            ty: Ty::I64,
                             count: None,
                         },
                         results: vec![ValueId(0)],
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return { values: vec![] },
+                        inst: Inst::Return { values: vec![] },
                         results: vec![],
                         proofs: vec![],
                     },
@@ -5229,8 +5221,8 @@ mod tests {
             id: StructId(0),
             name: "MyStruct".to_string(),
             fields: vec![
-                FieldDef { name: "x".to_string(), ty: Ty::int(32), offset: None },
-                FieldDef { name: "y".to_string(), ty: Ty::int(64), offset: None },
+                FieldDef { name: "x".to_string(), ty: Ty::I32, offset: None },
+                FieldDef { name: "y".to_string(), ty: Ty::I64, offset: None },
             ],
             size: None,
             align: None,
@@ -5242,21 +5234,21 @@ mod tests {
             id: FuncId(0),
             name: "alloc_and_struct".to_string(),
             ty: FuncTy {
-                params: vec![Ty::int(32), Ty::int(64)],
+                params: vec![Ty::I32, Ty::I64],
                 returns: vec![],
             },
             entry: BlockId(0),
             blocks: vec![TmirBlockDef {
                 id: BlockId(0),
                 params: vec![
-                    (ValueId(0), Ty::int(32)),
-                    (ValueId(1), Ty::int(64)),
+                    (ValueId(0), Ty::I32),
+                    (ValueId(1), Ty::I64),
                 ],
                 body: vec![
                     // First: a regular Alloc
                     InstrNode {
-                        instr: Instr::Alloc {
-                            ty: Ty::int(32),
+                        inst: Inst::Alloc {
+                            ty: Ty::I32,
                             count: None,
                         },
                         results: vec![ValueId(2)],
@@ -5264,7 +5256,7 @@ mod tests {
                     },
                     // Second: a Struct construction (also allocates a slot)
                     InstrNode {
-                        instr: Instr::Struct {
+                        inst: Inst::Struct {
                             ty: struct_ty,
                             fields: vec![
                                 Operand::Value(ValueId(0)),
@@ -5275,7 +5267,7 @@ mod tests {
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return { values: vec![] },
+                        inst: Inst::Return { values: vec![] },
                         results: vec![],
                         proofs: vec![],
                     },

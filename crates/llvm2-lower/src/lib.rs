@@ -16,6 +16,7 @@ pub mod abi;
 pub mod va_list;
 pub mod isel;
 pub mod adapter;
+pub mod tmir_compat;
 pub mod target_analysis;
 pub mod compute_graph;
 pub mod dispatch;
