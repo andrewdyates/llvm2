@@ -1,38 +1,36 @@
-// tmir-instrs stub — minimal tMIR instruction set for LLVM2 development
+// tmir-instrs stub — development mirror of the real tMIR instruction API.
 //
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
-// This is a development stub. The real tMIR crate (ayates_dbx/tMIR) defines
-// the full instruction set. This stub provides the ~25 core instructions
-// needed by LLVM2's instruction selector.
+// This file is a development stub used by LLVM2. It is intentionally kept
+// outside the main workspace and mirrors the public instruction-set API of the
+// real tMIR crate closely enough for adapter code and stub-only tests.
 //
-// Operand model: Real tMIR instructions use bare ValueId inputs and Constant
-// values in dedicated places such as SwitchCase. This stub keeps an Operand
-// (Value | Constant) helper so the adapter layer can handle both value
-// references and inline constants uniformly.
+// As of 2026-04-16, the real tMIR crate is used by the main workspace via a git
+// dependency. These stubs remain as documentation and for stub-only tests.
 //
-// Key differences from real tMIR that are intentional LLVM2 extensions:
-//   - InstrNode wrapper: carries proof annotations (real tMIR has no proofs)
-//   - Atomic instructions: AtomicLoad/Store/Rmw/CmpXchg/Fence
-//   - Select instruction: branchless conditional (real tMIR uses control flow)
-//   - GetElementPtr: typed pointer arithmetic (real tMIR uses Index)
-//   - Const/FConst instructions: kept for backward compat, prefer Operand::Constant
-//   - Signed/unsigned op variants: SDiv/UDiv, Slt/Ult, etc. (real tMIR is simpler)
+// Key API changes from the previous (pre-real-tMIR) stub:
+//   - Inst (not Instr), InstrNode.inst (not .instr)
+//   - ICmp/FCmp (not unified Cmp)
+//   - Alloca (not Alloc), GEP (not GetElementPtr)
+//   - AtomicRMW/AtomicRMWOp (capitalized), Ordering (not MemoryOrdering)
+//   - All operands are ValueId (no Operand wrapper)
+//   - Const value is Constant enum (not i64)
+//   - New: Overflow, NullPtr, Undef, Assume, Assert, Unreachable, Copy,
+//     ExtractField, InsertField, ExtractElement, InsertElement
+//   - Removed: Phi, Nop, FConst, Struct, Field, Index, Borrow, BorrowMut,
+//     EndBorrow, Retain, Release, IsUnique, Invoke, LandingPad, Resume, Dealloc
 
 #![allow(dead_code)]
 
-use std::hash::{Hash, Hasher};
-
 use serde::{Deserialize, Serialize};
-use tmir_types::{BlockId, FuncId, TmirProof, Ty, ValueId};
+use tmir_types::{BlockId, FuncId, FuncTyId, TmirProof, Ty, ValueId};
 
-/// Binary arithmetic/logic operations.
+/// Binary arithmetic, bitwise, shift, and floating-point operations.
 ///
-/// Note: Real tMIR uses simpler variants (Div instead of SDiv/UDiv, Shr instead
-/// of AShr/LShr). Our stub preserves the signed/unsigned distinction because the
-/// adapter and ISel need it for correct AArch64 lowering. The adapter maps
-/// real tMIR's Div/Rem/Shr based on the operand type's signedness.
+/// This development stub mirrors the operation names used by the real tMIR
+/// instruction API so downstream code can pattern-match on the same surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BinOp {
     Add,
@@ -52,27 +50,25 @@ pub enum BinOp {
     FSub,
     FMul,
     FDiv,
+    FRem,
 }
 
-/// Unary operations.
+/// Unary arithmetic and bitwise operations.
 ///
-/// Note: Real tMIR has only Neg and Not. FNeg/FAbs/FSqrt are LLVM2 extensions
-/// for float-specific operations that the ISel needs.
+/// These are the unary operators exposed by the real tMIR instruction API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UnOp {
     Neg,
     Not,
     FNeg,
-    FAbs,
-    FSqrt,
 }
 
-/// Integer/float comparison predicates.
+/// Integer comparison predicates.
 ///
-/// Note: Real tMIR has simpler predicates (Lt/Le/Gt/Ge without signed/unsigned
-/// distinction, no float comparisons). The adapter maps based on operand type.
+/// Signed and unsigned predicates are split explicitly because the real tMIR
+/// API exposes integer comparisons this way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum CmpOp {
+pub enum ICmpOp {
     Eq,
     Ne,
     Slt,
@@ -83,641 +79,388 @@ pub enum CmpOp {
     Ule,
     Ugt,
     Uge,
-    // Float comparisons (ordered)
-    FOeq,
-    FOne,
-    FOlt,
-    FOle,
-    FOgt,
-    FOge,
-    // Float comparisons (unordered)
-    FUeq,
-    FUne,
-    FUlt,
-    FUle,
-    FUgt,
-    FUge,
 }
 
-/// Type cast operations.
+/// Floating-point comparison predicates.
 ///
-/// Note: Real tMIR has simpler cast ops (IntToFloat/FloatToInt without
-/// signed/unsigned distinction). The adapter maps based on source type.
+/// Ordered predicates require non-NaN operands; unordered predicates treat NaN
+/// as a valid match according to the usual LLVM-style semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FCmpOp {
+    OEq,
+    ONe,
+    OLt,
+    OLe,
+    OGt,
+    OGe,
+    UEq,
+    UNe,
+    ULt,
+    ULe,
+    UGt,
+    UGe,
+}
+
+/// Arithmetic operations that also report overflow information.
+///
+/// These variants model the overflow-producing operations exposed by the real
+/// tMIR API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OverflowOp {
+    AddOverflow,
+    SubOverflow,
+    MulOverflow,
+}
+
+/// Type conversion operations.
+///
+/// These names match the real tMIR cast instruction surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CastOp {
-    /// Zero-extend integer.
     ZExt,
-    /// Sign-extend integer.
     SExt,
-    /// Truncate integer.
     Trunc,
-    /// Float to signed integer.
     FPToSI,
-    /// Float to unsigned integer.
     FPToUI,
-    /// Signed integer to float.
     SIToFP,
-    /// Unsigned integer to float.
     UIToFP,
-    /// Float precision conversion.
     FPExt,
-    /// Float precision truncation.
     FPTrunc,
-    /// Pointer to integer.
     PtrToInt,
-    /// Integer to pointer.
     IntToPtr,
-    /// Bitcast (same size, different type).
     Bitcast,
 }
 
-/// Memory ordering for atomic operations (matches C++/LLVM orderings).
+/// Atomic memory orderings.
+///
+/// This mirrors the ordering enum used by the real tMIR atomic instructions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum MemoryOrdering {
-    /// No ordering constraint (not valid for atomics, only for fences).
+pub enum Ordering {
     Relaxed,
-    /// Acquire: subsequent reads/writes cannot be reordered before this.
     Acquire,
-    /// Release: preceding reads/writes cannot be reordered after this.
     Release,
-    /// Acquire + Release combined.
     AcqRel,
-    /// Sequential consistency (strongest).
     SeqCst,
 }
 
 /// Atomic read-modify-write operations.
+///
+/// These are the RMW operators currently surfaced by the real tMIR API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum AtomicRmwOp {
-    /// Atomic add: *ptr += val.
+pub enum AtomicRMWOp {
     Add,
-    /// Atomic subtract: *ptr -= val.
     Sub,
-    /// Atomic AND: *ptr &= val.
     And,
-    /// Atomic OR: *ptr |= val.
     Or,
-    /// Atomic XOR: *ptr ^= val.
     Xor,
-    /// Atomic swap: old = *ptr; *ptr = val.
     Xchg,
 }
 
-// ---------------------------------------------------------------------------
-// Operand model (aligned with real tMIR)
-// ---------------------------------------------------------------------------
-
-/// A constant value (inline in an operand, not a separate instruction).
+/// Constant values embedded directly in instructions.
 ///
-/// In real tMIR, constants are represented by `Constant` rather than as
-/// separate Const/FConst instructions. This stub reuses that shape and also
-/// allows constants to appear inside `Operand::Constant` for adapter
-/// convenience.
-///
-/// Reference: ~/tMIR/crates/tmir/src/constant.rs
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// This type intentionally derives only `PartialEq` rather than `Eq` or `Hash`
+/// because it can carry `f64` values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Constant {
-    /// Integer constant. Uses i128 to match real tMIR (not i64).
     Int(i128),
-    /// Float constant.
     Float(f64),
-    /// Boolean constant.
     Bool(bool),
-    /// Aggregate constant.
     Aggregate(Vec<Constant>),
 }
 
-impl Constant {
-    fn normalized_f64_bits(value: f64) -> u64 {
-        if value == 0.0 {
-            0.0f64.to_bits()
-        } else if value.is_nan() {
-            f64::NAN.to_bits()
-        } else {
-            value.to_bits()
-        }
-    }
-
-    pub fn i32(v: i32) -> Self {
-        Self::Int(v as i128)
-    }
-
-    pub fn i64(v: i64) -> Self {
-        Self::Int(v as i128)
-    }
-
-    pub fn u32(v: u32) -> Self {
-        Self::Int(v as i128)
-    }
-
-    pub fn u64(v: u64) -> Self {
-        Self::Int(v as i128)
-    }
-
-    pub fn f32(v: f32) -> Self {
-        Self::Float(v as f64)
-    }
-
-    pub fn f64(v: f64) -> Self {
-        Self::Float(v)
-    }
-}
-
-impl PartialEq for Constant {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Constant::Int(lhs), Constant::Int(rhs)) => lhs == rhs,
-            (Constant::Float(lhs), Constant::Float(rhs)) => {
-                Self::normalized_f64_bits(*lhs) == Self::normalized_f64_bits(*rhs)
-            }
-            (Constant::Bool(lhs), Constant::Bool(rhs)) => lhs == rhs,
-            (Constant::Aggregate(lhs), Constant::Aggregate(rhs)) => lhs == rhs,
-            _ => false,
-        }
-    }
-}
-
-impl Eq for Constant {}
-
-impl Hash for Constant {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
-        match self {
-            Constant::Int(value) => value.hash(state),
-            Constant::Float(value) => Self::normalized_f64_bits(*value).hash(state),
-            Constant::Bool(value) => value.hash(state),
-            Constant::Aggregate(values) => values.hash(state),
-        }
-    }
-}
-
-/// An operand: either an SSA value reference or an inline constant.
+/// A single explicit switch destination.
 ///
-/// Note: real tMIR does NOT have an `Operand` type. Instructions use bare
-/// `ValueId` references, and this wrapper exists only in the stub so LLVM2 can
-/// handle values and inline constants uniformly.
-///
-/// Reference: real tMIR constants live in ~/tMIR/crates/tmir/src/constant.rs;
-/// `Operand` is specific to this stub.
+/// Each case matches a constant value and transfers control to a target block
+/// with a block-argument payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Operand {
-    /// Reference to an SSA value defined by another instruction.
-    Value(ValueId),
-    /// Inline constant value.
-    Constant(Constant),
-}
-
-impl Operand {
-    /// Create an operand referencing an SSA value.
-    pub fn value(vid: ValueId) -> Self {
-        Operand::Value(vid)
-    }
-
-    /// Create an integer constant operand.
-    pub fn int_val(value: i128) -> Self {
-        Operand::Constant(Constant::Int(value))
-    }
-
-    /// Create a float constant operand.
-    pub fn float_val(value: f64) -> Self {
-        Operand::Constant(Constant::Float(value))
-    }
-
-    /// Deprecated compatibility constructor for integer constants.
-    #[deprecated(note = "use Operand::int_val; Constant::Int no longer stores Ty")]
-    pub fn int(value: i128, _ty: Ty) -> Self {
-        Self::int_val(value)
-    }
-
-    /// Deprecated compatibility constructor for float constants.
-    #[deprecated(note = "use Operand::float_val; Constant::Float no longer stores Ty")]
-    pub fn float(value: f64, _ty: Ty) -> Self {
-        Self::float_val(value)
-    }
-
-    /// Create a boolean constant operand.
-    pub fn bool_const(value: bool) -> Self {
-        Operand::Constant(Constant::Bool(value))
-    }
-
-    /// Returns true if this operand is a constant.
-    pub fn is_constant(&self) -> bool {
-        matches!(self, Operand::Constant(_))
-    }
-
-    /// Returns true if this operand is a value reference.
-    pub fn is_value(&self) -> bool {
-        matches!(self, Operand::Value(_))
-    }
-
-    /// Get the ValueId if this is a value reference.
-    pub fn as_value(&self) -> Option<ValueId> {
-        match self {
-            Operand::Value(v) => Some(*v),
-            _ => None,
-        }
-    }
-
-    /// Get the constant if this is a constant operand.
-    pub fn as_constant(&self) -> Option<&Constant> {
-        match self {
-            Operand::Constant(c) => Some(c),
-            _ => None,
-        }
-    }
-}
-
-/// Convenience: convert a ValueId directly into an Operand::Value.
-impl From<ValueId> for Operand {
-    fn from(vid: ValueId) -> Self {
-        Operand::Value(vid)
-    }
-}
-
-/// A single switch case: value -> target block with block args.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SwitchCase {
     pub value: Constant,
     pub target: BlockId,
     pub args: Vec<ValueId>,
 }
 
-/// A clause in a landing pad instruction.
+/// Landing-pad clause metadata preserved as an LLVM2 extension.
 ///
-/// Catch clauses match a specific exception type. Filter clauses specify a set
-/// of types that may be thrown; if the thrown type is not in the filter list,
-/// the filter matches (triggering unexpected-exception handling).
-///
-/// This mirrors the LLVM landingpad clause model used by C++ EH and Rust panics.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The real tMIR instruction API mirrored by [`Inst`] does not currently expose
+/// landing-pad instructions in this stub, but LLVM2 still keeps this type
+/// around for exception-handling compatibility.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LandingPadClause {
-    /// Catch an exception of the given type.
     Catch(Ty),
-    /// Filter: matches if the thrown type is NOT in the list (for `throw()` specs).
     Filter(Vec<Ty>),
 }
 
-/// tMIR instruction set.
+/// A single tMIR instruction.
 ///
-/// These are the ~25 core instructions that LLVM2 must lower to machine code.
-/// Each instruction operates on SSA values and produces zero or more results.
+/// This development stub mirrors the real tMIR instruction enum names and field
+/// layout so adapter code can compile against a local stand-in crate.
 ///
-/// ## Operand model
-///
-/// Instructions that accept general inputs use `Operand` (value or constant),
-/// which is a stub-only LLVM2 convenience. Real tMIR instructions use bare
-/// `ValueId` operands and `Constant` in dedicated positions such as
-/// `SwitchCase`.
-///
-/// The adapter layer's `resolve_operand` method materializes constants into
-/// LIR Iconst/Fconst instructions when an `Operand::Constant` is encountered.
+/// All operands are bare `ValueId` references (no inline constant wrapper).
+/// Constants are represented as separate `Inst::Const` instructions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Instr {
-    /// Binary operation: result = lhs op rhs.
-    /// Both operands may be values or inline constants.
+pub enum Inst {
+    /// Binary operation: `result = lhs op rhs`.
     BinOp {
         op: BinOp,
         ty: Ty,
-        lhs: Operand,
-        rhs: Operand,
+        lhs: ValueId,
+        rhs: ValueId,
     },
 
-    /// Unary operation: result = op operand.
+    /// Unary operation: `result = op operand`.
     UnOp {
         op: UnOp,
         ty: Ty,
-        operand: Operand,
+        operand: ValueId,
     },
 
-    /// Comparison: result (Bool) = lhs cmp rhs.
-    /// Both operands may be values or inline constants.
-    Cmp {
-        op: CmpOp,
+    /// Integer comparison producing a boolean result.
+    ICmp {
+        op: ICmpOp,
         ty: Ty,
-        lhs: Operand,
-        rhs: Operand,
+        lhs: ValueId,
+        rhs: ValueId,
     },
 
-    /// Type cast: result = cast operand from src_ty to dst_ty.
+    /// Floating-point comparison producing a boolean result.
+    FCmp {
+        op: FCmpOp,
+        ty: Ty,
+        lhs: ValueId,
+        rhs: ValueId,
+    },
+
+    /// Type conversion from `src_ty` to `dst_ty`.
     Cast {
         op: CastOp,
         src_ty: Ty,
         dst_ty: Ty,
-        operand: Operand,
+        operand: ValueId,
     },
 
-    /// Load from memory: result = *ptr.
-    /// ptr must be a value (cannot load from a constant address).
+    /// Load from memory: `result = *ptr`.
     Load {
         ty: Ty,
         ptr: ValueId,
     },
 
-    /// Store to memory: *ptr = value.
-    /// ptr must be a value; stored value may be a constant.
+    /// Store to memory: `*ptr = value`.
     Store {
         ty: Ty,
         ptr: ValueId,
-        value: Operand,
+        value: ValueId,
     },
 
-    /// Stack allocation: result = alloca(ty, count).
-    Alloc {
+    /// Stack allocation: `result = alloca(ty, count)`.
+    Alloca {
         ty: Ty,
         count: Option<ValueId>,
     },
 
-    /// Deallocation hint (for verified memory management).
-    Dealloc {
-        ptr: ValueId,
+    /// Typed pointer arithmetic (get-element-pointer).
+    GEP {
+        pointee_ty: Ty,
+        base: ValueId,
+        indices: Vec<ValueId>,
     },
 
-    // -- Atomic memory operations (LLVM2 extension, not in real tMIR yet) --
-
-    /// Atomic load: result = atomic_load(ptr, ordering).
-    /// Provides acquire semantics (or stronger).
+    /// Atomic load: `result = atomic_load(ptr, ordering)`.
     AtomicLoad {
         ty: Ty,
         ptr: ValueId,
-        ordering: MemoryOrdering,
+        ordering: Ordering,
     },
 
-    /// Atomic store: atomic_store(ptr, value, ordering).
-    /// Provides release semantics (or stronger).
+    /// Atomic store: `atomic_store(ptr, value, ordering)`.
     AtomicStore {
         ty: Ty,
         ptr: ValueId,
-        value: Operand,
-        ordering: MemoryOrdering,
+        value: ValueId,
+        ordering: Ordering,
     },
 
-    /// Atomic read-modify-write: result (old value) = atomic_rmw(op, ptr, val, ordering).
-    AtomicRmw {
-        op: AtomicRmwOp,
+    /// Atomic read-modify-write: `result = atomic_rmw(op, ptr, val, ordering)`.
+    AtomicRMW {
+        op: AtomicRMWOp,
         ty: Ty,
         ptr: ValueId,
-        value: Operand,
-        ordering: MemoryOrdering,
+        value: ValueId,
+        ordering: Ordering,
     },
 
-    /// Compare and swap: (old_value, success) = cmpxchg(ptr, expected, desired, ordering).
-    /// If *ptr == expected, stores desired and returns (expected, true).
-    /// Otherwise returns (old_value, false).
+    /// Atomic compare-and-exchange.
+    ///
+    /// If `*ptr == expected`, stores `desired` and returns `(expected, true)`.
+    /// Otherwise returns `(old_value, false)`.
     CmpXchg {
         ty: Ty,
         ptr: ValueId,
-        expected: Operand,
-        desired: Operand,
-        success_ordering: MemoryOrdering,
-        failure_ordering: MemoryOrdering,
+        expected: ValueId,
+        desired: ValueId,
+        success: Ordering,
+        failure: Ordering,
     },
 
-    /// Memory fence: enforces ordering constraint without accessing memory.
+    /// Atomic fence: enforces ordering constraint without accessing memory.
     Fence {
-        ordering: MemoryOrdering,
+        ordering: Ordering,
     },
 
-    // -- Ownership instructions (tMIR-specific) --
-
-    /// Immutable borrow: result = &value.
-    Borrow {
-        ty: Ty,
-        value: ValueId,
-    },
-
-    /// Mutable borrow: result = &mut value.
-    BorrowMut {
-        ty: Ty,
-        value: ValueId,
-    },
-
-    /// End a borrow lifetime.
-    EndBorrow {
-        borrow: ValueId,
-    },
-
-    /// Increment reference count (ARC).
-    Retain {
-        value: ValueId,
-    },
-
-    /// Decrement reference count (ARC).
-    Release {
-        value: ValueId,
-    },
-
-    /// Check uniqueness of a reference (for COW optimization).
-    IsUnique {
-        value: ValueId,
-    },
-
-    // -- Control flow --
-
-    /// Unconditional branch.
-    /// Branch args may be values or constants in this stub.
+    /// Unconditional branch with block arguments.
     Br {
         target: BlockId,
-        args: Vec<Operand>,
+        args: Vec<ValueId>,
     },
 
-    /// Conditional branch.
-    /// Condition and branch args may be values or constants.
+    /// Conditional branch with explicit block arguments for both edges.
     CondBr {
-        cond: Operand,
+        cond: ValueId,
         then_target: BlockId,
-        then_args: Vec<Operand>,
+        then_args: Vec<ValueId>,
         else_target: BlockId,
-        else_args: Vec<Operand>,
+        else_args: Vec<ValueId>,
     },
 
-    /// Multi-way branch (switch).
-    /// The switched value may be a value or constant.
+    /// Multi-way branch with explicit default and per-case block arguments.
     Switch {
-        value: Operand,
-        cases: Vec<SwitchCase>,
-        default: BlockId,
-    },
-
-    /// Return from function.
-    /// Return values may be values or constants in this stub.
-    Return {
-        values: Vec<Operand>,
-    },
-
-    // -- Exception handling --
-
-    /// Invoke a function that may throw an exception.
-    ///
-    /// Like Call, but with normal and unwind successor blocks.
-    /// If the callee returns normally, control transfers to normal_dest with normal_args.
-    /// If the callee throws, control transfers to unwind_dest with unwind_args.
-    /// Arguments may be values or constants in this stub.
-    Invoke {
-        func: FuncId,
-        args: Vec<Operand>,
-        ret_ty: Vec<Ty>,
-        normal_dest: BlockId,
-        normal_args: Vec<Operand>,
-        unwind_dest: BlockId,
-        unwind_args: Vec<Operand>,
-    },
-
-    /// Exception landing pad.
-    ///
-    /// This is the first instruction in an unwind destination block.
-    /// It specifies the personality function's catch/filter clauses.
-    /// The result is the caught exception value.
-    LandingPad {
-        ty: Ty,
-        clauses: Vec<LandingPadClause>,
-    },
-
-    /// Resume unwinding after a landing pad.
-    ///
-    /// Continues propagating the exception to the next handler up the call stack.
-    /// The value operand is the exception value from the landing pad.
-    Resume {
         value: ValueId,
+        default: BlockId,
+        default_args: Vec<ValueId>,
+        cases: Vec<SwitchCase>,
     },
 
-    /// Direct function call.
-    /// Arguments may be values or constants in this stub.
+    /// Direct call by function identifier.
     Call {
-        func: FuncId,
-        args: Vec<Operand>,
-        ret_ty: Vec<Ty>,
+        callee: FuncId,
+        args: Vec<ValueId>,
     },
 
-    /// Indirect function call (call through pointer).
-    /// callee must be a value; arguments may be values or constants.
+    /// Indirect call by SSA value plus explicit function signature ID.
     CallIndirect {
         callee: ValueId,
-        args: Vec<Operand>,
-        ret_ty: Vec<Ty>,
+        sig: FuncTyId,
+        args: Vec<ValueId>,
     },
 
-    // -- Aggregate operations --
-
-    /// Construct a struct value.
-    /// Fields may be values or constants.
-    Struct {
-        ty: Ty,
-        fields: Vec<Operand>,
+    /// Function return.
+    Return {
+        values: Vec<ValueId>,
     },
 
-    /// Extract a struct field: result = value.field[index].
-    /// The value must be an SSA value (cannot extract from a constant).
-    Field {
+    /// Extract a field from an aggregate value.
+    ExtractField {
         ty: Ty,
+        aggregate: ValueId,
+        field: u32,
+    },
+
+    /// Insert a field into an aggregate value (returns new aggregate).
+    InsertField {
+        ty: Ty,
+        aggregate: ValueId,
+        field: u32,
         value: ValueId,
-        index: u32,
     },
 
-    /// Array/pointer index: result = base[index].
-    /// Index may be a value or constant.
-    Index {
+    /// Extract an element from an array-like aggregate.
+    ExtractElement {
         ty: Ty,
-        base: ValueId,
-        index: Operand,
+        array: ValueId,
+        index: ValueId,
     },
 
-    /// SSA phi node (block parameter).
-    /// Incoming values may be values or constants in this stub.
-    Phi {
+    /// Insert an element into an array-like aggregate.
+    InsertElement {
         ty: Ty,
-        incoming: Vec<(BlockId, Operand)>,
+        array: ValueId,
+        index: ValueId,
+        value: ValueId,
     },
 
-    /// Conditional value selection: result = cond ? true_val : false_val.
+    /// Arithmetic operation that also reports overflow.
     ///
-    /// Unlike CondBr (which is control flow), Select is a value-level operation
-    /// that produces a result without branching. Lowered to CSEL on AArch64.
-    /// LLVM2 extension (real tMIR uses control flow for this).
+    /// Produces two results: `(result, overflow_flag)`.
+    Overflow {
+        op: OverflowOp,
+        ty: Ty,
+        lhs: ValueId,
+        rhs: ValueId,
+    },
+
+    /// Branchless value selection: `result = cond ? then_val : else_val`.
     Select {
         ty: Ty,
-        cond: Operand,
-        true_val: Operand,
-        false_val: Operand,
+        cond: ValueId,
+        then_val: ValueId,
+        else_val: ValueId,
     },
 
-    /// Get element pointer: typed pointer arithmetic with stride.
-    ///
-    /// Computes: base + index * sizeof(elem_ty) + byte_offset.
-    /// This is the tMIR equivalent of LLVM's GEP instruction. It differs from
-    /// Index (which is array access returning the element address) by supporting
-    /// an explicit byte offset for struct field access within indexed elements.
-    ///
-    /// Example: accessing arr[i].field_at_offset_8
-    ///   GetElementPtr { elem_ty: StructTy, base: arr_ptr, index: i, offset: 8 }
-    GetElementPtr {
-        /// The element type (determines stride = sizeof(elem_ty)).
-        elem_ty: Ty,
-        /// Base pointer.
-        base: ValueId,
-        /// Index (multiplied by element size). May be value or constant.
-        index: Operand,
-        /// Additional byte offset added after indexing.
-        offset: i32,
-    },
-
-    /// No operation (used as placeholder).
-    Nop,
-
-    /// Integer constant (legacy — prefer Operand::Constant for new code).
-    ///
-    /// Kept for backward compatibility. The adapter handles both this form and
-    /// Operand::Constant(Constant::Int(..)); `value` remains `i64` even though
-    /// `Constant::Int` uses `i128`.
+    /// Inline constant materialization.
     Const {
         ty: Ty,
-        value: i64,
+        value: Constant,
     },
 
-    /// Float constant (legacy — prefer Operand::Constant for new code).
-    ///
-    /// Kept for backward compatibility. The adapter handles both this form and
-    /// Operand::Constant(Constant::Float(..)).
-    FConst {
+    /// Null pointer constant.
+    NullPtr,
+
+    /// Undefined value of a specific type.
+    Undef {
         ty: Ty,
-        value: f64,
+    },
+
+    /// Optimizer assumption (hint to the verifier).
+    Assume {
+        cond: ValueId,
+    },
+
+    /// Checked assertion with a diagnostic message.
+    Assert {
+        cond: ValueId,
+        msg: String,
+    },
+
+    /// Instruction that cannot be reached in well-formed control flow.
+    Unreachable,
+
+    /// Explicit SSA copy (identity operation).
+    Copy {
+        ty: Ty,
+        operand: ValueId,
     },
 }
 
-/// A tMIR instruction with its result value(s) and proof annotations.
+/// A tMIR instruction node carrying results and proof annotations.
 ///
-/// This is an LLVM2 extension over real tMIR. In real tMIR, result values are
-/// fields on each instruction variant (e.g., `BinOp { result: Value, ... }`).
-/// Our InstrNode wrapper separates results from the instruction for uniform
-/// handling in the adapter and ISel. Proof annotations are another LLVM2
-/// extension (real tMIR does not yet carry per-instruction proofs).
+/// The real tMIR API uses an instruction node wrapper; this development stub
+/// keeps that shape and stores proof metadata needed by LLVM2-side code.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstrNode {
     /// The instruction opcode and operands.
-    pub instr: Instr,
-    /// Result value(s) produced by this instruction. Empty for void ops
-    /// (Store, Br, CondBr, Switch, Return, Resume, Nop, EndBorrow, Retain, Release, Dealloc).
+    pub inst: Inst,
+    /// SSA values defined by this instruction. Empty for void ops
+    /// (Store, Br, CondBr, Switch, Return, Fence, Assume, Assert, Unreachable).
     pub results: Vec<ValueId>,
-    /// Proof annotations attached to this instruction by the source-language
-    /// compiler (tRust, tSwift, tC). These have been formally verified by z4.
-    /// The LLVM2 adapter extracts these for downstream optimization passes.
+    /// Optional proof annotations attached by upstream tooling (tRust, tSwift, tC).
+    /// These have been formally verified by z4.
     #[serde(default)]
     pub proofs: Vec<TmirProof>,
 }
 
 impl InstrNode {
-    /// Create a new instruction node without proof annotations.
-    pub fn new(instr: Instr, results: Vec<ValueId>) -> Self {
+    /// Creates a new instruction node with no proof annotations.
+    pub fn new(inst: Inst, results: Vec<ValueId>) -> Self {
         Self {
-            instr,
+            inst,
             results,
             proofs: Vec::new(),
         }
     }
 
-    /// Create a new instruction node with proof annotations.
-    pub fn with_proofs(instr: Instr, results: Vec<ValueId>, proofs: Vec<TmirProof>) -> Self {
+    /// Creates a new instruction node with explicit proof annotations.
+    pub fn with_proofs(inst: Inst, results: Vec<ValueId>, proofs: Vec<TmirProof>) -> Self {
         Self {
-            instr,
+            inst,
             results,
             proofs,
         }
@@ -728,69 +471,164 @@ impl InstrNode {
 mod tests {
     use super::*;
 
-    /// Helper: JSON round-trip an InstrNode and verify equality.
     fn round_trip_instr(node: &InstrNode) -> InstrNode {
-        let json = serde_json::to_string(node).expect("serialize");
-        serde_json::from_str(&json).expect("deserialize")
+        let json = serde_json::to_string(node).expect("serialize instruction node");
+        serde_json::from_str(&json).expect("deserialize instruction node")
     }
 
     #[test]
-    fn test_invoke_serde_round_trip() {
+    fn test_binop_serde_round_trip() {
         let instr = InstrNode::new(
-            Instr::Invoke {
-                func: FuncId(1),
-                args: vec![Operand::Value(ValueId(0)), Operand::int_val(42)],
-                ret_ty: vec![Ty::i32()],
-                normal_dest: BlockId(1),
-                normal_args: vec![],
-                unwind_dest: BlockId(2),
-                unwind_args: vec![],
+            Inst::BinOp {
+                op: BinOp::Add,
+                ty: Ty::i32(),
+                lhs: ValueId(1),
+                rhs: ValueId(2),
             },
-            vec![ValueId(10)],
+            vec![ValueId(3)],
         );
-        let rt = round_trip_instr(&instr);
-        assert_eq!(instr, rt);
+        let round_tripped = round_trip_instr(&instr);
+        assert_eq!(instr, round_tripped);
     }
 
     #[test]
-    fn test_landing_pad_serde_round_trip() {
+    fn test_const_i128_serde_round_trip() {
         let instr = InstrNode::new(
-            Instr::LandingPad {
-                ty: Ty::i64(),
-                clauses: vec![
-                    LandingPadClause::Catch(Ty::i32()),
-                    LandingPadClause::Filter(vec![Ty::i32(), Ty::i64()]),
+            Inst::Const {
+                ty: Ty::i128(),
+                value: Constant::Int(1_i128 << 100),
+            },
+            vec![ValueId(9)],
+        );
+        let round_tripped = round_trip_instr(&instr);
+        assert_eq!(instr, round_tripped);
+    }
+
+    #[test]
+    fn test_switch_serde_round_trip() {
+        let instr = InstrNode::new(
+            Inst::Switch {
+                value: ValueId(0),
+                default: BlockId(99),
+                default_args: vec![ValueId(10)],
+                cases: vec![
+                    SwitchCase {
+                        value: Constant::Int(0),
+                        target: BlockId(1),
+                        args: vec![ValueId(11)],
+                    },
+                    SwitchCase {
+                        value: Constant::Int(1),
+                        target: BlockId(2),
+                        args: vec![ValueId(12), ValueId(13)],
+                    },
                 ],
-            },
-            vec![ValueId(5)],
-        );
-        let rt = round_trip_instr(&instr);
-        assert_eq!(instr, rt);
-    }
-
-    #[test]
-    fn test_landing_pad_empty_clauses() {
-        let instr = InstrNode::new(
-            Instr::LandingPad {
-                ty: Ty::i64(),
-                clauses: vec![],
-            },
-            vec![ValueId(0)],
-        );
-        let rt = round_trip_instr(&instr);
-        assert_eq!(instr, rt);
-    }
-
-    #[test]
-    fn test_resume_serde_round_trip() {
-        let instr = InstrNode::new(
-            Instr::Resume {
-                value: ValueId(5),
             },
             vec![],
         );
-        let rt = round_trip_instr(&instr);
-        assert_eq!(instr, rt);
+        let round_tripped = round_trip_instr(&instr);
+        assert_eq!(instr, round_tripped);
+    }
+
+    #[test]
+    fn test_icmp_serde_round_trip() {
+        let instr = InstrNode::new(
+            Inst::ICmp {
+                op: ICmpOp::Slt,
+                ty: Ty::i64(),
+                lhs: ValueId(0),
+                rhs: ValueId(1),
+            },
+            vec![ValueId(2)],
+        );
+        let round_tripped = round_trip_instr(&instr);
+        assert_eq!(instr, round_tripped);
+    }
+
+    #[test]
+    fn test_fcmp_serde_round_trip() {
+        let instr = InstrNode::new(
+            Inst::FCmp {
+                op: FCmpOp::OLt,
+                ty: Ty::f64(),
+                lhs: ValueId(0),
+                rhs: ValueId(1),
+            },
+            vec![ValueId(2)],
+        );
+        let round_tripped = round_trip_instr(&instr);
+        assert_eq!(instr, round_tripped);
+    }
+
+    #[test]
+    fn test_overflow_serde_round_trip() {
+        let instr = InstrNode::new(
+            Inst::Overflow {
+                op: OverflowOp::AddOverflow,
+                ty: Ty::i32(),
+                lhs: ValueId(0),
+                rhs: ValueId(1),
+            },
+            vec![ValueId(2), ValueId(3)],
+        );
+        let round_tripped = round_trip_instr(&instr);
+        assert_eq!(instr, round_tripped);
+    }
+
+    #[test]
+    fn test_select_serde_round_trip() {
+        let instr = InstrNode::new(
+            Inst::Select {
+                ty: Ty::i32(),
+                cond: ValueId(0),
+                then_val: ValueId(1),
+                else_val: ValueId(2),
+            },
+            vec![ValueId(3)],
+        );
+        let round_tripped = round_trip_instr(&instr);
+        assert_eq!(instr, round_tripped);
+    }
+
+    #[test]
+    fn test_gep_serde_round_trip() {
+        let instr = InstrNode::new(
+            Inst::GEP {
+                pointee_ty: Ty::i32(),
+                base: ValueId(0),
+                indices: vec![ValueId(1), ValueId(2)],
+            },
+            vec![ValueId(3)],
+        );
+        let round_tripped = round_trip_instr(&instr);
+        assert_eq!(instr, round_tripped);
+    }
+
+    #[test]
+    fn test_null_ptr_serde_round_trip() {
+        let instr = InstrNode::new(Inst::NullPtr, vec![ValueId(0)]);
+        let round_tripped = round_trip_instr(&instr);
+        assert_eq!(instr, round_tripped);
+    }
+
+    #[test]
+    fn test_unreachable_serde_round_trip() {
+        let instr = InstrNode::new(Inst::Unreachable, vec![]);
+        let round_tripped = round_trip_instr(&instr);
+        assert_eq!(instr, round_tripped);
+    }
+
+    #[test]
+    fn test_copy_serde_round_trip() {
+        let instr = InstrNode::new(
+            Inst::Copy {
+                ty: Ty::i64(),
+                operand: ValueId(5),
+            },
+            vec![ValueId(6)],
+        );
+        let round_tripped = round_trip_instr(&instr);
+        assert_eq!(instr, round_tripped);
     }
 
     #[test]
@@ -807,39 +645,19 @@ mod tests {
     }
 
     #[test]
-    fn test_invoke_no_results() {
-        // Invoke for a void function
-        let instr = InstrNode::new(
-            Instr::Invoke {
-                func: FuncId(0),
-                args: vec![],
-                ret_ty: vec![],
-                normal_dest: BlockId(1),
-                normal_args: vec![Operand::Value(ValueId(0))],
-                unwind_dest: BlockId(2),
-                unwind_args: vec![Operand::Value(ValueId(1))],
+    fn test_with_proofs() {
+        let instr = InstrNode::with_proofs(
+            Inst::BinOp {
+                op: BinOp::Add,
+                ty: Ty::i32(),
+                lhs: ValueId(0),
+                rhs: ValueId(1),
             },
-            vec![],
+            vec![ValueId(2)],
+            vec![TmirProof::NoOverflow { signed: true }],
         );
-        let rt = round_trip_instr(&instr);
-        assert_eq!(instr, rt);
-    }
-
-    #[test]
-    fn test_invoke_multiple_return_types() {
-        let instr = InstrNode::new(
-            Instr::Invoke {
-                func: FuncId(3),
-                args: vec![Operand::Value(ValueId(0))],
-                ret_ty: vec![Ty::i32(), Ty::i64()],
-                normal_dest: BlockId(10),
-                normal_args: vec![],
-                unwind_dest: BlockId(20),
-                unwind_args: vec![],
-            },
-            vec![ValueId(1), ValueId(2)],
-        );
-        let rt = round_trip_instr(&instr);
-        assert_eq!(instr, rt);
+        assert_eq!(instr.proofs.len(), 1);
+        let round_tripped = round_trip_instr(&instr);
+        assert_eq!(instr, round_tripped);
     }
 }
