@@ -1662,7 +1662,7 @@ fn e2e_aarch64_multiblock_all_opt_levels() {
 // ---------------------------------------------------------------------------
 
 fn build_tmir_cross_call_module() -> tmir_func::Module {
-    use tmir_instrs::{BinOp, Instr, InstrNode};
+    use tmir_instrs::{BinOp, Instr, InstrNode, Operand};
     use tmir_types::{Ty, ValueId};
 
     // fn _callee(x: i32) -> i32 { x + 10 }
@@ -1690,15 +1690,15 @@ fn build_tmir_cross_call_module() -> tmir_func::Module {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
                         ty: Ty::Int(32),
-                        lhs: ValueId(0),
-                        rhs: ValueId(1),
+                        lhs: Operand::Value(ValueId(0)),
+                        rhs: Operand::Value(ValueId(1)),
                     },
                     results: vec![ValueId(2)],
                     proofs: vec![],
                 },
                 InstrNode {
                     instr: Instr::Return {
-                        values: vec![ValueId(2)],
+                        values: vec![Operand::Value(ValueId(2))],
                     },
                     results: vec![],
                     proofs: vec![],
@@ -1724,7 +1724,7 @@ fn build_tmir_cross_call_module() -> tmir_func::Module {
                 InstrNode {
                     instr: Instr::Call {
                         func: FuncId(0), // calls _callee
-                        args: vec![ValueId(0)],
+                        args: vec![Operand::Value(ValueId(0))],
                         ret_ty: vec![Ty::Int(32)],
                     },
                     results: vec![ValueId(1)],
@@ -1732,7 +1732,7 @@ fn build_tmir_cross_call_module() -> tmir_func::Module {
                 },
                 InstrNode {
                     instr: Instr::Return {
-                        values: vec![ValueId(1)],
+                        values: vec![Operand::Value(ValueId(1))],
                     },
                     results: vec![],
                     proofs: vec![],
