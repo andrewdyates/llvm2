@@ -72,7 +72,7 @@ pub enum ProofCategory {
     Branch,
 
     /// Peephole optimization identity rules.
-    /// Source: `peephole_proofs::all_peephole_proofs_with_32bit()`.
+    /// Source: `peephole_proofs::all_peephole_proofs_all_widths()`.
     Peephole,
 
     /// General optimization pass proofs (const fold, AND/OR absorb, DCE, copy prop).
@@ -425,7 +425,7 @@ fn register_comparison_branch_proofs(proofs: &mut Vec<CategorizedProof>) {
 
 #[inline(never)]
 fn register_peephole_opt_proofs(proofs: &mut Vec<CategorizedProof>) {
-    for p in crate::peephole_proofs::all_peephole_proofs_with_32bit() {
+    for p in crate::peephole_proofs::all_peephole_proofs_all_widths() {
         proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Peephole });
     }
     for p in crate::opt_proofs::all_opt_proofs() {
@@ -790,8 +790,8 @@ mod tests {
     fn test_peephole_proofs_count() {
         let db = ProofDatabase::new();
         let count = db.count_by_category(ProofCategory::Peephole);
-        // 9 core (64-bit) + 9 (32-bit) variants = 18
-        assert_eq!(count, 18, "expected 18 peephole proofs, got {}", count);
+        // 9 core (64-bit) + 9 (32-bit) + 9 (8-bit exhaustive) = 27
+        assert_eq!(count, 27, "expected 27 peephole proofs, got {}", count);
     }
 
     #[test]
