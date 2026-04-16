@@ -1182,3 +1182,147 @@ fn test_compile_to_object_convenience() {
     assert_valid_macho(&obj_bytes, "compile_to_object");
     assert_eq!(macho_filetype(&obj_bytes), 1);
 }
+
+// ===========================================================================
+// TEST 21: Multi-function module — all functions emitted in single .o
+// ===========================================================================
+
+/// Parse the Mach-O string table to extract all symbol name strings.
+/// This is a minimal parser that finds the LC_SYMTAB load command,
+/// reads the string table offset/size, and extracts null-terminated strings.
+fn extract_macho_symbol_names(bytes: &[u8]) -> Vec<String> {
+    // Mach-O 64-bit header: magic(4) + cputype(4) + cpusubtype(4) + filetype(4)
+    //                       + ncmds(4) + sizeofcmds(4) + flags(4) + reserved(4) = 32 bytes
+    let ncmds = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) as usize;
+    let mut offset = 32; // after mach_header_64
+
+    let mut symtab_offset = 0u32;
+    let mut symtab_nsyms = 0u32;
+    let mut strtab_offset = 0u32;
+    let mut strtab_size = 0u32;
+
+    // Find LC_SYMTAB (cmd == 2)
+    for _ in 0..ncmds {
+        if offset + 8 > bytes.len() {
+            break;
+        }
+        let cmd = u32::from_le_bytes([bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]]);
+        let cmdsize = u32::from_le_bytes([bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7]]) as usize;
+
+        if cmd == 2 {
+            // LC_SYMTAB: cmd(4) + cmdsize(4) + symoff(4) + nsyms(4) + stroff(4) + strsize(4)
+            symtab_offset = u32::from_le_bytes([bytes[offset+8], bytes[offset+9], bytes[offset+10], bytes[offset+11]]);
+            symtab_nsyms = u32::from_le_bytes([bytes[offset+12], bytes[offset+13], bytes[offset+14], bytes[offset+15]]);
+            strtab_offset = u32::from_le_bytes([bytes[offset+16], bytes[offset+17], bytes[offset+18], bytes[offset+19]]);
+            strtab_size = u32::from_le_bytes([bytes[offset+20], bytes[offset+21], bytes[offset+22], bytes[offset+23]]);
+            break;
+        }
+        offset += cmdsize;
+    }
+
+    let mut names = Vec::new();
+    if symtab_nsyms == 0 || strtab_size == 0 {
+        return names;
+    }
+
+    // Each nlist_64 entry is 16 bytes: n_strx(4) + n_type(1) + n_sect(1) + n_desc(2) + n_value(8)
+    let nlist_size = 16usize;
+    for i in 0..symtab_nsyms as usize {
+        let nlist_off = symtab_offset as usize + i * nlist_size;
+        if nlist_off + 4 > bytes.len() {
+            break;
+        }
+        let n_strx = u32::from_le_bytes([
+            bytes[nlist_off], bytes[nlist_off+1], bytes[nlist_off+2], bytes[nlist_off+3],
+        ]) as usize;
+
+        let str_start = strtab_offset as usize + n_strx;
+        if str_start >= bytes.len() {
+            continue;
+        }
+        // Read null-terminated string
+        let str_end = bytes[str_start..].iter().position(|&b| b == 0).unwrap_or(0) + str_start;
+        if str_end > str_start {
+            if let Ok(name) = std::str::from_utf8(&bytes[str_start..str_end]) {
+                names.push(name.to_string());
+            }
+        }
+    }
+
+    names
+}
+
+#[test]
+fn test_multi_function_module_all_functions_emitted() {
+    // Build a module with three functions.
+    let mut module = TmirModule::new("multi_func_module");
+    module.functions.push(build_simple_add());
+    module.functions.push(build_simple_sub());
+    module.functions.push(build_return_const());
+
+    let compiler = Compiler::default_o2();
+    let result = compiler.compile(&module).expect("multi-function module should compile");
+
+    // Basic validity.
+    assert!(!result.object_code.is_empty());
+    assert_valid_macho(&result.object_code, "multi_func_module");
+    assert_eq!(result.metrics.function_count, 3, "should report 3 functions compiled");
+
+    // Verify all function symbols are present in the Mach-O symbol table.
+    let symbol_names = extract_macho_symbol_names(&result.object_code);
+    assert!(
+        symbol_names.contains(&"_simple_add".to_string()),
+        "symbol table should contain _simple_add. Found: {:?}",
+        symbol_names
+    );
+    assert!(
+        symbol_names.contains(&"_simple_sub".to_string()),
+        "symbol table should contain _simple_sub. Found: {:?}",
+        symbol_names
+    );
+    assert!(
+        symbol_names.contains(&"_return_const".to_string()),
+        "symbol table should contain _return_const. Found: {:?}",
+        symbol_names
+    );
+}
+
+// ===========================================================================
+// TEST 22: Multi-function module — different from single-function output
+// ===========================================================================
+
+#[test]
+fn test_multi_function_module_differs_from_single() {
+    // A module with two functions should produce different (and larger)
+    // output than a module with one function.
+    let mut module_one = TmirModule::new("one_func");
+    module_one.functions.push(build_simple_add());
+
+    let mut module_two = TmirModule::new("two_func");
+    module_two.functions.push(build_simple_add());
+    module_two.functions.push(build_return_const());
+
+    let compiler = Compiler::default_o2();
+    let result_one = compiler.compile(&module_one).expect("single-function module");
+    let result_two = compiler.compile(&module_two).expect("two-function module");
+
+    assert!(
+        result_two.object_code.len() > result_one.object_code.len(),
+        "two-function module ({} bytes) should be larger than single-function ({} bytes)",
+        result_two.object_code.len(),
+        result_one.object_code.len(),
+    );
+
+    // Verify the two-function module has both symbols.
+    let symbols = extract_macho_symbol_names(&result_two.object_code);
+    assert!(symbols.contains(&"_simple_add".to_string()));
+    assert!(symbols.contains(&"_return_const".to_string()));
+
+    // The single-function module should only have one symbol.
+    let symbols_one = extract_macho_symbol_names(&result_one.object_code);
+    assert!(symbols_one.contains(&"_simple_add".to_string()));
+    assert!(
+        !symbols_one.contains(&"_return_const".to_string()),
+        "single-function module should not contain _return_const"
+    );
+}

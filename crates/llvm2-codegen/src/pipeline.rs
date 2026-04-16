@@ -782,6 +782,66 @@ impl Pipeline {
         Ok(obj_bytes)
     }
 
+    /// Prepare a tMIR function through all pipeline phases except encoding/emission.
+    ///
+    /// Runs ISel, optimization, verification, regalloc, copy lowering, frame
+    /// lowering, and branch resolution. Returns the prepared `IrMachFunction`
+    /// ready for encoding.
+    ///
+    /// This is used by [`Compiler::compile`](crate::compiler::Compiler::compile)
+    /// to prepare each function before combining them into a single Mach-O via
+    /// [`compile_module`](Self::compile_module).
+    pub(crate) fn prepare_function(
+        &self,
+        input: &llvm2_lower::Function,
+    ) -> Result<IrMachFunction, PipelineError> {
+        // Phase 1: Instruction Selection
+        let isel_func = self.run_isel(input)?;
+
+        // Phase 2: Convert ISel output to shared IR
+        let mut ir_func = isel_func.to_ir_func();
+
+        // Debug: verify succs/preds are populated for multi-block functions
+        #[cfg(debug_assertions)]
+        {
+            let has_branches = ir_func.blocks.len() > 1;
+            if has_branches {
+                let total_succs: usize = ir_func.blocks.iter().map(|b| b.succs.len()).sum();
+                let total_preds: usize = ir_func.blocks.iter().map(|b| b.preds.len()).sum();
+                debug_assert!(
+                    total_succs > 0,
+                    "Multi-block function '{}' has no successor edges! Blocks: {}",
+                    ir_func.name, ir_func.blocks.len()
+                );
+                debug_assert!(
+                    total_preds > 0,
+                    "Multi-block function '{}' has no predecessor edges! Blocks: {}",
+                    ir_func.name, ir_func.blocks.len()
+                );
+            }
+        }
+
+        // Phase 3: Optimization
+        self.run_optimization(&mut ir_func);
+
+        // Phase 3.5: Verification (optional — gated by config.verify)
+        self.run_verification(&ir_func)?;
+
+        // Phase 4-6: Register Allocation
+        self.run_regalloc(&mut ir_func)?;
+
+        // Phase 6.5: Lower pseudo Copy instructions to real MovR.
+        lower_copies(&mut ir_func);
+
+        // Phase 7: Frame Lowering
+        let _frame_layout = self.run_frame_lowering(&mut ir_func);
+
+        // Phase 7.5: Branch Resolution
+        resolve_branches(&mut ir_func);
+
+        Ok(ir_func)
+    }
+
     /// Compile multiple pre-built IR functions into a single Mach-O .o file.
     ///
     /// All functions are concatenated into one `__text` section. Cross-function

@@ -144,7 +144,7 @@ pub struct ProofCertificate {
 /// The result of compiling a tMIR module through the LLVM2 pipeline.
 #[derive(Debug, Clone)]
 pub struct CompilationResult {
-    /// Mach-O object file bytes (one per function for now).
+    /// Mach-O object file bytes containing all compiled functions.
     pub object_code: Vec<u8>,
     /// Compilation metrics.
     pub metrics: CompilationMetrics,
@@ -188,6 +188,10 @@ impl Compiler {
     /// tMIR adapter -> ISel -> optimization -> regalloc -> frame lowering
     /// -> encoding -> Mach-O emission.
     ///
+    /// All functions are compiled into a single Mach-O object file with each
+    /// function as a separate symbol in the `__text` section. Cross-function
+    /// calls are represented as relocations for the linker.
+    ///
     /// Returns the compiled object code, metrics, optional trace, and
     /// optional proof certificates.
     pub fn compile(
@@ -216,38 +220,47 @@ impl Compiler {
         // Build the internal pipeline.
         let pipeline = self.build_pipeline();
 
-        let mut total_code_size = 0usize;
-        let mut total_instruction_count = 0usize;
-        let mut last_obj_bytes = Vec::new();
+        // Phase 2+: Prepare each function through ISel, optimization,
+        // regalloc, frame lowering, and branch resolution.
+        let mut prepared_functions = Vec::with_capacity(lir_functions.len());
 
-        // Phase 2+: Compile each function through the pipeline.
         for (lir_func, _proof_ctx) in &lir_functions {
             let func_start = Instant::now();
 
-            let obj_bytes = pipeline.compile_function(lir_func)?;
-
-            // Estimate instruction count from object code size.
-            // AArch64 instructions are 4 bytes each. The Mach-O overhead
-            // is included in obj_bytes, but the text section contains the
-            // raw instructions. We approximate using total bytes / 4 for
-            // the code portion.
-            let code_insts = obj_bytes.len() / 4; // rough estimate
-
-            total_code_size += obj_bytes.len();
-            total_instruction_count += code_insts;
+            let ir_func = pipeline.prepare_function(lir_func)?;
 
             if tracing {
                 trace_entries.push(TraceEntry {
-                    phase: "compile_function".to_string(),
+                    phase: "prepare_function".to_string(),
                     duration: func_start.elapsed(),
                     detail: Some(lir_func.name.clone()),
                 });
             }
 
-            last_obj_bytes = obj_bytes;
+            prepared_functions.push(ir_func);
         }
 
-        let function_count = lir_functions.len();
+        let function_count = prepared_functions.len();
+
+        // Phase 8-9: Encode all functions and emit a single Mach-O object
+        // file with all functions in the __text section.
+        let emit_start = Instant::now();
+        let obj_bytes = pipeline.compile_module(&prepared_functions)?;
+        if tracing {
+            trace_entries.push(TraceEntry {
+                phase: "compile_module".to_string(),
+                duration: emit_start.elapsed(),
+                detail: Some(format!("{} functions", function_count)),
+            });
+        }
+
+        // Estimate instruction count from object code size.
+        // AArch64 instructions are 4 bytes each. The Mach-O overhead
+        // is included in obj_bytes, but the text section contains the
+        // raw instructions. We approximate using total bytes / 4 for
+        // the code portion.
+        let total_code_size = obj_bytes.len();
+        let total_instruction_count = obj_bytes.len() / 4; // rough estimate
 
         // Estimate optimization passes from opt level.
         let opt_passes = match self.config.opt_level {
@@ -281,7 +294,7 @@ impl Compiler {
         };
 
         Ok(CompilationResult {
-            object_code: last_obj_bytes,
+            object_code: obj_bytes,
             metrics,
             trace,
             proofs,
