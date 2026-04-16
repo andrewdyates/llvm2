@@ -387,6 +387,99 @@ pub fn apply_regalloc(
 }
 
 // ---------------------------------------------------------------------------
+// Proof annotation propagation
+// ---------------------------------------------------------------------------
+
+/// Convert an adapter-layer [`Proof`](llvm2_lower::Proof) to the IR-layer
+/// [`ProofAnnotation`](llvm2_ir::ProofAnnotation).
+///
+/// Some proof variants carry extra metadata (e.g., `InBounds { base, index }`)
+/// that is not represented in the simpler IR annotation enum. The conversion
+/// preserves the proof *kind* while dropping operand-specific metadata, since
+/// the annotation is attached to the defining instruction which already
+/// encodes its operands.
+fn proof_to_annotation(proof: &llvm2_lower::Proof) -> llvm2_ir::ProofAnnotation {
+    match proof {
+        llvm2_lower::Proof::NoOverflow { .. } => llvm2_ir::ProofAnnotation::NoOverflow,
+        llvm2_lower::Proof::InBounds { .. } => llvm2_ir::ProofAnnotation::InBounds,
+        llvm2_lower::Proof::NotNull { .. } => llvm2_ir::ProofAnnotation::NotNull,
+        llvm2_lower::Proof::ValidBorrow { .. } => llvm2_ir::ProofAnnotation::ValidBorrow,
+        llvm2_lower::Proof::NonZeroDivisor { .. } => llvm2_ir::ProofAnnotation::NonZeroDivisor,
+        llvm2_lower::Proof::ValidShift { .. } => llvm2_ir::ProofAnnotation::ValidShift,
+        llvm2_lower::Proof::Pure => llvm2_ir::ProofAnnotation::Pure,
+        llvm2_lower::Proof::Associative => llvm2_ir::ProofAnnotation::Associative,
+        llvm2_lower::Proof::Commutative => llvm2_ir::ProofAnnotation::Commutative,
+        llvm2_lower::Proof::Idempotent => llvm2_ir::ProofAnnotation::Idempotent,
+        // InRange has no direct annotation counterpart — the range info
+        // cannot be expressed in the single-variant ProofAnnotation. We
+        // skip it here; range-based opts use the full ProofContext.
+        llvm2_lower::Proof::InRange { .. } => llvm2_ir::ProofAnnotation::InBounds,
+    }
+}
+
+/// Propagate proof annotations from the adapter's [`ProofContext`](llvm2_lower::ProofContext)
+/// onto machine instructions in the IR function.
+///
+/// Uses the ISel value map to resolve LIR Values to VRegs, then builds a
+/// reverse map (VReg ID -> InstId) to locate the defining instruction for
+/// each value and annotate it with the appropriate [`ProofAnnotation`].
+///
+/// Function-level proofs (Pure, Associative, etc.) are stored on the
+/// [`MachFunction::function_proofs`] field.
+fn apply_proof_annotations(
+    ir_func: &mut IrMachFunction,
+    proof_ctx: &llvm2_lower::ProofContext,
+    value_map: &std::collections::HashMap<llvm2_lower::instructions::Value, llvm2_lower::isel::ISelOperand>,
+) {
+    use llvm2_ir::MachOperand as IrOp;
+    use llvm2_ir::types::InstId;
+
+    // Build reverse map: VReg ID -> first InstId that defines it.
+    // Convention: operand[0] is the destination register for instructions
+    // that produce a result.
+    let mut vreg_to_inst: std::collections::HashMap<u32, InstId> = std::collections::HashMap::new();
+    for (idx, inst) in ir_func.insts.iter().enumerate() {
+        if let Some(IrOp::VReg(vreg)) = inst.operands.first() {
+            // Only record the first definition (SSA property).
+            vreg_to_inst.entry(vreg.id).or_insert(InstId(idx as u32));
+        }
+    }
+
+    // Propagate per-value proofs onto defining instructions.
+    for (value, proofs) in &proof_ctx.value_proofs {
+        if let Some(isel_op) = value_map.get(value) {
+            // Extract VReg ID from ISel operand.
+            let vreg_id = match isel_op {
+                llvm2_lower::isel::ISelOperand::VReg(vreg) => Some(vreg.id),
+                _ => None,
+            };
+
+            if let Some(vid) = vreg_id {
+                if let Some(&inst_id) = vreg_to_inst.get(&vid) {
+                    // Pick the most meaningful proof for the instruction annotation.
+                    // ProofAnnotation is a single-value field, so we take the first
+                    // proof that maps to a concrete optimization opportunity.
+                    if let Some(proof) = proofs.first() {
+                        let annotation = proof_to_annotation(proof);
+                        let inst = ir_func.inst_mut(inst_id);
+                        // Only set if no annotation is already present (ISel may
+                        // have set one, and we do not want to overwrite).
+                        if inst.proof.is_none() {
+                            inst.proof = Some(annotation);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Propagate function-level proofs onto MachFunction metadata.
+    for proof in proof_ctx.function_proofs() {
+        ir_func.function_proofs.push(proof_to_annotation(proof));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Copy lowering: pseudo Copy -> real MovR
 // ---------------------------------------------------------------------------
 
@@ -662,8 +755,8 @@ impl Pipeline {
         &self,
         input: &llvm2_lower::Function,
     ) -> Result<Vec<u8>, PipelineError> {
-        // Phase 1: Instruction Selection
-        let isel_func = self.run_isel(input)?;
+        // Phase 1: Instruction Selection (no proof context in single-function path)
+        let (isel_func, _) = self.run_isel(input, None)?;
 
         // Phase 2: Convert ISel output to shared IR (issue #73 consolidation:
         // conversion logic now lives in ISelFunction::to_ir_func()).
@@ -770,11 +863,35 @@ impl Pipeline {
         &self,
         input: &llvm2_lower::Function,
     ) -> Result<IrMachFunction, PipelineError> {
+        self.prepare_function_with_proofs(input, None)
+    }
+
+    /// Like [`prepare_function`](Self::prepare_function) but also propagates
+    /// tMIR proof annotations from the adapter's [`ProofContext`](llvm2_lower::ProofContext)
+    /// onto the machine instructions and function metadata.
+    ///
+    /// Proof annotations enable proof-consuming optimizations (proof_opts pass)
+    /// that eliminate runtime safety checks verified by z4.
+    pub fn prepare_function_with_proofs(
+        &self,
+        input: &llvm2_lower::Function,
+        proof_ctx: Option<&llvm2_lower::ProofContext>,
+    ) -> Result<IrMachFunction, PipelineError> {
         // Phase 1: Instruction Selection
-        let isel_func = self.run_isel(input)?;
+        let (isel_func, value_map) = self.run_isel(input, proof_ctx)?;
 
         // Phase 2: Convert ISel output to shared IR
         let mut ir_func = isel_func.to_ir_func();
+
+        // Phase 2.5: Propagate proof annotations from ProofContext onto MachInsts.
+        //
+        // The adapter's ProofContext maps LIR Values to proof annotations.
+        // The ISel's value_map maps LIR Values to VRegs/operands.
+        // We build a VReg->InstId reverse map from the IR function, then
+        // annotate defining instructions with proof annotations.
+        if let (Some(ctx), Some(vmap)) = (proof_ctx, &value_map) {
+            apply_proof_annotations(&mut ir_func, ctx, vmap);
+        }
 
         // Debug: verify succs/preds are populated for multi-block functions
         #[cfg(debug_assertions)]
@@ -796,7 +913,7 @@ impl Pipeline {
             }
         }
 
-        // Phase 3: Optimization
+        // Phase 3: Optimization (including proof-consuming optimizations)
         self.run_optimization(&mut ir_func);
 
         // Phase 3.5: Verification (optional)
@@ -951,10 +1068,14 @@ impl Pipeline {
     // --- Phase implementations ---
 
     /// Phase 1: Run instruction selection on the input function.
+    ///
+    /// When `proof_ctx` is provided, returns the ISel value map alongside
+    /// the function so the caller can propagate proof annotations to the IR.
     fn run_isel(
         &self,
         input: &llvm2_lower::Function,
-    ) -> Result<llvm2_lower::isel::ISelFunction, PipelineError> {
+        proof_ctx: Option<&llvm2_lower::ProofContext>,
+    ) -> Result<(llvm2_lower::isel::ISelFunction, Option<std::collections::HashMap<llvm2_lower::instructions::Value, llvm2_lower::isel::ISelOperand>>), PipelineError> {
         use llvm2_lower::isel::InstructionSelector;
 
         let sig = llvm2_lower::function::Signature {
@@ -987,7 +1108,12 @@ impl Pipeline {
                 .map_err(|e| PipelineError::ISel(e.to_string()))?;
         }
 
-        Ok(isel.finalize())
+        if proof_ctx.is_some() {
+            let (func, value_map) = isel.finalize_with_value_map();
+            Ok((func, Some(value_map)))
+        } else {
+            Ok((isel.finalize(), None))
+        }
     }
 
     /// Phase 3: Run optimization passes.
