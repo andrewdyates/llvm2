@@ -110,6 +110,105 @@ impl Default for Linkage {
     }
 }
 
+/// Calling convention for functions.
+///
+/// Specifies the ABI calling convention used when lowering function calls.
+/// This determines register usage, stack layout, and parameter passing rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CallingConv {
+    /// Standard C calling convention (default).
+    C,
+    /// Fast calling convention — may use more registers, non-standard ABI.
+    Fast,
+    /// Swift calling convention (swiftcc) — self/error in dedicated registers.
+    Swift,
+    /// Cold calling convention — optimized for rarely-called functions.
+    Cold,
+    /// PreserveMost — callee preserves almost all registers.
+    /// Useful for runtime calls that should not disturb hot register state.
+    PreserveMost,
+}
+
+impl Default for CallingConv {
+    fn default() -> Self {
+        CallingConv::C
+    }
+}
+
+impl CallingConv {
+    /// Returns true if this is the standard C calling convention.
+    pub fn is_c(&self) -> bool {
+        matches!(self, CallingConv::C)
+    }
+
+    /// Returns true if this is a non-standard (fast/swift/cold/etc.) convention.
+    pub fn is_non_standard(&self) -> bool {
+        !self.is_c()
+    }
+
+    /// Returns a human-readable name for the calling convention.
+    pub fn name(&self) -> &'static str {
+        match self {
+            CallingConv::C => "ccc",
+            CallingConv::Fast => "fastcc",
+            CallingConv::Swift => "swiftcc",
+            CallingConv::Cold => "coldcc",
+            CallingConv::PreserveMost => "preserve_mostcc",
+        }
+    }
+}
+
+/// Visibility for symbols (functions and globals) in the object file.
+///
+/// Controls whether a symbol is visible to the linker and dynamic loader.
+/// Maps directly to ELF/Mach-O symbol visibility attributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Visibility {
+    /// Default visibility — symbol is visible to other modules and the dynamic linker.
+    Default,
+    /// Hidden visibility — symbol is not visible to the dynamic linker.
+    /// Can still be referenced by other translation units at link time.
+    Hidden,
+    /// Protected visibility — symbol is visible to the dynamic linker but cannot
+    /// be preempted by another definition (ELF-specific; on Mach-O, treated as default).
+    Protected,
+}
+
+impl Default for Visibility {
+    fn default() -> Self {
+        Visibility::Default
+    }
+}
+
+impl Visibility {
+    /// Returns true if the symbol has default (externally visible) visibility.
+    pub fn is_default(&self) -> bool {
+        matches!(self, Visibility::Default)
+    }
+
+    /// Returns true if the symbol is hidden from the dynamic linker.
+    pub fn is_hidden(&self) -> bool {
+        matches!(self, Visibility::Hidden)
+    }
+
+    /// Returns true if the symbol has protected visibility.
+    pub fn is_protected(&self) -> bool {
+        matches!(self, Visibility::Protected)
+    }
+
+    /// Returns the Mach-O N_PEXT/N_EXT flags for this visibility.
+    ///
+    /// - Default: N_EXT (external)
+    /// - Hidden: N_PEXT | N_EXT (private external)
+    /// - Protected: N_EXT (treated as default on Mach-O)
+    pub fn macho_flags(&self) -> u8 {
+        match self {
+            Visibility::Default | Visibility::Protected => 0x01,  // N_EXT
+            Visibility::Hidden => 0x01 | 0x10,                    // N_EXT | N_PEXT
+        }
+    }
+}
+
 /// Reference mutability (matches real tMIR Mutability).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Mutability {
@@ -142,6 +241,44 @@ pub struct Field {
 pub struct Variant {
     pub name: String,
     pub fields: Vec<Ty>,
+    /// Explicit discriminant value. If None, the discriminant is assigned
+    /// sequentially (0, 1, 2, ...) based on variant order — matching Rust's
+    /// default enum discriminant assignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discriminant: Option<i64>,
+}
+
+impl Variant {
+    /// Create a variant with no payload fields and no explicit discriminant.
+    pub fn unit(name: impl Into<String>) -> Self {
+        Self { name: name.into(), fields: vec![], discriminant: None }
+    }
+
+    /// Create a variant with a single payload type.
+    pub fn with_payload(name: impl Into<String>, payload: Ty) -> Self {
+        Self { name: name.into(), fields: vec![payload], discriminant: None }
+    }
+
+    /// Create a variant with multiple payload fields.
+    pub fn with_fields(name: impl Into<String>, fields: Vec<Ty>) -> Self {
+        Self { name: name.into(), fields, discriminant: None }
+    }
+
+    /// Create a variant with an explicit discriminant and no payload.
+    pub fn with_discriminant(name: impl Into<String>, discriminant: i64) -> Self {
+        Self { name: name.into(), fields: vec![], discriminant: Some(discriminant) }
+    }
+
+    /// Returns true if this variant has no payload fields.
+    pub fn is_unit(&self) -> bool {
+        self.fields.is_empty()
+    }
+
+    /// Returns the effective discriminant value given its position index.
+    /// If an explicit discriminant is set, returns that; otherwise returns the index.
+    pub fn effective_discriminant(&self, index: usize) -> i64 {
+        self.discriminant.unwrap_or(index as i64)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +423,11 @@ impl Ty {
         Ty::Vector { element: Box::new(element), lanes }
     }
 
+    /// Construct an enum type with named variants.
+    pub fn enum_ty(name: impl Into<String>, variants: Vec<Variant>) -> Self {
+        Ty::Enum { name: name.into(), variants }
+    }
+
     // -- Backward-compat constructors for migration from flat representation --
 
     /// Construct a signed integer type from raw bit width.
@@ -428,6 +570,22 @@ impl Ty {
         matches!(self, Ty::Enum { .. })
     }
 
+    /// Returns the enum name and variants if this is an enum type.
+    pub fn enum_info(&self) -> Option<(&str, &[Variant])> {
+        match self {
+            Ty::Enum { name, variants } => Some((name, variants)),
+            _ => None,
+        }
+    }
+
+    /// Returns the number of variants if this is an enum type.
+    pub fn variant_count(&self) -> Option<usize> {
+        match self {
+            Ty::Enum { variants, .. } => Some(variants.len()),
+            _ => None,
+        }
+    }
+
     /// Total size in bits for vector types: element_bits * lanes.
     /// Returns None for non-vector types.
     pub fn vector_bits(&self) -> Option<u32> {
@@ -499,6 +657,9 @@ pub struct GlobalDef {
     pub is_const: bool,
     /// Linkage visibility.
     pub linkage: Linkage,
+    /// Symbol visibility for the linker/dynamic loader.
+    #[serde(default)]
+    pub visibility: Visibility,
     /// Optional constant initializer (as raw bytes).
     /// None means zero-initialized or externally defined.
     #[serde(default)]
@@ -711,15 +872,17 @@ mod tests {
 
     #[test]
     fn test_enum_type() {
-        let e = Ty::Enum {
-            name: "Option".to_string(),
-            variants: vec![
-                Variant { name: "None".to_string(), fields: vec![] },
-                Variant { name: "Some".to_string(), fields: vec![Ty::i32()] },
-            ],
-        };
+        let e = Ty::enum_ty("Option", vec![
+            Variant::unit("None"),
+            Variant::with_payload("Some", Ty::i32()),
+        ]);
         assert!(e.is_enum());
         assert!(!Ty::i32().is_enum());
+        let (name, variants) = e.enum_info().unwrap();
+        assert_eq!(name, "Option");
+        assert_eq!(variants.len(), 2);
+        assert!(variants[0].is_unit());
+        assert!(!variants[1].is_unit());
     }
 
     // -- GlobalDef tests --
@@ -731,6 +894,7 @@ mod tests {
             ty: Ty::i32(),
             is_const: true,
             linkage: Linkage::External,
+            visibility: Visibility::Default,
             initializer: Some(vec![42, 0, 0, 0]),
             align: Some(4),
         };
@@ -738,6 +902,7 @@ mod tests {
         assert_eq!(g.ty, Ty::i32());
         assert!(g.is_const);
         assert_eq!(g.linkage, Linkage::External);
+        assert_eq!(g.visibility, Visibility::Default);
         assert_eq!(g.initializer, Some(vec![42, 0, 0, 0]));
     }
 
@@ -748,10 +913,12 @@ mod tests {
             ty: Ty::i64(),
             is_const: false,
             linkage: Linkage::default(),
+            visibility: Visibility::default(),
             initializer: None,
             align: None,
         };
         assert_eq!(g.linkage, Linkage::External);
+        assert_eq!(g.visibility, Visibility::Default);
         assert!(g.initializer.is_none());
         assert!(g.align.is_none());
     }
@@ -820,6 +987,7 @@ mod tests {
             ty: Ty::array(Ty::ptr(Ty::void()), 8),
             is_const: true,
             linkage: Linkage::Internal,
+            visibility: Visibility::Hidden,
             initializer: None,
             align: Some(8),
         };
@@ -844,5 +1012,214 @@ mod tests {
         assert_eq!(g.name, "g");
         assert!(g.initializer.is_none());
         assert!(g.align.is_none());
+        // visibility should default to Default when not present in JSON
+        assert_eq!(g.visibility, Visibility::Default);
+    }
+
+    // -- Enum type extended tests --
+
+    #[test]
+    fn test_enum_constructor_helper() {
+        let e = Ty::enum_ty("Result", vec![
+            Variant::with_payload("Ok", Ty::i64()),
+            Variant::with_payload("Err", Ty::i32()),
+        ]);
+        assert!(e.is_enum());
+        assert_eq!(e.variant_count(), Some(2));
+        let (name, variants) = e.enum_info().unwrap();
+        assert_eq!(name, "Result");
+        assert_eq!(variants[0].name, "Ok");
+        assert_eq!(variants[1].name, "Err");
+        assert_eq!(variants[0].fields, vec![Ty::i64()]);
+        assert_eq!(variants[1].fields, vec![Ty::i32()]);
+    }
+
+    #[test]
+    fn test_enum_variant_constructors() {
+        let unit = Variant::unit("None");
+        assert!(unit.is_unit());
+        assert_eq!(unit.discriminant, None);
+        assert_eq!(unit.effective_discriminant(0), 0);
+
+        let payload = Variant::with_payload("Some", Ty::i32());
+        assert!(!payload.is_unit());
+        assert_eq!(payload.fields.len(), 1);
+
+        let multi = Variant::with_fields("Complex", vec![Ty::i32(), Ty::f64()]);
+        assert!(!multi.is_unit());
+        assert_eq!(multi.fields.len(), 2);
+
+        let disc = Variant::with_discriminant("Error", 42);
+        assert!(disc.is_unit());
+        assert_eq!(disc.discriminant, Some(42));
+        assert_eq!(disc.effective_discriminant(0), 42);
+    }
+
+    #[test]
+    fn test_enum_discriminant_defaults() {
+        let e = Ty::enum_ty("Color", vec![
+            Variant::unit("Red"),
+            Variant::unit("Green"),
+            Variant::with_discriminant("Blue", 10),
+        ]);
+        let (_, variants) = e.enum_info().unwrap();
+        // Default discriminant follows position index
+        assert_eq!(variants[0].effective_discriminant(0), 0);
+        assert_eq!(variants[1].effective_discriminant(1), 1);
+        // Explicit discriminant overrides
+        assert_eq!(variants[2].effective_discriminant(2), 10);
+    }
+
+    #[test]
+    fn test_enum_query_methods() {
+        let e = Ty::enum_ty("Option", vec![
+            Variant::unit("None"),
+            Variant::with_payload("Some", Ty::i32()),
+        ]);
+        assert!(e.is_enum());
+        assert_eq!(e.variant_count(), Some(2));
+        assert!(e.enum_info().is_some());
+
+        // Non-enum types return None
+        assert!(!Ty::i32().is_enum());
+        assert_eq!(Ty::i32().variant_count(), None);
+        assert!(Ty::i32().enum_info().is_none());
+    }
+
+    #[test]
+    fn test_enum_serde_round_trip() {
+        let e = Ty::enum_ty("Tagged", vec![
+            Variant::unit("A"),
+            Variant::with_payload("B", Ty::i64()),
+            Variant::with_discriminant("C", 99),
+            Variant::with_fields("D", vec![Ty::f32(), Ty::bool_ty()]),
+        ]);
+        let json = serde_json::to_string(&e).unwrap();
+        let parsed: Ty = serde_json::from_str(&json).unwrap();
+        assert_eq!(e, parsed);
+        // Verify discriminant survived round-trip
+        if let Ty::Enum { variants, .. } = &parsed {
+            assert_eq!(variants[0].discriminant, None);
+            assert_eq!(variants[2].discriminant, Some(99));
+        } else {
+            panic!("expected Enum variant");
+        }
+    }
+
+    // -- CallingConv tests --
+
+    #[test]
+    fn test_calling_conv_default() {
+        assert_eq!(CallingConv::default(), CallingConv::C);
+        assert!(CallingConv::C.is_c());
+        assert!(!CallingConv::C.is_non_standard());
+    }
+
+    #[test]
+    fn test_calling_conv_variants() {
+        let variants = [
+            CallingConv::C,
+            CallingConv::Fast,
+            CallingConv::Swift,
+            CallingConv::Cold,
+            CallingConv::PreserveMost,
+        ];
+        // All variants are distinct
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                assert_eq!(i == j, a == b);
+            }
+        }
+        // Non-standard variants
+        assert!(CallingConv::Fast.is_non_standard());
+        assert!(CallingConv::Swift.is_non_standard());
+        assert!(CallingConv::Cold.is_non_standard());
+        assert!(CallingConv::PreserveMost.is_non_standard());
+    }
+
+    #[test]
+    fn test_calling_conv_names() {
+        assert_eq!(CallingConv::C.name(), "ccc");
+        assert_eq!(CallingConv::Fast.name(), "fastcc");
+        assert_eq!(CallingConv::Swift.name(), "swiftcc");
+        assert_eq!(CallingConv::Cold.name(), "coldcc");
+        assert_eq!(CallingConv::PreserveMost.name(), "preserve_mostcc");
+    }
+
+    #[test]
+    fn test_calling_conv_serde_round_trip() {
+        for cc in &[CallingConv::C, CallingConv::Fast, CallingConv::Swift,
+                     CallingConv::Cold, CallingConv::PreserveMost] {
+            let json = serde_json::to_string(cc).unwrap();
+            let parsed: CallingConv = serde_json::from_str(&json).unwrap();
+            assert_eq!(*cc, parsed);
+        }
+    }
+
+    // -- Visibility tests --
+
+    #[test]
+    fn test_visibility_default() {
+        assert_eq!(Visibility::default(), Visibility::Default);
+        assert!(Visibility::Default.is_default());
+        assert!(!Visibility::Default.is_hidden());
+        assert!(!Visibility::Default.is_protected());
+    }
+
+    #[test]
+    fn test_visibility_variants() {
+        let variants = [
+            Visibility::Default,
+            Visibility::Hidden,
+            Visibility::Protected,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                assert_eq!(i == j, a == b);
+            }
+        }
+        assert!(Visibility::Hidden.is_hidden());
+        assert!(Visibility::Protected.is_protected());
+    }
+
+    #[test]
+    fn test_visibility_macho_flags() {
+        // Default: N_EXT (0x01)
+        assert_eq!(Visibility::Default.macho_flags(), 0x01);
+        // Hidden: N_EXT | N_PEXT (0x11)
+        assert_eq!(Visibility::Hidden.macho_flags(), 0x11);
+        // Protected: treated as default on Mach-O
+        assert_eq!(Visibility::Protected.macho_flags(), 0x01);
+    }
+
+    #[test]
+    fn test_visibility_serde_round_trip() {
+        for vis in &[Visibility::Default, Visibility::Hidden, Visibility::Protected] {
+            let json = serde_json::to_string(vis).unwrap();
+            let parsed: Visibility = serde_json::from_str(&json).unwrap();
+            assert_eq!(*vis, parsed);
+        }
+    }
+
+    #[test]
+    fn test_global_def_with_visibility() {
+        let g = GlobalDef {
+            name: "_hidden_sym".to_string(),
+            ty: Ty::i32(),
+            is_const: false,
+            linkage: Linkage::External,
+            visibility: Visibility::Hidden,
+            initializer: None,
+            align: None,
+        };
+        assert_eq!(g.visibility, Visibility::Hidden);
+        assert!(g.visibility.is_hidden());
+        assert_eq!(g.visibility.macho_flags(), 0x11);
+
+        // Round-trip
+        let json = serde_json::to_string(&g).unwrap();
+        let parsed: GlobalDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(g, parsed);
+        assert_eq!(parsed.visibility, Visibility::Hidden);
     }
 }

@@ -15,7 +15,7 @@ use tmir_instrs::{
     AtomicRmwOp, BinOp, CastOp, CmpOp, Instr, InstrNode, MemoryOrdering, Operand, SwitchCase,
     UnOp,
 };
-use tmir_types::{BlockId, DataLayout, FuncId, FuncTy, GlobalDef, StructDef, TmirProof, Ty, ValueId};
+use tmir_types::{BlockId, CallingConv, DataLayout, FuncId, FuncTy, GlobalDef, StructDef, TmirProof, Ty, ValueId, Visibility};
 
 use crate::{Block, Function, Module};
 
@@ -100,6 +100,8 @@ pub struct FunctionBuilder {
     id: FuncId,
     name: String,
     ty: FuncTy,
+    calling_conv: CallingConv,
+    visibility: Visibility,
     blocks: Vec<Block>,
     proofs: Vec<TmirProof>,
     next_value_id: u32,
@@ -114,6 +116,8 @@ impl FunctionBuilder {
             id,
             name,
             ty: FuncTy { params, returns },
+            calling_conv: CallingConv::default(),
+            visibility: Visibility::default(),
             blocks: Vec::new(),
             proofs: Vec::new(),
             next_value_id: 0,
@@ -125,6 +129,18 @@ impl FunctionBuilder {
     /// Set the function ID.
     pub fn with_id(mut self, id: FuncId) -> Self {
         self.id = id;
+        self
+    }
+
+    /// Set the calling convention for this function.
+    pub fn with_calling_conv(mut self, cc: CallingConv) -> Self {
+        self.calling_conv = cc;
+        self
+    }
+
+    /// Set the symbol visibility for this function.
+    pub fn with_visibility(mut self, vis: Visibility) -> Self {
+        self.visibility = vis;
         self
     }
 
@@ -179,6 +195,8 @@ impl FunctionBuilder {
             id: self.id,
             name: self.name,
             ty: self.ty,
+            calling_conv: self.calling_conv,
+            visibility: self.visibility,
             entry: self.entry,
             blocks: self.blocks,
             proofs: self.proofs,
