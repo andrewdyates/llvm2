@@ -44,9 +44,11 @@ impl MachinePass for CfgSimplify {
 
     fn run(&mut self, func: &mut MachFunction) -> bool {
         let mut ever_changed = false;
+        // Safety bound to prevent infinite loops if sub-passes oscillate.
+        let max_iterations: usize = 32;
 
-        // Iterate sub-passes until fixed point.
-        loop {
+        // Iterate sub-passes until fixed point (bounded).
+        for _ in 0..max_iterations {
             let mut changed = false;
 
             rebuild_cfg_edges(func);
