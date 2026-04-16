@@ -463,8 +463,8 @@ fn resolve_inst_operands(
             }
         }
 
-        // IDIV, IMUL 3-operand, etc.
-        X86Opcode::Idiv => {
+        // IDIV/DIV, IMUL 3-operand, etc.
+        X86Opcode::Idiv | X86Opcode::Div => {
             if let Some(op) = inst.operands.first() {
                 ops.dst = resolve_operand(op, alloc);
             }

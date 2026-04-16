@@ -886,6 +886,11 @@ impl X86Encoder {
                 let dst = self.require_dst(ops, opcode)?;
                 self.encode_unary(0xF7, 7, dst);
             }
+            // DIV r/m64: REX.W + F7 /6
+            X86Opcode::Div => {
+                let dst = self.require_dst(ops, opcode)?;
+                self.encode_unary(0xF7, 6, dst);
+            }
 
             // =================================================================
             // Shifts
@@ -1978,6 +1983,22 @@ mod tests {
         // IDIV RCX: REX.W + F7 + ModRM(11 111 001)
         let bytes = encode(X86Opcode::Idiv, &X86InstOperands::r(RCX));
         assert_eq!(bytes, vec![0x48, 0xF7, 0xF9]);
+    }
+
+    #[test]
+    fn test_div_rcx() {
+        // DIV RCX: REX.W + F7 + ModRM(11 110 001)
+        // ModR/M: mod=11, reg=/6(110), rm=RCX(001) = 0xF1
+        let bytes = encode(X86Opcode::Div, &X86InstOperands::r(RCX));
+        assert_eq!(bytes, vec![0x48, 0xF7, 0xF1]);
+    }
+
+    #[test]
+    fn test_div_r8() {
+        // DIV R8: REX.WB(49) + F7 + ModRM(11 110 000)
+        // R8 hw_enc=8, bit3=1 -> REX.B. ModR/M rm=R8(0 low3)
+        let bytes = encode(X86Opcode::Div, &X86InstOperands::r(R8));
+        assert_eq!(bytes, vec![0x49, 0xF7, 0xF0]);
     }
 
     // -----------------------------------------------------------------------

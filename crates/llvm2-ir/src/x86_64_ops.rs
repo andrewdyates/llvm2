@@ -46,6 +46,8 @@ pub enum X86Opcode {
     ImulRRI,
     /// IDIV r64 (signed divide RDX:RAX by r64, quotient in RAX, remainder in RDX)
     Idiv,
+    /// DIV r64 (unsigned divide RDX:RAX by r64, quotient in RAX, remainder in RDX)
+    Div,
     /// NEG r64 (two's complement negate)
     Neg,
     /// INC r64
@@ -282,8 +284,8 @@ impl X86Opcode {
             // SETcc sets RFLAGS-dependent byte (reads RFLAGS)
             Setcc => InstFlags::EMPTY,
 
-            // IDIV has implicit operands (RDX:RAX) and can trap on division by zero
-            Idiv => InstFlags::HAS_SIDE_EFFECTS,
+            // IDIV/DIV have implicit operands (RDX:RAX) and can trap on division by zero
+            Idiv | Div => InstFlags::HAS_SIDE_EFFECTS,
 
             // Stack manipulation (modifies RSP)
             Push => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),

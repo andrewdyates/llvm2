@@ -30,7 +30,7 @@ use thiserror::Error;
 use llvm2_ir::regs::{RegClass, VReg};
 use llvm2_ir::x86_64_ops::{X86CondCode, X86Opcode};
 use llvm2_ir::x86_64_regs::{
-    self, X86PReg, RSP,
+    self, X86PReg, RAX, RCX, RDX, RSP,
     X86_ARG_GPRS, X86_ARG_XMMS, X86_RET_GPRS,
 };
 
@@ -235,6 +235,23 @@ enum X86LogicOp {
     Xor,
 }
 
+/// Shift operation classification for opcode selection.
+#[derive(Debug, Clone, Copy)]
+enum X86ShiftOp {
+    Shl,
+    Shr,
+    Sar,
+}
+
+/// Floating-point binary operation classification.
+#[derive(Debug, Clone, Copy)]
+enum X86FpBinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
 /// Integer unary operation classification.
 #[derive(Debug, Clone, Copy)]
 enum X86UnaryOp {
@@ -366,6 +383,35 @@ impl X86InstructionSelector {
             Opcode::Bor => self.select_logic(X86LogicOp::Or, inst, block)?,
             Opcode::Bxor => self.select_logic(X86LogicOp::Xor, inst, block)?,
 
+            // Division and remainder
+            Opcode::Sdiv => self.select_div(inst, block, /*is_signed=*/true, /*is_rem=*/false)?,
+            Opcode::Udiv => self.select_div(inst, block, /*is_signed=*/false, /*is_rem=*/false)?,
+            Opcode::Srem => self.select_div(inst, block, /*is_signed=*/true, /*is_rem=*/true)?,
+            Opcode::Urem => self.select_div(inst, block, /*is_signed=*/false, /*is_rem=*/true)?,
+
+            // Shifts
+            Opcode::Ishl => self.select_shift(X86ShiftOp::Shl, inst, block)?,
+            Opcode::Ushr => self.select_shift(X86ShiftOp::Shr, inst, block)?,
+            Opcode::Sshr => self.select_shift(X86ShiftOp::Sar, inst, block)?,
+
+            // Floating-point arithmetic
+            Opcode::Fadd => self.select_fp_binop(X86FpBinOp::Add, inst, block)?,
+            Opcode::Fsub => self.select_fp_binop(X86FpBinOp::Sub, inst, block)?,
+            Opcode::Fmul => self.select_fp_binop(X86FpBinOp::Mul, inst, block)?,
+            Opcode::Fdiv => self.select_fp_binop(X86FpBinOp::Div, inst, block)?,
+
+            // Floating-point unary
+            Opcode::Fneg => self.select_fneg(inst, block)?,
+
+            // Floating-point comparison
+            Opcode::Fcmp { cond } => self.select_fcmp(*cond, inst, block)?,
+
+            // Floating-point conversions
+            Opcode::FcvtToInt { dst_ty } => self.select_fcvt_to_int(dst_ty.clone(), inst, block)?,
+            Opcode::FcvtFromInt { src_ty } => self.select_fcvt_from_int(src_ty.clone(), inst, block)?,
+            Opcode::FPExt => self.select_fpext(inst, block)?,
+            Opcode::FPTrunc => self.select_fptrunc(inst, block)?,
+
             // Comparison
             Opcode::Icmp { cond } => self.select_comparison(*cond, inst, block)?,
 
@@ -382,6 +428,9 @@ impl X86InstructionSelector {
             } => self.select_condbranch(inst, *then_dest, *else_dest, block)?,
             Opcode::Return => self.lower_return(inst, block)?,
             Opcode::Call { name } => self.lower_call(name, inst, block)?,
+
+            // Switch (multi-way branch)
+            Opcode::Switch { cases, default } => self.select_switch(inst, cases, *default, block)?,
 
             // Unsupported opcodes emit a NOP placeholder for now
             _ => {
@@ -624,6 +673,577 @@ impl X86InstructionSelector {
         );
 
         self.define_value(result_val, X86ISelOperand::VReg(dst), ty);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Division and remainder
+    // -----------------------------------------------------------------------
+
+    /// Select integer division or remainder.
+    ///
+    /// x86-64 division uses implicit operands:
+    /// - Dividend: RDX:RAX (128-bit for 64-bit div, or sign/zero-extended)
+    /// - Divisor: the source register operand
+    /// - Quotient -> RAX, Remainder -> RDX
+    ///
+    /// For signed division (IDIV):
+    ///   MOV RAX, lhs
+    ///   MOV RDX, RAX; SAR RDX, 63  (sign-extend RAX into RDX:RAX)
+    ///   IDIV rhs
+    ///   MOV dst, RAX (quotient) or RDX (remainder)
+    ///
+    /// For unsigned division (DIV):
+    ///   MOV RAX, lhs
+    ///   XOR RDX, RDX (zero-extend into RDX:RAX)
+    ///   DIV rhs
+    ///   MOV dst, RAX (quotient) or RDX (remainder)
+    fn select_div(
+        &mut self,
+        inst: &Instruction,
+        block: Block,
+        is_signed: bool,
+        is_rem: bool,
+    ) -> Result<(), X86ISelError> {
+        Self::require_args(inst, 2, "Div")?;
+        Self::require_result(inst, "Div")?;
+
+        let lhs_val = inst.args[0];
+        let rhs_val = inst.args[1];
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&lhs_val);
+        let class = reg_class_for_type(&ty);
+        let dst = self.new_vreg(class);
+
+        let lhs = self.use_value(&lhs_val)?;
+        let rhs = self.use_value(&rhs_val)?;
+
+        // Move dividend to RAX
+        self.func.push_inst(
+            block,
+            X86ISelInst::new(
+                X86Opcode::MovRR,
+                vec![X86ISelOperand::PReg(RAX), lhs],
+            ),
+        );
+
+        if is_signed {
+            // Sign-extend RAX into RDX:RAX.
+            // Approximate CQO: MOV RDX, RAX; SAR RDX, 63
+            self.func.push_inst(
+                block,
+                X86ISelInst::new(
+                    X86Opcode::MovRR,
+                    vec![
+                        X86ISelOperand::PReg(RDX),
+                        X86ISelOperand::PReg(RAX),
+                    ],
+                ),
+            );
+            self.func.push_inst(
+                block,
+                X86ISelInst::new(
+                    X86Opcode::SarRI,
+                    vec![
+                        X86ISelOperand::PReg(RDX),
+                        X86ISelOperand::Imm(63),
+                    ],
+                ),
+            );
+            // IDIV rhs
+            self.func.push_inst(
+                block,
+                X86ISelInst::new(X86Opcode::Idiv, vec![rhs]),
+            );
+        } else {
+            // Zero-extend: XOR RDX, RDX
+            self.func.push_inst(
+                block,
+                X86ISelInst::new(
+                    X86Opcode::XorRR,
+                    vec![
+                        X86ISelOperand::PReg(RDX),
+                        X86ISelOperand::PReg(RDX),
+                        X86ISelOperand::PReg(RDX),
+                    ],
+                ),
+            );
+            // DIV rhs
+            self.func.push_inst(
+                block,
+                X86ISelInst::new(X86Opcode::Div, vec![rhs]),
+            );
+        }
+
+        // Result: quotient in RAX, remainder in RDX
+        let result_reg = if is_rem { RDX } else { RAX };
+        self.func.push_inst(
+            block,
+            X86ISelInst::new(
+                X86Opcode::MovRR,
+                vec![
+                    X86ISelOperand::VReg(dst),
+                    X86ISelOperand::PReg(result_reg),
+                ],
+            ),
+        );
+
+        self.define_value(result_val, X86ISelOperand::VReg(dst), ty);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Shift operations
+    // -----------------------------------------------------------------------
+
+    /// Select shift operation: SHL, SHR, SAR.
+    ///
+    /// x86-64 shifts use either an immediate count or the CL register.
+    /// tMIR `Ishl(lhs, rhs)` where rhs is a constant -> SHL dst, imm8
+    /// tMIR `Ishl(lhs, rhs)` where rhs is a register -> MOV CL, rhs; SHL dst, CL
+    fn select_shift(
+        &mut self,
+        op: X86ShiftOp,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), X86ISelError> {
+        Self::require_args(inst, 2, "Shift")?;
+        Self::require_result(inst, "Shift")?;
+
+        let lhs_val = inst.args[0];
+        let rhs_val = inst.args[1];
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&lhs_val);
+        let class = reg_class_for_type(&ty);
+        let dst = self.new_vreg(class);
+
+        let lhs = self.use_value(&lhs_val)?;
+        let rhs = self.use_value(&rhs_val)?;
+
+        // Check if the shift amount is an immediate
+        let is_imm = matches!(rhs, X86ISelOperand::Imm(_));
+
+        if is_imm {
+            let opc_ri = match op {
+                X86ShiftOp::Shl => X86Opcode::ShlRI,
+                X86ShiftOp::Shr => X86Opcode::ShrRI,
+                X86ShiftOp::Sar => X86Opcode::SarRI,
+            };
+            self.func.push_inst(
+                block,
+                X86ISelInst::new(
+                    opc_ri,
+                    vec![X86ISelOperand::VReg(dst), lhs, rhs],
+                ),
+            );
+        } else {
+            let opc_rr = match op {
+                X86ShiftOp::Shl => X86Opcode::ShlRR,
+                X86ShiftOp::Shr => X86Opcode::ShrRR,
+                X86ShiftOp::Sar => X86Opcode::SarRR,
+            };
+            // Move shift amount to CL (required by x86-64 shift-by-register)
+            self.func.push_inst(
+                block,
+                X86ISelInst::new(
+                    X86Opcode::MovRR,
+                    vec![X86ISelOperand::PReg(RCX), rhs],
+                ),
+            );
+            // Shift: dst = lhs shifted by CL
+            self.func.push_inst(
+                block,
+                X86ISelInst::new(
+                    opc_rr,
+                    vec![X86ISelOperand::VReg(dst), lhs],
+                ),
+            );
+        }
+
+        self.define_value(result_val, X86ISelOperand::VReg(dst), ty);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Floating-point arithmetic
+    // -----------------------------------------------------------------------
+
+    /// Select floating-point binary operation: ADDSS/ADDSD, SUBSS/SUBSD, etc.
+    ///
+    /// The opcode is chosen based on the type of the operands:
+    /// F32 -> SS (scalar single) variants
+    /// F64 -> SD (scalar double) variants
+    fn select_fp_binop(
+        &mut self,
+        op: X86FpBinOp,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), X86ISelError> {
+        Self::require_args(inst, 2, "FpBinop")?;
+        Self::require_result(inst, "FpBinop")?;
+
+        let lhs_val = inst.args[0];
+        let rhs_val = inst.args[1];
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&lhs_val);
+        let class = reg_class_for_type(&ty);
+        let dst = self.new_vreg(class);
+
+        let lhs = self.use_value(&lhs_val)?;
+        let rhs = self.use_value(&rhs_val)?;
+
+        let is_f32 = matches!(ty, Type::F32);
+        let opc = match (op, is_f32) {
+            (X86FpBinOp::Add, true) => X86Opcode::Addss,
+            (X86FpBinOp::Add, false) => X86Opcode::Addsd,
+            (X86FpBinOp::Sub, true) => X86Opcode::Subss,
+            (X86FpBinOp::Sub, false) => X86Opcode::Subsd,
+            (X86FpBinOp::Mul, true) => X86Opcode::Mulss,
+            (X86FpBinOp::Mul, false) => X86Opcode::Mulsd,
+            (X86FpBinOp::Div, true) => X86Opcode::Divss,
+            (X86FpBinOp::Div, false) => X86Opcode::Divsd,
+        };
+
+        self.func.push_inst(
+            block,
+            X86ISelInst::new(
+                opc,
+                vec![X86ISelOperand::VReg(dst), lhs, rhs],
+            ),
+        );
+
+        self.define_value(result_val, X86ISelOperand::VReg(dst), ty);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Floating-point unary: negate
+    // -----------------------------------------------------------------------
+
+    /// Select floating-point negation.
+    ///
+    /// x86-64 has no single FNEG instruction. Negation is implemented as
+    /// subtraction from zero: 0.0 - x.
+    fn select_fneg(
+        &mut self,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), X86ISelError> {
+        Self::require_args(inst, 1, "Fneg")?;
+        Self::require_result(inst, "Fneg")?;
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&src_val);
+        let class = reg_class_for_type(&ty);
+        let dst = self.new_vreg(class);
+        let zero = self.new_vreg(class);
+
+        let src = self.use_value(&src_val)?;
+
+        let is_f32 = matches!(ty, Type::F32);
+
+        // Materialize 0.0 into a register
+        let mov_opc = if is_f32 { X86Opcode::MovssRR } else { X86Opcode::MovsdRR };
+        self.func.push_inst(
+            block,
+            X86ISelInst::new(
+                mov_opc,
+                vec![X86ISelOperand::VReg(zero), X86ISelOperand::FImm(0.0)],
+            ),
+        );
+
+        // SUBSx zero, src -> dst (0.0 - x = -x)
+        let sub_opc = if is_f32 { X86Opcode::Subss } else { X86Opcode::Subsd };
+        self.func.push_inst(
+            block,
+            X86ISelInst::new(
+                sub_opc,
+                vec![
+                    X86ISelOperand::VReg(dst),
+                    X86ISelOperand::VReg(zero),
+                    src,
+                ],
+            ),
+        );
+
+        self.define_value(result_val, X86ISelOperand::VReg(dst), ty);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Floating-point comparison
+    // -----------------------------------------------------------------------
+
+    /// Select floating-point comparison: UCOMISS/UCOMISD + SETcc.
+    ///
+    /// tMIR `Fcmp(cond, lhs, rhs) -> bool_result` becomes:
+    ///   UCOMIS{S,D} lhs, rhs   (sets RFLAGS: CF, ZF, PF)
+    ///   MOV dst, 0 + CondCode  (pseudo for SETcc)
+    fn select_fcmp(
+        &mut self,
+        cond: FloatCC,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), X86ISelError> {
+        Self::require_args(inst, 2, "Fcmp")?;
+        Self::require_result(inst, "Fcmp")?;
+
+        let lhs_val = inst.args[0];
+        let rhs_val = inst.args[1];
+        let result_val = inst.results[0];
+
+        let ty = self.value_type(&lhs_val);
+        let lhs = self.use_value(&lhs_val)?;
+        let rhs = self.use_value(&rhs_val)?;
+
+        let x86cc = x86cc_from_floatcc(cond);
+
+        // UCOMISD/UCOMISS lhs, rhs
+        let cmp_opc = if matches!(ty, Type::F32) {
+            X86Opcode::Ucomiss
+        } else {
+            X86Opcode::Ucomisd
+        };
+        self.func.push_inst(
+            block,
+            X86ISelInst::new(cmp_opc, vec![lhs, rhs]),
+        );
+
+        // Materialize boolean result with condition code
+        let dst = self.new_vreg(RegClass::Gpr32);
+        self.func.push_inst(
+            block,
+            X86ISelInst::new(
+                X86Opcode::MovRI,
+                vec![
+                    X86ISelOperand::VReg(dst),
+                    X86ISelOperand::Imm(0),
+                    X86ISelOperand::CondCode(x86cc),
+                ],
+            ),
+        );
+
+        self.define_value(result_val, X86ISelOperand::VReg(dst), Type::B1);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Floating-point conversions
+    // -----------------------------------------------------------------------
+
+    /// Select float-to-int conversion (truncating).
+    ///
+    /// tMIR `FcvtToInt { dst_ty }` with F32/F64 source:
+    ///   CVTSS2SI / CVTSD2SI
+    fn select_fcvt_to_int(
+        &mut self,
+        dst_ty: Type,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), X86ISelError> {
+        Self::require_args(inst, 1, "FcvtToInt")?;
+        Self::require_result(inst, "FcvtToInt")?;
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+        let src_ty = self.value_type(&src_val);
+
+        let src = self.use_value(&src_val)?;
+        let class = reg_class_for_type(&dst_ty);
+        let dst = self.new_vreg(class);
+
+        let opc = if matches!(src_ty, Type::F32) {
+            X86Opcode::Cvtss2si
+        } else {
+            X86Opcode::Cvtsd2si
+        };
+
+        self.func.push_inst(
+            block,
+            X86ISelInst::new(
+                opc,
+                vec![X86ISelOperand::VReg(dst), src],
+            ),
+        );
+
+        self.define_value(result_val, X86ISelOperand::VReg(dst), dst_ty);
+        Ok(())
+    }
+
+    /// Select int-to-float conversion.
+    ///
+    /// tMIR `FcvtFromInt { src_ty }` to F32/F64:
+    ///   CVTSI2SS / CVTSI2SD
+    fn select_fcvt_from_int(
+        &mut self,
+        _src_ty: Type,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), X86ISelError> {
+        Self::require_args(inst, 1, "FcvtFromInt")?;
+        Self::require_result(inst, "FcvtFromInt")?;
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+        let result_ty = self.value_type(&result_val);
+
+        // Default to F64 if the result type has not been recorded
+        let dst_ty = if matches!(result_ty, Type::F32) {
+            Type::F32
+        } else {
+            Type::F64
+        };
+
+        let src = self.use_value(&src_val)?;
+        let class = reg_class_for_type(&dst_ty);
+        let dst = self.new_vreg(class);
+
+        let opc = if matches!(dst_ty, Type::F32) {
+            X86Opcode::Cvtsi2ss
+        } else {
+            X86Opcode::Cvtsi2sd
+        };
+
+        self.func.push_inst(
+            block,
+            X86ISelInst::new(
+                opc,
+                vec![X86ISelOperand::VReg(dst), src],
+            ),
+        );
+
+        self.define_value(result_val, X86ISelOperand::VReg(dst), dst_ty);
+        Ok(())
+    }
+
+    /// Select float precision widening: F32 -> F64 (CVTSS2SD).
+    fn select_fpext(
+        &mut self,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), X86ISelError> {
+        Self::require_args(inst, 1, "FPExt")?;
+        Self::require_result(inst, "FPExt")?;
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+
+        let src = self.use_value(&src_val)?;
+        let dst = self.new_vreg(RegClass::Fpr64);
+
+        self.func.push_inst(
+            block,
+            X86ISelInst::new(
+                X86Opcode::Cvtss2sd,
+                vec![X86ISelOperand::VReg(dst), src],
+            ),
+        );
+
+        self.define_value(result_val, X86ISelOperand::VReg(dst), Type::F64);
+        Ok(())
+    }
+
+    /// Select float precision narrowing: F64 -> F32 (CVTSD2SS).
+    fn select_fptrunc(
+        &mut self,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), X86ISelError> {
+        Self::require_args(inst, 1, "FPTrunc")?;
+        Self::require_result(inst, "FPTrunc")?;
+
+        let src_val = inst.args[0];
+        let result_val = inst.results[0];
+
+        let src = self.use_value(&src_val)?;
+        let dst = self.new_vreg(RegClass::Fpr32);
+
+        self.func.push_inst(
+            block,
+            X86ISelInst::new(
+                X86Opcode::Cvtsd2ss,
+                vec![X86ISelOperand::VReg(dst), src],
+            ),
+        );
+
+        self.define_value(result_val, X86ISelOperand::VReg(dst), Type::F32);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Switch (multi-way branch)
+    // -----------------------------------------------------------------------
+
+    /// Select switch (multi-way branch) as a cascade of CMP + Jcc + JMP.
+    ///
+    /// tMIR `Switch { cases, default }` with selector in args[0]:
+    ///   For each (value, target):
+    ///     CMP selector, value
+    ///     Jcc E, target_block
+    ///   JMP default_block
+    fn select_switch(
+        &mut self,
+        inst: &Instruction,
+        cases: &[(i64, Block)],
+        default: Block,
+        block: Block,
+    ) -> Result<(), X86ISelError> {
+        Self::require_args(inst, 1, "Switch")?;
+
+        let selector_val = inst.args[0];
+        let selector = self.use_value(&selector_val)?;
+
+        for &(case_val, target_block) in cases {
+            // CMP selector, case_value
+            self.func.push_inst(
+                block,
+                X86ISelInst::new(
+                    X86Opcode::CmpRI,
+                    vec![selector.clone(), X86ISelOperand::Imm(case_val)],
+                ),
+            );
+
+            // Jcc E, target_block (branch if equal)
+            self.func.push_inst(
+                block,
+                X86ISelInst::new(
+                    X86Opcode::Jcc,
+                    vec![
+                        X86ISelOperand::CondCode(X86CondCode::E),
+                        X86ISelOperand::Block(target_block),
+                    ],
+                ),
+            );
+
+            // Track successor
+            self.func
+                .blocks
+                .entry(block)
+                .or_default()
+                .successors
+                .push(target_block);
+        }
+
+        // JMP default_block (fallthrough)
+        self.func.push_inst(
+            block,
+            X86ISelInst::new(
+                X86Opcode::Jmp,
+                vec![X86ISelOperand::Block(default)],
+            ),
+        );
+        self.func
+            .blocks
+            .entry(block)
+            .or_default()
+            .successors
+            .push(default);
+
         Ok(())
     }
 
@@ -1887,5 +2507,614 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Division
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_select_sdiv() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::I64);
+        define_vreg(&mut isel, Value(1), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Sdiv,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        // MOV RAX, lhs + MOV RDX, RAX + SAR RDX, 63 + IDIV rhs + MOV dst, RAX
+        assert_eq!(insts.len(), 5);
+        assert_eq!(insts[0].opcode, X86Opcode::MovRR); // MOV RAX, lhs
+        assert_eq!(insts[0].operands[0], X86ISelOperand::PReg(RAX));
+        assert_eq!(insts[1].opcode, X86Opcode::MovRR); // MOV RDX, RAX
+        assert_eq!(insts[1].operands[0], X86ISelOperand::PReg(RDX));
+        assert_eq!(insts[2].opcode, X86Opcode::SarRI); // SAR RDX, 63
+        assert_eq!(insts[3].opcode, X86Opcode::Idiv);  // IDIV rhs
+        assert_eq!(insts[4].opcode, X86Opcode::MovRR); // MOV dst, RAX
+        assert_eq!(insts[4].operands[1], X86ISelOperand::PReg(RAX));
+    }
+
+    #[test]
+    fn test_select_udiv() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::I64);
+        define_vreg(&mut isel, Value(1), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Udiv,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        // MOV RAX, lhs + XOR RDX, RDX + DIV rhs + MOV dst, RAX
+        assert_eq!(insts.len(), 4);
+        assert_eq!(insts[0].opcode, X86Opcode::MovRR); // MOV RAX, lhs
+        assert_eq!(insts[1].opcode, X86Opcode::XorRR); // XOR RDX, RDX
+        assert_eq!(insts[2].opcode, X86Opcode::Div);   // DIV rhs
+        assert_eq!(insts[3].opcode, X86Opcode::MovRR); // MOV dst, RAX
+        assert_eq!(insts[3].operands[1], X86ISelOperand::PReg(RAX));
+    }
+
+    #[test]
+    fn test_select_srem() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::I64);
+        define_vreg(&mut isel, Value(1), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Srem,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        // Remainder result is in RDX
+        let last = insts.last().unwrap();
+        assert_eq!(last.opcode, X86Opcode::MovRR);
+        assert_eq!(last.operands[1], X86ISelOperand::PReg(RDX));
+    }
+
+    #[test]
+    fn test_select_urem() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::I64);
+        define_vreg(&mut isel, Value(1), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Urem,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        // Remainder result is in RDX
+        let last = insts.last().unwrap();
+        assert_eq!(last.opcode, X86Opcode::MovRR);
+        assert_eq!(last.operands[1], X86ISelOperand::PReg(RDX));
+    }
+
+    // -----------------------------------------------------------------------
+    // Shifts
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_select_ishl_reg() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::I64);
+        define_vreg(&mut isel, Value(1), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Ishl,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        // MOV RCX, rhs + SHL dst, CL
+        assert_eq!(insts.len(), 2);
+        assert_eq!(insts[0].opcode, X86Opcode::MovRR);
+        assert_eq!(insts[0].operands[0], X86ISelOperand::PReg(RCX));
+        assert_eq!(insts[1].opcode, X86Opcode::ShlRR);
+    }
+
+    #[test]
+    fn test_select_ushr_reg() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::I64);
+        define_vreg(&mut isel, Value(1), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Ushr,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        assert_eq!(insts.len(), 2);
+        assert_eq!(insts[0].opcode, X86Opcode::MovRR);
+        assert_eq!(insts[1].opcode, X86Opcode::ShrRR);
+    }
+
+    #[test]
+    fn test_select_sshr_reg() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::I64);
+        define_vreg(&mut isel, Value(1), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Sshr,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        assert_eq!(insts.len(), 2);
+        assert_eq!(insts[0].opcode, X86Opcode::MovRR);
+        assert_eq!(insts[1].opcode, X86Opcode::SarRR);
+    }
+
+    #[test]
+    fn test_select_ishl_imm() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::I64);
+        // Define Value(1) as an immediate by defining it with Iconst
+        isel.define_value(Value(1), X86ISelOperand::Imm(4), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Ishl,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        // SHL dst, lhs, imm (single instruction for immediate shift)
+        assert_eq!(insts.len(), 1);
+        assert_eq!(insts[0].opcode, X86Opcode::ShlRI);
+    }
+
+    // -----------------------------------------------------------------------
+    // Floating-point arithmetic
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_select_fadd_f64() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F64);
+        define_vreg(&mut isel, Value(1), Type::F64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fadd,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, X86Opcode::Addsd);
+        assert_eq!(inst.operands.len(), 3); // dst, lhs, rhs
+    }
+
+    #[test]
+    fn test_select_fadd_f32() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F32);
+        define_vreg(&mut isel, Value(1), Type::F32);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fadd,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, X86Opcode::Addss);
+    }
+
+    #[test]
+    fn test_select_fsub_f64() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F64);
+        define_vreg(&mut isel, Value(1), Type::F64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fsub,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, X86Opcode::Subsd);
+    }
+
+    #[test]
+    fn test_select_fmul_f64() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F64);
+        define_vreg(&mut isel, Value(1), Type::F64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fmul,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, X86Opcode::Mulsd);
+    }
+
+    #[test]
+    fn test_select_fdiv_f32() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F32);
+        define_vreg(&mut isel, Value(1), Type::F32);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fdiv,
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, X86Opcode::Divss);
+    }
+
+    // -----------------------------------------------------------------------
+    // Floating-point unary
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_select_fneg_f64() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fneg,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        // MovsdRR (zero) + Subsd (0 - x)
+        assert_eq!(insts.len(), 2);
+        assert_eq!(insts[0].opcode, X86Opcode::MovsdRR);
+        assert_eq!(insts[1].opcode, X86Opcode::Subsd);
+    }
+
+    #[test]
+    fn test_select_fneg_f32() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F32);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fneg,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        assert_eq!(insts.len(), 2);
+        assert_eq!(insts[0].opcode, X86Opcode::MovssRR);
+        assert_eq!(insts[1].opcode, X86Opcode::Subss);
+    }
+
+    // -----------------------------------------------------------------------
+    // Floating-point comparison
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_select_fcmp_f64_eq() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F64);
+        define_vreg(&mut isel, Value(1), Type::F64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fcmp {
+                    cond: FloatCC::Equal,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        assert_eq!(insts.len(), 2);
+        assert_eq!(insts[0].opcode, X86Opcode::Ucomisd);
+        assert_eq!(insts[1].opcode, X86Opcode::MovRI);
+        assert!(
+            insts[1]
+                .operands
+                .iter()
+                .any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::E)))
+        );
+    }
+
+    #[test]
+    fn test_select_fcmp_f32_lt() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F32);
+        define_vreg(&mut isel, Value(1), Type::F32);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fcmp {
+                    cond: FloatCC::LessThan,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        assert_eq!(insts[0].opcode, X86Opcode::Ucomiss);
+        assert!(
+            insts[1]
+                .operands
+                .iter()
+                .any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::B)))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Floating-point conversions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_select_fcvt_to_int_f64() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtToInt { dst_ty: Type::I64 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, X86Opcode::Cvtsd2si);
+    }
+
+    #[test]
+    fn test_select_fcvt_to_int_f32() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F32);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtToInt { dst_ty: Type::I64 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, X86Opcode::Cvtss2si);
+    }
+
+    #[test]
+    fn test_select_fcvt_from_int() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FcvtFromInt { src_ty: Type::I64 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        // Default to F64 (Cvtsi2sd)
+        assert_eq!(inst.opcode, X86Opcode::Cvtsi2sd);
+    }
+
+    #[test]
+    fn test_select_fpext() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F32);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FPExt,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, X86Opcode::Cvtss2sd);
+    }
+
+    #[test]
+    fn test_select_fptrunc() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::FPTrunc,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, X86Opcode::Cvtsd2ss);
+    }
+
+    // -----------------------------------------------------------------------
+    // Switch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_select_switch() {
+        let (mut isel, entry) = make_empty_isel();
+        let b1 = Block(1);
+        let b2 = Block(2);
+        let b3 = Block(3); // default
+        isel.func.ensure_block(b1);
+        isel.func.ensure_block(b2);
+        isel.func.ensure_block(b3);
+        define_vreg(&mut isel, Value(0), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Switch {
+                    cases: vec![(1, b1), (2, b2)],
+                    default: b3,
+                },
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        // For 2 cases: CMP + Jcc + CMP + Jcc + JMP = 5 instructions
+        assert_eq!(insts.len(), 5);
+        assert_eq!(insts[0].opcode, X86Opcode::CmpRI);
+        assert_eq!(insts[1].opcode, X86Opcode::Jcc);
+        assert_eq!(insts[2].opcode, X86Opcode::CmpRI);
+        assert_eq!(insts[3].opcode, X86Opcode::Jcc);
+        assert_eq!(insts[4].opcode, X86Opcode::Jmp);
+
+        // Verify successors include all targets + default
+        let succs = &mfunc.blocks[&entry].successors;
+        assert!(succs.contains(&b1));
+        assert!(succs.contains(&b2));
+        assert!(succs.contains(&b3));
+    }
+
+    #[test]
+    fn test_select_switch_empty_cases() {
+        let (mut isel, entry) = make_empty_isel();
+        let default_block = Block(1);
+        isel.func.ensure_block(default_block);
+        define_vreg(&mut isel, Value(0), Type::I64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Switch {
+                    cases: vec![],
+                    default: default_block,
+                },
+                args: vec![Value(0)],
+                results: vec![],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        // Empty switch: just JMP default
+        assert_eq!(insts.len(), 1);
+        assert_eq!(insts[0].opcode, X86Opcode::Jmp);
+        assert_eq!(insts[0].operands[0], X86ISelOperand::Block(default_block));
     }
 }
