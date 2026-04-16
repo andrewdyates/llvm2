@@ -24,6 +24,7 @@ thiserror = { workspace = true }
 [dev-dependencies]
 tmir-types = { workspace = true }
 tmir-instrs = { workspace = true }
+serde_json = { workspace = true }
 
 [[bench]]
 name = "compile_bench"
