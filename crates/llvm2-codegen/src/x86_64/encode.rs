@@ -831,6 +831,22 @@ impl X86Encoder {
                 self.emit_modrm(ModRM::ext_reg(0, dst.hw_enc()));
                 self.emit_imm32(imm);
             }
+            // TEST r64, [base+disp]: REX.W + 85 /r (memory operand form)
+            X86Opcode::TestRM => {
+                let dst = self.require_dst(ops, opcode)?;
+                let base = ops.base.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands(format!("{:?}: missing base register", opcode))
+                })?;
+                let rex = RexPrefix {
+                    w: true,
+                    r: dst.hw_enc() >= 8,
+                    x: false,
+                    b: base.hw_enc() >= 8,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0x85);
+                self.emit_mem_operand(dst.hw_enc(), base, ops.disp);
+            }
 
             // =================================================================
             // IMUL
@@ -856,6 +872,23 @@ impl X86Encoder {
                 self.emit_byte(0x69);
                 self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
                 self.emit_imm32(imm);
+            }
+            // IMUL r64, [base+disp]: REX.W + 0F AF /r (two-operand memory form)
+            X86Opcode::ImulRM => {
+                let dst = self.require_dst(ops, opcode)?;
+                let base = ops.base.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands(format!("{:?}: missing base register", opcode))
+                })?;
+                let rex = RexPrefix {
+                    w: true,
+                    r: dst.hw_enc() >= 8,
+                    x: false,
+                    b: base.hw_enc() >= 8,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0xAF);
+                self.emit_mem_operand(dst.hw_enc(), base, ops.disp);
             }
 
             // =================================================================
@@ -1039,6 +1072,23 @@ impl X86Encoder {
                 self.emit_byte(0xFF);
                 self.emit_modrm(ModRM::ext_reg(2, dst.hw_enc()));
             }
+            // CALL [base+disp]: FF /2 (indirect call through memory)
+            X86Opcode::CallM => {
+                let base = ops.base.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands(format!("{:?}: missing base register", opcode))
+                })?;
+                // No REX.W needed (default 64-bit in long mode),
+                // but need REX.B if the base register is R8-R15.
+                let rex = RexPrefix {
+                    w: false,
+                    r: false,
+                    x: false,
+                    b: base.hw_enc() >= 8,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0xFF);
+                self.emit_mem_operand(2, base, ops.disp);
+            }
             // JMP rel32: E9 cd
             X86Opcode::Jmp => {
                 self.emit_byte(0xE9);
@@ -1090,6 +1140,25 @@ impl X86Encoder {
                 self.emit_rex(rex);
                 self.emit_byte(0x8D);
                 self.emit_mem_operand(dst.hw_enc(), base, ops.disp);
+            }
+            // LEA r64, [base + index*scale + disp]: REX.W + 8D /r + SIB
+            X86Opcode::LeaSib => {
+                let dst = self.require_dst(ops, opcode)?;
+                let base = ops.base.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands(format!("{:?}: missing base register", opcode))
+                })?;
+                let index = ops.index.ok_or_else(|| {
+                    X86EncodeError::InvalidOperands(format!("{:?}: missing index register", opcode))
+                })?;
+                let rex = RexPrefix {
+                    w: true,
+                    r: dst.hw_enc() >= 8,
+                    x: index.hw_enc() >= 8,
+                    b: base.hw_enc() >= 8,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0x8D);
+                self.emit_sib_mem_operand(dst.hw_enc(), base, index, ops.scale, ops.disp);
             }
 
             // =================================================================
@@ -1174,6 +1243,21 @@ impl X86Encoder {
                 self.emit_rex(rex);
                 self.emit_byte(0x63);
                 self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
+            }
+            // MOVZX r64, r/m16: REX.W + 0F B7 /r (zero-extend word to qword)
+            X86Opcode::MovzxW => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_0f_rr64(0xB7, dst, src);
+            }
+            // MOVSX r64, r/m8: REX.W + 0F BE /r (sign-extend byte to qword)
+            X86Opcode::MovsxB => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_0f_rr64(0xBE, dst, src);
+            }
+            // MOVSX r64, r/m16: REX.W + 0F BF /r (sign-extend word to qword)
+            X86Opcode::MovsxW => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_0f_rr64(0xBF, dst, src);
             }
 
             // =================================================================
@@ -1503,6 +1587,7 @@ mod tests {
     use llvm2_ir::x86_64_regs::{
         R8, R9, R10, R11, R12, R13, R14, R15, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP,
         AL, CL, R8B,
+        AX, CX, R14W,
         XMM0, XMM1, XMM8, XMM15,
     };
 
@@ -3550,5 +3635,198 @@ mod tests {
 
         assert_eq!(bytes.len(), 20, "prologue/epilogue should be 20 bytes");
         assert_eq!(bytes, expected);
+    }
+
+    // -----------------------------------------------------------------------
+    // MovzxW tests (MOVZX r64, r/m16 -- 0F B7)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_movzxw_rax_cx() {
+        // MOVZX RAX, CX: REX.W(48) + 0F B7 + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::MovzxW, &X86InstOperands::rr(RAX, CX));
+        assert_eq!(bytes, vec![0x48, 0x0F, 0xB7, 0xC1]);
+    }
+
+    #[test]
+    fn test_movzxw_r8_ax() {
+        // MOVZX R8, AX: REX.WR(4C) + 0F B7 + ModRM(11 000 000)
+        let bytes = encode(X86Opcode::MovzxW, &X86InstOperands::rr(R8, AX));
+        assert_eq!(bytes, vec![0x4C, 0x0F, 0xB7, 0xC0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // MovsxB tests (MOVSX r64, r/m8 -- 0F BE)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_movsxb_rax_cl() {
+        // MOVSX RAX, CL: REX.W(48) + 0F BE + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::MovsxB, &X86InstOperands::rr(RAX, CL));
+        assert_eq!(bytes, vec![0x48, 0x0F, 0xBE, 0xC1]);
+    }
+
+    #[test]
+    fn test_movsxb_r8_al() {
+        // MOVSX R8, AL: REX.WR(4C) + 0F BE + ModRM(11 000 000)
+        let bytes = encode(X86Opcode::MovsxB, &X86InstOperands::rr(R8, AL));
+        assert_eq!(bytes, vec![0x4C, 0x0F, 0xBE, 0xC0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // MovsxW tests (MOVSX r64, r/m16 -- 0F BF)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_movsxw_rax_cx() {
+        // MOVSX RAX, CX: REX.W(48) + 0F BF + ModRM(11 000 001)
+        let bytes = encode(X86Opcode::MovsxW, &X86InstOperands::rr(RAX, CX));
+        assert_eq!(bytes, vec![0x48, 0x0F, 0xBF, 0xC1]);
+    }
+
+    #[test]
+    fn test_movsxw_r15_r14w() {
+        // MOVSX R15, R14W: REX.WRB(4D) + 0F BF + ModRM(11 111 110)
+        let bytes = encode(X86Opcode::MovsxW, &X86InstOperands::rr(R15, R14W));
+        assert_eq!(bytes, vec![0x4D, 0x0F, 0xBF, 0xFE]);
+    }
+
+    // -----------------------------------------------------------------------
+    // LeaSib tests (LEA r64, [base + index*scale + disp])
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lea_sib_rax_rbx_rcx_scale4() {
+        // LEA RAX, [RBX + RCX*4]: REX.W(48) + 8D + ModRM(00 000 100) + SIB(10 001 011)
+        let bytes = encode(
+            X86Opcode::LeaSib,
+            &X86InstOperands::rm_sib(RAX, RBX, RCX, 4, 0),
+        );
+        assert_eq!(bytes, vec![0x48, 0x8D, 0x04, 0x8B]);
+    }
+
+    #[test]
+    fn test_lea_sib_rax_rbx_rcx_scale4_disp8() {
+        // LEA RAX, [RBX + RCX*4 + 16]: REX.W(48) + 8D + ModRM(01 000 100) + SIB(10 001 011) + disp8(10)
+        let bytes = encode(
+            X86Opcode::LeaSib,
+            &X86InstOperands::rm_sib(RAX, RBX, RCX, 4, 16),
+        );
+        assert_eq!(bytes, vec![0x48, 0x8D, 0x44, 0x8B, 0x10]);
+    }
+
+    #[test]
+    fn test_lea_sib_r8_r12_r9_scale2() {
+        // LEA R8, [R12 + R9*2]: REX.WRXB(4F) + 8D + ModRM(00 000 100) + SIB(01 001 100)
+        let bytes = encode(
+            X86Opcode::LeaSib,
+            &X86InstOperands::rm_sib(R8, R12, R9, 2, 0),
+        );
+        assert_eq!(bytes, vec![0x4F, 0x8D, 0x04, 0x4C]);
+    }
+
+    // -----------------------------------------------------------------------
+    // ImulRM tests (IMUL r64, [base+disp] -- 0F AF)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_imul_rax_mem_rbx() {
+        // IMUL RAX, [RBX]: REX.W(48) + 0F AF + ModRM(00 000 011)
+        let bytes = encode(X86Opcode::ImulRM, &X86InstOperands::rm(RAX, RBX, 0));
+        assert_eq!(bytes, vec![0x48, 0x0F, 0xAF, 0x03]);
+    }
+
+    #[test]
+    fn test_imul_rax_mem_rbx_disp8() {
+        // IMUL RAX, [RBX+16]: REX.W(48) + 0F AF + ModRM(01 000 011) + disp8(10)
+        let bytes = encode(X86Opcode::ImulRM, &X86InstOperands::rm(RAX, RBX, 16));
+        assert_eq!(bytes, vec![0x48, 0x0F, 0xAF, 0x43, 0x10]);
+    }
+
+    #[test]
+    fn test_imul_r8_mem_r13() {
+        // IMUL R8, [R13+0]: REX.WRB(4D) + 0F AF + ModRM(01 000 101) + disp8(00)
+        // R13 base (hw_enc & 7 == 5) with disp=0 requires disp8=0
+        let bytes = encode(X86Opcode::ImulRM, &X86InstOperands::rm(R8, R13, 0));
+        assert_eq!(bytes, vec![0x4D, 0x0F, 0xAF, 0x45, 0x00]);
+    }
+
+    // -----------------------------------------------------------------------
+    // TestRM tests (TEST r64, [base+disp] -- 85)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_test_rax_mem_rbx() {
+        // TEST RAX, [RBX]: REX.W(48) + 85 + ModRM(00 000 011)
+        let bytes = encode(X86Opcode::TestRM, &X86InstOperands::rm(RAX, RBX, 0));
+        assert_eq!(bytes, vec![0x48, 0x85, 0x03]);
+    }
+
+    #[test]
+    fn test_test_rcx_mem_rdx_disp8() {
+        // TEST RCX, [RDX+16]: REX.W(48) + 85 + ModRM(01 001 010) + disp8(10)
+        let bytes = encode(X86Opcode::TestRM, &X86InstOperands::rm(RCX, RDX, 16));
+        assert_eq!(bytes, vec![0x48, 0x85, 0x4A, 0x10]);
+    }
+
+    // -----------------------------------------------------------------------
+    // CallM tests (CALL [base+disp] -- FF /2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_call_mem_rax() {
+        // CALL [RAX]: FF + ModRM(00 010 000) = 0x10
+        let bytes = encode(
+            X86Opcode::CallM,
+            &X86InstOperands {
+                base: Some(RAX),
+                disp: 0,
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0xFF, 0x10]);
+    }
+
+    #[test]
+    fn test_call_mem_rbx_disp8() {
+        // CALL [RBX+8]: FF + ModRM(01 010 011) + disp8(08)
+        let bytes = encode(
+            X86Opcode::CallM,
+            &X86InstOperands {
+                base: Some(RBX),
+                disp: 8,
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0xFF, 0x53, 0x08]);
+    }
+
+    #[test]
+    fn test_call_mem_r15() {
+        // CALL [R15]: REX.B(41) + FF + ModRM(00 010 111)
+        let bytes = encode(
+            X86Opcode::CallM,
+            &X86InstOperands {
+                base: Some(R15),
+                disp: 0,
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0x41, 0xFF, 0x17]);
+    }
+
+    #[test]
+    fn test_call_mem_rsp() {
+        // CALL [RSP]: FF + ModRM(00 010 100) + SIB(00 100 100)
+        // RSP base requires SIB byte
+        let bytes = encode(
+            X86Opcode::CallM,
+            &X86InstOperands {
+                base: Some(RSP),
+                disp: 0,
+                ..X86InstOperands::none()
+            },
+        );
+        assert_eq!(bytes, vec![0xFF, 0x14, 0x24]);
     }
 }
