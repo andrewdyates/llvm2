@@ -36,7 +36,7 @@
 use std::collections::HashMap;
 
 use crate::abi::{gpr, AppleAArch64ABI, ArgLocation, PReg};
-use crate::function::Signature;
+use crate::function::{Signature, StackSlotInfo};
 use crate::instructions::{AtomicOrdering, AtomicRmwOp, Block, FloatCC, Instruction, IntCC, Opcode, Value};
 use crate::types::Type;
 use thiserror::Error;
@@ -310,6 +310,11 @@ pub struct ISelFunction {
     pub blocks: HashMap<Block, ISelBlock>,
     pub block_order: Vec<Block>,
     pub next_vreg: u32,
+    /// Stack slot metadata from the adapter.
+    ///
+    /// Indexed by slot number (matching `ISelOperand::StackSlot(n)`).
+    /// Propagated to `MachFunction::stack_slots` via `to_ir_func()`.
+    pub stack_slots: Vec<StackSlotInfo>,
 }
 
 /// Backward-compatible alias (deprecated). Use `ISelFunction` directly.
@@ -323,6 +328,7 @@ impl ISelFunction {
             blocks: HashMap::new(),
             block_order: Vec::new(),
             next_vreg: 0,
+            stack_slots: Vec::new(),
         }
     }
 
@@ -412,6 +418,14 @@ impl ISelFunction {
             ir_func.blocks[i].preds = preds;
         }
 
+        // Propagate stack slot metadata from the ISel function to the IR function.
+        for slot_info in &self.stack_slots {
+            ir_func.alloc_stack_slot(llvm2_ir::function::StackSlot::new(
+                slot_info.size,
+                slot_info.align,
+            ));
+        }
+
         ir_func
     }
 }
@@ -482,6 +496,14 @@ impl InstructionSelector {
             value_map: HashMap::new(),
             value_types: HashMap::new(),
         }
+    }
+
+    /// Set the stack slot metadata from the LIR function.
+    ///
+    /// This must be called before `finalize()` so that `to_ir_func()` can
+    /// propagate the slots to the canonical `MachFunction::stack_slots`.
+    pub fn set_stack_slots(&mut self, slots: Vec<StackSlotInfo>) {
+        self.func.stack_slots = slots;
     }
 
     /// Require that `inst` has at least `n` arguments.

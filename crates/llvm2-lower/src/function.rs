@@ -17,6 +17,18 @@ pub struct BasicBlock {
     pub instructions: Vec<Instruction>,
 }
 
+/// Stack slot metadata for the LIR.
+///
+/// Tracks size and alignment for each stack allocation emitted by the adapter.
+/// Propagated through ISel to the canonical `MachFunction::stack_slots`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackSlotInfo {
+    /// Size in bytes.
+    pub size: u32,
+    /// Alignment in bytes (must be power of 2).
+    pub align: u32,
+}
+
 /// A function in the LIR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Function {
@@ -24,6 +36,12 @@ pub struct Function {
     pub signature: Signature,
     pub blocks: HashMap<Block, BasicBlock>,
     pub entry_block: Block,
+    /// Stack slots allocated during adapter translation.
+    ///
+    /// Each entry corresponds to a `StackAddr { slot: N }` instruction,
+    /// where N is the index into this Vec. Populated by the adapter to
+    /// ensure each Alloc/Struct gets a unique slot index.
+    pub stack_slots: Vec<StackSlotInfo>,
 }
 
 /// LIR function signature (input-level, uses `llvm2_lower::Type`).
@@ -46,6 +64,7 @@ impl Function {
             signature,
             blocks: HashMap::new(),
             entry_block: Block(0),
+            stack_slots: Vec::new(),
         }
     }
 }
