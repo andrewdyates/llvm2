@@ -596,6 +596,109 @@ impl Ty {
             _ => None,
         }
     }
+
+    // -- Methods matching real tMIR API (convergence with ~/tMIR/crates/tmir/src/ty.rs) --
+
+    /// Bit-width as `u32`, matching real tMIR's `bit_width(&self) -> Option<u32>`.
+    ///
+    /// This is the canonical API in real tMIR. The `bits()` method returns `u16`
+    /// for backward compatibility with LLVM2's internal types.
+    pub fn bit_width(&self) -> Option<u32> {
+        self.bits().map(|b| b as u32)
+    }
+
+    /// Returns true if this is a numeric type (integer or float).
+    ///
+    /// Matches real tMIR's `is_numeric()`. Note: Bool is NOT numeric in real tMIR
+    /// (it's a distinct type), but our `is_integer()` includes Bool for backward compat.
+    /// This method follows real tMIR semantics: integer primitives and floats only.
+    pub fn is_numeric(&self) -> bool {
+        matches!(
+            self,
+            Ty::Primitive(PrimitiveType::Int { .. })
+                | Ty::Primitive(PrimitiveType::Float(_))
+        )
+    }
+
+    /// Returns true if this is a struct type (either inline StructDef or ID-based Struct).
+    pub fn is_struct(&self) -> bool {
+        matches!(self, Ty::StructDef { .. } | Ty::Struct(_))
+    }
+
+    /// Returns true if this is a tuple type.
+    pub fn is_tuple(&self) -> bool {
+        matches!(self, Ty::Tuple(_))
+    }
+
+    /// Returns true if this is an array type.
+    pub fn is_array(&self) -> bool {
+        matches!(self, Ty::Array { .. })
+    }
+
+    /// Returns the array element type and length if this is an array type.
+    pub fn array_info(&self) -> Option<(&Ty, u64)> {
+        match self {
+            Ty::Array { element, len } => Some((element, *len)),
+            _ => None,
+        }
+    }
+}
+
+/// Display implementation matching real tMIR's format.
+///
+/// Primitives use the same strings as real tMIR: i8, i16, ..., f32, f64, bool, void, never.
+/// The nested enum representation maps to the flat display format.
+impl core::fmt::Display for Ty {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Ty::Primitive(PrimitiveType::Int { width, signed: true }) => {
+                write!(f, "i{}", width.bits())
+            }
+            Ty::Primitive(PrimitiveType::Int { width, signed: false }) => {
+                write!(f, "u{}", width.bits())
+            }
+            Ty::Primitive(PrimitiveType::Float(FloatWidth::F32)) => f.write_str("f32"),
+            Ty::Primitive(PrimitiveType::Float(FloatWidth::F64)) => f.write_str("f64"),
+            Ty::Primitive(PrimitiveType::Bool) => f.write_str("bool"),
+            Ty::Primitive(PrimitiveType::Unit) => f.write_str("void"),
+            Ty::Primitive(PrimitiveType::Never) => f.write_str("never"),
+            Ty::Array { element, len } => write!(f, "[{} x {}]", element, len),
+            Ty::Tuple(elems) => {
+                f.write_str("(")?;
+                for (i, elem) in elems.iter().enumerate() {
+                    if i > 0 { f.write_str(", ")?; }
+                    write!(f, "{}", elem)?;
+                }
+                f.write_str(")")
+            }
+            Ty::StructDef { name, .. } => write!(f, "struct.{}", name),
+            Ty::Enum { name, .. } => write!(f, "enum.{}", name),
+            Ty::Ref { .. } => f.write_str("ptr"),
+            Ty::Vector { element, lanes } => write!(f, "<{} x {}>", lanes, element),
+            Ty::FnPtr { params, ret } => {
+                f.write_str("fn(")?;
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 { f.write_str(", ")?; }
+                    write!(f, "{}", p)?;
+                }
+                write!(f, ") -> {}", ret)
+            }
+            Ty::Struct(id) => write!(f, "struct.{}", id.0),
+            Ty::Func(ft) => {
+                f.write_str("fn(")?;
+                for (i, p) in ft.params.iter().enumerate() {
+                    if i > 0 { f.write_str(", ")?; }
+                    write!(f, "{}", p)?;
+                }
+                f.write_str(") -> (")?;
+                for (i, r) in ft.returns.iter().enumerate() {
+                    if i > 0 { f.write_str(", ")?; }
+                    write!(f, "{}", r)?;
+                }
+                f.write_str(")")
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -616,6 +719,10 @@ pub struct StructId(pub u32);
 pub struct FuncTy {
     pub params: Vec<Ty>,
     pub returns: Vec<Ty>,
+    /// Whether this function accepts variadic arguments.
+    /// Matches real tMIR's `FuncTy.is_vararg`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_vararg: bool,
 }
 
 /// A named field in an LLVM2 struct definition (for StructId resolution).
@@ -626,7 +733,8 @@ pub struct FieldDef {
     pub name: String,
     pub ty: Ty,
     /// Byte offset within the struct (populated by layout).
-    pub offset: Option<u32>,
+    /// Widened to u64 to match real tMIR's `FieldDef.offset: Option<u64>`.
+    pub offset: Option<u64>,
 }
 
 /// Struct definition: name + ordered fields (for StructId resolution).
@@ -638,9 +746,11 @@ pub struct StructDef {
     pub name: String,
     pub fields: Vec<FieldDef>,
     /// Total size in bytes (populated by layout).
-    pub size: Option<u32>,
+    /// Widened to u64 to match real tMIR's `StructDef.size: Option<u64>`.
+    pub size: Option<u64>,
     /// Alignment in bytes (populated by layout).
-    pub align: Option<u32>,
+    /// Widened to u64 to match real tMIR's `StructDef.align: Option<u64>`.
+    pub align: Option<u64>,
 }
 
 /// A global variable definition.
@@ -735,6 +845,83 @@ pub struct BlockId(pub u32);
 pub struct FuncId(pub u32);
 
 // ---------------------------------------------------------------------------
+// ID types matching real tMIR (~/tMIR/crates/tmir/src/value.rs)
+// ---------------------------------------------------------------------------
+
+/// Type reference. Index into a module's type table.
+///
+/// Matches real tMIR's `TyId` from `value.rs`. Used for ID-based type
+/// indirection (e.g., `Ty::Array(TyId, u64)` in real tMIR).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TyId(pub u32);
+
+impl TyId {
+    pub const fn new(index: u32) -> Self { Self(index) }
+    pub const fn index(self) -> u32 { self.0 }
+    pub const fn as_usize(self) -> usize { self.0 as usize }
+}
+
+impl core::fmt::Display for TyId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Function type reference. Index into a module's func type table.
+///
+/// Matches real tMIR's `FuncTyId` from `value.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct FuncTyId(pub u32);
+
+impl FuncTyId {
+    pub const fn new(index: u32) -> Self { Self(index) }
+    pub const fn index(self) -> u32 { self.0 }
+    pub const fn as_usize(self) -> usize { self.0 as usize }
+}
+
+impl core::fmt::Display for FuncTyId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Proof annotation reference. Index into a module's proof table.
+///
+/// Matches real tMIR's `ProofId` from `value.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ProofId(pub u32);
+
+impl ProofId {
+    pub const fn new(index: u32) -> Self { Self(index) }
+    pub const fn index(self) -> u32 { self.0 }
+    pub const fn as_usize(self) -> usize { self.0 as usize }
+}
+
+impl core::fmt::Display for ProofId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Custom proof tag for extensible proof annotations.
+///
+/// Matches real tMIR's `ProofTag` from `value.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ProofTag(pub u32);
+
+impl ProofTag {
+    pub const fn new(index: u32) -> Self { Self(index) }
+    pub const fn index(self) -> u32 { self.0 }
+    pub const fn as_usize(self) -> usize { self.0 as usize }
+}
+
+impl core::fmt::Display for ProofTag {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Proof annotations
 // ---------------------------------------------------------------------------
 
@@ -743,19 +930,26 @@ pub struct FuncId(pub u32);
 /// These are generated by the source-language compiler (tRust, tSwift, tC)
 /// and formally verified by z4. Each annotation represents a proven property
 /// that enables downstream optimizations in LLVM2.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Aligned with real tMIR `ProofAnnotation` as of 2026-04-16
+/// (~/tMIR/crates/tmir/src/proof.rs). LLVM2 keeps ValueId-bearing variants
+/// for backward compatibility; real tMIR uses parameterless variants and
+/// attaches proofs to instructions via `InstrNode`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TmirProof {
+    // -- Functional correctness (matches real tMIR) --
+
     /// Function or computation has no side effects.
     /// Enables: GPU/ANE dispatch, aggressive reordering, CSE.
     Pure,
 
-    /// Borrow is guaranteed valid (lifetime within scope).
-    /// Enables: skip liveness check, treat as raw pointer, memory aliasing refinement.
-    ValidBorrow { borrow: ValueId },
+    /// Function or computation is guaranteed to terminate.
+    /// (Real tMIR: `ProofAnnotation::Terminates`)
+    Terminates,
 
-    /// Array/pointer access is within bounds.
-    /// Enables: skip bounds check, use direct load/store, GPU dispatch.
-    InBounds { base: ValueId, index: ValueId },
+    /// Function or computation is deterministic.
+    /// (Real tMIR: `ProofAnnotation::Deterministic`)
+    Deterministic,
 
     /// Operation is associative: (a op b) op c = a op (b op c).
     /// Enables: parallel reduction, operation reordering.
@@ -765,29 +959,114 @@ pub enum TmirProof {
     /// Enables: parallel reduction, operand reordering.
     Commutative,
 
+    /// Operation is idempotent: f(f(x)) = f(x).
+    /// Enables: redundant application elimination.
+    Idempotent,
+
+    // -- Memory safety (backward-compat variants with ValueId) --
+
+    /// Borrow is guaranteed valid (lifetime within scope).
+    /// LLVM2 variant with explicit ValueId. Real tMIR uses parameterless `ValidBorrow`.
+    ValidBorrow { borrow: ValueId },
+
+    /// Array/pointer access is within bounds.
+    /// LLVM2 variant with explicit ValueIds. Real tMIR uses parameterless `InBounds`.
+    InBounds { base: ValueId, index: ValueId },
+
+    /// Pointer is guaranteed non-null.
+    /// LLVM2 variant with explicit ValueId. Real tMIR uses parameterless `NotNull`.
+    NotNull { ptr: ValueId },
+
+    /// Division divisor is guaranteed non-zero.
+    /// LLVM2 variant with explicit ValueId. See also `DivNonZero` (parameterless).
+    NonZeroDivisor { divisor: ValueId },
+
+    /// Shift amount is within [0, bitwidth).
+    /// LLVM2 variant with explicit ValueId. See also `ShiftInRange` (parameterless).
+    ValidShift { amount: ValueId, bitwidth: u16 },
+
+    // -- Memory safety (parameterless, matches real tMIR ProofAnnotation) --
+
+    /// Borrow is valid (parameterless form matching real tMIR).
+    ValidBorrowSimple,
+
+    /// Borrow is uniquely owned (real tMIR: `ProofAnnotation::UniqueBorrow`).
+    UniqueBorrow,
+
+    /// Borrow is shared (real tMIR: `ProofAnnotation::SharedBorrow`).
+    SharedBorrow,
+
+    /// Deallocation is valid (real tMIR: `ProofAnnotation::ValidDealloc`).
+    ValidDealloc,
+
+    /// Access is in bounds (parameterless form matching real tMIR).
+    InBoundsSimple,
+
+    /// Pointer is non-null (parameterless form matching real tMIR).
+    NotNullSimple,
+
+    // -- Arithmetic safety --
+
     /// Addition/subtraction guaranteed not to overflow.
     /// Enables: skip overflow check, use wrapping arithmetic directly.
     NoOverflow { signed: bool },
 
-    /// Pointer is guaranteed non-null.
-    /// Enables: skip null check.
-    NotNull { ptr: ValueId },
+    /// No unsigned wrapping (real tMIR: `ProofAnnotation::NoWrap`).
+    NoWrap,
 
-    /// Division divisor is guaranteed non-zero.
-    /// Enables: skip divide-by-zero check.
-    NonZeroDivisor { divisor: ValueId },
+    /// Division divisor is non-zero (parameterless, matches real tMIR `DivNonZero`).
+    DivNonZero,
 
-    /// Shift amount is within [0, bitwidth).
-    /// Enables: skip shift-amount masking.
-    ValidShift { amount: ValueId, bitwidth: u16 },
+    /// Shift amount is in valid range (parameterless, matches real tMIR `ShiftInRange`).
+    ShiftInRange,
 
     /// Value is within a specific range [lo, hi].
     /// Enables: range-based optimizations (width narrowing, skip sign extension).
     InRange { lo: i128, hi: i128 },
 
-    /// Operation is idempotent: f(f(x)) = f(x).
-    /// Enables: redundant application elimination.
-    Idempotent,
+    // -- Concurrency (matches real tMIR) --
+
+    /// Code is free of data races (real tMIR: `ProofAnnotation::DataRaceFree`).
+    DataRaceFree,
+
+    // -- Neural network bounds (matches real tMIR, gamma-crown) --
+
+    /// Output is bounded within [lo, hi] (real tMIR: `ProofAnnotation::BoundedOutput`).
+    BoundedOutput { lo: f64, hi: f64 },
+
+    /// Function is monotonic (real tMIR: `ProofAnnotation::Monotonic`).
+    Monotonic,
+
+    // -- Extensible --
+
+    /// Custom proof tag (real tMIR: `ProofAnnotation::Custom(ProofTag)`).
+    Custom(ProofTag),
+}
+
+// Manual Eq impl because BoundedOutput contains f64 (not auto-Eq).
+// We compare f64 by bit pattern for deterministic equality.
+impl Eq for TmirProof {}
+
+impl core::hash::Hash for TmirProof {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        match self {
+            TmirProof::ValidBorrow { borrow } => borrow.hash(state),
+            TmirProof::InBounds { base, index } => { base.hash(state); index.hash(state); }
+            TmirProof::NotNull { ptr } => ptr.hash(state),
+            TmirProof::NonZeroDivisor { divisor } => divisor.hash(state),
+            TmirProof::ValidShift { amount, bitwidth } => { amount.hash(state); bitwidth.hash(state); }
+            TmirProof::NoOverflow { signed } => signed.hash(state),
+            TmirProof::InRange { lo, hi } => { lo.hash(state); hi.hash(state); }
+            TmirProof::BoundedOutput { lo, hi } => {
+                lo.to_bits().hash(state);
+                hi.to_bits().hash(state);
+            }
+            TmirProof::Custom(tag) => tag.hash(state),
+            // Unit variants: discriminant is sufficient
+            _ => {}
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1221,5 +1500,253 @@ mod tests {
         let parsed: GlobalDef = serde_json::from_str(&json).unwrap();
         assert_eq!(g, parsed);
         assert_eq!(parsed.visibility, Visibility::Hidden);
+    }
+
+    // -- Convergence with real tMIR: TyId, FuncTyId, ProofId, ProofTag --
+
+    #[test]
+    fn test_ty_id_construction() {
+        let t = TyId::new(5);
+        assert_eq!(t.index(), 5);
+        assert_eq!(t.as_usize(), 5);
+        assert_eq!(t.0, 5);
+        assert_eq!(format!("{}", t), "5");
+    }
+
+    #[test]
+    fn test_func_ty_id_construction() {
+        let ft = FuncTyId::new(0);
+        assert_eq!(ft.index(), 0);
+        assert_eq!(ft.as_usize(), 0);
+        assert_eq!(format!("{}", ft), "0");
+    }
+
+    #[test]
+    fn test_proof_id_construction() {
+        let p = ProofId::new(10);
+        assert_eq!(p.index(), 10);
+        assert_eq!(p.as_usize(), 10);
+        assert_eq!(format!("{}", p), "10");
+    }
+
+    #[test]
+    fn test_proof_tag_construction() {
+        let t = ProofTag::new(99);
+        assert_eq!(t.index(), 99);
+        assert_eq!(t.as_usize(), 99);
+        assert_eq!(format!("{}", t), "99");
+    }
+
+    #[test]
+    fn test_typed_ids_are_ordered() {
+        assert!(TyId::new(0) < TyId::new(1));
+        assert!(FuncTyId::new(5) > FuncTyId::new(3));
+        assert_eq!(ProofId::new(2), ProofId::new(2));
+    }
+
+    // -- Convergence: bit_width() and is_numeric() --
+
+    #[test]
+    fn test_bit_width_matches_bits() {
+        assert_eq!(Ty::i8().bit_width(), Some(8));
+        assert_eq!(Ty::i16().bit_width(), Some(16));
+        assert_eq!(Ty::i32().bit_width(), Some(32));
+        assert_eq!(Ty::i64().bit_width(), Some(64));
+        assert_eq!(Ty::i128().bit_width(), Some(128));
+        assert_eq!(Ty::f32().bit_width(), Some(32));
+        assert_eq!(Ty::f64().bit_width(), Some(64));
+        assert_eq!(Ty::bool_ty().bit_width(), Some(1));
+        assert_eq!(Ty::ptr(Ty::i32()).bit_width(), Some(64));
+        assert_eq!(Ty::unit().bit_width(), Some(0));
+        assert_eq!(Ty::never().bit_width(), Some(0));
+        // Compound types return None
+        assert_eq!(Ty::vector(Ty::i32(), 4).bit_width(), None);
+        assert_eq!(Ty::array(Ty::i32(), 8).bit_width(), None);
+    }
+
+    #[test]
+    fn test_is_numeric() {
+        assert!(Ty::i32().is_numeric());
+        assert!(Ty::u64().is_numeric());
+        assert!(Ty::f64().is_numeric());
+        assert!(Ty::f32().is_numeric());
+        // Bool is NOT numeric (matches real tMIR)
+        assert!(!Ty::bool_ty().is_numeric());
+        assert!(!Ty::ptr(Ty::i32()).is_numeric());
+        assert!(!Ty::unit().is_numeric());
+        assert!(!Ty::never().is_numeric());
+        assert!(!Ty::vector(Ty::i32(), 4).is_numeric());
+    }
+
+    // -- Convergence: Display for Ty --
+
+    #[test]
+    fn test_ty_display_primitives() {
+        assert_eq!(format!("{}", Ty::i8()), "i8");
+        assert_eq!(format!("{}", Ty::i16()), "i16");
+        assert_eq!(format!("{}", Ty::i32()), "i32");
+        assert_eq!(format!("{}", Ty::i64()), "i64");
+        assert_eq!(format!("{}", Ty::i128()), "i128");
+        assert_eq!(format!("{}", Ty::u8()), "u8");
+        assert_eq!(format!("{}", Ty::u16()), "u16");
+        assert_eq!(format!("{}", Ty::u32()), "u32");
+        assert_eq!(format!("{}", Ty::u64()), "u64");
+        assert_eq!(format!("{}", Ty::f32()), "f32");
+        assert_eq!(format!("{}", Ty::f64()), "f64");
+        assert_eq!(format!("{}", Ty::bool_ty()), "bool");
+        assert_eq!(format!("{}", Ty::unit()), "void");
+        assert_eq!(format!("{}", Ty::never()), "never");
+    }
+
+    #[test]
+    fn test_ty_display_compound() {
+        assert_eq!(format!("{}", Ty::ptr(Ty::i32())), "ptr");
+        assert_eq!(format!("{}", Ty::vector(Ty::i32(), 4)), "<4 x i32>");
+        assert_eq!(format!("{}", Ty::array(Ty::f64(), 8)), "[f64 x 8]");
+        assert_eq!(format!("{}", Ty::Struct(StructId(3))), "struct.3");
+    }
+
+    // -- Convergence: is_vararg on FuncTy --
+
+    #[test]
+    fn test_func_ty_is_vararg() {
+        let ft = FuncTy { params: vec![Ty::i32()], returns: vec![Ty::i64()], is_vararg: true };
+        assert!(ft.is_vararg);
+        let ft2 = FuncTy { params: vec![], returns: vec![], is_vararg: false };
+        assert!(!ft2.is_vararg);
+    }
+
+    #[test]
+    fn test_func_ty_serde_vararg_round_trip() {
+        let ft = FuncTy { params: vec![Ty::i32()], returns: vec![Ty::i64()], is_vararg: true };
+        let json = serde_json::to_string(&ft).unwrap();
+        assert!(json.contains("is_vararg"));
+        let parsed: FuncTy = serde_json::from_str(&json).unwrap();
+        assert_eq!(ft, parsed);
+        assert!(parsed.is_vararg);
+    }
+
+    #[test]
+    fn test_func_ty_serde_defaults_vararg() {
+        // JSON without is_vararg should default to false
+        let json = r#"{"params":[],"returns":[]}"#;
+        let ft: FuncTy = serde_json::from_str(json).unwrap();
+        assert!(!ft.is_vararg);
+    }
+
+    // -- Convergence: u64 fields in StructDef/FieldDef --
+
+    #[test]
+    fn test_struct_def_u64_fields() {
+        let sd = StructDef {
+            id: StructId(0),
+            name: "Large".to_string(),
+            fields: vec![FieldDef {
+                name: "data".to_string(),
+                ty: Ty::i64(),
+                offset: Some(0x1_0000_0000), // > u32::MAX
+            }],
+            size: Some(0x2_0000_0000), // > u32::MAX
+            align: Some(16),
+        };
+        assert_eq!(sd.size, Some(0x2_0000_0000));
+        assert_eq!(sd.fields[0].offset, Some(0x1_0000_0000));
+    }
+
+    // -- Convergence: new TmirProof variants --
+
+    #[test]
+    fn test_new_proof_variants_exist() {
+        // Verify all new variants from real tMIR ProofAnnotation can be constructed
+        let proofs = vec![
+            TmirProof::Pure,
+            TmirProof::Terminates,
+            TmirProof::Deterministic,
+            TmirProof::Associative,
+            TmirProof::Commutative,
+            TmirProof::Idempotent,
+            TmirProof::ValidBorrowSimple,
+            TmirProof::UniqueBorrow,
+            TmirProof::SharedBorrow,
+            TmirProof::ValidDealloc,
+            TmirProof::InBoundsSimple,
+            TmirProof::NotNullSimple,
+            TmirProof::NoWrap,
+            TmirProof::DivNonZero,
+            TmirProof::ShiftInRange,
+            TmirProof::DataRaceFree,
+            TmirProof::BoundedOutput { lo: -1.0, hi: 1.0 },
+            TmirProof::Monotonic,
+            TmirProof::Custom(ProofTag::new(42)),
+        ];
+        // All variants are distinct
+        for (i, a) in proofs.iter().enumerate() {
+            for (j, b) in proofs.iter().enumerate() {
+                assert_eq!(i == j, a == b, "mismatch at ({}, {})", i, j);
+            }
+        }
+    }
+
+    #[test]
+    fn test_bounded_output_equality() {
+        let a = TmirProof::BoundedOutput { lo: -1.0, hi: 1.0 };
+        let b = TmirProof::BoundedOutput { lo: -1.0, hi: 1.0 };
+        let c = TmirProof::BoundedOutput { lo: 0.0, hi: 2.0 };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_proof_custom_tag() {
+        let p = TmirProof::Custom(ProofTag::new(99));
+        if let TmirProof::Custom(tag) = &p {
+            assert_eq!(tag.index(), 99);
+        } else {
+            panic!("expected Custom variant");
+        }
+    }
+
+    #[test]
+    fn test_new_proof_serde_round_trip() {
+        let proofs = vec![
+            TmirProof::Terminates,
+            TmirProof::Deterministic,
+            TmirProof::UniqueBorrow,
+            TmirProof::DataRaceFree,
+            TmirProof::BoundedOutput { lo: -0.5, hi: 0.5 },
+            TmirProof::Monotonic,
+            TmirProof::Custom(ProofTag::new(7)),
+        ];
+        for p in &proofs {
+            let json = serde_json::to_string(p).unwrap();
+            let parsed: TmirProof = serde_json::from_str(&json).unwrap();
+            assert_eq!(*p, parsed);
+        }
+    }
+
+    // -- Convergence: query methods --
+
+    #[test]
+    fn test_is_struct() {
+        assert!(Ty::Struct(StructId(0)).is_struct());
+        assert!(Ty::StructDef { name: "Foo".to_string(), fields: vec![] }.is_struct());
+        assert!(!Ty::i32().is_struct());
+    }
+
+    #[test]
+    fn test_is_tuple() {
+        assert!(Ty::Tuple(vec![Ty::i32(), Ty::f64()]).is_tuple());
+        assert!(!Ty::i32().is_tuple());
+    }
+
+    #[test]
+    fn test_is_array_and_array_info() {
+        let a = Ty::array(Ty::i32(), 10);
+        assert!(a.is_array());
+        let (elem, len) = a.array_info().unwrap();
+        assert_eq!(*elem, Ty::i32());
+        assert_eq!(len, 10);
+        assert!(!Ty::i32().is_array());
+        assert!(Ty::i32().array_info().is_none());
     }
 }

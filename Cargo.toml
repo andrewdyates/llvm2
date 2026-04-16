@@ -16,6 +16,12 @@ members = [
     "crates/llvm2-cli",
     # stubs/ kept but removed from workspace — being replaced by real tmir
 ]
+exclude = [
+    "stubs/tmir-types",
+    "stubs/tmir-instrs",
+    "stubs/tmir-func",
+    "stubs/tmir-semantics",
+]
 
 [workspace.package]
 version = "0.1.0"
