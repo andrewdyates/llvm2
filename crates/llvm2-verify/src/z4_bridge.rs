@@ -1120,45 +1120,152 @@ pub fn verify_with_cli(obligation: &ProofObligation, config: &Z4Config) -> Z4Res
     }
 }
 
-/// Search for z4 or z3 binary. Prefers z4 (our verified solver), falls back to z3.
+/// Search for a z4 or z3 CLI binary, preferring z4.
 ///
 /// Search order:
-/// 1. z4 on PATH
-/// 2. z4 at well-known build locations (~/z4/target/{user/,}{release,debug}/z4)
-/// 3. z3 on PATH (legacy fallback)
+/// 1. `Z4_SOLVER_PATH` environment variable (explicit override)
+/// 2. `z4` on `PATH`
+/// 3. `z4` under `CARGO_TARGET_DIR` build directories
+/// 4. `z4` at well-known build locations under `~/z4/target/`
+/// 5. `/tmp/z4-build/release/z4` (common temp build location)
+/// 6. `z3` on `PATH` (legacy fallback)
 fn find_solver_binary() -> String {
-    // Prefer z4 (our verified SMT solver, z3-compatible CLI interface)
-    if let Ok(output) = std::process::Command::new("which").arg("z4").output()
-        && output.status.success() {
+    let resolve_on_path = |binary: &str| -> Option<String> {
+        if let Ok(output) = std::process::Command::new("which").arg(binary).output()
+            && output.status.success()
+        {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
+                return Some(path);
+            }
+        }
+        None
+    };
+
+    let existing_file = |candidate: &std::path::Path| -> Option<String> {
+        candidate
+            .is_file()
+            .then(|| candidate.to_string_lossy().to_string())
+    };
+
+    // 1. Z4_SOLVER_PATH explicit override
+    if let Ok(override_val) = std::env::var("Z4_SOLVER_PATH") {
+        let trimmed = override_val.trim().to_string();
+        if !trimmed.is_empty() {
+            if let Some(path) = existing_file(std::path::Path::new(&trimmed)) {
+                return path;
+            }
+            if let Some(path) = resolve_on_path(&trimmed) {
                 return path;
             }
         }
-    // Check well-known z4 build locations (includes cargo wrapper CARGO_TARGET_DIR variants)
+    }
+
+    // 2. z4 on PATH
+    if let Some(path) = resolve_on_path("z4") {
+        return path;
+    }
+
+    // 3. z4 under CARGO_TARGET_DIR
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        let target_dir = std::path::Path::new(&target_dir);
+        for subdir in ["user/release/z4", "user/debug/z4", "release/z4", "debug/z4"] {
+            if let Some(path) = existing_file(&target_dir.join(subdir)) {
+                return path;
+            }
+        }
+    }
+
+    // 4. Well-known build locations under ~/z4/target/
     if let Some(home) = std::env::var_os("HOME") {
         let home = std::path::Path::new(&home);
-        for subdir in &[
+        for subdir in [
             "target/user/release/z4",
             "target/user/debug/z4",
             "target/release/z4",
             "target/debug/z4",
         ] {
-            let candidate = home.join("z4").join(subdir);
-            if candidate.is_file() {
-                return candidate.to_string_lossy().to_string();
-            }
-        }
-    }
-    // Fallback: z3 binary (legacy, unverified)
-    if let Ok(output) = std::process::Command::new("which").arg("z3").output()
-        && output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
+            if let Some(path) = existing_file(&home.join("z4").join(subdir)) {
                 return path;
             }
         }
+    }
+
+    // 5. Common temp build location
+    if let Some(path) = existing_file(std::path::Path::new("/tmp/z4-build/release/z4")) {
+        return path;
+    }
+
+    // 6. Fallback: z3 on PATH (legacy, unverified)
+    if let Some(path) = resolve_on_path("z3") {
+        return path;
+    }
+
     String::new()
+}
+
+/// Detect the solver version string for a CLI binary.
+///
+/// Tries `--version` first, then `-version`, and returns the first
+/// non-empty version line on success. Returns `None` if the binary
+/// cannot be invoked or produces no recognizable version output.
+fn detect_solver_version(solver_path: &str) -> Option<String> {
+    let solver_path = solver_path.trim();
+    if solver_path.is_empty() {
+        return None;
+    }
+
+    for flag in ["--version", "-version"] {
+        let Ok(output) = std::process::Command::new(solver_path).arg(flag).output() else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let lines: Vec<&str> = stdout
+            .lines()
+            .chain(stderr.lines())
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        // Prefer a line containing "version", otherwise take the first line.
+        if let Some(version) = lines
+            .iter()
+            .find(|line| line.to_ascii_lowercase().contains("version"))
+            .copied()
+            .or_else(|| lines.first().copied())
+        {
+            return Some(version.to_string());
+        }
+    }
+
+    None
+}
+
+/// Return a human-readable description of the detected SMT solver binary.
+///
+/// The returned string includes the resolved solver path and version when
+/// available. If no CLI solver binary is found, returns `"no SMT solver found"`.
+pub fn solver_info() -> String {
+    let solver_path = find_solver_binary();
+    if solver_path.is_empty() {
+        return "no SMT solver found".to_string();
+    }
+
+    let solver_name = std::path::Path::new(&solver_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("solver");
+
+    if let Some(version) = detect_solver_version(&solver_path) {
+        format!("{} at {} ({})", solver_name, solver_path, version)
+    } else {
+        format!("{} at {} (version unavailable)", solver_name, solver_path)
+    }
 }
 
 /// Write SMT-LIB2 content to a temporary file with a unique name.
@@ -4930,5 +5037,80 @@ mod tests {
         let result = verify_with_cli(&obligation, &config);
         assert_eq!(result, Z4Result::Verified,
             "32-bit array store-load roundtrip should be verified");
+    }
+
+    // -----------------------------------------------------------------------
+    // find_solver_binary / detect_solver_version / solver_info tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_find_solver_binary_returns_valid_path() {
+        let solver = find_solver_binary();
+        if !solver.is_empty() {
+            assert!(
+                std::path::Path::new(&solver).is_file(),
+                "expected solver path to be a file, got: {}",
+                solver
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_solver_binary_prefers_z4_over_z3() {
+        let solver = find_solver_binary();
+        if let Ok(home) = std::env::var("HOME") {
+            let z4_path = format!("{}/z4/target/user/release/z4", home);
+            if std::path::Path::new(&z4_path).is_file() {
+                assert!(
+                    solver.contains("z4"),
+                    "expected z4 to be preferred when present at {}, got: {}",
+                    z4_path,
+                    solver
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_detect_solver_version_empty_path() {
+        assert!(detect_solver_version("").is_none());
+    }
+
+    #[test]
+    fn test_detect_solver_version_nonexistent() {
+        assert!(detect_solver_version("/nonexistent/binary/xyz").is_none());
+    }
+
+    #[test]
+    fn test_detect_solver_version_real_solver() {
+        if z3_available() {
+            let solver = find_solver_binary();
+            assert!(
+                detect_solver_version(&solver).is_some(),
+                "expected version detection to succeed for solver: {}",
+                solver
+            );
+        }
+    }
+
+    #[test]
+    fn test_solver_info_when_available() {
+        if z3_available() {
+            let info = solver_info();
+            assert!(info.contains(" at "), "expected solver_info to contain ' at ', got: {}", info);
+            assert_ne!(info, "no SMT solver found");
+        }
+    }
+
+    #[test]
+    fn test_solver_info_contains_solver_name() {
+        if z3_available() {
+            let info = solver_info();
+            assert!(
+                info.contains("z4") || info.contains("z3"),
+                "expected solver_info to mention z4 or z3, got: {}",
+                info
+            );
+        }
     }
 }
