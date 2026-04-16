@@ -155,6 +155,7 @@ fn proof_vectorize_add(arrangement: VectorArrangement, label: &str) -> ProofObli
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -194,6 +195,7 @@ fn proof_vectorize_sub(arrangement: VectorArrangement, label: &str) -> ProofObli
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -235,6 +237,7 @@ fn proof_vectorize_mul(arrangement: VectorArrangement, label: &str) -> ProofObli
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -270,6 +273,7 @@ fn proof_vectorize_neg(arrangement: VectorArrangement, label: &str) -> ProofObli
         inputs: vector_inputs("vn", arrangement),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -304,6 +308,7 @@ fn proof_vectorize_and(width: u32, label: &str) -> ProofObligation {
         inputs: bitwise_inputs(width),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -340,6 +345,7 @@ fn proof_vectorize_and_lanes(arrangement: VectorArrangement, label: &str) -> Pro
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -371,6 +377,7 @@ fn proof_vectorize_orr(width: u32, label: &str) -> ProofObligation {
         inputs: bitwise_inputs(width),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -404,6 +411,7 @@ fn proof_vectorize_orr_lanes(arrangement: VectorArrangement, label: &str) -> Pro
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -435,6 +443,7 @@ fn proof_vectorize_eor(width: u32, label: &str) -> ProofObligation {
         inputs: bitwise_inputs(width),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -468,6 +477,7 @@ fn proof_vectorize_eor_lanes(arrangement: VectorArrangement, label: &str) -> Pro
         inputs,
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -514,6 +524,7 @@ fn proof_vectorize_bic(width: u32, label: &str) -> ProofObligation {
         inputs: bitwise_inputs(width),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -552,6 +563,7 @@ fn proof_vectorize_shl(
         inputs: vector_inputs("vn", arrangement),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -588,6 +600,7 @@ fn proof_vectorize_ushr(
         inputs: vector_inputs("vn", arrangement),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -624,6 +637,7 @@ fn proof_vectorize_sshr(
         inputs: vector_inputs("vn", arrangement),
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -955,6 +969,7 @@ mod tests {
             inputs,
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1009,6 +1024,7 @@ mod tests {
                 vm_64.clone().eq_expr(SmtExpr::var("vm128_lo", 64)),
             ],
             fp_inputs: vec![],
+            category: None,
         };
 
         assert_valid(&obligation);

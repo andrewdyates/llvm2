@@ -619,6 +619,7 @@ impl SynthesisEngine {
             inputs: vec![("x".to_string(), self.width)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         (pattern_expr, replacement_expr, obligation)

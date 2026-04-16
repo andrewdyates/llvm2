@@ -179,6 +179,7 @@ pub fn proof_sched_raw_data_dependency() -> ProofObligation {
         ],
         preconditions: vec![ordering_ok],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -213,6 +214,7 @@ pub fn proof_sched_raw_data_dependency_8bit() -> ProofObligation {
         ],
         preconditions: vec![ordering_ok],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -264,6 +266,7 @@ pub fn proof_sched_waw_store_ordering() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -291,6 +294,7 @@ pub fn proof_sched_waw_store_ordering_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -347,6 +351,7 @@ pub fn proof_sched_terminator_last() -> ProofObligation {
         ],
         preconditions: vec![ordering_ok],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -379,6 +384,7 @@ pub fn proof_sched_terminator_last_8bit() -> ProofObligation {
         ],
         preconditions: vec![ordering_ok],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -432,6 +438,7 @@ pub fn proof_sched_side_effect_ordering() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -459,6 +466,7 @@ pub fn proof_sched_side_effect_ordering_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -513,6 +521,7 @@ pub fn proof_sched_independent_reorder() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -538,6 +547,7 @@ pub fn proof_sched_independent_reorder_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -595,6 +605,7 @@ pub fn proof_sched_topological_order() -> ProofObligation {
         ],
         preconditions: vec![ordering_ok],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -627,6 +638,7 @@ pub fn proof_sched_topological_order_8bit() -> ProofObligation {
         ],
         preconditions: vec![ordering_ok],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -685,6 +697,7 @@ pub fn proof_sched_load_load_independence() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -712,6 +725,7 @@ pub fn proof_sched_load_load_independence_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -777,6 +791,7 @@ pub fn proof_sched_war_anti_dependency() -> ProofObligation {
         ],
         preconditions: vec![ordering_ok],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -813,6 +828,7 @@ pub fn proof_sched_war_anti_dependency_8bit() -> ProofObligation {
         ],
         preconditions: vec![ordering_ok],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -872,6 +888,7 @@ pub fn proof_sched_register_pressure_gpr_bound() -> ProofObligation {
         ],
         preconditions: vec![pressure_ok],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -904,6 +921,7 @@ pub fn proof_sched_register_pressure_gpr_bound_8bit() -> ProofObligation {
         ],
         preconditions: vec![pressure_ok],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -942,6 +960,7 @@ pub fn proof_sched_register_pressure_fpr_bound() -> ProofObligation {
         ],
         preconditions: vec![pressure_ok],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -974,6 +993,7 @@ pub fn proof_sched_register_pressure_fpr_bound_8bit() -> ProofObligation {
         ],
         preconditions: vec![pressure_ok],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1036,6 +1056,7 @@ pub fn proof_sched_latency_ordering() -> ProofObligation {
         ],
         preconditions: vec![latency_guarantee],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1072,6 +1093,7 @@ pub fn proof_sched_latency_ordering_8bit() -> ProofObligation {
         ],
         preconditions: vec![latency_guarantee],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1122,6 +1144,7 @@ pub fn proof_sched_store_load_ordering() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1146,6 +1169,7 @@ pub fn proof_sched_store_load_ordering_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1194,6 +1218,7 @@ pub fn proof_sched_non_aliased_load_independence() -> ProofObligation {
         ],
         preconditions: vec![non_equal],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1228,6 +1253,7 @@ pub fn proof_sched_non_aliased_load_independence_8bit() -> ProofObligation {
         ],
         preconditions: vec![non_equal],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1293,6 +1319,7 @@ pub fn proof_sched_critical_path_optimality() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1325,6 +1352,7 @@ pub fn proof_sched_critical_path_optimality_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1654,6 +1682,7 @@ mod tests {
             ],
             preconditions: vec![], // no precondition -- should fail
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1692,6 +1721,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1728,6 +1758,7 @@ mod tests {
             ],
             preconditions: vec![], // no precondition -- should fail
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1808,6 +1839,7 @@ mod tests {
             ],
             preconditions: vec![], // no precondition -- should fail
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1846,6 +1878,7 @@ mod tests {
             ],
             preconditions: vec![], // no precondition -- should fail
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1881,6 +1914,7 @@ mod tests {
             ],
             preconditions: vec![], // no precondition -- should fail
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

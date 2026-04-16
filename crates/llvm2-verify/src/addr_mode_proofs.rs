@@ -137,6 +137,7 @@ pub fn proof_base_plus_imm_effective_addr() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -177,6 +178,7 @@ pub fn proof_base_plus_imm_combined_offset() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -212,6 +214,7 @@ pub fn proof_base_plus_reg_effective_addr() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -240,6 +243,7 @@ pub fn proof_base_plus_imm_effective_addr_w32() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -267,6 +271,7 @@ pub fn proof_base_plus_imm_combined_offset_w32() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -291,6 +296,7 @@ pub fn proof_base_plus_reg_effective_addr_w32() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -329,6 +335,7 @@ pub fn proof_scaled_offset_range_1b() -> ProofObligation {
         inputs: vec![("offset".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -360,6 +367,7 @@ pub fn proof_scaled_offset_range_2b() -> ProofObligation {
         inputs: vec![("offset".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -389,6 +397,7 @@ pub fn proof_scaled_offset_range_4b() -> ProofObligation {
         inputs: vec![("offset".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -418,6 +427,7 @@ pub fn proof_scaled_offset_range_8b() -> ProofObligation {
         inputs: vec![("offset".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -460,6 +470,7 @@ pub fn proof_pre_index_writeback() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -503,6 +514,7 @@ pub fn proof_post_index_writeback() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -526,6 +538,7 @@ pub fn proof_post_index_effective_addr() -> ProofObligation {
         inputs: vec![("base".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -557,6 +570,7 @@ pub fn proof_pre_post_index_same_writeback() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -592,6 +606,7 @@ pub fn proof_unscaled_signed_9bit_range() -> ProofObligation {
         inputs: vec![("offset".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -620,6 +635,7 @@ pub fn proof_base_plus_imm_effective_addr_i8() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -651,6 +667,7 @@ pub fn proof_base_plus_imm_combined_offset_i8() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -675,6 +692,7 @@ pub fn proof_base_plus_reg_effective_addr_i8() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -903,6 +921,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -937,6 +956,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -970,6 +990,7 @@ mod tests {
             ],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

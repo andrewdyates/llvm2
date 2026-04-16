@@ -653,6 +653,7 @@ impl RuleDiscovery {
             inputs: vars.to_vec(),
             preconditions: proposal.preconditions.clone(),
             fp_inputs: vec![],
+            category: None,
         };
 
         match verify_by_evaluation(&obligation) {

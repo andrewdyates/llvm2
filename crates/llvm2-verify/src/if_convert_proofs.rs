@@ -90,6 +90,7 @@ pub fn proof_diamond_csel_equivalence() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -122,6 +123,7 @@ pub fn proof_diamond_csel_equivalence_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -178,6 +180,7 @@ pub fn proof_triangle_csel_equivalence() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -210,6 +213,7 @@ pub fn proof_triangle_csel_equivalence_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -265,6 +269,7 @@ pub fn proof_csinc_formation() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -300,6 +305,7 @@ pub fn proof_csinc_formation_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -355,6 +361,7 @@ pub fn proof_csneg_formation() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -390,6 +397,7 @@ pub fn proof_csneg_formation_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -441,6 +449,7 @@ pub fn proof_condition_inversion() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -473,6 +482,7 @@ pub fn proof_condition_inversion_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -534,6 +544,7 @@ pub fn proof_multi_instruction_hoist_safety() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -574,6 +585,7 @@ pub fn proof_multi_instruction_hoist_safety_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -628,6 +640,7 @@ pub fn proof_cfg_structure_preservation() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -660,6 +673,7 @@ pub fn proof_cfg_structure_preservation_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -717,6 +731,7 @@ pub fn proof_side_effect_rejection() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -749,6 +764,7 @@ pub fn proof_side_effect_rejection_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -801,6 +817,7 @@ pub fn proof_idempotence() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -833,6 +850,7 @@ pub fn proof_idempotence_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -895,6 +913,7 @@ pub fn proof_arm_condition_code_mapping() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -927,6 +946,7 @@ pub fn proof_arm_condition_code_mapping_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -982,6 +1002,7 @@ pub fn proof_csinc_inverted() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1017,6 +1038,7 @@ pub fn proof_csinc_inverted_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1071,6 +1093,7 @@ pub fn proof_csneg_inverted() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -1106,6 +1129,7 @@ pub fn proof_csneg_inverted_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 

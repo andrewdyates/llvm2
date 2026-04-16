@@ -123,6 +123,7 @@ pub fn proof_branch26_range() -> ProofObligation {
         inputs: vec![("offset".to_string(), width)],
         preconditions: vec![aligned, in_range],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -161,6 +162,7 @@ pub fn proof_branch26_range_8bit() -> ProofObligation {
         inputs: vec![("offset".to_string(), width)],
         preconditions: vec![aligned, in_range],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -205,6 +207,7 @@ pub fn proof_page21_alignment() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -235,6 +238,7 @@ pub fn proof_page21_alignment_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -264,6 +268,7 @@ pub fn proof_pageoff12_masking() -> ProofObligation {
         inputs: vec![("addr".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -283,6 +288,7 @@ pub fn proof_pageoff12_masking_8bit() -> ProofObligation {
         inputs: vec![("addr".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -331,6 +337,7 @@ pub fn proof_adrp_add_pair() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -361,6 +368,7 @@ pub fn proof_adrp_add_pair_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -404,6 +412,7 @@ pub fn proof_signed_overflow_detection() -> ProofObligation {
         inputs: vec![("val".to_string(), width)],
         preconditions: vec![in_range],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -427,6 +436,7 @@ pub fn proof_signed_overflow_detection_8bit() -> ProofObligation {
         inputs: vec![("val".to_string(), width)],
         preconditions: vec![in_range],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -464,6 +474,7 @@ pub fn proof_symbol_table_ordering() -> ProofObligation {
         inputs: vec![("nlocal".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -482,6 +493,7 @@ pub fn proof_symbol_table_ordering_8bit() -> ProofObligation {
         inputs: vec![("nlocal".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -534,6 +546,7 @@ pub fn proof_string_table_offset() -> ProofObligation {
         ],
         preconditions: vec![pre_strtab, pre_strx_pos, pre_strx_bound],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -569,6 +582,7 @@ pub fn proof_string_table_offset_8bit() -> ProofObligation {
         ],
         preconditions: vec![pre_strtab, pre_strx_pos, pre_strx_bound],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -623,6 +637,7 @@ pub fn proof_section_index_validity() -> ProofObligation {
         ],
         preconditions: vec![pre_nsects, pre_sect_ge, pre_sect_le],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -660,6 +675,7 @@ pub fn proof_section_index_validity_8bit() -> ProofObligation {
         ],
         preconditions: vec![pre_nsects, pre_sect_ge, pre_sect_le],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -698,6 +714,7 @@ pub fn proof_load_command_size() -> ProofObligation {
         ],
         preconditions: vec![pre],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -722,6 +739,7 @@ pub fn proof_load_command_size_8bit() -> ProofObligation {
         ],
         preconditions: vec![pre],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -776,6 +794,7 @@ pub fn proof_section_offset_monotonicity() -> ProofObligation {
         ],
         preconditions: vec![pre_order, pre_no_overlap, pre_no_overflow],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -812,6 +831,7 @@ pub fn proof_section_offset_monotonicity_8bit() -> ProofObligation {
         ],
         preconditions: vec![pre_order, pre_no_overlap, pre_no_overflow],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -857,6 +877,7 @@ pub fn proof_alignment_power_of_two() -> ProofObligation {
         inputs: vec![("align_log2".to_string(), width)],
         preconditions: vec![pre],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -884,6 +905,7 @@ pub fn proof_alignment_power_of_two_8bit() -> ProofObligation {
         inputs: vec![("align_log2".to_string(), width)],
         preconditions: vec![pre],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -914,6 +936,7 @@ pub fn proof_magic_number() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -932,6 +955,7 @@ pub fn proof_magic_number_8bit() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 

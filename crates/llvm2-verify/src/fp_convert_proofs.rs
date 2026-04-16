@@ -43,6 +43,7 @@ pub fn proof_fcvtzs_i32_f32() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 8, 24)],
+            category: None,
     }
 }
 
@@ -58,6 +59,7 @@ pub fn proof_fcvtzs_i64_f64() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 11, 53)],
+            category: None,
     }
 }
 
@@ -79,6 +81,7 @@ pub fn proof_fcvtzu_i32_f32() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 8, 24)],
+            category: None,
     }
 }
 
@@ -94,6 +97,7 @@ pub fn proof_fcvtzu_i64_f64() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 11, 53)],
+            category: None,
     }
 }
 
@@ -117,6 +121,7 @@ pub fn proof_scvtf_f32_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -132,6 +137,7 @@ pub fn proof_scvtf_f64_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -163,6 +169,7 @@ pub fn proof_ucvtf_f32_i32() -> ProofObligation {
         inputs: vec![("a".to_string(), 32)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -193,6 +200,7 @@ pub fn proof_ucvtf_f64_i64() -> ProofObligation {
         inputs: vec![("a".to_string(), 64)],
         preconditions: vec![msb_is_zero],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -215,6 +223,7 @@ pub fn proof_fcvt_f64_f32() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 8, 24)],
+            category: None,
     }
 }
 
@@ -232,6 +241,7 @@ pub fn proof_fcvt_f32_f64() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 11, 53)],
+            category: None,
     }
 }
 
@@ -268,6 +278,7 @@ pub fn proof_roundtrip_scvtf_fcvtzs() -> ProofObligation {
         inputs: vec![("a".to_string(), 32)],
         preconditions: vec![lower_bound, upper_bound],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -295,6 +306,7 @@ pub fn proof_fcvtzs_nan_produces_zero() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -832,6 +844,7 @@ mod tests {
             inputs: vec![],
             preconditions: vec![],
             fp_inputs: vec![("a".to_string(), 11, 53)],
+            category: None,
         };
         let result = verify_fp_convert_by_evaluation(&wrong);
         match result {

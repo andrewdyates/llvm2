@@ -66,6 +66,7 @@ pub fn proof_copy_identity() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -81,6 +82,7 @@ pub fn proof_copy_identity_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -112,6 +114,7 @@ pub fn proof_copy_in_add() -> ProofObligation {
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -131,6 +134,7 @@ pub fn proof_copy_in_add_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -152,6 +156,7 @@ pub fn proof_copy_in_sub() -> ProofObligation {
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -171,6 +176,7 @@ pub fn proof_copy_in_sub_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -192,6 +198,7 @@ pub fn proof_copy_in_mul() -> ProofObligation {
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -213,6 +220,7 @@ pub fn proof_copy_in_and() -> ProofObligation {
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -234,6 +242,7 @@ pub fn proof_copy_in_or() -> ProofObligation {
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -255,6 +264,7 @@ pub fn proof_copy_in_xor() -> ProofObligation {
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -280,6 +290,7 @@ pub fn proof_copy_in_shl() -> ProofObligation {
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -301,6 +312,7 @@ pub fn proof_copy_in_lshr() -> ProofObligation {
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -322,6 +334,7 @@ pub fn proof_copy_in_ashr() -> ProofObligation {
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -342,6 +355,7 @@ pub fn proof_copy_in_neg() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -371,6 +385,7 @@ pub fn proof_copy_in_nested_expr() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -390,6 +405,7 @@ pub fn proof_copy_in_shl_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -408,6 +424,7 @@ pub fn proof_copy_in_neg_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -434,6 +451,7 @@ pub fn proof_copy_chain_two() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -449,6 +467,7 @@ pub fn proof_copy_chain_two_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -469,6 +488,7 @@ pub fn proof_copy_chain_three() -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -495,6 +515,7 @@ pub fn proof_copy_chain_in_expr() -> ProofObligation {
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -514,6 +535,7 @@ pub fn proof_copy_chain_in_expr_8bit() -> ProofObligation {
         inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -752,6 +774,7 @@ mod tests {
             inputs: vec![("x".to_string(), width), ("a".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -786,6 +809,7 @@ mod tests {
             inputs: vec![("x".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

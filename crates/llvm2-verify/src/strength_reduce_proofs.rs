@@ -91,6 +91,7 @@ fn proof_mul_to_shift_n(n: u32, width: u32) -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -130,6 +131,7 @@ fn proof_mul_to_add_width(width: u32) -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -178,6 +180,7 @@ fn proof_mul_to_sub_shift_n(n: u32, width: u32) -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -226,6 +229,7 @@ fn proof_mul_to_add_shift_n(n: u32, width: u32) -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -271,6 +275,7 @@ fn proof_div_to_shift_n(n: u32, width: u32) -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -320,6 +325,7 @@ fn proof_mod_to_mask_n(n: u32, width: u32) -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -373,6 +379,7 @@ fn proof_iv_update_at_iter(iter: u64, width: u32) -> ProofObligation {
         inputs: vec![("base".to_string(), width), ("stride".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -422,6 +429,7 @@ fn proof_idempotence_n(n: u32, width: u32) -> ProofObligation {
         inputs: vec![("x".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -463,6 +471,7 @@ fn proof_no_change_add(width: u32) -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -481,6 +490,7 @@ fn proof_no_change_sub(width: u32) -> ProofObligation {
         inputs: vec![("a".to_string(), width), ("b".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -530,6 +540,7 @@ fn proof_dce_composition(width: u32) -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 

@@ -154,6 +154,7 @@ pub fn proof_movz_hw0() -> ProofObligation {
         inputs: vec![("imm16".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -175,6 +176,7 @@ pub fn proof_movz_hw1() -> ProofObligation {
         inputs: vec![("imm16".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -194,6 +196,7 @@ pub fn proof_movz_hw2() -> ProofObligation {
         inputs: vec![("imm16".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -213,6 +216,7 @@ pub fn proof_movz_hw3() -> ProofObligation {
         inputs: vec![("imm16".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -231,6 +235,7 @@ pub fn proof_movz_hw0_8bit() -> ProofObligation {
         inputs: vec![("imm".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -248,6 +253,7 @@ pub fn proof_movz_hw1_8bit() -> ProofObligation {
         inputs: vec![("imm".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -283,6 +289,7 @@ pub fn proof_movz_movk_32bit() -> ProofObligation {
         inputs: vec![("lo16".to_string(), 16), ("hi16".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -308,6 +315,7 @@ pub fn proof_movz_movk_16bit() -> ProofObligation {
         inputs: vec![("lo8".to_string(), 8), ("hi8".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -354,6 +362,7 @@ pub fn proof_movz_movk_64bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -382,6 +391,7 @@ pub fn proof_orr_logical_imm() -> ProofObligation {
         inputs: vec![("bitmask".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -400,6 +410,7 @@ pub fn proof_orr_logical_imm_32bit() -> ProofObligation {
         inputs: vec![("bitmask".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -418,6 +429,7 @@ pub fn proof_orr_logical_imm_8bit() -> ProofObligation {
         inputs: vec![("bitmask".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -449,6 +461,7 @@ pub fn proof_movn_hw0() -> ProofObligation {
         inputs: vec![("imm16".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -474,6 +487,7 @@ pub fn proof_movn_hw1() -> ProofObligation {
         inputs: vec![("imm16".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -495,6 +509,7 @@ pub fn proof_movn_hw2() -> ProofObligation {
         inputs: vec![("imm16".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -516,6 +531,7 @@ pub fn proof_movn_hw3() -> ProofObligation {
         inputs: vec![("imm16".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -537,6 +553,7 @@ pub fn proof_movn_hw0_8bit() -> ProofObligation {
         inputs: vec![("imm".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -568,6 +585,7 @@ pub fn proof_orr_movz_equivalence() -> ProofObligation {
         inputs: vec![("val".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -586,6 +604,7 @@ pub fn proof_orr_movz_equivalence_8bit() -> ProofObligation {
         inputs: vec![("val".to_string(), 8)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -617,6 +636,7 @@ pub fn proof_movn_is_complement_of_movz() -> ProofObligation {
         inputs: vec![("imm16".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -642,6 +662,7 @@ pub fn proof_movk_idempotent() -> ProofObligation {
         inputs: vec![("base".to_string(), width), ("imm16".to_string(), 16)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -675,6 +696,7 @@ pub fn proof_movk_commutative() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -931,6 +953,7 @@ mod tests {
             inputs: vec![("imm16".to_string(), 16)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -953,6 +976,7 @@ mod tests {
             inputs: vec![("imm16".to_string(), 16)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -982,6 +1006,7 @@ mod tests {
             inputs: vec![("lo16".to_string(), 16), ("hi16".to_string(), 16)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

@@ -110,6 +110,7 @@ pub fn proof_add_zero_identity() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -129,6 +130,7 @@ pub fn proof_sub_zero_identity() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -150,6 +152,7 @@ pub fn proof_mul_one_identity() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -169,6 +172,7 @@ pub fn proof_lsl_zero_identity() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -188,6 +192,7 @@ pub fn proof_lsr_zero_identity() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -207,6 +212,7 @@ pub fn proof_asr_zero_identity() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -226,6 +232,7 @@ pub fn proof_orr_self_identity() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -245,6 +252,7 @@ pub fn proof_and_self_identity() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -264,6 +272,7 @@ pub fn proof_eor_zero_identity() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -283,6 +292,7 @@ pub fn proof_add_zero_identity_w32() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -298,6 +308,7 @@ pub fn proof_sub_zero_identity_w32() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -317,6 +328,7 @@ pub fn proof_mul_one_identity_w32() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -336,6 +348,7 @@ pub fn proof_lsl_zero_identity_w32() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -355,6 +368,7 @@ pub fn proof_lsr_zero_identity_w32() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -374,6 +388,7 @@ pub fn proof_asr_zero_identity_w32() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -393,6 +408,7 @@ pub fn proof_orr_self_identity_w32() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -412,6 +428,7 @@ pub fn proof_and_self_identity_w32() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -431,6 +448,7 @@ pub fn proof_eor_zero_identity_w32() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -454,6 +472,7 @@ pub fn proof_add_zero_identity_i8() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -473,6 +492,7 @@ pub fn proof_sub_zero_identity_i8() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -492,6 +512,7 @@ pub fn proof_mul_one_identity_i8() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -511,6 +532,7 @@ pub fn proof_lsl_zero_identity_i8() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -530,6 +552,7 @@ pub fn proof_lsr_zero_identity_i8() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -549,6 +572,7 @@ pub fn proof_asr_zero_identity_i8() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -568,6 +592,7 @@ pub fn proof_orr_self_identity_i8() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -587,6 +612,7 @@ pub fn proof_and_self_identity_i8() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -606,6 +632,7 @@ pub fn proof_eor_zero_identity_i8() -> ProofObligation {
         inputs: vec![("xn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -917,6 +944,7 @@ mod tests {
             inputs: vec![("xn".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -939,6 +967,7 @@ mod tests {
             inputs: vec![("xn".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -962,6 +991,7 @@ mod tests {
             inputs: vec![("xn".to_string(), width), ("xm".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -984,6 +1014,7 @@ mod tests {
             inputs: vec![("xn".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);
@@ -1006,6 +1037,7 @@ mod tests {
             inputs: vec![("xn".to_string(), width)],
             preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
         };
 
         let result = verify_by_evaluation(&obligation);

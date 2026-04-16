@@ -89,6 +89,7 @@ pub fn proof_cbz_equivalence() -> ProofObligation {
         inputs: vec![("Rn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -116,6 +117,7 @@ pub fn proof_cbz_equivalence_8bit() -> ProofObligation {
         inputs: vec![("Rn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -156,6 +158,7 @@ pub fn proof_cbnz_equivalence() -> ProofObligation {
         inputs: vec![("Rn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -183,6 +186,7 @@ pub fn proof_cbnz_equivalence_8bit() -> ProofObligation {
         inputs: vec![("Rn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -240,6 +244,7 @@ pub fn proof_tbz_equivalence() -> ProofObligation {
         inputs: vec![("Rn".to_string(), width), ("k".to_string(), width)],
         preconditions: vec![k_bound],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -270,6 +275,7 @@ pub fn proof_tbz_equivalence_8bit() -> ProofObligation {
         inputs: vec![("Rn".to_string(), width), ("k".to_string(), width)],
         preconditions: vec![k_bound],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -320,6 +326,7 @@ pub fn proof_tbnz_equivalence() -> ProofObligation {
         inputs: vec![("Rn".to_string(), width), ("k".to_string(), width)],
         preconditions: vec![k_bound],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -349,6 +356,7 @@ pub fn proof_tbnz_equivalence_8bit() -> ProofObligation {
         inputs: vec![("Rn".to_string(), width), ("k".to_string(), width)],
         preconditions: vec![k_bound],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -402,6 +410,7 @@ pub fn proof_non_fusible_cmp_nonzero() -> ProofObligation {
         inputs: vec![("Rn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -428,6 +437,7 @@ pub fn proof_non_fusible_cmp_nonzero_8bit() -> ProofObligation {
         inputs: vec![("Rn".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -490,6 +500,7 @@ pub fn proof_flag_liveness_cbz() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -542,6 +553,7 @@ pub fn proof_csel_equivalence() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -577,6 +589,7 @@ pub fn proof_csel_equivalence_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -617,6 +630,7 @@ pub fn proof_cset_equivalence() -> ProofObligation {
         inputs: vec![("cond".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -643,6 +657,7 @@ pub fn proof_cset_equivalence_8bit() -> ProofObligation {
         inputs: vec![("cond".to_string(), width)],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -689,6 +704,7 @@ pub fn proof_csinc_equivalence() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -724,6 +740,7 @@ pub fn proof_csinc_equivalence_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -770,6 +787,7 @@ pub fn proof_condition_inversion() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -802,6 +820,7 @@ pub fn proof_condition_inversion_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -856,6 +875,7 @@ pub fn proof_diamond_safety() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
@@ -888,6 +908,7 @@ pub fn proof_diamond_safety_8bit() -> ProofObligation {
         ],
         preconditions: vec![],
         fp_inputs: vec![],
+            category: None,
     }
 }
 
