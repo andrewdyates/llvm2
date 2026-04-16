@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 
-use crate::abi::{gpr, AppleAArch64ABI, ArgLocation, PReg};
+use crate::abi::{gpr, AppleAArch64ABI, ArgLocation, HfaBaseType, PReg};
 use crate::function::{Signature, StackSlotInfo};
 use crate::instructions::{AtomicOrdering, AtomicRmwOp, Block, FloatCC, Instruction, IntCC, Opcode, Value};
 use crate::types::Type;
@@ -74,6 +74,8 @@ pub enum ISelError {
     UnsupportedFconstType(Type),
     #[error("unsupported ABI location for return value: stack-passed returns are not supported")]
     UnsupportedReturnLocation,
+    #[error("unsupported ABI location for argument: RegSequence on non-aggregate type")]
+    UnsupportedArgLocation,
     #[error("malformed instruction: expected at least {expected} args, got {actual} (opcode context: {context})")]
     InsufficientArgs {
         expected: usize,
@@ -1238,6 +1240,11 @@ impl InstructionSelector {
                     // memory-to-register copying.
                     self.select_aggregate_return(src, &ty, block)?;
                 }
+                ArgLocation::RegSequence(_) => {
+                    // HFA return for non-aggregate scalar types should not occur.
+                    // Aggregate HFA returns are dispatched above via select_aggregate_return.
+                    return Err(ISelError::UnsupportedReturnLocation);
+                }
                 ArgLocation::Stack { .. } => {
                     return Err(ISelError::UnsupportedReturnLocation);
                 }
@@ -1317,6 +1324,11 @@ impl InstructionSelector {
                         ),
                     );
                 }
+                ArgLocation::RegSequence(_) => {
+                    // HFA: aggregate types are dispatched above via select_aggregate_arg.
+                    // Scalar types should never receive RegSequence classification.
+                    return Err(ISelError::UnsupportedArgLocation);
+                }
             }
         }
 
@@ -1346,6 +1358,27 @@ impl InstructionSelector {
                         block,
                         ISelInst::new(opc, vec![ISelOperand::VReg(dst), ISelOperand::PReg(*preg)]),
                     );
+                    self.define_value(*val, ISelOperand::VReg(dst), ty);
+                }
+                ArgLocation::RegSequence(regs) => {
+                    // HFA return: the callee placed each FP member in consecutive
+                    // typed FPR registers. For the caller, the aggregate is
+                    // reconstituted from these registers. We define the result
+                    // as the pointer to a stack-allocated buffer where we store
+                    // the HFA members.
+                    let ty = result_types[i].clone();
+                    let dst = self.new_vreg(RegClass::Gpr64);
+                    // For scaffold: copy the first register as a representative.
+                    // Full implementation stores each HFA member to memory.
+                    if let Some(first) = regs.first() {
+                        self.func.push_inst(
+                            block,
+                            ISelInst::new(
+                                AArch64Opcode::MovR,
+                                vec![ISelOperand::VReg(dst), ISelOperand::PReg(*first)],
+                            ),
+                        );
+                    }
                     self.define_value(*val, ISelOperand::VReg(dst), ty);
                 }
                 ArgLocation::Indirect { ptr_reg } => {
@@ -1616,6 +1649,10 @@ impl InstructionSelector {
                         ),
                     );
                 }
+                ArgLocation::RegSequence(_) => {
+                    // HFA: aggregate types dispatched above via select_aggregate_arg
+                    return Err(ISelError::UnsupportedArgLocation);
+                }
             }
         }
 
@@ -1645,6 +1682,21 @@ impl InstructionSelector {
                         block,
                         ISelInst::new(opc, vec![ISelOperand::VReg(dst), ISelOperand::PReg(*preg)]),
                     );
+                    self.define_value(*val, ISelOperand::VReg(dst), ty);
+                }
+                ArgLocation::RegSequence(regs) => {
+                    // HFA return from variadic call: copy first FPR register.
+                    let ty = result_types[i].clone();
+                    let dst = self.new_vreg(RegClass::Gpr64);
+                    if let Some(first) = regs.first() {
+                        self.func.push_inst(
+                            block,
+                            ISelInst::new(
+                                AArch64Opcode::MovR,
+                                vec![ISelOperand::VReg(dst), ISelOperand::PReg(*first)],
+                            ),
+                        );
+                    }
                     self.define_value(*val, ISelOperand::VReg(dst), ty);
                 }
                 ArgLocation::Indirect { ptr_reg } => {
@@ -1762,6 +1814,10 @@ impl InstructionSelector {
                         ),
                     );
                 }
+                ArgLocation::RegSequence(_) => {
+                    // HFA: aggregate types dispatched above via select_aggregate_arg
+                    return Err(ISelError::UnsupportedArgLocation);
+                }
             }
         }
 
@@ -1803,6 +1859,21 @@ impl InstructionSelector {
                         block,
                         ISelInst::new(opc, vec![ISelOperand::VReg(dst), ISelOperand::PReg(*preg)]),
                     );
+                    self.define_value(*val, ISelOperand::VReg(dst), ty);
+                }
+                ArgLocation::RegSequence(regs) => {
+                    // HFA return from indirect call
+                    let ty = result_types[i].clone();
+                    let dst = self.new_vreg(RegClass::Gpr64);
+                    if let Some(first) = regs.first() {
+                        self.func.push_inst(
+                            block,
+                            ISelInst::new(
+                                AArch64Opcode::MovR,
+                                vec![ISelOperand::VReg(dst), ISelOperand::PReg(*first)],
+                            ),
+                        );
+                    }
                     self.define_value(*val, ISelOperand::VReg(dst), ty);
                 }
                 ArgLocation::Indirect { ptr_reg } => {
@@ -2378,6 +2449,7 @@ impl InstructionSelector {
     /// Select aggregate return value lowering.
     ///
     /// Apple AArch64 ABI:
+    /// - HFA (1-4 same FP fields): load members into consecutive S/D registers
     /// - Small (<=8 bytes): pack fields into X0
     /// - Medium (<=16 bytes): pack fields into X0 + X1
     /// - Large (>16 bytes): store to memory pointed to by X8 (sret)
@@ -2390,6 +2462,36 @@ impl InstructionSelector {
         block: Block,
     ) -> Result<(), ISelError> {
         let size = agg_ty.bytes();
+
+        // Check for HFA first: return in consecutive typed FPR registers.
+        if let Some((hfa_base, count)) = AppleAArch64ABI::classify_hfa(agg_ty) {
+            let elem_size = match hfa_base {
+                HfaBaseType::F32 => 4u32,
+                HfaBaseType::F64 => 8u32,
+            };
+            let typed_regs: &[PReg] = match hfa_base {
+                HfaBaseType::F32 => AppleAArch64ABI::s_arg_regs(),
+                HfaBaseType::F64 => AppleAArch64ABI::d_arg_regs(),
+            };
+            // Load each HFA member from memory into the corresponding FPR.
+            for i in 0..count {
+                if i < typed_regs.len() {
+                    let byte_offset = i as u32 * elem_size;
+                    self.func.push_inst(
+                        block,
+                        ISelInst::new(
+                            AArch64Opcode::LdrRI,
+                            vec![
+                                ISelOperand::PReg(typed_regs[i]),
+                                src.clone(),
+                                ISelOperand::Imm(byte_offset as i64),
+                            ],
+                        ),
+                    );
+                }
+            }
+            return Ok(());
+        }
 
         if size <= 8 {
             // Small aggregate: load entire struct as a single X0 value.
@@ -2571,6 +2673,45 @@ impl InstructionSelector {
                         vec![ISelOperand::PReg(*preg), src, ISelOperand::Imm(0)],
                     ),
                 );
+            }
+            ArgLocation::RegSequence(regs) => {
+                // HFA (Homogeneous Floating-point Aggregate): load each member
+                // from memory into the designated typed FPR register.
+                //
+                // The register list uses the element type's register class:
+                //   F32 HFA: S0, S1, S2, ... (each member is 4 bytes)
+                //   F64 HFA: D0, D1, D2, ... (each member is 8 bytes)
+                //
+                // `src` is a pointer to the aggregate in memory. Each member is
+                // loaded from `[src + i * element_size]`.
+                let elem_size = if regs.is_empty() {
+                    4 // fallback; shouldn't happen
+                } else {
+                    // Determine element size from HFA classification.
+                    if let Some((hfa_base, _)) = AppleAArch64ABI::classify_hfa(agg_ty) {
+                        match hfa_base {
+                            HfaBaseType::F32 => 4,
+                            HfaBaseType::F64 => 8,
+                        }
+                    } else {
+                        size / regs.len() as u32
+                    }
+                };
+                for (i, preg) in regs.iter().enumerate() {
+                    let byte_offset = i as u32 * elem_size;
+                    // LDR Sn/Dn, [src, #offset]
+                    self.func.push_inst(
+                        block,
+                        ISelInst::new(
+                            AArch64Opcode::LdrRI,
+                            vec![
+                                ISelOperand::PReg(*preg),
+                                src.clone(),
+                                ISelOperand::Imm(byte_offset as i64),
+                            ],
+                        ),
+                    );
+                }
             }
             ArgLocation::Indirect { ptr_reg } => {
                 if size <= 16 {
@@ -2780,6 +2921,21 @@ impl InstructionSelector {
                             ],
                         ),
                     );
+                }
+                ArgLocation::RegSequence(regs) => {
+                    // HFA formal argument: the caller passed each FP member in
+                    // consecutive typed FPR registers. For the callee, we copy
+                    // the first register as a representative. Full HFA lowering
+                    // would allocate stack space and store all members.
+                    if let Some(first) = regs.first() {
+                        self.func.push_inst(
+                            entry_block,
+                            ISelInst::new(
+                                AArch64Opcode::Copy,
+                                vec![ISelOperand::VReg(vreg), ISelOperand::PReg(*first)],
+                            ),
+                        );
+                    }
                 }
                 ArgLocation::Indirect { ptr_reg } => {
                     // Large aggregate: load pointer from register, then load data
