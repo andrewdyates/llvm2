@@ -7,7 +7,7 @@
 //! Storage model: arena-based Vec indexed by typed wrappers.
 //! No HashMap for blocks/values — Vec + index only (cache-friendly).
 
-use crate::inst::MachInst;
+use crate::inst::{MachInst, ProofAnnotation};
 use crate::types::{BlockId, InstId, StackSlotId};
 
 /// A basic block of machine instructions.
@@ -324,6 +324,15 @@ pub struct MachFunction {
     /// Populated during ISel for functions that contain invoke/landingpad
     /// instructions. Consumed by the codegen pipeline to generate the LSDA.
     pub eh_metadata: ExceptionHandlingMetadata,
+    /// Function-level proof annotations from tMIR.
+    ///
+    /// These proofs apply to the function as a whole (e.g., Pure, Associative,
+    /// Commutative, Idempotent) rather than to individual instructions.
+    /// Populated by the compilation pipeline from the adapter's ProofContext
+    /// function_proofs.
+    ///
+    /// Per-instruction proofs are stored on each [`MachInst::proof`] field.
+    pub function_proofs: Vec<ProofAnnotation>,
 }
 
 impl MachFunction {
@@ -341,6 +350,7 @@ impl MachFunction {
             next_vreg: 0,
             stack_slots: Vec::new(),
             eh_metadata: ExceptionHandlingMetadata::new(),
+            function_proofs: Vec::new(),
         }
     }
 

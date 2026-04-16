@@ -311,10 +311,10 @@ impl Compiler {
         // so cross-function BL instructions get proper BRANCH26 relocations.
         let mut prepared_funcs = Vec::with_capacity(lir_functions.len());
 
-        for (lir_func, _proof_ctx) in &lir_functions {
+        for (lir_func, proof_ctx) in &lir_functions {
             let func_start = Instant::now();
 
-            let ir_func = pipeline.prepare_function(lir_func)?;
+            let ir_func = pipeline.prepare_function_with_proofs(lir_func, Some(proof_ctx))?;
 
             if tracing {
                 trace_entries.push(TraceEntry {

@@ -3810,6 +3810,16 @@ impl InstructionSelector {
     pub fn finalize(self) -> ISelFunction {
         self.func
     }
+
+    /// Consume the selector and return both the completed ISelFunction
+    /// and the value-to-operand mapping.
+    ///
+    /// The value map is needed by the pipeline to propagate proof
+    /// annotations from the adapter's [`ProofContext`](crate::adapter::ProofContext)
+    /// onto the machine instructions that define each value.
+    pub fn finalize_with_value_map(self) -> (ISelFunction, HashMap<Value, ISelOperand>) {
+        (self.func, self.value_map)
+    }
 }
 
 // ---------------------------------------------------------------------------
