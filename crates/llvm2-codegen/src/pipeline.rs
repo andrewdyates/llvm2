@@ -667,7 +667,12 @@ pub fn encode_function_with_fixups(
 
                 // Record a Branch26 fixup. The symbol name is stored in the fixup
                 // target — the module-level emitter resolves it to a symbol index.
-                let sym_name = inst.operands[0].as_symbol().unwrap();
+                let sym_name = inst.operands[0].as_symbol().ok_or_else(|| {
+                    PipelineError::Encoding(format!(
+                        "BL/B instruction at offset {} has non-symbol operand",
+                        byte_offset
+                    ))
+                })?;
                 fixups.push(Fixup::branch_sym(byte_offset, sym_name.to_string()));
             } else {
                 let word = encode_ir_inst(inst)?;

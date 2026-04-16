@@ -138,12 +138,11 @@ fn collect_diamond_transforms(func: &MachFunction) -> Vec<DiamondTransform> {
 
     for &header_id in &func.block_order {
         let header = func.block(header_id);
-        if header.insts.is_empty() {
+        let Some(&last_inst_id) = header.insts.last() else {
             continue;
-        }
+        };
 
         // Last instruction must be BCond.
-        let last_inst_id = *header.insts.last().unwrap();
         let last_inst = func.inst(last_inst_id);
         if last_inst.opcode != AArch64Opcode::BCond {
             continue;
@@ -197,11 +196,13 @@ fn collect_diamond_transforms(func: &MachFunction) -> Vec<DiamondTransform> {
         }
 
         // Last instruction of each arm must be unconditional B.
-        if true_blk.insts.is_empty() || false_blk.insts.is_empty() {
+        let (Some(&true_last_id), Some(&false_last_id)) =
+            (true_blk.insts.last(), false_blk.insts.last())
+        else {
             continue;
-        }
-        let true_last = func.inst(*true_blk.insts.last().unwrap());
-        let false_last = func.inst(*false_blk.insts.last().unwrap());
+        };
+        let true_last = func.inst(true_last_id);
+        let false_last = func.inst(false_last_id);
         if !true_last.is_unconditional_branch() || !false_last.is_unconditional_branch() {
             continue;
         }
@@ -408,12 +409,14 @@ fn try_multi_inst_diamond(
     false_body: &[InstId],
     cond: CondCode,
 ) -> Option<Vec<MachInst>> {
-    if true_body.is_empty() || false_body.is_empty() {
+    let (Some(&true_last_id), Some(&false_last_id)) =
+        (true_body.last(), false_body.last())
+    else {
         return None;
-    }
+    };
 
-    let true_last = func.inst(*true_body.last().unwrap());
-    let false_last = func.inst(*false_body.last().unwrap());
+    let true_last = func.inst(true_last_id);
+    let false_last = func.inst(false_last_id);
 
     // Final instructions must both be MOVs to the same destination.
     if !is_mov(true_last) || !is_mov(false_last) {
@@ -527,12 +530,11 @@ fn collect_triangle_transforms(func: &MachFunction) -> Vec<TriangleTransform> {
 
     for &header_id in &func.block_order {
         let header = func.block(header_id);
-        if header.insts.is_empty() {
+        let Some(&last_inst_id) = header.insts.last() else {
             continue;
-        }
+        };
 
         // Last instruction must be BCond.
-        let last_inst_id = *header.insts.last().unwrap();
         let last_inst = func.inst(last_inst_id);
         if last_inst.opcode != AArch64Opcode::BCond {
             continue;

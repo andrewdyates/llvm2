@@ -562,7 +562,8 @@ fn insert_before_terminator(func: &mut MachFunction, block: BlockId, inst_id: In
         func.block_mut(block).insts.push(inst_id);
     } else {
         // Check if last instruction is a terminator.
-        let last = *block_insts.last().unwrap();
+        // block_insts is non-empty (in else branch of is_empty() check).
+        let last = block_insts[block_insts.len() - 1];
         let flags = func.inst(last).flags;
         let is_term = flags.is_terminator() || flags.is_branch();
         let block_data = func.block_mut(block);

@@ -94,12 +94,11 @@ fn collect_diamond_transforms(func: &MachFunction) -> Vec<DiamondTransform> {
 
     for &header_id in &func.block_order {
         let header = func.block(header_id);
-        if header.insts.is_empty() {
+        let Some(&last_inst_id) = header.insts.last() else {
             continue;
-        }
+        };
 
         // Last instruction must be BCond.
-        let last_inst_id = *header.insts.last().unwrap();
         let last_inst = func.inst(last_inst_id);
         if last_inst.opcode != AArch64Opcode::BCond {
             continue;

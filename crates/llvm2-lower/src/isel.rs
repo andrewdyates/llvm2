@@ -88,6 +88,8 @@ pub enum ISelError {
     StructGepOutOfRange { index: u32, field_count: usize },
     #[error("aggregate type too large for inline return: {0} bytes")]
     AggregateReturnTooLarge(u32),
+    #[error("internal error: block not found in ISel function")]
+    BlockNotFound,
 }
 
 // ---------------------------------------------------------------------------
@@ -1391,7 +1393,7 @@ impl InstructionSelector {
         );
 
         // Record both successors in the block (normal + unwind).
-        let isel_block = self.func.blocks.get_mut(&block).unwrap();
+        let isel_block = self.func.blocks.get_mut(&block).ok_or(ISelError::BlockNotFound)?;
         if !isel_block.successors.contains(&normal_dest) {
             isel_block.successors.push(normal_dest);
         }

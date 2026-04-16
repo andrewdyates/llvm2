@@ -448,7 +448,8 @@ fn unroll_loop(func: &mut MachFunction, lp: &NaturalLoop, trip_count: usize) -> 
         }
 
         // Last new block branches to exit.
-        let last = *new_blocks.last().unwrap();
+        // SAFETY: `new_blocks` is non-empty (checked by enclosing if-guard).
+        let last = new_blocks[new_blocks.len() - 1];
         let br = func.push_inst(MachInst::new(
             AArch64Opcode::B,
             vec![MachOperand::Block(exit_block)],
