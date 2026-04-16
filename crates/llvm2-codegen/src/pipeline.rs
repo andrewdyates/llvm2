@@ -215,6 +215,66 @@ impl Default for PipelineConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Input format detection and module loading
+// ---------------------------------------------------------------------------
+
+/// Detected input format for tMIR module files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputFormat {
+    /// JSON wire format (.json).
+    Json,
+    /// Binary tMIR bitcode (.tmbc).
+    Tmbc,
+}
+
+/// Detect the input format of a tMIR module file.
+///
+/// Checks file extension first (`.tmbc` or `.json`). For unknown extensions,
+/// reads the first 4 bytes and checks for the tMBC magic header.
+pub fn detect_input_format(path: &std::path::Path) -> InputFormat {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("tmbc") => return InputFormat::Tmbc,
+        Some("json") => return InputFormat::Json,
+        _ => {}
+    }
+
+    // Fall back to magic-byte detection.
+    let mut magic = [0u8; 4];
+    match std::fs::File::open(path)
+        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut magic))
+    {
+        Ok(()) if magic == *b"tMBC" => InputFormat::Tmbc,
+        _ => InputFormat::Json,
+    }
+}
+
+/// Load a tMIR module from a file, auto-detecting the format.
+pub fn load_module(path: &std::path::Path) -> Result<tmir_func::Module, PipelineError> {
+    match detect_input_format(path) {
+        InputFormat::Json => tmir_func::reader::read_module_from_json(path)
+            .map_err(|err| PipelineError::ISel(err.to_string())),
+        InputFormat::Tmbc => tmir_func::binary::read_module_from_tmbc(path)
+            .map_err(|err| PipelineError::ISel(err.to_string())),
+    }
+}
+
+/// Load a tMIR module from in-memory bytes, auto-detecting the format.
+///
+/// Bytes starting with `tMBC` magic are decoded as binary bitcode; otherwise
+/// the bytes are interpreted as a UTF-8 JSON string.
+pub fn load_module_from_bytes(bytes: &[u8]) -> Result<tmir_func::Module, PipelineError> {
+    if bytes.starts_with(b"tMBC") {
+        tmir_func::binary::read_module_from_binary(bytes)
+            .map_err(|err| PipelineError::ISel(err.to_string()))
+    } else {
+        let json = std::str::from_utf8(bytes)
+            .map_err(|err| PipelineError::ISel(err.to_string()))?;
+        tmir_func::reader::read_module_from_str(json)
+            .map_err(|err| PipelineError::ISel(err.to_string()))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CompilationUnit — holds all state across compilation phases
 // ---------------------------------------------------------------------------
 

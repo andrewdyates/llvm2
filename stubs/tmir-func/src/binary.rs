@@ -71,6 +71,8 @@ pub enum TmirBinaryError {
     InvalidUtf8,
     /// Structural validation error.
     Validation(String),
+    /// I/O error (file read/write).
+    IoError(std::io::Error),
 }
 
 impl fmt::Display for TmirBinaryError {
@@ -86,6 +88,7 @@ impl fmt::Display for TmirBinaryError {
             Self::Leb128Overflow => write!(f, "LEB128 value overflow"),
             Self::InvalidUtf8 => write!(f, "invalid UTF-8 string"),
             Self::Validation(msg) => write!(f, "validation: {msg}"),
+            Self::IoError(err) => write!(f, "I/O error: {err}"),
         }
     }
 }
@@ -1813,6 +1816,30 @@ pub fn read_module_from_binary(bytes: &[u8]) -> Result<Module, TmirBinaryError> 
 pub fn round_trip_binary(module: &Module) -> Result<Module, TmirBinaryError> {
     let bytes = write_module_to_binary(module);
     read_module_from_binary(&bytes)
+}
+
+// ---------------------------------------------------------------------------
+// File I/O convenience wrappers
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if `bytes` starts with the tMBC magic header.
+pub fn is_tmbc_format(bytes: &[u8]) -> bool {
+    bytes.len() >= 4 && bytes[..4] == *MAGIC
+}
+
+/// Read a tMIR module from a `.tmbc` file on disk.
+pub fn read_module_from_tmbc(path: &std::path::Path) -> Result<Module, TmirBinaryError> {
+    let bytes = std::fs::read(path).map_err(TmirBinaryError::IoError)?;
+    read_module_from_binary(&bytes)
+}
+
+/// Serialize a tMIR module to binary and write it to a `.tmbc` file on disk.
+pub fn write_module_to_tmbc(
+    module: &Module,
+    path: &std::path::Path,
+) -> Result<(), TmirBinaryError> {
+    let bytes = write_module_to_binary(module);
+    std::fs::write(path, bytes).map_err(TmirBinaryError::IoError)
 }
 
 // ---------------------------------------------------------------------------
