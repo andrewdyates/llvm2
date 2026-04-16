@@ -42,7 +42,6 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use tmir::{Module as TmirModule, BinOp, Inst, InstrNode, BlockId, Ty, ValueId};
-use crate::tmir_compat::Operand;
 
 use crate::instructions::Value;
 use crate::target_analysis::{
@@ -194,8 +193,10 @@ pub struct ComputeNode {
     /// Estimated data size in bytes processed by this node.
     pub data_size_bytes: u64,
     /// Values produced by this node (used for edge construction).
+    #[serde(skip)]
     pub produced_values: Vec<ValueId>,
     /// Values consumed by this node (used for edge construction).
+    #[serde(skip)]
     pub consumed_values: Vec<ValueId>,
     /// Dominant operation name (e.g., "ADD", "MUL", "GEMM") for cost model queries.
     /// Derived from the most common instruction in the node.
@@ -370,6 +371,7 @@ fn binop_to_op_name(op: &BinOp) -> &'static str {
         BinOp::FSub => "FSUB",
         BinOp::FMul => "FMUL",
         BinOp::FDiv => "FDIV",
+        BinOp::FRem => "FDIV", // closest equivalent
     }
 }
 
@@ -604,7 +606,7 @@ impl ComputeGraph {
             // Collect type information from the module for these values.
             let mut value_types_map: HashMap<ValueId, Ty> = HashMap::new();
             for func in &module.functions {
-                for block in func.iter_blocks() {
+                for block in func.blocks.iter() {
                     for (vid, ty) in &block.params {
                         if all_values.contains(vid) {
                             value_types_map.insert(*vid, ty.clone());
@@ -613,15 +615,11 @@ impl ComputeGraph {
                     for instr_node in &block.body {
                         match &instr_node.inst {
                             Inst::BinOp { ty, lhs, rhs, .. } => {
-                                if let Some(lhs_vid) = lhs.as_value() {
-                                    if all_values.contains(&lhs_vid) {
-                                        value_types_map.entry(lhs_vid).or_insert_with(|| ty.clone());
-                                    }
+                                if all_values.contains(lhs) {
+                                    value_types_map.entry(*lhs).or_insert_with(|| ty.clone());
                                 }
-                                if let Some(rhs_vid) = rhs.as_value() {
-                                    if all_values.contains(&rhs_vid) {
-                                        value_types_map.entry(rhs_vid).or_insert_with(|| ty.clone());
-                                    }
+                                if all_values.contains(rhs) {
+                                    value_types_map.entry(*rhs).or_insert_with(|| ty.clone());
                                 }
                                 for r in &instr_node.results {
                                     if all_values.contains(r) {
@@ -630,10 +628,8 @@ impl ComputeGraph {
                                 }
                             }
                             Inst::UnOp { ty, operand, .. } => {
-                                if let Some(op_vid) = operand.as_value() {
-                                    if all_values.contains(&op_vid) {
-                                        value_types_map.entry(op_vid).or_insert_with(|| ty.clone());
-                                    }
+                                if all_values.contains(operand) {
+                                    value_types_map.entry(*operand).or_insert_with(|| ty.clone());
                                 }
                                 for r in &instr_node.results {
                                     if all_values.contains(r) {
@@ -668,7 +664,7 @@ impl ComputeGraph {
                 node.costs.entry(target).or_insert_with(|| {
                     estimate_compute_cost(
                         node.kind,
-                        node.instuctions.len(),
+                        node.instructions.len(),
                         node.data_size_bytes,
                         target,
                     )
@@ -877,7 +873,7 @@ const MIN_VECTORIZABLE_ELEMENTS: u64 = 4;
 fn detect_data_parallel(instrs: &[&InstrNode], value_types: &HashMap<ValueId, Ty>) -> bool {
     // Need at least one array-typed value with sufficient element count
     let has_large_array = value_types.values().any(|ty| match ty {
-        Ty::Array { len, .. } => *len >= MIN_VECTORIZABLE_ELEMENTS,
+        Ty::Array(_, len) => *len >= MIN_VECTORIZABLE_ELEMENTS,
         _ => false,
     });
     if !has_large_array {
@@ -896,9 +892,9 @@ fn detect_data_parallel(instrs: &[&InstrNode], value_types: &HashMap<ValueId, Ty
             if !is_elementwise {
                 return false;
             }
-            // At least one operand must be array-typed (skip constants)
-            let lhs_is_array = lhs.as_value().and_then(|v| value_types.get(&v)).is_some_and(|ty| matches!(ty, Ty::Array { .. }));
-            let rhs_is_array = rhs.as_value().and_then(|v| value_types.get(&v)).is_some_and(|ty| matches!(ty, Ty::Array { .. }));
+            // At least one operand must be array-typed
+            let lhs_is_array = value_types.get(lhs).is_some_and(|ty| matches!(ty, Ty::Array(..)));
+            let rhs_is_array = value_types.get(rhs).is_some_and(|ty| matches!(ty, Ty::Array(..)));
             lhs_is_array || rhs_is_array
         }
         _ => false,
@@ -932,7 +928,7 @@ fn detect_data_parallel(instrs: &[&InstrNode], value_types: &HashMap<ValueId, Ty
 fn detect_matrix_heavy(instrs: &[&InstrNode], value_types: &HashMap<ValueId, Ty>) -> bool {
     // Need array-typed values with sufficient element count
     let has_large_array = value_types.values().any(|ty| match ty {
-        Ty::Array { len, .. } => *len >= MIN_VECTORIZABLE_ELEMENTS,
+        Ty::Array(_, len) => *len >= MIN_VECTORIZABLE_ELEMENTS,
         _ => false,
     });
     if !has_large_array {
@@ -950,9 +946,9 @@ fn detect_matrix_heavy(instrs: &[&InstrNode], value_types: &HashMap<ValueId, Ty>
             Inst::BinOp { op, lhs, rhs, .. }
                 if matches!(op, BinOp::FMul | BinOp::Mul) =>
             {
-                // Check that at least one operand is array-typed (skip constants)
-                let lhs_is_array = lhs.as_value().and_then(|v| value_types.get(&v)).is_some_and(|ty| matches!(ty, Ty::Array { .. }));
-                let rhs_is_array = rhs.as_value().and_then(|v| value_types.get(&v)).is_some_and(|ty| matches!(ty, Ty::Array { .. }));
+                // Check that at least one operand is array-typed
+                let lhs_is_array = value_types.get(lhs).is_some_and(|ty| matches!(ty, Ty::Array(..)));
+                let rhs_is_array = value_types.get(rhs).is_some_and(|ty| matches!(ty, Ty::Array(..)));
                 if lhs_is_array || rhs_is_array {
                     for r in &node.results {
                         mul_results.insert(*r);
@@ -962,9 +958,9 @@ fn detect_matrix_heavy(instrs: &[&InstrNode], value_types: &HashMap<ValueId, Ty>
             Inst::BinOp { op, lhs, rhs, .. }
                 if matches!(op, BinOp::FAdd | BinOp::Add) =>
             {
-                // The accumulate must consume a multiply result (skip constants)
-                let lhs_match = lhs.as_value().is_some_and(|v| mul_results.contains(&v));
-                let rhs_match = rhs.as_value().is_some_and(|v| mul_results.contains(&v));
+                // The accumulate must consume a multiply result
+                let lhs_match = mul_results.contains(lhs);
+                let rhs_match = mul_results.contains(rhs);
                 if lhs_match || rhs_match {
                     has_mac_pattern = true;
                 }
@@ -1047,7 +1043,7 @@ impl GraphBuilder {
         for (func_idx, func) in module.functions.iter().enumerate() {
             // Collect type information for all values in the function
             let mut value_types: HashMap<ValueId, Ty> = HashMap::new();
-            for block in func.iter_blocks() {
+            for block in func.blocks.iter() {
                 for (vid, ty) in &block.params {
                     value_types.insert(*vid, ty.clone());
                 }
@@ -1055,26 +1051,26 @@ impl GraphBuilder {
                     // Infer types from instructions (skip constant operands)
                     match &node.inst {
                         Inst::BinOp { ty, lhs, rhs, .. } => {
-                            if let Some(v) = lhs.as_value() { value_types.entry(v).or_insert_with(|| ty.clone()); }
-                            if let Some(v) = rhs.as_value() { value_types.entry(v).or_insert_with(|| ty.clone()); }
+                            value_types.entry(*lhs).or_insert_with(|| ty.clone());
+                            value_types.entry(*rhs).or_insert_with(|| ty.clone());
                             for r in &node.results {
                                 value_types.insert(*r, ty.clone());
                             }
                         }
                         Inst::UnOp { ty, operand, .. } => {
-                            if let Some(v) = operand.as_value() { value_types.entry(v).or_insert_with(|| ty.clone()); }
+                            value_types.entry(*operand).or_insert_with(|| ty.clone());
                             for r in &node.results {
                                 value_types.insert(*r, ty.clone());
                             }
                         }
-                        Inst::Cmp { ty, lhs, rhs, .. } => {
-                            if let Some(v) = lhs.as_value() { value_types.entry(v).or_insert_with(|| ty.clone()); }
-                            if let Some(v) = rhs.as_value() { value_types.entry(v).or_insert_with(|| ty.clone()); }
+                        Inst::ICmp { ty, lhs, rhs, .. } | Inst::FCmp { ty, lhs, rhs, .. } => {
+                            value_types.entry(*lhs).or_insert_with(|| ty.clone());
+                            value_types.entry(*rhs).or_insert_with(|| ty.clone());
                             for r in &node.results {
                                 value_types.insert(*r, Ty::Bool);
                             }
                         }
-                        Inst::Const { ty, .. } | Inst::FConst { ty, .. } => {
+                        Inst::Const { ty, .. } => {
                             for r in &node.results {
                                 value_types.insert(*r, ty.clone());
                             }
@@ -1089,7 +1085,7 @@ impl GraphBuilder {
                 }
             }
 
-            for block in func.iter_blocks() {
+            for block in func.blocks.iter() {
                 let nodes = self.build_nodes_for_block(
                     func_idx as u32,
                     block.id,
@@ -1112,13 +1108,13 @@ impl GraphBuilder {
             // When a Br instruction in block A passes args to block B's params,
             // the block B params are effectively "produced" by block A's node
             // (since the branch transfers the values).
-            for block in func.iter_blocks() {
+            for block in func.blocks.iter() {
                 let source_node_id = block_to_node
                     .get(&(func_idx as u32, block.id.0))
                     .copied();
 
                 for node in &block.body {
-                    let targets: Vec<(BlockId, &[Operand])> = match &node.inst {
+                    let targets: Vec<(BlockId, &[ValueId])> = match &node.inst {
                         Inst::Br { target, args } => {
                             vec![(*target, args.as_slice())]
                         }
@@ -1128,20 +1124,14 @@ impl GraphBuilder {
                                 (*else_target, else_args.as_slice()),
                             ]
                         }
-                        Inst::Invoke { normal_dest, normal_args, unwind_dest, unwind_args, .. } => {
-                            vec![
-                                (*normal_dest, normal_args.as_slice()),
-                                (*unwind_dest, unwind_args.as_slice()),
-                            ]
-                        }
                         _ => vec![],
                     };
 
                     for (target_block_id, args) in targets {
-                        if let Some(target_block) = func.block(target_block_id) {
+                        if let Some(target_block) = func.blocks.iter().find(|b| b.id == target_block_id) {
                             // Map branch args -> target block params.
                             // The target block's params are produced by the source block.
-                            for (arg_op, (param_vid, _param_ty)) in
+                            for (arg_vid, (param_vid, _param_ty)) in
                                 args.iter().zip(target_block.params.iter())
                             {
                                 if let Some(src_node) = source_node_id {
@@ -1149,7 +1139,7 @@ impl GraphBuilder {
                                     // (it flows through the branch)
                                     value_to_node.insert(*param_vid, src_node);
                                     // Also ensure the arg itself is tracked
-                                    let _ = arg_op; // already tracked as consumed
+                                    let _ = arg_vid; // already tracked as consumed
                                 }
                             }
                         }
@@ -1209,57 +1199,45 @@ impl GraphBuilder {
             produced_values.extend_from_slice(&node.results);
 
             // Track consumed values and estimate data size.
-            // Operand::Constant values are skipped (they don't have ValueIds).
-            let push_operand = |cv: &mut Vec<ValueId>, op: &Operand| {
-                if let Some(vid) = op.as_value() {
-                    cv.push(vid);
-                }
-            };
-            let push_operands = |cv: &mut Vec<ValueId>, ops: &[Operand]| {
-                for op in ops {
-                    if let Some(vid) = op.as_value() {
-                        cv.push(vid);
-                    }
-                }
-            };
+            // All operands are ValueId in the real tmir API.
             match &node.inst {
                 Inst::BinOp { ty, lhs, rhs, .. } => {
-                    push_operand(&mut consumed_values, lhs);
-                    push_operand(&mut consumed_values, rhs);
+                    consumed_values.push(*lhs);
+                    consumed_values.push(*rhs);
                     data_size_bytes += estimate_type_bytes(ty) as u64 * 2;
                 }
                 Inst::UnOp { ty, operand, .. } => {
-                    push_operand(&mut consumed_values, operand);
+                    consumed_values.push(*operand);
                     data_size_bytes += estimate_type_bytes(ty) as u64;
                 }
-                Inst::Cmp { lhs, rhs, .. } => {
-                    push_operand(&mut consumed_values, lhs);
-                    push_operand(&mut consumed_values, rhs);
+                Inst::ICmp { lhs, rhs, .. } | Inst::FCmp { lhs, rhs, .. } => {
+                    consumed_values.push(*lhs);
+                    consumed_values.push(*rhs);
                 }
                 Inst::Load { ptr, .. } => {
                     consumed_values.push(*ptr);
                 }
                 Inst::Store { ptr, value, .. } => {
                     consumed_values.push(*ptr);
-                    push_operand(&mut consumed_values, value);
+                    consumed_values.push(*value);
                 }
                 Inst::Br { args, .. } => {
-                    push_operands(&mut consumed_values, args);
+                    consumed_values.extend_from_slice(args);
                 }
                 Inst::CondBr { cond, then_args, else_args, .. } => {
-                    push_operand(&mut consumed_values, cond);
-                    push_operands(&mut consumed_values, then_args);
-                    push_operands(&mut consumed_values, else_args);
+                    consumed_values.push(*cond);
+                    consumed_values.extend_from_slice(then_args);
+                    consumed_values.extend_from_slice(else_args);
                 }
                 Inst::Return { values } => {
-                    push_operands(&mut consumed_values, values);
+                    consumed_values.extend_from_slice(values);
                 }
                 Inst::Call { args, .. } => {
-                    push_operands(&mut consumed_values, args);
+                    consumed_values.extend_from_slice(args);
                 }
-                Inst::Index { base, index, .. } => {
-                    consumed_values.push(*base);
-                    push_operand(&mut consumed_values, index);
+                Inst::ExtractElement { array, index, .. } => {
+                    consumed_values.push(*array);
+                    consumed_values.push(*index);
                 }
                 _ => {}
             }
@@ -1354,21 +1332,13 @@ impl GraphBuilder {
 
 /// Estimate byte size of a tMIR type.
 fn estimate_type_bytes(ty: &Ty) -> u32 {
-    match ty {
-        Ty::Primitive(p) => match p {
-            PrimitiveType::Bool => 1,
-            PrimitiveType::Int { width, .. } => (width.bits() as u32).div_ceil(8),
-            PrimitiveType::Float(fw) => (fw.bits() as u32).div_ceil(8),
-            PrimitiveType::Unit => 0,
-            PrimitiveType::Never => 0,
-        },
-        Ty::Ref { .. } => 8,
-        Ty::Array { element, len } => estimate_type_bytes(element) * (*len as u32),
-        Ty::Vector { element, lanes } => estimate_type_bytes(element) * lanes,
-        Ty::Struct(_) | Ty::StructDef { .. } | Ty::Tuple(_) => 8, // rough estimate
-        Ty::Enum { .. } => 8, // rough estimate
-        Ty::FnPtr { .. } | Ty::Func(_) => 8,
-    }
+    ty.bit_width().map(|w| w.div_ceil(8)).unwrap_or(match ty {
+        Ty::Struct(_) => 8, // rough estimate
+        Ty::Array(_, len) => 8 * (*len as u32), // rough: 8 bytes per element
+        Ty::Func(_) => 8,
+        Ty::Void => 0,
+        _ => 8,
+    })
 }
 
 // ---------------------------------------------------------------------------
