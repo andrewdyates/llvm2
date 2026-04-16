@@ -12,8 +12,8 @@
 // _operand variants or construct Operand directly.
 
 use tmir_instrs::{
-    AtomicRmwOp, BinOp, CastOp, CmpOp, Instr, InstrNode, MemoryOrdering, Operand, SwitchCase,
-    UnOp,
+    AtomicRmwOp, BinOp, CastOp, CmpOp, Instr, InstrNode, LandingPadClause, MemoryOrdering,
+    Operand, SwitchCase, UnOp,
 };
 use tmir_types::{BlockId, CallingConv, DataLayout, FuncId, FuncTy, GlobalDef, StructDef, TmirProof, Ty, ValueId, Visibility};
 
@@ -375,6 +375,55 @@ pub fn call_indirect(
         },
         results,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Exception handling helpers
+// ---------------------------------------------------------------------------
+
+/// Create an invoke instruction (call that may unwind).
+///
+/// Like `call`, but with normal and unwind successor blocks.
+/// If the callee returns normally, control transfers to `normal_dest` with `normal_args`.
+/// If the callee unwinds, control transfers to `unwind_dest` with `unwind_args`.
+pub fn invoke(
+    func: FuncId,
+    args: Vec<ValueId>,
+    ret_ty: Vec<Ty>,
+    normal_dest: BlockId,
+    normal_args: Vec<ValueId>,
+    unwind_dest: BlockId,
+    unwind_args: Vec<ValueId>,
+    results: Vec<ValueId>,
+) -> InstrNode {
+    InstrNode::new(
+        Instr::Invoke {
+            func,
+            args: values_to_operands(args),
+            ret_ty,
+            normal_dest,
+            normal_args: values_to_operands(normal_args),
+            unwind_dest,
+            unwind_args: values_to_operands(unwind_args),
+        },
+        results,
+    )
+}
+
+/// Create a landing pad instruction (exception catch/filter).
+///
+/// This produces the caught exception value. `clauses` specify which exception
+/// types to catch and any filter constraints.
+pub fn landing_pad(ty: Ty, clauses: Vec<LandingPadClause>, result: ValueId) -> InstrNode {
+    InstrNode::new(Instr::LandingPad { ty, clauses }, vec![result])
+}
+
+/// Create a resume instruction (continue unwinding).
+///
+/// `value` is the exception value from a landing pad that should be propagated
+/// to the next handler up the call stack.
+pub fn resume(value: ValueId) -> InstrNode {
+    InstrNode::new(Instr::Resume { value }, vec![])
 }
 
 /// Create a switch instruction.

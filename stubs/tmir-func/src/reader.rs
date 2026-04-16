@@ -144,8 +144,8 @@ pub fn round_trip(module: &Module) -> Result<Module, TmirJsonError> {
 mod tests {
     use super::*;
     use crate::builder::{self, ModuleBuilder};
-    use tmir_instrs::BinOp;
-    use tmir_types::{BlockId, Ty};
+    use tmir_instrs::{BinOp, LandingPadClause};
+    use tmir_types::{BlockId, FuncId, Ty};
 
     fn make_add_module() -> Module {
         let mut mb = ModuleBuilder::new("test_add");
@@ -238,5 +238,175 @@ mod tests {
         let loaded = read_module_from_json(&path).unwrap();
         assert_eq!(module, loaded);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Exception handling tests
+    // -----------------------------------------------------------------------
+
+    /// Build a module with invoke/landingpad/resume to test the full EH flow.
+    ///
+    /// Structure:
+    ///   entry:
+    ///     %r = invoke @callee() to normal_bb unwind landing_bb
+    ///   normal_bb:
+    ///     return %r
+    ///   landing_bb:
+    ///     %exn = landingpad i64 catch i32
+    ///     resume %exn
+    fn make_eh_module() -> Module {
+        let mut mb = ModuleBuilder::new("test_eh");
+        let callee_id = FuncId(1);
+
+        let mut fb = mb.function("eh_func", vec![], vec![Ty::i32()]);
+        let (entry_id, _params) = fb.entry_block();
+
+        let normal_bb = fb.fresh_block();
+        let landing_bb = fb.fresh_block();
+
+        let invoke_result = fb.fresh_value();
+        let exn_val = fb.fresh_value();
+
+        // Entry block: invoke @callee
+        fb.add_block(
+            entry_id,
+            vec![],
+            vec![builder::invoke(
+                callee_id,
+                vec![],
+                vec![Ty::i32()],
+                normal_bb,
+                vec![],
+                landing_bb,
+                vec![],
+                vec![invoke_result],
+            )],
+        );
+
+        // Normal continuation: return the result
+        fb.add_block(
+            normal_bb,
+            vec![],
+            vec![builder::ret(vec![invoke_result])],
+        );
+
+        // Landing pad: catch i32 exceptions, then resume
+        fb.add_block(
+            landing_bb,
+            vec![],
+            vec![
+                builder::landing_pad(
+                    Ty::i64(),
+                    vec![LandingPadClause::Catch(Ty::i32())],
+                    exn_val,
+                ),
+                builder::resume(exn_val),
+            ],
+        );
+
+        let func = fb.build();
+        mb.add_function(func);
+        mb.build()
+    }
+
+    #[test]
+    fn test_eh_module_round_trip() {
+        let module = make_eh_module();
+        let rt = round_trip(&module).expect("round-trip failed");
+        assert_eq!(module, rt);
+    }
+
+    #[test]
+    fn test_eh_module_json_string() {
+        let module = make_eh_module();
+        let json = write_module_to_string(&module).unwrap();
+        // Verify key instruction names appear in JSON
+        assert!(json.contains("Invoke"), "JSON should contain Invoke variant");
+        assert!(
+            json.contains("LandingPad"),
+            "JSON should contain LandingPad variant"
+        );
+        assert!(json.contains("Resume"), "JSON should contain Resume variant");
+        assert!(
+            json.contains("Catch"),
+            "JSON should contain Catch clause"
+        );
+        // Parse back
+        let parsed = read_module_from_str(&json).unwrap();
+        assert_eq!(module, parsed);
+    }
+
+    #[test]
+    fn test_builder_invoke() {
+        let node = builder::invoke(
+            FuncId(0),
+            vec![tmir_types::ValueId(0)],
+            vec![Ty::i32()],
+            BlockId(1),
+            vec![],
+            BlockId(2),
+            vec![],
+            vec![tmir_types::ValueId(1)],
+        );
+        assert_eq!(node.results.len(), 1);
+        assert!(matches!(node.instr, tmir_instrs::Instr::Invoke { .. }));
+    }
+
+    #[test]
+    fn test_builder_landing_pad() {
+        let node = builder::landing_pad(
+            Ty::i64(),
+            vec![
+                LandingPadClause::Catch(Ty::i32()),
+                LandingPadClause::Filter(vec![Ty::i32()]),
+            ],
+            tmir_types::ValueId(5),
+        );
+        assert_eq!(node.results.len(), 1);
+        assert_eq!(node.results[0], tmir_types::ValueId(5));
+        match &node.instr {
+            tmir_instrs::Instr::LandingPad { ty, clauses } => {
+                assert_eq!(*ty, Ty::i64());
+                assert_eq!(clauses.len(), 2);
+            }
+            other => panic!("expected LandingPad, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_builder_resume() {
+        let node = builder::resume(tmir_types::ValueId(3));
+        assert!(node.results.is_empty());
+        match &node.instr {
+            tmir_instrs::Instr::Resume { value } => {
+                assert_eq!(*value, tmir_types::ValueId(3));
+            }
+            other => panic!("expected Resume, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eh_with_filter_clause_round_trip() {
+        let mut mb = ModuleBuilder::new("test_filter");
+        let mut fb = mb.function("filter_func", vec![], vec![]);
+        let (entry_id, _params) = fb.entry_block();
+        let exn = fb.fresh_value();
+        fb.add_block(
+            entry_id,
+            vec![],
+            vec![
+                builder::landing_pad(
+                    Ty::i64(),
+                    vec![LandingPadClause::Filter(vec![Ty::i32(), Ty::i64()])],
+                    exn,
+                ),
+                builder::resume(exn),
+            ],
+        );
+        let func = fb.build();
+        mb.add_function(func);
+        let module = mb.build();
+        let rt = round_trip(&module).expect("round-trip failed");
+        assert_eq!(module, rt);
     }
 }

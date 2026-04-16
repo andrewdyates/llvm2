@@ -1129,6 +1129,12 @@ impl GraphBuilder {
                                 (*else_target, else_args.as_slice()),
                             ]
                         }
+                        Instr::Invoke { normal_dest, normal_args, unwind_dest, unwind_args, .. } => {
+                            vec![
+                                (*normal_dest, normal_args.as_slice()),
+                                (*unwind_dest, unwind_args.as_slice()),
+                            ]
+                        }
                         _ => vec![],
                     };
 

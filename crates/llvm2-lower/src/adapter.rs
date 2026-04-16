@@ -912,6 +912,42 @@ impl<'a> TmirAdapter<'a> {
                 let arg_vids = self.resolve_operands(args, &mut pre)?;
                 self.translate_call_indirect(callee, &arg_vids, ret_ty, &node.results)?
             }
+            // Exception handling: stub lowering (full codegen in #140).
+            // Invoke: for now, lower as a regular call + unconditional branch to normal_dest.
+            // The unwind path is not yet wired up in the LIR.
+            Instr::Invoke {
+                func,
+                args,
+                ret_ty,
+                normal_dest,
+                normal_args,
+                unwind_dest: _,
+                unwind_args: _,
+            } => {
+                let arg_vids = self.resolve_operands(args, &mut pre)?;
+                let normal_vids = self.resolve_operands(normal_args, &mut pre)?;
+                let mut result = self.translate_call(func, &arg_vids, ret_ty, &node.results)?;
+                result.extend(self.translate_br(normal_dest, &normal_vids)?);
+                result
+            }
+            // LandingPad: no-op stub, result is undefined (exception value placeholder).
+            Instr::LandingPad { .. } => {
+                if node.results.is_empty() {
+                    vec![]
+                } else {
+                    let dst = self.map_result(&node.results)?;
+                    vec![Instruction {
+                        opcode: Opcode::Iconst {
+                            ty: Type::I64,
+                            imm: 0,
+                        },
+                        args: vec![],
+                        results: vec![dst],
+                    }]
+                }
+            }
+            // Resume: no-op stub (unwinding not yet supported in LIR).
+            Instr::Resume { .. } => vec![],
             // Select: conditional value (branchless).
             Instr::Select {
                 ty: _,
