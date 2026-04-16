@@ -171,6 +171,45 @@ pub fn symbolic_fp_binary_inputs(eb: u32, sb: u32) -> (SmtExpr, SmtExpr) {
     )
 }
 
+/// Encode a tMIR floating-point comparison as an SMT expression.
+///
+/// `Fcmp(cond, a, b)` returns a 1-bit bitvector: `bv1(1)` if the condition
+/// holds, `bv1(0)` otherwise. This matches the AArch64 FCMP + CSET output
+/// format.
+///
+/// # Supported conditions
+///
+/// All 14 `FloatCC` variants: 6 ordered, 2 ordering predicates, 6 unordered.
+///
+/// Ordered comparisons return false when either operand is NaN.
+/// Unordered comparisons return true when either operand is NaN.
+pub fn encode_tmir_fcmp(cond: &llvm2_lower::instructions::FloatCC, _ty: Type, lhs: SmtExpr, rhs: SmtExpr) -> SmtExpr {
+    use llvm2_lower::instructions::FloatCC;
+
+    let a_nan = lhs.clone().fp_is_nan();
+    let b_nan = rhs.clone().fp_is_nan();
+    let either_nan = a_nan.clone().or_expr(b_nan.clone());
+
+    let bool_result = match cond {
+        FloatCC::Equal => lhs.fp_eq(rhs),
+        FloatCC::NotEqual => lhs.fp_eq(rhs).not_expr(),
+        FloatCC::LessThan => lhs.fp_lt(rhs),
+        FloatCC::LessThanOrEqual => lhs.fp_le(rhs),
+        FloatCC::GreaterThan => lhs.fp_gt(rhs),
+        FloatCC::GreaterThanOrEqual => lhs.fp_ge(rhs),
+        FloatCC::Ordered => a_nan.not_expr().and_expr(b_nan.not_expr()),
+        FloatCC::Unordered => either_nan,
+        FloatCC::UnorderedEqual => lhs.fp_eq(rhs).or_expr(either_nan),
+        FloatCC::UnorderedNotEqual => lhs.fp_eq(rhs).not_expr().or_expr(either_nan),
+        FloatCC::UnorderedLessThan => lhs.fp_lt(rhs).or_expr(either_nan),
+        FloatCC::UnorderedLessThanOrEqual => lhs.fp_le(rhs).or_expr(either_nan),
+        FloatCC::UnorderedGreaterThan => lhs.fp_gt(rhs).or_expr(either_nan),
+        FloatCC::UnorderedGreaterThanOrEqual => lhs.fp_ge(rhs).or_expr(either_nan),
+    };
+
+    SmtExpr::ite(bool_result, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1))
+}
+
 /// Encode a tMIR integer constant.
 pub fn encode_tmir_iconst(ty: Type, imm: i64) -> SmtExpr {
     let width = ty.bits();
@@ -578,5 +617,100 @@ mod tests {
         let (a, b) = symbolic_binary_inputs(Type::I32);
         let result = try_encode_tmir_shift(&Opcode::Iadd, Type::I32, a, b);
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // FP comparison (FCMP) semantic encoder tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encode_tmir_fcmp_eq_true() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(1.0);
+        let expr = encode_tmir_fcmp(&FloatCC::Equal, Type::F64, a, b);
+        let result = expr.eval(&std::collections::HashMap::new());
+        assert_eq!(result, EvalResult::Bv(1));
+    }
+
+    #[test]
+    fn test_encode_tmir_fcmp_eq_false() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let expr = encode_tmir_fcmp(&FloatCC::Equal, Type::F64, a, b);
+        let result = expr.eval(&std::collections::HashMap::new());
+        assert_eq!(result, EvalResult::Bv(0));
+    }
+
+    #[test]
+    fn test_encode_tmir_fcmp_lt_true() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let expr = encode_tmir_fcmp(&FloatCC::LessThan, Type::F64, a, b);
+        let result = expr.eval(&std::collections::HashMap::new());
+        assert_eq!(result, EvalResult::Bv(1));
+    }
+
+    #[test]
+    fn test_encode_tmir_fcmp_gt_true() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp64_const(3.0);
+        let b = SmtExpr::fp64_const(1.0);
+        let expr = encode_tmir_fcmp(&FloatCC::GreaterThan, Type::F64, a, b);
+        let result = expr.eval(&std::collections::HashMap::new());
+        assert_eq!(result, EvalResult::Bv(1));
+    }
+
+    #[test]
+    fn test_encode_tmir_fcmp_ordered_no_nan() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let expr = encode_tmir_fcmp(&FloatCC::Ordered, Type::F64, a, b);
+        let result = expr.eval(&std::collections::HashMap::new());
+        assert_eq!(result, EvalResult::Bv(1));
+    }
+
+    #[test]
+    fn test_encode_tmir_fcmp_ordered_with_nan() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp64_const(f64::NAN);
+        let b = SmtExpr::fp64_const(1.0);
+        let expr = encode_tmir_fcmp(&FloatCC::Ordered, Type::F64, a, b);
+        let result = expr.eval(&std::collections::HashMap::new());
+        assert_eq!(result, EvalResult::Bv(0));
+    }
+
+    #[test]
+    fn test_encode_tmir_fcmp_unordered_with_nan() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp64_const(f64::NAN);
+        let b = SmtExpr::fp64_const(1.0);
+        let expr = encode_tmir_fcmp(&FloatCC::Unordered, Type::F64, a, b);
+        let result = expr.eval(&std::collections::HashMap::new());
+        assert_eq!(result, EvalResult::Bv(1));
+    }
+
+    #[test]
+    fn test_encode_tmir_fcmp_unordered_eq_nan() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp64_const(f64::NAN);
+        let b = SmtExpr::fp64_const(f64::NAN);
+        let expr = encode_tmir_fcmp(&FloatCC::UnorderedEqual, Type::F64, a, b);
+        let result = expr.eval(&std::collections::HashMap::new());
+        // NaN should make UnorderedEqual true
+        assert_eq!(result, EvalResult::Bv(1));
+    }
+
+    #[test]
+    fn test_encode_tmir_fcmp_f32() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp32_const(1.5f32);
+        let b = SmtExpr::fp32_const(2.5f32);
+        let expr = encode_tmir_fcmp(&FloatCC::LessThan, Type::F32, a, b);
+        let result = expr.eval(&std::collections::HashMap::new());
+        assert_eq!(result, EvalResult::Bv(1));
     }
 }

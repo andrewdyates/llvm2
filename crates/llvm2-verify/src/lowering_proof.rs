@@ -1261,6 +1261,258 @@ pub fn proof_fneg_f64() -> ProofObligation {
     }
 }
 
+/// Build the proof obligation for: `tMIR::Fdiv(F32, a, b) -> FDIV Sd, Sn, Sm`
+///
+/// Reference: ARM DDI 0487, C7.2.77 FDIV (scalar).
+pub fn proof_fdiv_f32() -> ProofObligation {
+    use crate::aarch64_semantics::{encode_fdiv_rr, FPSize};
+    use crate::tmir_semantics::encode_tmir_fp_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp32_const(0.0);
+    let b = SmtExpr::fp32_const(0.0);
+
+    ProofObligation {
+        name: "Fdiv_F32 -> FDIV Sd".to_string(),
+        tmir_expr: encode_tmir_fp_binop(&Opcode::Fdiv, Type::F32, a.clone(), b.clone()),
+        aarch64_expr: encode_fdiv_rr(FPSize::Single, a, b),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 8, 24), ("b".to_string(), 8, 24)],
+            category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Fdiv(F64, a, b) -> FDIV Dd, Dn, Dm`
+///
+/// Reference: ARM DDI 0487, C7.2.77 FDIV (scalar).
+pub fn proof_fdiv_f64() -> ProofObligation {
+    use crate::aarch64_semantics::{encode_fdiv_rr, FPSize};
+    use crate::tmir_semantics::encode_tmir_fp_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp64_const(0.0);
+    let b = SmtExpr::fp64_const(0.0);
+
+    ProofObligation {
+        name: "Fdiv_F64 -> FDIV Dd".to_string(),
+        tmir_expr: encode_tmir_fp_binop(&Opcode::Fdiv, Type::F64, a.clone(), b.clone()),
+        aarch64_expr: encode_fdiv_rr(FPSize::Double, a, b),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 11, 53), ("b".to_string(), 11, 53)],
+            category: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Floating-point comparison lowering proofs: tMIR::Fcmp -> FCMP + CSET
+// ---------------------------------------------------------------------------
+
+/// Generic FCMP proof builder. Builds a proof that
+/// `tMIR::Fcmp(cond, ty, a, b)` produces the same BV1 result as the
+/// AArch64 `FCMP + CSET` sequence encoded by `encode_fcmp`.
+///
+/// Reference: ARM DDI 0487, C7.2.76 FCMP.
+fn proof_fcmp_generic(
+    cond: llvm2_lower::instructions::FloatCC,
+    is_f32: bool,
+    name: &str,
+) -> ProofObligation {
+    use crate::aarch64_semantics::{encode_fcmp, FPSize};
+    use crate::tmir_semantics::encode_tmir_fcmp;
+    use llvm2_lower::types::Type;
+
+    let (ty, fp_size, eb, sb) = if is_f32 {
+        (Type::F32, FPSize::Single, 8u32, 24u32)
+    } else {
+        (Type::F64, FPSize::Double, 11u32, 53u32)
+    };
+
+    let a = if is_f32 { SmtExpr::fp32_const(0.0) } else { SmtExpr::fp64_const(0.0) };
+    let b = if is_f32 { SmtExpr::fp32_const(0.0) } else { SmtExpr::fp64_const(0.0) };
+
+    ProofObligation {
+        name: name.to_string(),
+        tmir_expr: encode_tmir_fcmp(&cond, ty, a.clone(), b.clone()),
+        aarch64_expr: encode_fcmp(fp_size, a, b, &cond),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), eb, sb), ("b".to_string(), eb, sb)],
+            category: None,
+    }
+}
+
+/// Proof: tMIR::Fcmp(Equal, F32) -> FCMP Sn, Sm + CSET (EQ)
+pub fn proof_fcmp_eq_f32() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::Equal, true, "Fcmp_Eq_F32 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(Equal, F64) -> FCMP Dn, Dm + CSET (EQ)
+pub fn proof_fcmp_eq_f64() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::Equal, false, "Fcmp_Eq_F64 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(NotEqual, F32) -> FCMP + CSET (NE)
+pub fn proof_fcmp_ne_f32() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::NotEqual, true, "Fcmp_NE_F32 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(NotEqual, F64) -> FCMP + CSET (NE)
+pub fn proof_fcmp_ne_f64() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::NotEqual, false, "Fcmp_NE_F64 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(LessThan, F32) -> FCMP + CSET (LT)
+pub fn proof_fcmp_lt_f32() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::LessThan, true, "Fcmp_LT_F32 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(LessThan, F64) -> FCMP + CSET (LT)
+pub fn proof_fcmp_lt_f64() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::LessThan, false, "Fcmp_LT_F64 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(LessThanOrEqual, F32) -> FCMP + CSET (LE)
+pub fn proof_fcmp_le_f32() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::LessThanOrEqual, true, "Fcmp_LE_F32 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(LessThanOrEqual, F64) -> FCMP + CSET (LE)
+pub fn proof_fcmp_le_f64() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::LessThanOrEqual, false, "Fcmp_LE_F64 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(GreaterThan, F32) -> FCMP + CSET (GT)
+pub fn proof_fcmp_gt_f32() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::GreaterThan, true, "Fcmp_GT_F32 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(GreaterThan, F64) -> FCMP + CSET (GT)
+pub fn proof_fcmp_gt_f64() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::GreaterThan, false, "Fcmp_GT_F64 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(GreaterThanOrEqual, F32) -> FCMP + CSET (GE)
+pub fn proof_fcmp_ge_f32() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::GreaterThanOrEqual, true, "Fcmp_GE_F32 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(GreaterThanOrEqual, F64) -> FCMP + CSET (GE)
+pub fn proof_fcmp_ge_f64() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::GreaterThanOrEqual, false, "Fcmp_GE_F64 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(Ordered, F32) -> FCMP + CSET (ORD)
+pub fn proof_fcmp_ord_f32() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::Ordered, true, "Fcmp_Ord_F32 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(Ordered, F64) -> FCMP + CSET (ORD)
+pub fn proof_fcmp_ord_f64() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::Ordered, false, "Fcmp_Ord_F64 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(Unordered, F32) -> FCMP + CSET (UNO)
+pub fn proof_fcmp_uno_f32() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::Unordered, true, "Fcmp_Uno_F32 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(Unordered, F64) -> FCMP + CSET (UNO)
+pub fn proof_fcmp_uno_f64() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::Unordered, false, "Fcmp_Uno_F64 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(UnorderedEqual, F32) -> FCMP + CSET (UEQ)
+pub fn proof_fcmp_ueq_f32() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::UnorderedEqual, true, "Fcmp_UEQ_F32 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(UnorderedEqual, F64) -> FCMP + CSET (UEQ)
+pub fn proof_fcmp_ueq_f64() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::UnorderedEqual, false, "Fcmp_UEQ_F64 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(UnorderedNotEqual, F32) -> FCMP + CSET (UNE)
+pub fn proof_fcmp_une_f32() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::UnorderedNotEqual, true, "Fcmp_UNE_F32 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(UnorderedNotEqual, F64) -> FCMP + CSET (UNE)
+pub fn proof_fcmp_une_f64() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::UnorderedNotEqual, false, "Fcmp_UNE_F64 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(UnorderedLessThan, F32) -> FCMP + CSET (ULT)
+pub fn proof_fcmp_ult_f32() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::UnorderedLessThan, true, "Fcmp_ULT_F32 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(UnorderedLessThan, F64) -> FCMP + CSET (ULT)
+pub fn proof_fcmp_ult_f64() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::UnorderedLessThan, false, "Fcmp_ULT_F64 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(UnorderedLessThanOrEqual, F32) -> FCMP + CSET (ULE)
+pub fn proof_fcmp_ule_f32() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::UnorderedLessThanOrEqual, true, "Fcmp_ULE_F32 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(UnorderedLessThanOrEqual, F64) -> FCMP + CSET (ULE)
+pub fn proof_fcmp_ule_f64() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::UnorderedLessThanOrEqual, false, "Fcmp_ULE_F64 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(UnorderedGreaterThan, F32) -> FCMP + CSET (UGT)
+pub fn proof_fcmp_ugt_f32() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::UnorderedGreaterThan, true, "Fcmp_UGT_F32 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(UnorderedGreaterThan, F64) -> FCMP + CSET (UGT)
+pub fn proof_fcmp_ugt_f64() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::UnorderedGreaterThan, false, "Fcmp_UGT_F64 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(UnorderedGreaterThanOrEqual, F32) -> FCMP + CSET (UGE)
+pub fn proof_fcmp_uge_f32() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::UnorderedGreaterThanOrEqual, true, "Fcmp_UGE_F32 -> FCMP+CSET")
+}
+
+/// Proof: tMIR::Fcmp(UnorderedGreaterThanOrEqual, F64) -> FCMP + CSET (UGE)
+pub fn proof_fcmp_uge_f64() -> ProofObligation {
+    use llvm2_lower::instructions::FloatCC;
+    proof_fcmp_generic(FloatCC::UnorderedGreaterThanOrEqual, false, "Fcmp_UGE_F64 -> FCMP+CSET")
+}
+
 /// Return all floating-point lowering rule proofs.
 pub fn all_fp_lowering_proofs() -> Vec<ProofObligation> {
     vec![
@@ -1272,7 +1524,81 @@ pub fn all_fp_lowering_proofs() -> Vec<ProofObligation> {
         proof_fmul_f64(),
         proof_fneg_f32(),
         proof_fneg_f64(),
+        proof_fdiv_f32(),
+        proof_fdiv_f64(),
+        // FCMP: ordered comparisons (F32 + F64)
+        proof_fcmp_eq_f32(),
+        proof_fcmp_eq_f64(),
+        proof_fcmp_ne_f32(),
+        proof_fcmp_ne_f64(),
+        proof_fcmp_lt_f32(),
+        proof_fcmp_lt_f64(),
+        proof_fcmp_le_f32(),
+        proof_fcmp_le_f64(),
+        proof_fcmp_gt_f32(),
+        proof_fcmp_gt_f64(),
+        proof_fcmp_ge_f32(),
+        proof_fcmp_ge_f64(),
+        // FCMP: ordering predicates (F32 + F64)
+        proof_fcmp_ord_f32(),
+        proof_fcmp_ord_f64(),
+        proof_fcmp_uno_f32(),
+        proof_fcmp_uno_f64(),
+        // FCMP: unordered comparisons (F32 + F64)
+        proof_fcmp_ueq_f32(),
+        proof_fcmp_ueq_f64(),
+        proof_fcmp_une_f32(),
+        proof_fcmp_une_f64(),
+        proof_fcmp_ult_f32(),
+        proof_fcmp_ult_f64(),
+        proof_fcmp_ule_f32(),
+        proof_fcmp_ule_f64(),
+        proof_fcmp_ugt_f32(),
+        proof_fcmp_ugt_f64(),
+        proof_fcmp_uge_f32(),
+        proof_fcmp_uge_f64(),
     ]
+}
+
+/// Detect whether a proof obligation is an FP comparison (FCMP).
+///
+/// FCMP proofs produce `ITE(comparison_bool, BV1(1), BV1(0))` at the top
+/// level, whereas arithmetic proofs (FADD/FSUB/FMUL/FDIV) have FPAdd/FPSub/
+/// FPMul/FPDiv at the top. FNEG has FPNeg.
+fn is_fp_cmp_obligation(obligation: &ProofObligation) -> bool {
+    matches!(&obligation.tmir_expr, SmtExpr::Ite { .. })
+}
+
+/// Parse a `FloatCC` condition from an FCMP proof obligation name.
+///
+/// Proof names follow the convention `Fcmp_{CondCode}_{Size} -> FCMP+CSET`.
+/// This function extracts the condition code and maps it to the corresponding
+/// `FloatCC` variant.
+fn parse_float_cc_from_name(name: &str) -> llvm2_lower::instructions::FloatCC {
+    use llvm2_lower::instructions::FloatCC;
+    // Extract the condition code between "Fcmp_" and "_F"
+    if let Some(rest) = name.strip_prefix("Fcmp_") {
+        let cond_str = rest.split('_').next().unwrap_or("");
+        match cond_str {
+            "Eq" => FloatCC::Equal,
+            "NE" => FloatCC::NotEqual,
+            "LT" => FloatCC::LessThan,
+            "LE" => FloatCC::LessThanOrEqual,
+            "GT" => FloatCC::GreaterThan,
+            "GE" => FloatCC::GreaterThanOrEqual,
+            "Ord" => FloatCC::Ordered,
+            "Uno" => FloatCC::Unordered,
+            "UEQ" => FloatCC::UnorderedEqual,
+            "UNE" => FloatCC::UnorderedNotEqual,
+            "ULT" => FloatCC::UnorderedLessThan,
+            "ULE" => FloatCC::UnorderedLessThanOrEqual,
+            "UGT" => FloatCC::UnorderedGreaterThan,
+            "UGE" => FloatCC::UnorderedGreaterThanOrEqual,
+            other => panic!("Unknown FloatCC condition in proof name: {}", other),
+        }
+    } else {
+        panic!("FCMP proof name does not start with 'Fcmp_': {}", name);
+    }
 }
 
 /// Verify a floating-point proof obligation by concrete evaluation with
@@ -1285,11 +1611,15 @@ pub fn all_fp_lowering_proofs() -> Vec<ProofObligation> {
 ///
 /// # Test vectors
 ///
-/// For binary FP operations (FADD, FSUB, FMUL): tests all combinations of
-/// edge cases including zero, one, negative values, small/large magnitudes,
+/// For binary FP operations (FADD, FSUB, FMUL, FDIV): tests all combinations
+/// of edge cases including zero, one, negative values, small/large magnitudes,
 /// denormals, and infinity.
 ///
 /// For unary FP operations (FNEG): tests each edge case value individually.
+///
+/// For FP comparisons (FCMP): tests all combinations of edge cases including
+/// NaN, which is critical for verifying ordered/unordered comparison semantics.
+/// Results are compared as BV1 (bitvector width 1) rather than Float.
 ///
 /// # Verification strength
 ///
@@ -1300,6 +1630,7 @@ pub fn verify_fp_by_evaluation(obligation: &ProofObligation) -> VerificationResu
     let empty_env = HashMap::new();
 
     // FP test vectors: representative values covering IEEE 754 edge cases.
+    // NaN is included for FCMP proofs (critical for ordered/unordered semantics).
     let f64_test_values: Vec<f64> = vec![
         0.0, -0.0, 1.0, -1.0, 0.5, -0.5,
         2.0, -2.0, 0.1, -0.1,
@@ -1311,6 +1642,7 @@ pub fn verify_fp_by_evaluation(obligation: &ProofObligation) -> VerificationResu
         1.0 / 3.0, -1.0 / 3.0,
         42.0, -42.0, 100.0, -100.0,
         0.000001, -0.000001,
+        f64::NAN,
     ];
 
     let f32_test_values: Vec<f32> = vec![
@@ -1323,10 +1655,12 @@ pub fn verify_fp_by_evaluation(obligation: &ProofObligation) -> VerificationResu
         std::f32::consts::PI, -std::f32::consts::PI,
         42.0f32, -42.0f32, 100.0f32, -100.0f32,
         0.000001f32, -0.000001f32,
+        f32::NAN,
     ];
 
     let is_unary = obligation.fp_inputs.len() == 1;
     let is_f32 = obligation.fp_inputs.first().map(|(_, eb, _)| *eb == 8).unwrap_or(false);
+    let is_cmp = is_fp_cmp_obligation(obligation);
 
     if is_unary {
         // Unary FP operation (FNEG)
@@ -1357,8 +1691,54 @@ pub fn verify_fp_by_evaluation(obligation: &ProofObligation) -> VerificationResu
                     }
             }
         }
+    } else if is_cmp {
+        // FP comparison (FCMP): produces BV1. We call the encoder functions
+        // directly with concrete values rather than template substitution,
+        // because FCMP expression trees contain multiple FPConst(0.0)
+        // placeholders for both operands that cannot be structurally
+        // distinguished during tree walking.
+        let cond = parse_float_cc_from_name(&obligation.name);
+        if is_f32 {
+            for &a_val in &f32_test_values {
+                for &b_val in &f32_test_values {
+                    let a_expr = SmtExpr::fp32_const(a_val);
+                    let b_expr = SmtExpr::fp32_const(b_val);
+                    let tmir_expr = crate::tmir_semantics::encode_tmir_fcmp(
+                        &cond, llvm2_lower::types::Type::F32, a_expr.clone(), b_expr.clone());
+                    let aarch64_expr = crate::aarch64_semantics::encode_fcmp(
+                        crate::aarch64_semantics::FPSize::Single, a_expr, b_expr, &cond);
+                    let tmir_result = tmir_expr.try_eval(&empty_env);
+                    let aarch64_result = aarch64_expr.try_eval(&empty_env);
+                    if let (Ok(t), Ok(a)) = (&tmir_result, &aarch64_result)
+                        && !fp_results_equal(t, a) {
+                            return VerificationResult::Invalid {
+                                counterexample: format!("a={}, b={}, tmir={:?}, aarch64={:?}", a_val, b_val, t, a),
+                            };
+                        }
+                }
+            }
+        } else {
+            for &a_val in &f64_test_values {
+                for &b_val in &f64_test_values {
+                    let a_expr = SmtExpr::fp64_const(a_val);
+                    let b_expr = SmtExpr::fp64_const(b_val);
+                    let tmir_expr = crate::tmir_semantics::encode_tmir_fcmp(
+                        &cond, llvm2_lower::types::Type::F64, a_expr.clone(), b_expr.clone());
+                    let aarch64_expr = crate::aarch64_semantics::encode_fcmp(
+                        crate::aarch64_semantics::FPSize::Double, a_expr, b_expr, &cond);
+                    let tmir_result = tmir_expr.try_eval(&empty_env);
+                    let aarch64_result = aarch64_expr.try_eval(&empty_env);
+                    if let (Ok(t), Ok(a)) = (&tmir_result, &aarch64_result)
+                        && !fp_results_equal(t, a) {
+                            return VerificationResult::Invalid {
+                                counterexample: format!("a={}, b={}, tmir={:?}, aarch64={:?}", a_val, b_val, t, a),
+                            };
+                        }
+                }
+            }
+        }
     } else {
-        // Binary FP operation (FADD, FSUB, FMUL)
+        // Binary FP operation (FADD, FSUB, FMUL, FDIV)
         if is_f32 {
             for &a_val in &f32_test_values {
                 for &b_val in &f32_test_values {
@@ -3392,6 +3772,167 @@ mod tests {
     #[test]
     fn test_proof_fneg_f64() {
         assert_fp_valid(&proof_fneg_f64());
+    }
+
+    #[test]
+    fn test_proof_fdiv_f32() {
+        assert_fp_valid(&proof_fdiv_f32());
+    }
+
+    #[test]
+    fn test_proof_fdiv_f64() {
+        assert_fp_valid(&proof_fdiv_f64());
+    }
+
+    // FCMP ordered comparison proofs
+    #[test]
+    fn test_proof_fcmp_eq_f32() {
+        assert_fp_valid(&proof_fcmp_eq_f32());
+    }
+
+    #[test]
+    fn test_proof_fcmp_eq_f64() {
+        assert_fp_valid(&proof_fcmp_eq_f64());
+    }
+
+    #[test]
+    fn test_proof_fcmp_ne_f32() {
+        assert_fp_valid(&proof_fcmp_ne_f32());
+    }
+
+    #[test]
+    fn test_proof_fcmp_ne_f64() {
+        assert_fp_valid(&proof_fcmp_ne_f64());
+    }
+
+    #[test]
+    fn test_proof_fcmp_lt_f32() {
+        assert_fp_valid(&proof_fcmp_lt_f32());
+    }
+
+    #[test]
+    fn test_proof_fcmp_lt_f64() {
+        assert_fp_valid(&proof_fcmp_lt_f64());
+    }
+
+    #[test]
+    fn test_proof_fcmp_le_f32() {
+        assert_fp_valid(&proof_fcmp_le_f32());
+    }
+
+    #[test]
+    fn test_proof_fcmp_le_f64() {
+        assert_fp_valid(&proof_fcmp_le_f64());
+    }
+
+    #[test]
+    fn test_proof_fcmp_gt_f32() {
+        assert_fp_valid(&proof_fcmp_gt_f32());
+    }
+
+    #[test]
+    fn test_proof_fcmp_gt_f64() {
+        assert_fp_valid(&proof_fcmp_gt_f64());
+    }
+
+    #[test]
+    fn test_proof_fcmp_ge_f32() {
+        assert_fp_valid(&proof_fcmp_ge_f32());
+    }
+
+    #[test]
+    fn test_proof_fcmp_ge_f64() {
+        assert_fp_valid(&proof_fcmp_ge_f64());
+    }
+
+    // FCMP ordering predicate proofs
+    #[test]
+    fn test_proof_fcmp_ord_f32() {
+        assert_fp_valid(&proof_fcmp_ord_f32());
+    }
+
+    #[test]
+    fn test_proof_fcmp_ord_f64() {
+        assert_fp_valid(&proof_fcmp_ord_f64());
+    }
+
+    #[test]
+    fn test_proof_fcmp_uno_f32() {
+        assert_fp_valid(&proof_fcmp_uno_f32());
+    }
+
+    #[test]
+    fn test_proof_fcmp_uno_f64() {
+        assert_fp_valid(&proof_fcmp_uno_f64());
+    }
+
+    // FCMP unordered comparison proofs
+    #[test]
+    fn test_proof_fcmp_ueq_f32() {
+        assert_fp_valid(&proof_fcmp_ueq_f32());
+    }
+
+    #[test]
+    fn test_proof_fcmp_ueq_f64() {
+        assert_fp_valid(&proof_fcmp_ueq_f64());
+    }
+
+    #[test]
+    fn test_proof_fcmp_une_f32() {
+        assert_fp_valid(&proof_fcmp_une_f32());
+    }
+
+    #[test]
+    fn test_proof_fcmp_une_f64() {
+        assert_fp_valid(&proof_fcmp_une_f64());
+    }
+
+    #[test]
+    fn test_proof_fcmp_ult_f32() {
+        assert_fp_valid(&proof_fcmp_ult_f32());
+    }
+
+    #[test]
+    fn test_proof_fcmp_ult_f64() {
+        assert_fp_valid(&proof_fcmp_ult_f64());
+    }
+
+    #[test]
+    fn test_proof_fcmp_ule_f32() {
+        assert_fp_valid(&proof_fcmp_ule_f32());
+    }
+
+    #[test]
+    fn test_proof_fcmp_ule_f64() {
+        assert_fp_valid(&proof_fcmp_ule_f64());
+    }
+
+    #[test]
+    fn test_proof_fcmp_ugt_f32() {
+        assert_fp_valid(&proof_fcmp_ugt_f32());
+    }
+
+    #[test]
+    fn test_proof_fcmp_ugt_f64() {
+        assert_fp_valid(&proof_fcmp_ugt_f64());
+    }
+
+    #[test]
+    fn test_proof_fcmp_uge_f32() {
+        assert_fp_valid(&proof_fcmp_uge_f32());
+    }
+
+    #[test]
+    fn test_proof_fcmp_uge_f64() {
+        assert_fp_valid(&proof_fcmp_uge_f64());
+    }
+
+    /// Verify the FP proof count matches expectations.
+    #[test]
+    fn test_fp_lowering_proof_count() {
+        let proofs = all_fp_lowering_proofs();
+        // 8 original (fadd/fsub/fmul/fneg x f32/f64) + 2 fdiv + 28 fcmp = 38
+        assert_eq!(proofs.len(), 38, "Expected 38 FP lowering proofs");
     }
 
     #[test]

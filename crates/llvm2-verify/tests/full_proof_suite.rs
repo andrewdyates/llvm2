@@ -211,8 +211,8 @@ fn full_proof_suite_known_category_counts() {
     // Division: sdiv/udiv x I32/I64 = 4
     assert_eq!(db.count_by_category(ProofCategory::Division), 4);
 
-    // FP: fadd/fsub/fmul/fneg x F32/F64 = 8
-    assert_eq!(db.count_by_category(ProofCategory::FloatingPoint), 8);
+    // FP: fadd/fsub/fmul/fdiv/fneg x F32/F64 = 10, plus 14 fcmp conditions x 2 sizes = 28; total = 38
+    assert_eq!(db.count_by_category(ProofCategory::FloatingPoint), 38);
 
     // NZCV: N/Z/C/V = 4
     assert_eq!(db.count_by_category(ProofCategory::NzcvFlags), 4);

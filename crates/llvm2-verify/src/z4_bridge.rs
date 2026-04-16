@@ -4035,10 +4035,10 @@ mod tests {
         verify_category_batch(ProofCategory::Division, 4);
     }
 
-    /// Verify all floating-point lowering proofs (fadd/fsub/fmul/fneg F32/F64) through z3.
+    /// Verify all floating-point lowering proofs (fadd/fsub/fmul/fdiv/fneg/fcmp F32/F64) through z3.
     #[test]
     fn test_z4_batch_verify_floating_point_proofs() {
-        verify_category_batch(ProofCategory::FloatingPoint, 8);
+        verify_category_batch(ProofCategory::FloatingPoint, 38);
     }
 
     /// Verify all general optimization pass proofs through z3.
@@ -5334,6 +5334,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let chc = encode_obligation_as_chc(&obligation);
@@ -5370,6 +5371,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![precond],
             fp_inputs: vec![],
+            category: None,
         };
 
         let chc = encode_obligation_as_chc(&obligation);
@@ -5393,6 +5395,7 @@ mod tests {
             inputs: vec![("x".to_string(), 64)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let chc = encode_obligation_as_chc(&obligation);
@@ -5419,6 +5422,7 @@ mod tests {
             inputs: vec![("a".to_string(), 8), ("b".to_string(), 16)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let chc = encode_obligation_as_chc(&obligation);

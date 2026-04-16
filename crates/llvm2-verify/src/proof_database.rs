@@ -759,8 +759,9 @@ mod tests {
     fn test_fp_lowering_proofs_count() {
         let db = ProofDatabase::new();
         let count = db.count_by_category(ProofCategory::FloatingPoint);
-        // fadd/fsub/fmul/fneg x F32/F64 = 8
-        assert_eq!(count, 8, "expected 8 FP proofs, got {}", count);
+        // fadd/fsub/fmul/fdiv/fneg x F32/F64 = 10, plus 14 fcmp conditions x 2 sizes = 28
+        // Total: 10 + 28 = 38
+        assert_eq!(count, 38, "expected 38 FP proofs, got {}", count);
     }
 
     #[test]
