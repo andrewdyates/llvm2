@@ -759,6 +759,95 @@ impl Pipeline {
         Ok(obj_bytes)
     }
 
+    /// Prepare a tMIR function through phases 1-7.5 (ISel through branch
+    /// resolution) without encoding or Mach-O emission.
+    ///
+    /// The returned `IrMachFunction` is ready to be passed to
+    /// [`compile_module`](Self::compile_module) alongside other prepared
+    /// functions. This enables multi-function compilation where cross-function
+    /// BL instructions are resolved via BRANCH26 relocations.
+    pub fn prepare_function(
+        &self,
+        input: &llvm2_lower::Function,
+    ) -> Result<IrMachFunction, PipelineError> {
+        // Phase 1: Instruction Selection
+        let isel_func = self.run_isel(input)?;
+
+        // Phase 2: Convert ISel output to shared IR
+        let mut ir_func = isel_func.to_ir_func();
+
+        // Debug: verify succs/preds are populated for multi-block functions
+        #[cfg(debug_assertions)]
+        {
+            let has_branches = ir_func.blocks.len() > 1;
+            if has_branches {
+                let total_succs: usize = ir_func.blocks.iter().map(|b| b.succs.len()).sum();
+                let total_preds: usize = ir_func.blocks.iter().map(|b| b.preds.len()).sum();
+                debug_assert!(
+                    total_succs > 0,
+                    "Multi-block function '{}' has no successor edges! Blocks: {}",
+                    ir_func.name, ir_func.blocks.len()
+                );
+                debug_assert!(
+                    total_preds > 0,
+                    "Multi-block function '{}' has no predecessor edges! Blocks: {}",
+                    ir_func.name, ir_func.blocks.len()
+                );
+            }
+        }
+
+        // Phase 3: Optimization
+        self.run_optimization(&mut ir_func);
+
+        // Phase 3.5: Verification (optional)
+        self.run_verification(&ir_func)?;
+
+        // Phase 4-6: Register Allocation
+        self.run_regalloc(&mut ir_func)?;
+
+        // Phase 6.5: Lower pseudo Copy instructions to real MovR.
+        lower_copies(&mut ir_func);
+
+        // Phase 7: Frame Lowering
+        let _frame_layout = self.run_frame_lowering(&mut ir_func);
+
+        // Phase 7.5: Branch Resolution
+        resolve_branches(&mut ir_func);
+
+        Ok(ir_func)
+    }
+
+    /// Prepare a pre-built IR function through phases 3-7.5 (optimization
+    /// through branch resolution) without encoding or Mach-O emission.
+    ///
+    /// Like [`prepare_function`](Self::prepare_function) but skips ISel,
+    /// accepting an `IrMachFunction` directly. The returned function is ready
+    /// for [`compile_module`](Self::compile_module).
+    pub fn prepare_ir_function(
+        &self,
+        ir_func: &mut IrMachFunction,
+    ) -> Result<(), PipelineError> {
+        // Phase 3: Optimization
+        self.run_optimization(ir_func);
+
+        // Phase 3.5: Verification (optional)
+        self.run_verification(ir_func)?;
+
+        // Phase 4-6: Register Allocation
+        self.run_regalloc(ir_func)?;
+
+        // Phase 6.5: Lower pseudo Copy instructions to real MovR.
+        lower_copies(ir_func);
+
+        // Phase 7: Frame Lowering
+        let _frame_layout = self.run_frame_lowering(ir_func);
+
+        // Phase 7.5: Branch Resolution
+        resolve_branches(ir_func);
+
+        Ok(())
+    }
+
     /// Encode an already-allocated IR function to Mach-O.
     ///
     /// Skips ISel, optimization, and regalloc. Useful for testing the
@@ -802,7 +891,6 @@ impl Pipeline {
     ) -> Result<Vec<u8>, PipelineError> {
         use crate::macho::MachOWriter;
         use crate::macho::fixup::FixupList;
-        use crate::macho::reloc::Relocation;
 
         // Phase 1: Encode each function, collecting code bytes and fixups.
         // Track each function's byte offset within the combined __text section.
