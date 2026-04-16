@@ -155,6 +155,28 @@ pub struct CompilationResult {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Count the number of real (non-pseudo) machine instructions in a function.
+///
+/// Walks blocks in layout order and counts instructions that will actually be
+/// encoded to machine code. Pseudo-instructions (Phi, Copy, StackAlloc, Nop,
+/// etc.) are excluded since they have no hardware encoding.
+fn count_real_instructions(func: &llvm2_ir::MachFunction) -> usize {
+    func.block_order
+        .iter()
+        .map(|&block_id| {
+            func.blocks[block_id.0 as usize]
+                .insts
+                .iter()
+                .filter(|&&inst_id| !func.insts[inst_id.0 as usize].is_pseudo())
+                .count()
+        })
+        .sum()
+}
+
+// ---------------------------------------------------------------------------
 // Compiler
 // ---------------------------------------------------------------------------
 
@@ -257,8 +279,15 @@ impl Compiler {
             });
         }
 
-        let total_code_size = obj_bytes.len();
-        let total_instruction_count = total_code_size / 4; // rough estimate
+        // Count actual non-pseudo instructions across all prepared functions.
+        // Each AArch64 instruction is exactly 4 bytes, so code_size = count * 4.
+        // This is the real instruction count, not the Mach-O object size / 4
+        // which would incorrectly include headers, symbol tables, and relocations.
+        let total_instruction_count: usize = prepared_funcs
+            .iter()
+            .map(|f| count_real_instructions(f))
+            .sum();
+        let total_code_size = total_instruction_count * 4;
 
         // Estimate optimization passes from opt level.
         let opt_passes = match self.config.opt_level {
@@ -312,7 +341,9 @@ impl Compiler {
 
         let obj_bytes = pipeline.compile_ir_function(ir_func)?;
 
-        let code_insts = obj_bytes.len() / 4;
+        // Count actual non-pseudo instructions from the function, not obj size / 4
+        // which would include Mach-O headers, symbol tables, and relocations.
+        let code_insts = count_real_instructions(ir_func);
         let opt_passes = match self.config.opt_level {
             OptLevel::O0 => 0,
             OptLevel::O1 => 3,
@@ -321,7 +352,7 @@ impl Compiler {
         };
 
         let metrics = CompilationMetrics {
-            code_size_bytes: obj_bytes.len(),
+            code_size_bytes: code_insts * 4,
             instruction_count: code_insts,
             function_count: 1,
             optimization_passes_run: opt_passes,
