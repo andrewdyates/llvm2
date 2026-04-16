@@ -1359,6 +1359,7 @@ fn estimate_type_bytes(ty: &Ty) -> u32 {
         },
         Ty::Ref { .. } => 8,
         Ty::Array { element, len } => estimate_type_bytes(element) * (*len as u32),
+        Ty::Vector { element, lanes } => estimate_type_bytes(element) * lanes,
         Ty::Struct(_) | Ty::StructDef { .. } | Ty::Tuple(_) => 8, // rough estimate
         Ty::Enum { .. } => 8, // rough estimate
         Ty::FnPtr { .. } | Ty::Func(_) => 8,
@@ -1456,6 +1457,8 @@ mod tests {
                 proofs: vec![],
             }],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         }
     }
 
@@ -1503,6 +1506,8 @@ mod tests {
                 proofs: vec![],
             }],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         }
     }
 
@@ -1562,6 +1567,8 @@ mod tests {
                 proofs: vec![],
             }],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         }
     }
 
@@ -1610,6 +1617,8 @@ mod tests {
                 proofs: vec![],
             }],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         }
     }
 
@@ -1670,6 +1679,8 @@ mod tests {
                 proofs: vec![],
             }],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         }
     }
 
@@ -1741,6 +1752,8 @@ mod tests {
                 proofs: vec![],
             }],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         }
     }
 
@@ -2374,6 +2387,8 @@ mod tests {
                 },
             ],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         };
 
         let graph = ComputeGraph::from_module(&module);
@@ -3063,6 +3078,8 @@ mod tests {
                 proofs: vec![],
             }],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         };
 
         let graph = ComputeGraph::from_module(&module);
@@ -3179,6 +3196,8 @@ mod tests {
                 proofs: vec![],
             }],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         };
 
         // Give full proofs so GPU/ANE are at least proof-legal.

@@ -186,6 +186,8 @@ mod tests {
             name: "".to_string(),
             functions: vec![],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         };
         let result = validate_module(&module);
         assert!(result.is_err());
@@ -211,6 +213,8 @@ mod tests {
                 proofs: vec![],
             }],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         };
         let result = validate_module(&module);
         assert!(result.is_err());

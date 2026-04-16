@@ -13,7 +13,7 @@ pub mod reader;
 
 use serde::{Deserialize, Serialize};
 use tmir_instrs::InstrNode;
-use tmir_types::{BlockId, FuncId, FuncTy, StructDef, TmirProof, Ty, ValueId};
+use tmir_types::{BlockId, DataLayout, FuncId, FuncTy, GlobalDef, StructDef, TmirProof, Ty, ValueId};
 
 /// A basic block in a tMIR function.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,12 +58,19 @@ impl Function {
     }
 }
 
-/// A tMIR module: collection of functions, struct definitions, and globals.
+/// A tMIR module: collection of functions, struct definitions, globals, and
+/// target data layout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Module {
     pub name: String,
     pub functions: Vec<Function>,
     pub structs: Vec<StructDef>,
+    /// Global variable definitions.
+    #[serde(default)]
+    pub globals: Vec<GlobalDef>,
+    /// Target data layout (None = use default for target).
+    #[serde(default)]
+    pub data_layout: Option<DataLayout>,
 }
 
 impl Module {
@@ -73,6 +80,8 @@ impl Module {
             name: name.into(),
             functions: Vec::new(),
             structs: Vec::new(),
+            globals: Vec::new(),
+            data_layout: None,
         }
     }
 
@@ -84,5 +93,10 @@ impl Module {
     /// Look up a function by name.
     pub fn function_by_name(&self, name: &str) -> Option<&Function> {
         self.functions.iter().find(|f| f.name == name)
+    }
+
+    /// Look up a global variable by name.
+    pub fn global_by_name(&self, name: &str) -> Option<&GlobalDef> {
+        self.globals.iter().find(|g| g.name == name)
     }
 }

@@ -15,7 +15,7 @@ use tmir_instrs::{
     AtomicRmwOp, BinOp, CastOp, CmpOp, Instr, InstrNode, MemoryOrdering, Operand, SwitchCase,
     UnOp,
 };
-use tmir_types::{BlockId, FuncId, FuncTy, StructDef, TmirProof, Ty, ValueId};
+use tmir_types::{BlockId, DataLayout, FuncId, FuncTy, GlobalDef, StructDef, TmirProof, Ty, ValueId};
 
 use crate::{Block, Function, Module};
 
@@ -29,6 +29,8 @@ pub struct ModuleBuilder {
     name: String,
     functions: Vec<Function>,
     structs: Vec<StructDef>,
+    globals: Vec<GlobalDef>,
+    data_layout: Option<DataLayout>,
     next_func_id: u32,
 }
 
@@ -39,6 +41,8 @@ impl ModuleBuilder {
             name: name.into(),
             functions: Vec::new(),
             structs: Vec::new(),
+            globals: Vec::new(),
+            data_layout: None,
             next_func_id: 0,
         }
     }
@@ -46,6 +50,18 @@ impl ModuleBuilder {
     /// Add a struct definition to the module.
     pub fn add_struct(&mut self, def: StructDef) -> &mut Self {
         self.structs.push(def);
+        self
+    }
+
+    /// Add a global variable definition to the module.
+    pub fn add_global(&mut self, global: GlobalDef) -> &mut Self {
+        self.globals.push(global);
+        self
+    }
+
+    /// Set the target data layout for the module.
+    pub fn with_data_layout(&mut self, layout: DataLayout) -> &mut Self {
+        self.data_layout = Some(layout);
         self
     }
 
@@ -73,6 +89,8 @@ impl ModuleBuilder {
             name: self.name,
             functions: self.functions,
             structs: self.structs,
+            globals: self.globals,
+            data_layout: self.data_layout,
         }
     }
 }

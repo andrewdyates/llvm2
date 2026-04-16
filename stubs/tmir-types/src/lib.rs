@@ -91,6 +91,25 @@ pub enum PrimitiveType {
     Never,
 }
 
+/// Linkage type for global variables and functions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Linkage {
+    /// Visible outside the module.
+    External,
+    /// Only visible within the module.
+    Internal,
+    /// Weak linkage — may be overridden by a strong definition.
+    Weak,
+    /// Available externally but not emitted if unused.
+    AvailableExternally,
+}
+
+impl Default for Linkage {
+    fn default() -> Self {
+        Linkage::External
+    }
+}
+
 /// Reference mutability (matches real tMIR Mutability).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Mutability {
@@ -176,6 +195,16 @@ pub enum Ty {
         pointee: Box<Ty>,
     },
 
+    /// Fixed-length vector type for SIMD: `<N x T>`.
+    ///
+    /// Element must be a scalar (integer or float). Lane count is typically
+    /// 2, 4, 8, or 16 matching hardware SIMD widths (e.g., 4xi32 for 128-bit
+    /// NEON, 2xf64 for 128-bit SSE).
+    Vector {
+        element: Box<Ty>,
+        lanes: u32,
+    },
+
     /// Function pointer type.
     ///
     /// Matches real tMIR's `Type::FnPtr { params, ret }`.
@@ -247,6 +276,14 @@ impl Ty {
     /// Construct an array type.
     pub fn array(element: Ty, len: u64) -> Self {
         Ty::Array { element: Box::new(element), len }
+    }
+
+    /// Construct a vector (SIMD) type.
+    ///
+    /// Element should be a scalar type (integer or float). Lane count is the
+    /// number of elements in the vector (e.g., 4 for 4xi32 NEON).
+    pub fn vector(element: Ty, lanes: u32) -> Self {
+        Ty::Vector { element: Box::new(element), lanes }
     }
 
     // -- Backward-compat constructors for migration from flat representation --
@@ -372,6 +409,35 @@ impl Ty {
             _ => None,
         }
     }
+
+    /// Returns true if this is a vector (SIMD) type.
+    pub fn is_vector(&self) -> bool {
+        matches!(self, Ty::Vector { .. })
+    }
+
+    /// Returns the element type and lane count if this is a vector type.
+    pub fn vector_info(&self) -> Option<(&Ty, u32)> {
+        match self {
+            Ty::Vector { element, lanes } => Some((element, *lanes)),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this is an enum type.
+    pub fn is_enum(&self) -> bool {
+        matches!(self, Ty::Enum { .. })
+    }
+
+    /// Total size in bits for vector types: element_bits * lanes.
+    /// Returns None for non-vector types.
+    pub fn vector_bits(&self) -> Option<u32> {
+        match self {
+            Ty::Vector { element, lanes } => {
+                element.bits().map(|b| (b as u32) * lanes)
+            }
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +483,82 @@ pub struct StructDef {
     pub size: Option<u32>,
     /// Alignment in bytes (populated by layout).
     pub align: Option<u32>,
+}
+
+/// A global variable definition.
+///
+/// Represents a module-level variable with optional initializer.
+/// Used for static data, string literals, vtables, etc.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GlobalDef {
+    /// Global variable name (mangled).
+    pub name: String,
+    /// Type of the global variable.
+    pub ty: Ty,
+    /// Whether this global is a constant (immutable after initialization).
+    pub is_const: bool,
+    /// Linkage visibility.
+    pub linkage: Linkage,
+    /// Optional constant initializer (as raw bytes).
+    /// None means zero-initialized or externally defined.
+    #[serde(default)]
+    pub initializer: Option<Vec<u8>>,
+    /// Alignment in bytes (None = natural alignment).
+    #[serde(default)]
+    pub align: Option<u32>,
+}
+
+/// Data layout specification for the target.
+///
+/// Describes pointer sizes, alignment rules, and endianness.
+/// This is a simplified version of LLVM's DataLayout string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataLayout {
+    /// Pointer size in bytes (typically 8 for 64-bit targets).
+    pub pointer_size: u32,
+    /// Pointer alignment in bytes.
+    pub pointer_align: u32,
+    /// Stack alignment in bytes (minimum alignment for stack slots).
+    pub stack_align: u32,
+    /// Whether the target is big-endian (false = little-endian).
+    pub big_endian: bool,
+    /// Preferred alignment for integer types, keyed by size in bits.
+    /// E.g., [(32, 4), (64, 8)] means i32 prefers 4-byte, i64 prefers 8-byte.
+    #[serde(default)]
+    pub int_align: Vec<(u16, u32)>,
+}
+
+impl DataLayout {
+    /// Create a default AArch64 data layout.
+    pub fn aarch64() -> Self {
+        Self {
+            pointer_size: 8,
+            pointer_align: 8,
+            stack_align: 16,
+            big_endian: false,
+            int_align: vec![(8, 1), (16, 2), (32, 4), (64, 8), (128, 16)],
+        }
+    }
+
+    /// Create a default x86-64 data layout.
+    pub fn x86_64() -> Self {
+        Self {
+            pointer_size: 8,
+            pointer_align: 8,
+            stack_align: 16,
+            big_endian: false,
+            int_align: vec![(8, 1), (16, 2), (32, 4), (64, 8), (128, 16)],
+        }
+    }
+
+    /// Get the preferred alignment for a given integer bit width.
+    pub fn align_of_int(&self, bits: u16) -> u32 {
+        self.int_align
+            .iter()
+            .find(|(b, _)| *b == bits)
+            .map(|(_, a)| *a)
+            .unwrap_or((bits as u32).div_ceil(8))
+    }
 }
 
 /// A tMIR value reference (SSA value ID within a function).
@@ -485,4 +627,222 @@ pub enum TmirProof {
     /// Operation is idempotent: f(f(x)) = f(x).
     /// Enables: redundant application elimination.
     Idempotent,
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- i128 tests (already existed, verifying they work) --
+
+    #[test]
+    fn test_i128_constructor() {
+        let t = Ty::i128();
+        assert_eq!(t, Ty::Primitive(PrimitiveType::Int { width: IntWidth::I128, signed: true }));
+        assert_eq!(t.bits(), Some(128));
+        assert_eq!(t.scalar_bytes(), Some(16));
+        assert!(t.is_signed());
+    }
+
+    #[test]
+    fn test_i128_from_int_constructor() {
+        let t = Ty::int(128);
+        assert_eq!(t, Ty::i128());
+    }
+
+    #[test]
+    fn test_u128_constructor() {
+        let t = Ty::uint(128);
+        assert_eq!(t.bits(), Some(128));
+        assert!(t.is_unsigned());
+    }
+
+    // -- Vector type tests --
+
+    #[test]
+    fn test_vector_constructor() {
+        let v = Ty::vector(Ty::i32(), 4);
+        assert!(v.is_vector());
+        let (elem, lanes) = v.vector_info().unwrap();
+        assert_eq!(*elem, Ty::i32());
+        assert_eq!(lanes, 4);
+    }
+
+    #[test]
+    fn test_vector_f64x2() {
+        let v = Ty::vector(Ty::f64(), 2);
+        assert!(v.is_vector());
+        assert_eq!(v.vector_bits(), Some(128)); // 2 * 64
+    }
+
+    #[test]
+    fn test_vector_i8x16() {
+        let v = Ty::vector(Ty::i8(), 16);
+        assert_eq!(v.vector_bits(), Some(128)); // 16 * 8 = 128-bit NEON
+    }
+
+    #[test]
+    fn test_vector_i32x8() {
+        let v = Ty::vector(Ty::i32(), 8);
+        assert_eq!(v.vector_bits(), Some(256)); // 8 * 32 = 256-bit AVX
+    }
+
+    #[test]
+    fn test_vector_not_scalar() {
+        let v = Ty::vector(Ty::i32(), 4);
+        assert_eq!(v.scalar_bytes(), None);
+        assert_eq!(v.bits(), None);
+        assert!(!v.is_integer());
+        assert!(!v.is_float());
+    }
+
+    #[test]
+    fn test_non_vector_info() {
+        assert!(Ty::i32().vector_info().is_none());
+        assert!(!Ty::i32().is_vector());
+        assert_eq!(Ty::i32().vector_bits(), None);
+    }
+
+    // -- Enum type tests --
+
+    #[test]
+    fn test_enum_type() {
+        let e = Ty::Enum {
+            name: "Option".to_string(),
+            variants: vec![
+                Variant { name: "None".to_string(), fields: vec![] },
+                Variant { name: "Some".to_string(), fields: vec![Ty::i32()] },
+            ],
+        };
+        assert!(e.is_enum());
+        assert!(!Ty::i32().is_enum());
+    }
+
+    // -- GlobalDef tests --
+
+    #[test]
+    fn test_global_def_construction() {
+        let g = GlobalDef {
+            name: "_my_global".to_string(),
+            ty: Ty::i32(),
+            is_const: true,
+            linkage: Linkage::External,
+            initializer: Some(vec![42, 0, 0, 0]),
+            align: Some(4),
+        };
+        assert_eq!(g.name, "_my_global");
+        assert_eq!(g.ty, Ty::i32());
+        assert!(g.is_const);
+        assert_eq!(g.linkage, Linkage::External);
+        assert_eq!(g.initializer, Some(vec![42, 0, 0, 0]));
+    }
+
+    #[test]
+    fn test_global_def_defaults() {
+        let g = GlobalDef {
+            name: "_extern_sym".to_string(),
+            ty: Ty::i64(),
+            is_const: false,
+            linkage: Linkage::default(),
+            initializer: None,
+            align: None,
+        };
+        assert_eq!(g.linkage, Linkage::External);
+        assert!(g.initializer.is_none());
+        assert!(g.align.is_none());
+    }
+
+    #[test]
+    fn test_linkage_variants() {
+        assert_eq!(Linkage::default(), Linkage::External);
+        // Verify all variants exist and are distinct
+        let variants = [
+            Linkage::External,
+            Linkage::Internal,
+            Linkage::Weak,
+            Linkage::AvailableExternally,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                assert_eq!(i == j, a == b);
+            }
+        }
+    }
+
+    // -- DataLayout tests --
+
+    #[test]
+    fn test_data_layout_aarch64() {
+        let dl = DataLayout::aarch64();
+        assert_eq!(dl.pointer_size, 8);
+        assert_eq!(dl.pointer_align, 8);
+        assert_eq!(dl.stack_align, 16);
+        assert!(!dl.big_endian);
+        assert_eq!(dl.align_of_int(32), 4);
+        assert_eq!(dl.align_of_int(64), 8);
+        assert_eq!(dl.align_of_int(128), 16);
+    }
+
+    #[test]
+    fn test_data_layout_x86_64() {
+        let dl = DataLayout::x86_64();
+        assert_eq!(dl.pointer_size, 8);
+        assert!(!dl.big_endian);
+        assert_eq!(dl.align_of_int(8), 1);
+        assert_eq!(dl.align_of_int(16), 2);
+    }
+
+    #[test]
+    fn test_data_layout_fallback_align() {
+        let dl = DataLayout::aarch64();
+        // Width not in the table: falls back to ceil(bits/8)
+        assert_eq!(dl.align_of_int(48), 6);
+    }
+
+    // -- Serde round-trip tests --
+
+    #[test]
+    fn test_vector_serde_round_trip() {
+        let v = Ty::vector(Ty::f32(), 4);
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: Ty = serde_json::from_str(&json).unwrap();
+        assert_eq!(v, parsed);
+    }
+
+    #[test]
+    fn test_global_def_serde_round_trip() {
+        let g = GlobalDef {
+            name: "_vtable".to_string(),
+            ty: Ty::array(Ty::ptr(Ty::void()), 8),
+            is_const: true,
+            linkage: Linkage::Internal,
+            initializer: None,
+            align: Some(8),
+        };
+        let json = serde_json::to_string(&g).unwrap();
+        let parsed: GlobalDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(g, parsed);
+    }
+
+    #[test]
+    fn test_data_layout_serde_round_trip() {
+        let dl = DataLayout::aarch64();
+        let json = serde_json::to_string(&dl).unwrap();
+        let parsed: DataLayout = serde_json::from_str(&json).unwrap();
+        assert_eq!(dl, parsed);
+    }
+
+    #[test]
+    fn test_global_def_serde_defaults() {
+        // JSON without optional fields should deserialize with defaults
+        let json = r#"{"name":"g","ty":{"Primitive":{"Int":{"width":"I32","signed":true}}},"is_const":false,"linkage":"External"}"#;
+        let g: GlobalDef = serde_json::from_str(json).unwrap();
+        assert_eq!(g.name, "g");
+        assert!(g.initializer.is_none());
+        assert!(g.align.is_none());
+    }
 }
