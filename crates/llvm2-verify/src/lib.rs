@@ -109,6 +109,8 @@ pub mod neon_lowering_proofs;
 pub mod neon_encoding_proofs;
 pub mod vectorization_proofs;
 pub mod ane_precision_proofs;
+pub mod x86_64_semantics;
+pub mod x86_64_lowering_proofs;
 pub mod regalloc_proofs;
 pub mod scheduler_proofs;
 pub mod const_materialize_proofs;
