@@ -814,7 +814,7 @@ pub fn verify_with_z4_api(obligation: &ProofObligation, config: &Z4Config) -> Z4
 
     // Declare bitvector input variables
     let mut var_terms: HashMap<String, z4::Term> = HashMap::new();
-    // UF declarations stored separately since z4 returns FuncDecl, not Term
+    // UF declarations stored separately: try_declare_fun returns FuncDecl, not Term
     let mut func_decls: HashMap<String, z4::FuncDecl> = HashMap::new();
     for (name, width) in &obligation.inputs {
         let sort = Sort::bitvec(*width);
@@ -884,7 +884,7 @@ pub fn verify_with_z4_api(obligation: &ProofObligation, config: &Z4Config) -> Z4
 ///
 /// The solver is `&mut` because z4's term construction methods require
 /// mutable access. `func_decls` stores UF declarations separately since
-/// z4 returns `FuncDecl` (not `Term`) from `declare_fun`.
+/// z4 returns `FuncDecl` (not `Term`) from `try_declare_fun`.
 #[cfg(feature = "z4")]
 #[allow(deprecated)]
 fn translate_expr_to_z4(
@@ -1205,7 +1205,8 @@ fn translate_expr_to_z4(
                 .get(name)
                 .cloned()
                 .ok_or_else(|| format!("Uninterpreted function '{}' not declared", name))?;
-            Ok(solver.apply(&func, &translated_args))
+            solver.try_apply(&func, &translated_args)
+                .map_err(|e| format!("Failed to apply UF '{}': {}", name, e))
         }
         SmtExpr::UFDecl { name, arg_sorts, ret_sort } => {
             // Translate argument sorts and return sort
@@ -1214,8 +1215,9 @@ fn translate_expr_to_z4(
                 .map(smt_sort_to_z4)
                 .collect::<Result<Vec<_>, _>>()?;
             let z4_ret_sort = smt_sort_to_z4(ret_sort)?;
-            let func = solver.declare_fun(name, &z4_arg_sorts, z4_ret_sort);
-            func_decls.insert(name.clone(), func.clone());
+            let func = solver.try_declare_fun(name, &z4_arg_sorts, z4_ret_sort)
+                .map_err(|e| format!("Failed to declare UF '{}': {}", name, e))?;
+            func_decls.insert(name.clone(), func);
             // Return a dummy boolean term -- UFDecl is a declaration, not an
             // expression. Callers should not use the returned term value.
             Ok(solver.bool_const(true))
