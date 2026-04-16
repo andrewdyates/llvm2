@@ -928,7 +928,7 @@ fn test_compiler_api_with_tracing() {
 }
 
 // ===========================================================================
-// TEST 11: Compiler API — proof certificates (placeholder)
+// TEST 11: Compiler API — proof certificates from function verifier
 // ===========================================================================
 
 #[test]
@@ -948,8 +948,15 @@ fn test_compiler_api_with_proof_certificates() {
         result.proofs.is_some(),
         "proofs field should be Some when emit_proofs is true"
     );
-    // Currently a placeholder -- empty until z4 integration.
-    assert!(result.proofs.unwrap().is_empty());
+    let proofs = result.proofs.unwrap();
+    // The add test function contains verified instructions (e.g., AddRR)
+    // that produce real proof certificates from the proof database.
+    assert!(!proofs.is_empty(), "proof certificates should be non-empty");
+    for cert in &proofs {
+        assert!(cert.verified, "certificate '{}' should be verified", cert.rule_name);
+        assert!(!cert.rule_name.is_empty());
+        assert!(!cert.function_name.is_empty());
+    }
 }
 
 // ===========================================================================
