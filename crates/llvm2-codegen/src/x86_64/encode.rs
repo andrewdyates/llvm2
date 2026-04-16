@@ -39,7 +39,7 @@ pub enum X86EncodeError {
     UnsupportedOpcode(X86Opcode),
     /// The operand combination is invalid.
     InvalidOperands(String),
-    /// x86-64 encoding is not yet implemented (scaffolding stub).
+    /// x86-64 encoding is not yet implemented for this specific form.
     NotImplemented(String),
 }
 

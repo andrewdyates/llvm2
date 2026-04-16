@@ -1,13 +1,26 @@
-// llvm2-codegen/x86_64/mod.rs - x86-64 target encoding modules (stub)
+// llvm2-codegen/x86_64/mod.rs - x86-64 target encoding modules
 //
 // Author: Andrew Yates <ayates@dropbox.com>
 // Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
-//! x86-64 (AMD64) instruction encoding.
+//! x86-64 (AMD64) instruction encoding and compilation pipeline.
 //!
-//! This module provides the x86-64 backend for LLVM2. Currently a stub
-//! with type definitions and structure in place; actual encoding logic
-//! will be implemented in follow-up issues.
+//! This module provides the x86-64 backend for LLVM2. It includes:
+//!
+//! - **Binary encoding** (`encode`): Full instruction encoder supporting 50+
+//!   instruction types including ALU (ADD, SUB, AND, OR, XOR), MOV variants
+//!   (reg-reg, reg-imm64, reg-mem, mem-reg, SIB addressing), control flow
+//!   (RET, CALL, JMP, Jcc), stack (PUSH, POP), shifts, unary ops, IMUL,
+//!   DIV/IDIV, MOVZX/MOVSX, CMOVcc, SETcc, bit manipulation (BSF, BSR,
+//!   TZCNT, LZCNT, POPCNT), SSE scalar (ADDSD/SS, SUBSD/SS, MULSD/SS,
+//!   DIVSD/SS, MOVSD/SS, UCOMISD/SS), SSE conversions, LEA, and
+//!   RIP-relative addressing.
+//!
+//! - **Compilation pipeline** (`pipeline`): End-to-end pipeline from ISel
+//!   output to machine code bytes or object files. Includes System V AMD64
+//!   ABI frame lowering (prologue/epilogue), simplified linear-scan register
+//!   assignment, branch resolution for variable-length instructions, and
+//!   output to raw bytes, ELF, or Mach-O object files.
 //!
 //! # Architecture
 //!
@@ -32,8 +45,8 @@ pub mod pipeline;
 
 pub use encode::{ModRM, RexPrefix, Sib, X86EncodeError, X86Encoder, X86InstOperands};
 pub use pipeline::{
-    X86Pipeline, X86PipelineConfig, X86PipelineError,
+    X86OutputFormat, X86Pipeline, X86PipelineConfig, X86PipelineError,
     X86RegAssignment,
     build_x86_add_test_function, build_x86_const_test_function,
-    x86_compile_to_bytes, x86_compile_to_elf,
+    x86_compile_to_bytes, x86_compile_to_elf, x86_compile_to_macho,
 };

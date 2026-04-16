@@ -59,6 +59,7 @@ use llvm2_lower::x86_64_isel::{
 
 use crate::x86_64::encode::{X86EncodeError, X86Encoder, X86InstOperands};
 use crate::elf::{ElfMachine, ElfWriter};
+use crate::macho::writer::{MachOTarget, MachOWriter};
 
 // ---------------------------------------------------------------------------
 // Pipeline errors
@@ -815,10 +816,24 @@ fn resolve_x86_branches(func: &mut X86ISelFunction) {
 // X86Pipeline — main entry point
 // ---------------------------------------------------------------------------
 
+/// Output format for the x86-64 pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum X86OutputFormat {
+    /// Raw machine code bytes (no object file wrapper).
+    RawBytes,
+    /// ELF .o object file (for Linux/BSD).
+    Elf,
+    /// Mach-O .o object file (for macOS).
+    MachO,
+}
+
 /// Configuration for the x86-64 pipeline.
 #[derive(Debug, Clone)]
 pub struct X86PipelineConfig {
+    /// Output format: raw bytes, ELF, or Mach-O.
+    pub output_format: X86OutputFormat,
     /// Whether to emit an ELF .o wrapper (vs raw code bytes).
+    /// Deprecated: use `output_format` instead.
     pub emit_elf: bool,
     /// Whether to emit prologue/epilogue (false for leaf functions that
     /// don't need a frame).
@@ -828,6 +843,7 @@ pub struct X86PipelineConfig {
 impl Default for X86PipelineConfig {
     fn default() -> Self {
         Self {
+            output_format: X86OutputFormat::RawBytes,
             emit_elf: false,
             emit_frame: true,
         }
@@ -836,7 +852,8 @@ impl Default for X86PipelineConfig {
 
 /// The x86-64 compilation pipeline.
 ///
-/// Orchestrates: ISel output -> regalloc -> frame lowering -> encoding -> ELF.
+/// Orchestrates: ISel output -> regalloc -> frame lowering -> encoding -> object file.
+/// Supports output to raw bytes, ELF, or Mach-O object files.
 pub struct X86Pipeline {
     pub config: X86PipelineConfig,
 }
@@ -855,7 +872,8 @@ impl X86Pipeline {
     /// Compile an x86-64 ISel function to machine code bytes.
     ///
     /// This is the main entry point. It takes an `X86ISelFunction` (post-ISel,
-    /// pre-regalloc) and returns encoded machine code bytes.
+    /// pre-regalloc) and returns encoded machine code bytes, optionally
+    /// wrapped in an ELF or Mach-O object file.
     pub fn compile_function(
         &self,
         func: &X86ISelFunction,
@@ -875,11 +893,20 @@ impl X86Pipeline {
         // Phase 4: Encode all instructions.
         let code = self.encode_function(&func, &assignment.allocation)?;
 
-        // Phase 5: Optionally wrap in ELF.
-        if self.config.emit_elf {
-            Ok(self.emit_elf(&func.name, &code))
+        // Phase 5: Optionally wrap in object file format.
+        // Resolve output format: `output_format` takes precedence, fall back to `emit_elf`.
+        let effective_format = if self.config.output_format != X86OutputFormat::RawBytes {
+            self.config.output_format
+        } else if self.config.emit_elf {
+            X86OutputFormat::Elf
         } else {
-            Ok(code)
+            X86OutputFormat::RawBytes
+        };
+
+        match effective_format {
+            X86OutputFormat::RawBytes => Ok(code),
+            X86OutputFormat::Elf => Ok(self.emit_elf(&func.name, &code)),
+            X86OutputFormat::MachO => Ok(self.emit_macho(&func.name, &code)),
         }
     }
 
@@ -995,6 +1022,21 @@ impl X86Pipeline {
         writer.add_symbol(func_name, 1, 0, code.len() as u64, true, 2); // STT_FUNC
         writer.write()
     }
+
+    /// Emit a Mach-O .o file wrapping the encoded machine code.
+    ///
+    /// Produces a valid x86-64 Mach-O relocatable object file with a __TEXT,__text
+    /// section and a global function symbol with Mach-O name mangling (_prefix).
+    fn emit_macho(&self, func_name: &str, code: &[u8]) -> Vec<u8> {
+        let mut writer = MachOWriter::for_target(MachOTarget::X86_64);
+        writer.add_text_section(code);
+
+        // Mach-O convention: symbol names have underscore prefix.
+        // Section index is 1-based (first add_text_section = section 1).
+        let macho_name = format!("_{}", func_name);
+        writer.add_symbol(&macho_name, 1, 0, true);
+        writer.write()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,6 +1058,23 @@ pub fn x86_compile_to_elf(
     let pipeline = X86Pipeline::new(X86PipelineConfig {
         emit_elf: true,
         emit_frame: true,
+        ..X86PipelineConfig::default()
+    });
+    pipeline.compile_function(func)
+}
+
+/// Compile an x86-64 ISel function to a Mach-O .o file.
+///
+/// Produces a valid x86-64 Mach-O relocatable object file suitable for
+/// linking on macOS. The function is emitted as a global symbol with
+/// Mach-O name mangling (_prefix).
+pub fn x86_compile_to_macho(
+    func: &X86ISelFunction,
+) -> Result<Vec<u8>, X86PipelineError> {
+    let pipeline = X86Pipeline::new(X86PipelineConfig {
+        output_format: X86OutputFormat::MachO,
+        emit_frame: true,
+        ..X86PipelineConfig::default()
     });
     pipeline.compile_function(func)
 }
@@ -1159,6 +1218,7 @@ mod tests {
         let config = X86PipelineConfig {
             emit_elf: true,
             emit_frame: false,
+            ..X86PipelineConfig::default()
         };
         let pipeline = X86Pipeline::new(config);
         assert!(pipeline.config.emit_elf);
@@ -1313,6 +1373,7 @@ mod tests {
         let pipeline = X86Pipeline::new(X86PipelineConfig {
             emit_elf: false,
             emit_frame: true,
+            ..X86PipelineConfig::default()
         });
         let code = pipeline.compile_function(&func).unwrap();
 
@@ -1331,6 +1392,7 @@ mod tests {
         let pipeline = X86Pipeline::new(X86PipelineConfig {
             emit_elf: false,
             emit_frame: false,
+            ..X86PipelineConfig::default()
         });
         let code = pipeline.compile_function(&func).unwrap();
 
@@ -1344,6 +1406,7 @@ mod tests {
         let pipeline = X86Pipeline::new(X86PipelineConfig {
             emit_elf: false,
             emit_frame: true,
+            ..X86PipelineConfig::default()
         });
         let code = pipeline.compile_function(&func).unwrap();
 
@@ -1358,6 +1421,7 @@ mod tests {
         let pipeline = X86Pipeline::new(X86PipelineConfig {
             emit_elf: false,
             emit_frame: true,
+            ..X86PipelineConfig::default()
         });
         let code = pipeline.compile_function(&func).unwrap();
 
@@ -1371,6 +1435,7 @@ mod tests {
         let pipeline = X86Pipeline::new(X86PipelineConfig {
             emit_elf: false,
             emit_frame: false,
+            ..X86PipelineConfig::default()
         });
         let code = pipeline.compile_function(&func).unwrap();
 
@@ -1409,6 +1474,62 @@ mod tests {
         let bytes = x86_compile_to_elf(&func).unwrap();
         assert!(bytes.len() > 64);
         assert_eq!(&bytes[0..4], &[0x7F, b'E', b'L', b'F']);
+    }
+
+    // -----------------------------------------------------------------------
+    // Mach-O emission
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compile_to_macho() {
+        let func = build_x86_const_test_function();
+        let bytes = x86_compile_to_macho(&func).unwrap();
+
+        // Mach-O magic: 0xFEEDFACF (MH_MAGIC_64, little-endian).
+        assert!(bytes.len() > 32);
+        assert_eq!(&bytes[0..4], &[0xCF, 0xFA, 0xED, 0xFE]);
+
+        // CPU type should be CPU_TYPE_X86_64 = 0x01000007 at offset 4.
+        let cputype = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        assert_eq!(cputype, 0x01000007, "CPU type should be CPU_TYPE_X86_64");
+    }
+
+    #[test]
+    fn test_compile_add_to_macho() {
+        let func = build_x86_add_test_function();
+        let bytes = x86_compile_to_macho(&func).unwrap();
+
+        assert!(bytes.len() > 64);
+        // Mach-O magic
+        assert_eq!(&bytes[0..4], &[0xCF, 0xFA, 0xED, 0xFE]);
+        // CPU type = x86-64
+        let cputype = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        assert_eq!(cputype, 0x01000007);
+    }
+
+    #[test]
+    fn test_compile_macho_via_config() {
+        let func = build_x86_const_test_function();
+        let pipeline = X86Pipeline::new(X86PipelineConfig {
+            output_format: X86OutputFormat::MachO,
+            emit_frame: true,
+            ..X86PipelineConfig::default()
+        });
+        let bytes = pipeline.compile_function(&func).unwrap();
+
+        // Mach-O magic
+        assert_eq!(&bytes[0..4], &[0xCF, 0xFA, 0xED, 0xFE]);
+
+        // Last byte of the embedded code should be RET (0xC3), but since
+        // it's wrapped in Mach-O, we just verify the overall structure.
+        assert!(bytes.len() > 100, "Mach-O output should be substantial");
+    }
+
+    #[test]
+    fn test_output_format_enum() {
+        assert_ne!(X86OutputFormat::RawBytes, X86OutputFormat::Elf);
+        assert_ne!(X86OutputFormat::Elf, X86OutputFormat::MachO);
+        assert_ne!(X86OutputFormat::RawBytes, X86OutputFormat::MachO);
     }
 
     // -----------------------------------------------------------------------
