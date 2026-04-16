@@ -18,7 +18,7 @@
 //! | `serde` derives | Yes (for tMIR serialization) | No (zero-dep core) |
 //! | `bits()` method | Yes | No |
 //!
-//! Once tMIR integration matures, this enum will align with tmir-types.
+//! Once tMIR integration matures, this enum will align with `tmir::Ty`.
 //! See issue #37 for tracking type unification.
 
 use serde::{Deserialize, Serialize};

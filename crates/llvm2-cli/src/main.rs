@@ -36,14 +36,14 @@ use llvm2_codegen::pipeline;
         Targets: aarch64 (primary), x86-64 (scaffold), riscv64 (scaffold)."
 )]
 struct Cli {
-    /// Input tMIR module file (positional, JSON-serialized tmir_func::Module).
+    /// Input tMIR module file (positional, JSON-serialized tmir::Module).
     /// Use --input-json for explicit JSON wire format reading with validation.
     input: Option<PathBuf>,
 
     /// Read tMIR module from a JSON wire format file (with structural validation).
     ///
     /// This is the recommended way to pass tMIR from external tools.
-    /// The JSON format matches serde serialization of tmir_func::Module.
+    /// The JSON format matches serde serialization of tmir::Module.
     #[arg(long = "input-json", conflicts_with = "input")]
     input_json: Option<PathBuf>,
 

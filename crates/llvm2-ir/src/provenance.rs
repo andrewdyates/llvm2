@@ -48,8 +48,8 @@ use crate::types::InstId;
 /// Identifier for a tMIR instruction (source-level).
 ///
 /// This corresponds to an instruction index in the tMIR function being compiled.
-/// It is deliberately a separate type from `tmir_types::ValueId` to keep the
-/// provenance system self-contained within llvm2-ir (no dependency on tMIR stubs
+/// It is deliberately a separate type from `tmir::ValueId` to keep the
+/// provenance system self-contained within llvm2-ir (no dependency on tMIR
 /// for the core tracking infrastructure).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct TmirInstId(pub u32);

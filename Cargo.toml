@@ -14,7 +14,7 @@ members = [
     "crates/llvm2-codegen",
     "crates/llvm2-regalloc",
     "crates/llvm2-cli",
-    # stubs/ kept but removed from workspace — being replaced by real tmir
+    # stubs/ excluded from workspace — replaced by real tmir crate. See #291 for cleanup.
 ]
 exclude = [
     "stubs/tmir-types",
