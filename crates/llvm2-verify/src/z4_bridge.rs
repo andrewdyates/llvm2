@@ -1034,20 +1034,20 @@ fn translate_expr_to_z4(
         }
         SmtExpr::Extract { high, low, operand, .. } => {
             let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
-            Ok(solver.extract(*high, *low, o))
+            Ok(solver.bvextract(o, *high, *low))
         }
         SmtExpr::Concat { hi, lo, .. } => {
             let h = translate_expr_to_z4(hi, solver, var_terms, func_decls)?;
             let l = translate_expr_to_z4(lo, solver, var_terms, func_decls)?;
-            Ok(solver.concat(h, l))
+            Ok(solver.bvconcat(h, l))
         }
         SmtExpr::ZeroExtend { operand, extra_bits, .. } => {
             let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
-            Ok(solver.zero_ext(*extra_bits, o))
+            Ok(solver.bvzeroext(o, *extra_bits))
         }
         SmtExpr::SignExtend { operand, extra_bits, .. } => {
             let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
-            Ok(solver.sign_ext(*extra_bits, o))
+            Ok(solver.bvsignext(o, *extra_bits))
         }
         // -------------------------------------------------------------------
         // Array theory (QF_ABV): Select, Store, ConstArray
