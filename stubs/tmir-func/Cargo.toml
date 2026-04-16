@@ -6,6 +6,10 @@
 # This is a development stub. When the real tMIR crate is available,
 # replace the workspace dep path to point to the tMIR repo.
 
+# Standalone workspace — stubs are not part of the main LLVM2 workspace.
+# The real tmir crate has replaced these stubs in the workspace.
+[workspace]
+
 [package]
 name = "tmir-func"
 version = "0.1.0"

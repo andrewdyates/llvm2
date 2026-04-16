@@ -12,8 +12,8 @@
 // _operand variants or construct Operand directly.
 
 use tmir_instrs::{
-    AtomicRmwOp, BinOp, CastOp, CmpOp, Instr, InstrNode, LandingPadClause, MemoryOrdering,
-    Operand, SwitchCase, UnOp,
+    AtomicRmwOp, BinOp, CastOp, CmpOp, Constant, Instr, InstrNode, LandingPadClause,
+    MemoryOrdering, Operand, SwitchCase, UnOp,
 };
 use tmir_types::{BlockId, CallingConv, DataLayout, FuncId, FuncTy, GlobalDef, StructDef, TmirProof, Ty, ValueId, Visibility};
 
@@ -430,7 +430,7 @@ pub fn resume(value: ValueId) -> InstrNode {
 pub fn switch(value: ValueId, cases: Vec<(i64, BlockId)>, default: BlockId) -> InstrNode {
     let cases = cases
         .into_iter()
-        .map(|(v, target)| SwitchCase { value: v, target })
+        .map(|(v, target)| SwitchCase { value: Constant::Int(v as i128), target, args: vec![] })
         .collect();
     InstrNode::new(
         Instr::Switch {

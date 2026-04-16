@@ -776,22 +776,24 @@ fn decode_operands(data: &[u8], pos: &mut usize) -> Result<Vec<Operand>, TmirBin
 
 fn encode_constant(buf: &mut Vec<u8>, c: &Constant) {
     match c {
-        Constant::Int { value, ty } => {
+        Constant::Int(value) => {
             encode_u8(buf, 0);
             encode_i128(buf, *value);
-            encode_ty(buf, ty);
         }
-        Constant::Float { value, ty } => {
+        Constant::Float(value) => {
             encode_u8(buf, 1);
             encode_f64(buf, *value);
-            encode_ty(buf, ty);
         }
         Constant::Bool(b) => {
             encode_u8(buf, 2);
             encode_bool(buf, *b);
         }
-        Constant::Unit => {
+        Constant::Aggregate(values) => {
             encode_u8(buf, 3);
+            encode_u32(buf, values.len() as u32);
+            for v in values {
+                encode_constant(buf, v);
+            }
         }
     }
 }
@@ -801,19 +803,24 @@ fn decode_constant(data: &[u8], pos: &mut usize) -> Result<Constant, TmirBinaryE
     match tag {
         0 => {
             let value = decode_i128(data, pos)?;
-            let ty = decode_ty(data, pos)?;
-            Ok(Constant::Int { value, ty })
+            Ok(Constant::Int(value))
         }
         1 => {
             let value = decode_f64(data, pos)?;
-            let ty = decode_ty(data, pos)?;
-            Ok(Constant::Float { value, ty })
+            Ok(Constant::Float(value))
         }
         2 => {
             let b = decode_bool(data, pos)?;
             Ok(Constant::Bool(b))
         }
-        3 => Ok(Constant::Unit),
+        3 => {
+            let count = decode_u32(data, pos)? as usize;
+            let mut values = Vec::with_capacity(count);
+            for _ in 0..count {
+                values.push(decode_constant(data, pos)?);
+            }
+            Ok(Constant::Aggregate(values))
+        }
         _ => Err(TmirBinaryError::UnknownTag("Constant", tag)),
     }
 }
@@ -1145,8 +1152,12 @@ fn encode_instr(buf: &mut Vec<u8>, instr: &Instr) {
             encode_operand(buf, value);
             encode_u32(buf, cases.len() as u32);
             for c in cases {
-                encode_i64(buf, c.value);
+                encode_constant(buf, &c.value);
                 encode_u32(buf, c.target.0);
+                encode_u32(buf, c.args.len() as u32);
+                for a in &c.args {
+                    encode_u32(buf, a.0);
+                }
             }
             encode_u32(buf, default.0);
         }
@@ -1355,9 +1366,14 @@ fn decode_instr(data: &[u8], pos: &mut usize) -> Result<Instr, TmirBinaryError> 
             let count = decode_u32(data, pos)? as usize;
             let mut cases = Vec::with_capacity(count);
             for _ in 0..count {
-                let val = decode_i64(data, pos)?;
+                let val = decode_constant(data, pos)?;
                 let target = BlockId(decode_u32(data, pos)?);
-                cases.push(SwitchCase { value: val, target });
+                let arg_count = decode_u32(data, pos)? as usize;
+                let mut args = Vec::with_capacity(arg_count);
+                for _ in 0..arg_count {
+                    args.push(ValueId(decode_u32(data, pos)?));
+                }
+                cases.push(SwitchCase { value: val, target, args });
             }
             let default = BlockId(decode_u32(data, pos)?);
             Ok(Instr::Switch { value, cases, default })
@@ -2269,8 +2285,8 @@ mod tests {
             Instr::BinOp {
                 op: BinOp::Add,
                 ty: Ty::i128(),
-                lhs: Operand::Constant(Constant::Int { value: i128::MAX, ty: Ty::i128() }),
-                rhs: Operand::Constant(Constant::Int { value: i128::MIN, ty: Ty::i128() }),
+                lhs: Operand::Constant(Constant::Int(i128::MAX)),
+                rhs: Operand::Constant(Constant::Int(i128::MIN)),
             },
             vec![v2],
         );
@@ -2397,7 +2413,7 @@ mod tests {
                 op: BinOp::Add,
                 ty: Ty::i64(),
                 lhs: Operand::Value(params[0]),
-                rhs: Operand::Constant(Constant::Int { value: 42, ty: Ty::i64() }),
+                rhs: Operand::Constant(Constant::Int(42)),
             },
             vec![result],
         );

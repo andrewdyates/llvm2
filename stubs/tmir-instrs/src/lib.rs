@@ -7,10 +7,10 @@
 // the full instruction set. This stub provides the ~25 core instructions
 // needed by LLVM2's instruction selector.
 //
-// Operand model: The real tMIR uses Operand (Value | Constant) for instruction
-// inputs, matching how SSA IRs carry inline constants. Our stub mirrors this
-// model so the adapter layer can handle both value references and inline
-// constants uniformly. See ~/tMIR/crates/tmir-instrs/src/lib.rs for reference.
+// Operand model: Real tMIR instructions use bare ValueId inputs and Constant
+// values in dedicated places such as SwitchCase. This stub keeps an Operand
+// (Value | Constant) helper so the adapter layer can handle both value
+// references and inline constants uniformly.
 //
 // Key differences from real tMIR that are intentional LLVM2 extensions:
 //   - InstrNode wrapper: carries proof annotations (real tMIR has no proofs)
@@ -21,6 +21,8 @@
 //   - Signed/unsigned op variants: SDiv/UDiv, Slt/Ult, etc. (real tMIR is simpler)
 
 #![allow(dead_code)]
+
+use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 use tmir_types::{BlockId, FuncId, TmirProof, Ty, ValueId};
@@ -167,32 +169,96 @@ pub enum AtomicRmwOp {
 
 /// A constant value (inline in an operand, not a separate instruction).
 ///
-/// In the real tMIR, constants are carried inline within Operand::Constant
-/// rather than as separate Const/FConst instructions. This stub mirrors that
-/// model. The adapter layer resolves Operand::Constant to LIR Iconst/Fconst
-/// instructions during lowering.
+/// In real tMIR, constants are represented by `Constant` rather than as
+/// separate Const/FConst instructions. This stub reuses that shape and also
+/// allows constants to appear inside `Operand::Constant` for adapter
+/// convenience.
 ///
-/// Reference: ~/tMIR/crates/tmir-instrs/src/lib.rs (Constant enum)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Reference: ~/tMIR/crates/tmir/src/constant.rs
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Constant {
-    /// Integer constant with type. Uses i128 to match real tMIR (not i64).
-    Int { value: i128, ty: Ty },
-    /// Float constant with type.
-    Float { value: f64, ty: Ty },
+    /// Integer constant. Uses i128 to match real tMIR (not i64).
+    Int(i128),
+    /// Float constant.
+    Float(f64),
     /// Boolean constant.
     Bool(bool),
-    /// Unit constant (void/zero-sized).
-    Unit,
+    /// Aggregate constant.
+    Aggregate(Vec<Constant>),
+}
+
+impl Constant {
+    fn normalized_f64_bits(value: f64) -> u64 {
+        if value == 0.0 {
+            0.0f64.to_bits()
+        } else if value.is_nan() {
+            f64::NAN.to_bits()
+        } else {
+            value.to_bits()
+        }
+    }
+
+    pub fn i32(v: i32) -> Self {
+        Self::Int(v as i128)
+    }
+
+    pub fn i64(v: i64) -> Self {
+        Self::Int(v as i128)
+    }
+
+    pub fn u32(v: u32) -> Self {
+        Self::Int(v as i128)
+    }
+
+    pub fn u64(v: u64) -> Self {
+        Self::Int(v as i128)
+    }
+
+    pub fn f32(v: f32) -> Self {
+        Self::Float(v as f64)
+    }
+
+    pub fn f64(v: f64) -> Self {
+        Self::Float(v)
+    }
+}
+
+impl PartialEq for Constant {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Constant::Int(lhs), Constant::Int(rhs)) => lhs == rhs,
+            (Constant::Float(lhs), Constant::Float(rhs)) => {
+                Self::normalized_f64_bits(*lhs) == Self::normalized_f64_bits(*rhs)
+            }
+            (Constant::Bool(lhs), Constant::Bool(rhs)) => lhs == rhs,
+            (Constant::Aggregate(lhs), Constant::Aggregate(rhs)) => lhs == rhs,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Constant {}
+
+impl Hash for Constant {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Constant::Int(value) => value.hash(state),
+            Constant::Float(value) => Self::normalized_f64_bits(*value).hash(state),
+            Constant::Bool(value) => value.hash(state),
+            Constant::Aggregate(values) => values.hash(state),
+        }
+    }
 }
 
 /// An operand: either an SSA value reference or an inline constant.
 ///
-/// This is the fundamental operand model of real tMIR. Instructions reference
-/// their inputs as Operand rather than bare ValueId, allowing constants to be
-/// carried inline without separate Const instructions. This enables simpler
-/// pattern matching in the instruction selector.
+/// Note: real tMIR does NOT have an `Operand` type. Instructions use bare
+/// `ValueId` references, and this wrapper exists only in the stub so LLVM2 can
+/// handle values and inline constants uniformly.
 ///
-/// Reference: ~/tMIR/crates/tmir-instrs/src/lib.rs (Operand enum)
+/// Reference: real tMIR constants live in ~/tMIR/crates/tmir/src/constant.rs;
+/// `Operand` is specific to this stub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Operand {
     /// Reference to an SSA value defined by another instruction.
@@ -208,13 +274,25 @@ impl Operand {
     }
 
     /// Create an integer constant operand.
-    pub fn int(value: i128, ty: Ty) -> Self {
-        Operand::Constant(Constant::Int { value, ty })
+    pub fn int_val(value: i128) -> Self {
+        Operand::Constant(Constant::Int(value))
     }
 
     /// Create a float constant operand.
-    pub fn float(value: f64, ty: Ty) -> Self {
-        Operand::Constant(Constant::Float { value, ty })
+    pub fn float_val(value: f64) -> Self {
+        Operand::Constant(Constant::Float(value))
+    }
+
+    /// Deprecated compatibility constructor for integer constants.
+    #[deprecated(note = "use Operand::int_val; Constant::Int no longer stores Ty")]
+    pub fn int(value: i128, _ty: Ty) -> Self {
+        Self::int_val(value)
+    }
+
+    /// Deprecated compatibility constructor for float constants.
+    #[deprecated(note = "use Operand::float_val; Constant::Float no longer stores Ty")]
+    pub fn float(value: f64, _ty: Ty) -> Self {
+        Self::float_val(value)
     }
 
     /// Create a boolean constant operand.
@@ -256,11 +334,12 @@ impl From<ValueId> for Operand {
     }
 }
 
-/// A single switch case: value -> target block.
+/// A single switch case: value -> target block with block args.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SwitchCase {
-    pub value: i64,
+    pub value: Constant,
     pub target: BlockId,
+    pub args: Vec<ValueId>,
 }
 
 /// A clause in a landing pad instruction.
@@ -286,8 +365,9 @@ pub enum LandingPadClause {
 /// ## Operand model
 ///
 /// Instructions that accept general inputs use `Operand` (value or constant),
-/// matching the real tMIR operand model. Instructions that require a specific
-/// SSA value (e.g., pointer for Load, borrow target) use bare `ValueId`.
+/// which is a stub-only LLVM2 convenience. Real tMIR instructions use bare
+/// `ValueId` operands and `Constant` in dedicated positions such as
+/// `SwitchCase`.
 ///
 /// The adapter layer's `resolve_operand` method materializes constants into
 /// LIR Iconst/Fconst instructions when an `Operand::Constant` is encountered.
@@ -434,7 +514,7 @@ pub enum Instr {
     // -- Control flow --
 
     /// Unconditional branch.
-    /// Branch args may be values or constants (matching real tMIR).
+    /// Branch args may be values or constants in this stub.
     Br {
         target: BlockId,
         args: Vec<Operand>,
@@ -459,7 +539,7 @@ pub enum Instr {
     },
 
     /// Return from function.
-    /// Return values may be values or constants (matching real tMIR).
+    /// Return values may be values or constants in this stub.
     Return {
         values: Vec<Operand>,
     },
@@ -471,7 +551,7 @@ pub enum Instr {
     /// Like Call, but with normal and unwind successor blocks.
     /// If the callee returns normally, control transfers to normal_dest with normal_args.
     /// If the callee throws, control transfers to unwind_dest with unwind_args.
-    /// Arguments may be values or constants (matching real tMIR).
+    /// Arguments may be values or constants in this stub.
     Invoke {
         func: FuncId,
         args: Vec<Operand>,
@@ -501,7 +581,7 @@ pub enum Instr {
     },
 
     /// Direct function call.
-    /// Arguments may be values or constants (matching real tMIR).
+    /// Arguments may be values or constants in this stub.
     Call {
         func: FuncId,
         args: Vec<Operand>,
@@ -542,7 +622,7 @@ pub enum Instr {
     },
 
     /// SSA phi node (block parameter).
-    /// Incoming values may be values or constants (matching real tMIR).
+    /// Incoming values may be values or constants in this stub.
     Phi {
         ty: Ty,
         incoming: Vec<(BlockId, Operand)>,
@@ -586,7 +666,8 @@ pub enum Instr {
     /// Integer constant (legacy — prefer Operand::Constant for new code).
     ///
     /// Kept for backward compatibility. The adapter handles both this form and
-    /// Operand::Constant(Constant::Int{..}).
+    /// Operand::Constant(Constant::Int(..)); `value` remains `i64` even though
+    /// `Constant::Int` uses `i128`.
     Const {
         ty: Ty,
         value: i64,
@@ -595,7 +676,7 @@ pub enum Instr {
     /// Float constant (legacy — prefer Operand::Constant for new code).
     ///
     /// Kept for backward compatibility. The adapter handles both this form and
-    /// Operand::Constant(Constant::Float{..}).
+    /// Operand::Constant(Constant::Float(..)).
     FConst {
         ty: Ty,
         value: f64,
@@ -658,7 +739,7 @@ mod tests {
         let instr = InstrNode::new(
             Instr::Invoke {
                 func: FuncId(1),
-                args: vec![Operand::Value(ValueId(0)), Operand::int(42, Ty::i32())],
+                args: vec![Operand::Value(ValueId(0)), Operand::int_val(42)],
                 ret_ty: vec![Ty::i32()],
                 normal_dest: BlockId(1),
                 normal_args: vec![],
