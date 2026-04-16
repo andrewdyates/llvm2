@@ -380,6 +380,15 @@ fn resolve_inst_operands(
                 ops.dst = resolve_operand(op, alloc);
             }
         }
+        X86Opcode::CallM => {
+            for op in &inst.operands {
+                if let X86ISelOperand::MemAddr { base, disp } = op {
+                    ops.base = resolve_operand(base, alloc);
+                    ops.disp = *disp as i64;
+                    break;
+                }
+            }
+        }
 
         // SSE: [dst, src]
         X86Opcode::Addsd | X86Opcode::Subsd | X86Opcode::Mulsd | X86Opcode::Divsd
@@ -423,7 +432,8 @@ fn resolve_inst_operands(
                 }
             }
         }
-        X86Opcode::Movzx | X86Opcode::Movsx => {
+        X86Opcode::Movzx | X86Opcode::MovzxW | X86Opcode::MovsxB
+        | X86Opcode::MovsxW | X86Opcode::Movsx => {
             if inst.operands.len() >= 2 {
                 ops.dst = resolve_operand(&inst.operands[0], alloc);
                 ops.src = resolve_operand(&inst.operands[1], alloc);
@@ -484,7 +494,8 @@ fn resolve_inst_operands(
         }
 
         // Memory forms
-        X86Opcode::AddRM | X86Opcode::SubRM | X86Opcode::CmpRM => {
+        X86Opcode::AddRM | X86Opcode::SubRM | X86Opcode::CmpRM
+        | X86Opcode::ImulRM | X86Opcode::TestRM => {
             if let Some(op) = inst.operands.first() {
                 ops.dst = resolve_operand(op, alloc);
             }
@@ -545,7 +556,7 @@ fn resolve_inst_operands(
         }
 
         // Scaled-index memory: [dst/src, base, index, scale, disp]
-        X86Opcode::MovRMSib => {
+        X86Opcode::MovRMSib | X86Opcode::LeaSib => {
             if let Some(op) = inst.operands.first() {
                 ops.dst = resolve_operand(op, alloc);
             }

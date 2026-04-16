@@ -44,6 +44,8 @@ pub enum X86Opcode {
     ImulRR,
     /// IMUL r64, r64, imm32 (signed multiply, three-operand form)
     ImulRRI,
+    /// IMUL r64, [mem] (signed multiply, two-operand memory form)
+    ImulRM,
     /// IDIV r64 (signed divide RDX:RAX by r64, quotient in RAX, remainder in RDX)
     Idiv,
     /// DIV r64 (unsigned divide RDX:RAX by r64, quotient in RAX, remainder in RDX)
@@ -103,12 +105,20 @@ pub enum X86Opcode {
     MovRM,
     /// MOV [mem], r64
     MovMR,
-    /// MOVZX r64, r8/r16 (zero-extend)
+    /// MOVZX r64, r8 (zero-extend byte to qword, 0F B6)
     Movzx,
-    /// MOVSX r64, r8/r16/r32 (sign-extend, aka MOVSXD for 32->64)
+    /// MOVZX r64, r16 (zero-extend word to qword, 0F B7)
+    MovzxW,
+    /// MOVSX r64, r8 (sign-extend byte to qword, 0F BE)
+    MovsxB,
+    /// MOVSX r64, r16 (sign-extend word to qword, 0F BF)
+    MovsxW,
+    /// MOVSXD r64, r32 (sign-extend dword to qword, 63h)
     Movsx,
     /// LEA r64, [mem] (load effective address)
     Lea,
+    /// LEA r64, [base + index*scale + disp] (SIB addressing form)
+    LeaSib,
 
     // =====================================================================
     // Scaled-index memory addressing (SIB forms)
@@ -135,6 +145,8 @@ pub enum X86Opcode {
     TestRR,
     /// TEST r64, imm32
     TestRI,
+    /// TEST r64, [mem] (AND without storing result, sets RFLAGS)
+    TestRM,
 
     // =====================================================================
     // Branch / control flow
@@ -148,6 +160,8 @@ pub enum X86Opcode {
     Call,
     /// CALL r64 (indirect call)
     CallR,
+    /// CALL [mem] (indirect call through memory)
+    CallM,
     /// RET (near return)
     Ret,
 
@@ -268,18 +282,22 @@ impl X86Opcode {
             // Calls
             Call => InstFlags::IS_CALL.union(InstFlags::HAS_SIDE_EFFECTS),
             CallR => InstFlags::IS_CALL.union(InstFlags::HAS_SIDE_EFFECTS),
+            CallM => InstFlags::IS_CALL.union(InstFlags::HAS_SIDE_EFFECTS).union(InstFlags::READS_MEMORY),
 
             // Return
             Ret => InstFlags::IS_RETURN.union(InstFlags::IS_TERMINATOR),
 
             // Memory loads
-            MovRM | MovsdRM | MovssRM | AddRM | SubRM | CmpRM | MovRMSib => InstFlags::READS_MEMORY,
+            MovRM | MovsdRM | MovssRM | AddRM | SubRM | CmpRM | MovRMSib | ImulRM => InstFlags::READS_MEMORY,
 
             // Memory stores
             MovMR | MovsdMR | MovssMR | MovMRSib => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Compare/test (set RFLAGS = side effect)
             CmpRR | CmpRI | TestRR | TestRI | Ucomisd | Ucomiss => InstFlags::HAS_SIDE_EFFECTS,
+
+            // Compare/test with memory operand (side effect + memory read)
+            TestRM => InstFlags::HAS_SIDE_EFFECTS.union(InstFlags::READS_MEMORY),
 
             // SETcc sets RFLAGS-dependent byte (reads RFLAGS)
             Setcc => InstFlags::EMPTY,
@@ -437,11 +455,14 @@ mod tests {
 
     #[test]
     fn call_opcodes_have_call_and_side_effect_flags() {
-        for op in &[X86Opcode::Call, X86Opcode::CallR] {
+        for op in &[X86Opcode::Call, X86Opcode::CallR, X86Opcode::CallM] {
             let flags = op.default_flags();
             assert!(flags.contains(InstFlags::IS_CALL), "{:?}", op);
             assert!(flags.contains(InstFlags::HAS_SIDE_EFFECTS), "{:?}", op);
         }
+        // CallM also reads memory
+        let flags = X86Opcode::CallM.default_flags();
+        assert!(flags.contains(InstFlags::READS_MEMORY));
     }
 
     #[test]
@@ -453,7 +474,7 @@ mod tests {
 
     #[test]
     fn memory_load_opcodes() {
-        for op in &[X86Opcode::MovRM, X86Opcode::MovsdRM, X86Opcode::MovssRM, X86Opcode::MovRMSib] {
+        for op in &[X86Opcode::MovRM, X86Opcode::MovsdRM, X86Opcode::MovssRM, X86Opcode::MovRMSib, X86Opcode::ImulRM] {
             let flags = op.default_flags();
             assert!(flags.contains(InstFlags::READS_MEMORY), "{:?}", op);
             assert!(!flags.contains(InstFlags::WRITES_MEMORY), "{:?}", op);
@@ -471,10 +492,13 @@ mod tests {
 
     #[test]
     fn compare_opcodes_have_side_effects() {
-        for op in &[X86Opcode::CmpRR, X86Opcode::CmpRI, X86Opcode::TestRR, X86Opcode::TestRI, X86Opcode::Ucomisd, X86Opcode::Ucomiss] {
+        for op in &[X86Opcode::CmpRR, X86Opcode::CmpRI, X86Opcode::TestRR, X86Opcode::TestRI, X86Opcode::TestRM, X86Opcode::Ucomisd, X86Opcode::Ucomiss] {
             let flags = op.default_flags();
             assert!(flags.contains(InstFlags::HAS_SIDE_EFFECTS), "{:?}", op);
         }
+        // TestRM also reads memory
+        let flags = X86Opcode::TestRM.default_flags();
+        assert!(flags.contains(InstFlags::READS_MEMORY));
     }
 
     #[test]
@@ -492,7 +516,8 @@ mod tests {
             X86Opcode::ShrRR, X86Opcode::ShrRI,
             X86Opcode::SarRR, X86Opcode::SarRI,
             X86Opcode::MovRR, X86Opcode::MovRI,
-            X86Opcode::Movzx, X86Opcode::Movsx, X86Opcode::Lea, X86Opcode::LeaRip,
+            X86Opcode::Movzx, X86Opcode::MovzxW, X86Opcode::MovsxB, X86Opcode::MovsxW,
+            X86Opcode::Movsx, X86Opcode::Lea, X86Opcode::LeaSib, X86Opcode::LeaRip,
             X86Opcode::Addsd, X86Opcode::Subsd,
             X86Opcode::Mulsd, X86Opcode::Divsd,
             X86Opcode::MovsdRR,
