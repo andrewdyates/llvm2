@@ -1532,6 +1532,148 @@ mod tests {
         assert_ne!(X86OutputFormat::RawBytes, X86OutputFormat::MachO);
     }
 
+    #[test]
+    fn test_macho_x86_64_full_header_validation() {
+        // Validate the complete Mach-O header structure for x86-64 output,
+        // including CPU subtype, file type, number of load commands, and flags.
+        let func = build_x86_const_test_function();
+        let bytes = x86_compile_to_macho(&func).unwrap();
+
+        // Helper to read little-endian u32.
+        fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+            u32::from_le_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ])
+        }
+
+        // mach_header_64 fields:
+        // offset  0: magic     = MH_MAGIC_64 (0xFEEDFACF)
+        // offset  4: cputype   = CPU_TYPE_X86_64 (0x01000007)
+        // offset  8: cpusubtype = CPU_SUBTYPE_X86_64_ALL (3)
+        // offset 12: filetype  = MH_OBJECT (1)
+        // offset 16: ncmds     = 4 (segment, build_version, symtab, dysymtab)
+        // offset 20: sizeofcmds
+        // offset 24: flags     = MH_SUBSECTIONS_VIA_SYMBOLS (0x2000)
+        // offset 28: reserved  = 0
+
+        assert_eq!(read_u32(&bytes, 0), 0xFEEDFACF, "magic");
+        assert_eq!(read_u32(&bytes, 4), 0x01000007, "cputype = CPU_TYPE_X86_64");
+        assert_eq!(read_u32(&bytes, 8), 3, "cpusubtype = CPU_SUBTYPE_X86_64_ALL");
+        assert_eq!(read_u32(&bytes, 12), 1, "filetype = MH_OBJECT");
+        assert_eq!(read_u32(&bytes, 16), 4, "ncmds = 4");
+        assert!(read_u32(&bytes, 20) > 0, "sizeofcmds > 0");
+        assert_eq!(read_u32(&bytes, 24) & 0x2000, 0x2000, "MH_SUBSECTIONS_VIA_SYMBOLS");
+        assert_eq!(read_u32(&bytes, 28), 0, "reserved = 0");
+    }
+
+    #[test]
+    fn test_macho_x86_64_contains_function_code() {
+        // Verify that the Mach-O output contains the actual machine code
+        // by compiling a frameless function and searching for the RET byte.
+        let func = build_x86_const_test_function();
+
+        // First compile to raw bytes to know what to look for.
+        let pipeline_raw = X86Pipeline::new(X86PipelineConfig {
+            output_format: X86OutputFormat::RawBytes,
+            emit_frame: false,
+            ..X86PipelineConfig::default()
+        });
+        let raw_code = pipeline_raw.compile_function(&func).unwrap();
+
+        // Now compile to Mach-O.
+        let pipeline_macho = X86Pipeline::new(X86PipelineConfig {
+            output_format: X86OutputFormat::MachO,
+            emit_frame: false,
+            ..X86PipelineConfig::default()
+        });
+        let macho_bytes = pipeline_macho.compile_function(&func).unwrap();
+
+        // The raw code should appear somewhere in the Mach-O output.
+        let found = macho_bytes
+            .windows(raw_code.len())
+            .any(|window| window == raw_code.as_slice());
+        assert!(
+            found,
+            "Mach-O output should contain the raw machine code ({} bytes)",
+            raw_code.len()
+        );
+    }
+
+    #[test]
+    fn test_macho_x86_64_symbol_name_mangling() {
+        // Verify that the emitted symbol name has the _ prefix per Mach-O convention.
+        let func = build_x86_add_test_function();
+        let bytes = x86_compile_to_macho(&func).unwrap();
+
+        // The string table should contain "_add" (underscore-prefixed function name).
+        let strtab_bytes = String::from_utf8_lossy(&bytes);
+        assert!(
+            strtab_bytes.contains("_add"),
+            "Mach-O should contain symbol name '_add' (underscore-prefixed)"
+        );
+    }
+
+    #[test]
+    fn test_macho_x86_64_not_aarch64() {
+        // Ensure the x86-64 pipeline does NOT emit AArch64 CPU type.
+        let func = build_x86_const_test_function();
+        let bytes = x86_compile_to_macho(&func).unwrap();
+
+        let cputype = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        // CPU_TYPE_ARM64 = 0x0100000C -- must NOT be this.
+        assert_ne!(cputype, 0x0100000C, "x86-64 Mach-O must not have ARM64 CPU type");
+    }
+
+    #[test]
+    fn test_macho_x86_64_section_alignment() {
+        // x86-64 Mach-O text sections should be 16-byte aligned (2^4),
+        // per System V ABI convention. Check the section header's align field.
+        let func = build_x86_const_test_function();
+        let bytes = x86_compile_to_macho(&func).unwrap();
+
+        // section_64 header starts after mach_header_64(32) + segment_command_64(72).
+        // section_64 layout at offset 104:
+        //   sectname(16) + segname(16) + addr(8) + size(8) + offset(4) + align(4)
+        //   = align field is at offset 104 + 52 = 156
+        let section_hdr_start = 32 + 72; // 104
+        let align_offset = section_hdr_start + 16 + 16 + 8 + 8 + 4; // 52 bytes in
+        let align = u32::from_le_bytes([
+            bytes[align_offset],
+            bytes[align_offset + 1],
+            bytes[align_offset + 2],
+            bytes[align_offset + 3],
+        ]);
+        assert_eq!(align, 4, "x86-64 text section should have alignment 2^4 = 16 bytes");
+    }
+
+    #[test]
+    fn test_macho_x86_64_build_version_platform() {
+        // Verify the LC_BUILD_VERSION command specifies macOS platform.
+        let func = build_x86_const_test_function();
+        let bytes = x86_compile_to_macho(&func).unwrap();
+
+        fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+            u32::from_le_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ])
+        }
+
+        // LC_BUILD_VERSION follows the LC_SEGMENT_64 (which includes 1 section header).
+        // segment_cmd = 72 bytes, section_64 = 80 bytes
+        let bv_offset = 32 + 72 + 80; // after header + segment cmd + 1 section
+        let bv_cmd = read_u32(&bytes, bv_offset);
+        assert_eq!(bv_cmd, 0x32, "expected LC_BUILD_VERSION (0x32)");
+
+        let platform = read_u32(&bytes, bv_offset + 8);
+        assert_eq!(platform, 1, "platform should be PLATFORM_MACOS (1)");
+    }
+
     // -----------------------------------------------------------------------
     // Branch resolution
     // -----------------------------------------------------------------------
