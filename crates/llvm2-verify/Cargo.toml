@@ -24,6 +24,5 @@ llvm2-ir = { workspace = true }
 llvm2-lower = { workspace = true }
 thiserror = { workspace = true }
 # z4 SMT solver: optional, enabled via the `z4` feature above.
-# Uses path dep for local development; switch to git dep for CI:
-#   z4 = { git = "https://github.com/dropbox-ai-prototypes/z4", optional = true }
+# Uses workspace path dep (~/z4/crates/z4) for local development.
 z4 = { workspace = true, optional = true }

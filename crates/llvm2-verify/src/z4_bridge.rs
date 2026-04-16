@@ -791,7 +791,7 @@ fn extract_bv_value(model_text: &str, var_name: &str) -> Option<u64> {
 /// QF_UFBV (uninterpreted functions) based on the formula content.
 #[cfg(feature = "z4")]
 pub fn verify_with_z4_api(obligation: &ProofObligation, config: &Z4Config) -> Z4Result {
-    use z4::{Logic, SolveResult, Sort, Solver};
+    use z4::{Logic, SolveResult, Sort, Solver, BitVecSort};
 
     // Infer the correct logic from the formula content.
     let formula = obligation.negated_equivalence();
@@ -803,6 +803,7 @@ pub fn verify_with_z4_api(obligation: &ProofObligation, config: &Z4Config) -> Z4
         // z4 does not have a dedicated QF_ABVFP logic; fall back to ALL
         "QF_ABVFP" => Logic::All,
         "QF_UFBV" => Logic::QfUfbv,
+        // z4 doesn't have QfAbvfp; use All as fallback for combined theories
         _ => Logic::All,
     };
 
@@ -813,6 +814,8 @@ pub fn verify_with_z4_api(obligation: &ProofObligation, config: &Z4Config) -> Z4
 
     // Declare bitvector input variables
     let mut var_terms: HashMap<String, z4::Term> = HashMap::new();
+    // UF declarations stored separately since z4 returns FuncDecl, not Term
+    let mut func_decls: HashMap<String, z4::FuncDecl> = HashMap::new();
     for (name, width) in &obligation.inputs {
         let sort = Sort::bitvec(*width);
         let term = solver.declare_const(name, sort);
@@ -827,7 +830,7 @@ pub fn verify_with_z4_api(obligation: &ProofObligation, config: &Z4Config) -> Z4
     }
 
     // Build and assert the negated equivalence formula
-    let formula_term = translate_expr_to_z4(&formula, &mut solver, &var_terms);
+    let formula_term = translate_expr_to_z4(&formula, &mut solver, &var_terms, &mut func_decls);
     match formula_term {
         Ok(term) => solver.assert_term(term),
         Err(e) => return Z4Result::Error(format!("Failed to translate formula: {}", e)),
@@ -879,13 +882,16 @@ pub fn verify_with_z4_api(obligation: &ProofObligation, config: &Z4Config) -> Z4
 /// This recursively converts our internal AST into z4's native term
 /// representation using the solver's builder API.
 ///
-/// All z4 term-building methods require `&mut Solver`.
+/// The solver is `&mut` because z4's term construction methods require
+/// mutable access. `func_decls` stores UF declarations separately since
+/// z4 returns `FuncDecl` (not `Term`) from `declare_fun`.
 #[cfg(feature = "z4")]
-#[allow(deprecated)] // z4 deprecated panicking methods; we use them for brevity with internal data
+#[allow(deprecated)]
 fn translate_expr_to_z4(
     expr: &SmtExpr,
     solver: &mut z4::Solver,
     var_terms: &HashMap<String, z4::Term>,
+    func_decls: &mut HashMap<String, z4::FuncDecl>,
 ) -> Result<z4::Term, String> {
     match expr {
         SmtExpr::Var { name, .. } => {
@@ -895,172 +901,172 @@ fn translate_expr_to_z4(
                 .ok_or_else(|| format!("Variable '{}' not declared", name))
         }
         SmtExpr::BvConst { value, width } => {
-            // SmtExpr stores u64; z4 bv_const takes i64. Safe cast: we mask
-            // to width so the bit pattern is preserved under two's complement.
+            // z4's bv_const takes i64; our SmtExpr stores u64.
+            // The bit pattern is preserved for widths <= 64.
             Ok(solver.bv_const(*value as i64, *width))
         }
         SmtExpr::BoolConst(b) => {
             Ok(solver.bool_const(*b))
         }
         SmtExpr::BvAdd { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvadd(l, r))
         }
         SmtExpr::BvSub { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvsub(l, r))
         }
         SmtExpr::BvMul { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvmul(l, r))
         }
         SmtExpr::BvSDiv { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvsdiv(l, r))
         }
         SmtExpr::BvUDiv { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvudiv(l, r))
         }
         SmtExpr::BvNeg { operand, .. } => {
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
             Ok(solver.bvneg(o))
         }
         SmtExpr::BvAnd { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvand(l, r))
         }
         SmtExpr::BvOr { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvor(l, r))
         }
         SmtExpr::BvXor { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvxor(l, r))
         }
         SmtExpr::BvShl { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvshl(l, r))
         }
         SmtExpr::BvLshr { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvlshr(l, r))
         }
         SmtExpr::BvAshr { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvashr(l, r))
         }
         SmtExpr::Eq { lhs, rhs } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.eq(l, r))
         }
         SmtExpr::Not { operand } => {
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
             Ok(solver.not(o))
         }
         SmtExpr::And { lhs, rhs } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.and(l, r))
         }
         SmtExpr::Or { lhs, rhs } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.or(l, r))
         }
         SmtExpr::BvSlt { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvslt(l, r))
         }
         SmtExpr::BvSge { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvsge(l, r))
         }
         SmtExpr::BvSgt { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvsgt(l, r))
         }
         SmtExpr::BvSle { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvsle(l, r))
         }
         SmtExpr::BvUlt { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvult(l, r))
         }
         SmtExpr::BvUge { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvuge(l, r))
         }
         SmtExpr::BvUgt { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvugt(l, r))
         }
         SmtExpr::BvUle { lhs, rhs, .. } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.bvule(l, r))
         }
         SmtExpr::Ite { cond, then_expr, else_expr } => {
-            let c = translate_expr_to_z4(cond, solver, var_terms)?;
-            let t = translate_expr_to_z4(then_expr, solver, var_terms)?;
-            let e = translate_expr_to_z4(else_expr, solver, var_terms)?;
+            let c = translate_expr_to_z4(cond, solver, var_terms, func_decls)?;
+            let t = translate_expr_to_z4(then_expr, solver, var_terms, func_decls)?;
+            let e = translate_expr_to_z4(else_expr, solver, var_terms, func_decls)?;
             Ok(solver.ite(c, t, e))
         }
         SmtExpr::Extract { high, low, operand, .. } => {
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
-            Ok(solver.bvextract(o, *high, *low))
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
+            Ok(solver.extract(*high, *low, o))
         }
         SmtExpr::Concat { hi, lo, .. } => {
-            let h = translate_expr_to_z4(hi, solver, var_terms)?;
-            let l = translate_expr_to_z4(lo, solver, var_terms)?;
-            Ok(solver.bvconcat(h, l))
+            let h = translate_expr_to_z4(hi, solver, var_terms, func_decls)?;
+            let l = translate_expr_to_z4(lo, solver, var_terms, func_decls)?;
+            Ok(solver.concat(h, l))
         }
         SmtExpr::ZeroExtend { operand, extra_bits, .. } => {
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
-            Ok(solver.bvzeroext(o, *extra_bits))
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
+            Ok(solver.zero_ext(*extra_bits, o))
         }
         SmtExpr::SignExtend { operand, extra_bits, .. } => {
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
-            Ok(solver.bvsignext(o, *extra_bits))
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
+            Ok(solver.sign_ext(*extra_bits, o))
         }
         // -------------------------------------------------------------------
         // Array theory (QF_ABV): Select, Store, ConstArray
         // -------------------------------------------------------------------
         SmtExpr::Select { array, index } => {
-            let a = translate_expr_to_z4(array, solver, var_terms)?;
-            let i = translate_expr_to_z4(index, solver, var_terms)?;
+            let a = translate_expr_to_z4(array, solver, var_terms, func_decls)?;
+            let i = translate_expr_to_z4(index, solver, var_terms, func_decls)?;
             Ok(solver.select(a, i))
         }
         SmtExpr::Store { array, index, value } => {
-            let a = translate_expr_to_z4(array, solver, var_terms)?;
-            let i = translate_expr_to_z4(index, solver, var_terms)?;
-            let v = translate_expr_to_z4(value, solver, var_terms)?;
+            let a = translate_expr_to_z4(array, solver, var_terms, func_decls)?;
+            let i = translate_expr_to_z4(index, solver, var_terms, func_decls)?;
+            let v = translate_expr_to_z4(value, solver, var_terms, func_decls)?;
             Ok(solver.store(a, i, v))
         }
         SmtExpr::ConstArray { index_sort, value } => {
-            let v = translate_expr_to_z4(value, solver, var_terms)?;
+            let v = translate_expr_to_z4(value, solver, var_terms, func_decls)?;
             let idx_sort = smt_sort_to_z4(index_sort)?;
-            // z4 const_array takes (index_sort, value); element sort is inferred.
+            // z4's const_array takes (index_sort, value); element sort is inferred.
             Ok(solver.const_array(idx_sort, v))
         }
 
@@ -1068,117 +1074,121 @@ fn translate_expr_to_z4(
         // Floating-point theory (QF_FP): arithmetic, comparisons, conversions
         // -------------------------------------------------------------------
         SmtExpr::FPConst { bits, eb, sb } => {
-            // z4 has no fp_const_from_bits. Build via BV constant + reinterpret.
-            let total_width = eb + sb;
-            let bv = solver.bv_const(*bits as i64, total_width);
-            solver.try_bv_to_fp_reinterpret(bv, *eb, *sb)
-                .map_err(|e| format!("FPConst translation failed: {}", e))
+            // z4 doesn't have fp_const_from_bits. Decompose the IEEE 754 bit
+            // pattern into sign (1 bit), exponent (eb bits), significand
+            // (sb-1 bits) bitvectors and use fp_from_bvs.
+            let total = eb + sb;
+            let sign_bit = ((*bits >> (total - 1)) & 1) as i64;
+            let exp_bits = ((*bits >> (sb - 1)) & ((1u64 << eb) - 1)) as i64;
+            let sig_bits = (*bits & ((1u64 << (sb - 1)) - 1)) as i64;
+            let sign = solver.bv_const(sign_bit, 1);
+            let exp = solver.bv_const(exp_bits, *eb);
+            let sig = solver.bv_const(sig_bits, sb - 1);
+            Ok(solver.fp_from_bvs(sign, exp, sig, *eb, *sb))
         }
         SmtExpr::FPAdd { rm, lhs, rhs } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             let rm_term = rounding_mode_to_z4_term(solver, *rm)?;
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
             Ok(solver.fp_add(rm_term, l, r))
         }
         SmtExpr::FPSub { rm, lhs, rhs } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             let rm_term = rounding_mode_to_z4_term(solver, *rm)?;
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
             Ok(solver.fp_sub(rm_term, l, r))
         }
         SmtExpr::FPMul { rm, lhs, rhs } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             let rm_term = rounding_mode_to_z4_term(solver, *rm)?;
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
             Ok(solver.fp_mul(rm_term, l, r))
         }
         SmtExpr::FPDiv { rm, lhs, rhs } => {
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             let rm_term = rounding_mode_to_z4_term(solver, *rm)?;
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
             Ok(solver.fp_div(rm_term, l, r))
         }
         SmtExpr::FPNeg { operand } => {
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
             Ok(solver.fp_neg(o))
         }
         SmtExpr::FPAbs { operand } => {
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
             Ok(solver.fp_abs(o))
         }
         SmtExpr::FPSqrt { rm, operand } => {
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
             let rm_term = rounding_mode_to_z4_term(solver, *rm)?;
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
             Ok(solver.fp_sqrt(rm_term, o))
         }
         SmtExpr::FPFma { rm, a, b, c } => {
+            let ta = translate_expr_to_z4(a, solver, var_terms, func_decls)?;
+            let tb = translate_expr_to_z4(b, solver, var_terms, func_decls)?;
+            let tc = translate_expr_to_z4(c, solver, var_terms, func_decls)?;
             let rm_term = rounding_mode_to_z4_term(solver, *rm)?;
-            let ta = translate_expr_to_z4(a, solver, var_terms)?;
-            let tb = translate_expr_to_z4(b, solver, var_terms)?;
-            let tc = translate_expr_to_z4(c, solver, var_terms)?;
             Ok(solver.fp_fma(rm_term, ta, tb, tc))
         }
         SmtExpr::FPEq { lhs, rhs } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.fp_eq(l, r))
         }
         SmtExpr::FPLt { lhs, rhs } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.fp_lt(l, r))
         }
         SmtExpr::FPGt { lhs, rhs } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.fp_gt(l, r))
         }
         SmtExpr::FPGe { lhs, rhs } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
-            // z4 uses fp_ge (not fp_geq)
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.fp_ge(l, r))
         }
         SmtExpr::FPLe { lhs, rhs } => {
-            let l = translate_expr_to_z4(lhs, solver, var_terms)?;
-            let r = translate_expr_to_z4(rhs, solver, var_terms)?;
-            // z4 uses fp_le (not fp_leq)
+            let l = translate_expr_to_z4(lhs, solver, var_terms, func_decls)?;
+            let r = translate_expr_to_z4(rhs, solver, var_terms, func_decls)?;
             Ok(solver.fp_le(l, r))
         }
         SmtExpr::FPIsNaN { operand } => {
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
             Ok(solver.fp_is_nan(o))
         }
         SmtExpr::FPIsInf { operand } => {
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
             Ok(solver.fp_is_infinite(o))
         }
         SmtExpr::FPIsZero { operand } => {
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
             Ok(solver.fp_is_zero(o))
         }
         SmtExpr::FPIsNormal { operand } => {
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
             Ok(solver.fp_is_normal(o))
         }
         SmtExpr::FPToSBv { rm, operand, width } => {
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
             let rm_term = rounding_mode_to_z4_term(solver, *rm)?;
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
             Ok(solver.fp_to_sbv(rm_term, o, *width))
         }
         SmtExpr::FPToUBv { rm, operand, width } => {
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
             let rm_term = rounding_mode_to_z4_term(solver, *rm)?;
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
             Ok(solver.fp_to_ubv(rm_term, o, *width))
         }
         SmtExpr::BvToFP { rm, operand, eb, sb } => {
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
             let rm_term = rounding_mode_to_z4_term(solver, *rm)?;
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
             Ok(solver.bv_to_fp(rm_term, o, *eb, *sb))
         }
         SmtExpr::FPToFP { rm, operand, eb, sb } => {
+            let o = translate_expr_to_z4(operand, solver, var_terms, func_decls)?;
             let rm_term = rounding_mode_to_z4_term(solver, *rm)?;
-            let o = translate_expr_to_z4(operand, solver, var_terms)?;
             Ok(solver.fp_to_fp(rm_term, o, *eb, *sb))
         }
 
@@ -1188,24 +1198,27 @@ fn translate_expr_to_z4(
         SmtExpr::UF { name, args, ret_sort: _ } => {
             let translated_args: Vec<z4::Term> = args
                 .iter()
-                .map(|arg| translate_expr_to_z4(arg, solver, var_terms))
+                .map(|arg| translate_expr_to_z4(arg, solver, var_terms, func_decls))
                 .collect::<Result<Vec<_>, _>>()?;
-            // UF applications are currently not supported via the native API
-            // because we'd need to thread FuncDecl through the var_terms map
-            // instead of Term. Return a descriptive error for now.
-            Err(format!(
-                "Uninterpreted function application '{}' not yet supported in z4 native API; \
-                 use CLI fallback",
-                name
-            ))
+            // Look up the FuncDecl (must have been declared via UFDecl)
+            let func = func_decls
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("Uninterpreted function '{}' not declared", name))?;
+            Ok(solver.apply(&func, &translated_args))
         }
         SmtExpr::UFDecl { name, arg_sorts, ret_sort } => {
-            // UF declarations are not yet threaded through the var_terms map.
-            Err(format!(
-                "Uninterpreted function declaration '{}' not yet supported in z4 native API; \
-                 use CLI fallback",
-                name
-            ))
+            // Translate argument sorts and return sort
+            let z4_arg_sorts: Vec<z4::Sort> = arg_sorts
+                .iter()
+                .map(smt_sort_to_z4)
+                .collect::<Result<Vec<_>, _>>()?;
+            let z4_ret_sort = smt_sort_to_z4(ret_sort)?;
+            let func = solver.declare_fun(name, &z4_arg_sorts, z4_ret_sort);
+            func_decls.insert(name.clone(), func.clone());
+            // Return a dummy boolean term -- UFDecl is a declaration, not an
+            // expression. Callers should not use the returned term value.
+            Ok(solver.bool_const(true))
         }
 
         // -------------------------------------------------------------------
@@ -1218,14 +1231,14 @@ fn translate_expr_to_z4(
         SmtExpr::ForAll { var, var_width, lower: _, upper: _, body: _ } => {
             Err(format!(
                 "Bounded ForAll quantifier (var '{}', width {}) not yet supported in z4 native API; \
-                 use CLI fallback with z3 which handles the SMT-LIB2 quantifier syntax",
+                 use CLI fallback which handles the SMT-LIB2 quantifier syntax",
                 var, var_width
             ))
         }
         SmtExpr::Exists { var, var_width, lower: _, upper: _, body: _ } => {
             Err(format!(
                 "Bounded Exists quantifier (var '{}', width {}) not yet supported in z4 native API; \
-                 use CLI fallback with z3 which handles the SMT-LIB2 quantifier syntax",
+                 use CLI fallback which handles the SMT-LIB2 quantifier syntax",
                 var, var_width
             ))
         }
@@ -1235,14 +1248,17 @@ fn translate_expr_to_z4(
 /// Convert an [`SmtSort`] to the z4 native [`z4::Sort`].
 #[cfg(feature = "z4")]
 fn smt_sort_to_z4(sort: &SmtSort) -> Result<z4::Sort, String> {
-    use z4::Sort;
+    use z4::{Sort, BitVecSort, ArraySort};
     match sort {
         SmtSort::BitVec(w) => Ok(Sort::bitvec(*w)),
         SmtSort::Bool => Ok(Sort::Bool),
         SmtSort::Array(idx, elem) => {
             let idx_sort = smt_sort_to_z4(idx)?;
             let elem_sort = smt_sort_to_z4(elem)?;
-            Ok(Sort::array(idx_sort, elem_sort))
+            Ok(Sort::Array(Box::new(ArraySort {
+                index_sort: idx_sort,
+                element_sort: elem_sort,
+            })))
         }
         SmtSort::FloatingPoint(eb, sb) => {
             Ok(Sort::FloatingPoint(*eb, *sb))
@@ -1250,21 +1266,21 @@ fn smt_sort_to_z4(sort: &SmtSort) -> Result<z4::Sort, String> {
     }
 }
 
-/// Convert our [`RoundingMode`] to a z4 rounding-mode [`z4::Term`].
+/// Convert our [`RoundingMode`] to a z4 rounding mode Term.
 ///
-/// In z4's native API, rounding modes are represented as terms (not an enum).
-/// They are created via `solver.fp_rounding_mode("RNE")` etc.
+/// z4's native API represents rounding modes as `Term` values created via
+/// `solver.try_fp_rounding_mode("RNE")`, not as a Rust enum.
 #[cfg(feature = "z4")]
 fn rounding_mode_to_z4_term(solver: &mut z4::Solver, rm: RoundingMode) -> Result<z4::Term, String> {
-    let rm_str = match rm {
+    let name = match rm {
         RoundingMode::RNE => "RNE",
         RoundingMode::RNA => "RNA",
         RoundingMode::RTP => "RTP",
         RoundingMode::RTN => "RTN",
         RoundingMode::RTZ => "RTZ",
     };
-    solver.try_fp_rounding_mode(rm_str)
-        .map_err(|e| format!("Failed to create rounding mode {}: {}", rm_str, e))
+    solver.try_fp_rounding_mode(name)
+        .map_err(|e| format!("Failed to create rounding mode '{}': {}", name, e))
 }
 
 // ---------------------------------------------------------------------------
