@@ -82,6 +82,8 @@ fn build_tmir_add_module() -> tmir_func::Module {
         name: "e2e_test".to_string(),
         functions: vec![func],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     }
 }
 
@@ -126,6 +128,8 @@ fn build_tmir_const_module() -> tmir_func::Module {
         name: "e2e_const_test".to_string(),
         functions: vec![func],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     }
 }
 
@@ -175,6 +179,8 @@ fn build_tmir_sub_module() -> tmir_func::Module {
         name: "e2e_sub_test".to_string(),
         functions: vec![func],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     }
 }
 
@@ -823,6 +829,8 @@ fn build_tmir_max_module() -> tmir_func::Module {
         name: "e2e_max_test".to_string(),
         functions: vec![func],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     }
 }
 
@@ -931,6 +939,8 @@ fn build_tmir_abs_module() -> tmir_func::Module {
         name: "e2e_abs_test".to_string(),
         functions: vec![func],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     }
 }
 
@@ -1136,6 +1146,8 @@ fn build_tmir_fibonacci_module() -> tmir_func::Module {
         name: "e2e_fibonacci_test".to_string(),
         functions: vec![func],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     }
 }
 
@@ -1292,6 +1304,8 @@ fn build_tmir_sum_1_to_n_module() -> tmir_func::Module {
         name: "e2e_sum_1_to_n_test".to_string(),
         functions: vec![func],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     }
 }
 
@@ -1746,6 +1760,8 @@ fn build_tmir_cross_call_module() -> tmir_func::Module {
         name: "e2e_cross_call_test".to_string(),
         functions: vec![callee, caller],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     }
 }
 
@@ -2035,6 +2051,8 @@ fn build_tmir_classify_module() -> tmir_func::Module {
         name: "e2e_classify_test".to_string(),
         functions: vec![func],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     }
 }
 
@@ -2201,6 +2219,8 @@ fn build_tmir_sum_to_n_module() -> tmir_func::Module {
         name: "e2e_sum_to_n_test".to_string(),
         functions: vec![func],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     }
 }
 
@@ -2337,6 +2357,8 @@ fn build_tmir_clamp_module() -> tmir_func::Module {
         name: "e2e_clamp_test".to_string(),
         functions: vec![func],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     }
 }
 
@@ -2554,6 +2576,8 @@ fn build_tmir_factorial_module() -> tmir_func::Module {
         name: "e2e_factorial_test".to_string(),
         functions: vec![func],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     }
 }
 

@@ -15,3 +15,6 @@ description = "Stub: tMIR type definitions for LLVM2 development"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0"

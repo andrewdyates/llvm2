@@ -985,6 +985,8 @@ fn build_call_module() -> TmirModule {
         name: "call_test".to_string(),
         functions: vec![callee, caller],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     }
 }
 

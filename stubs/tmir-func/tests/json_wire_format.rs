@@ -147,6 +147,8 @@ fn test_validation_rejects_empty_name() {
         name: "".to_string(),
         functions: vec![],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     };
     assert!(validate_module(&module).is_err());
 }
@@ -167,6 +169,8 @@ fn test_validation_rejects_missing_entry_block() {
             proofs: vec![],
         }],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     };
     assert!(validate_module(&module).is_err());
 }
@@ -177,6 +181,8 @@ fn test_validation_accepts_empty_function_list() {
         name: "empty".to_string(),
         functions: vec![],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     };
     assert!(validate_module(&module).is_ok());
 }

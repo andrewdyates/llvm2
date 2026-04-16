@@ -324,7 +324,7 @@ pub fn translate_type_with_structs(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Type::Struct(field_types))
         }
-        Ty::Enum { .. } => {
+        Ty::Vector { .. } | Ty::Enum { .. } => {
             Err(AdapterError::UnsupportedType(format!("{:?}", ty)))
         }
         Ty::FnPtr { .. } | Ty::Func(_) => {
@@ -2052,6 +2052,8 @@ mod tests {
             name: "test".to_string(),
             functions: vec![func],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         }
     }
 
@@ -3493,6 +3495,8 @@ mod tests {
                 },
             ],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         };
 
         let results = translate_module(&module).unwrap();
@@ -3562,6 +3566,8 @@ mod tests {
                 },
             ],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         };
 
         let results = translate_module(&module).unwrap();
@@ -3831,6 +3837,8 @@ mod tests {
                 },
             ],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         };
 
         let results = translate_module(&module).unwrap();
@@ -4336,6 +4344,8 @@ mod tests {
                 },
             ],
             structs: vec![],
+            globals: vec![],
+            data_layout: None,
         };
 
         let results = translate_module(&module).unwrap();

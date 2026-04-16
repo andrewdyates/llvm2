@@ -1417,6 +1417,8 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
         name: "e2e_high_pressure_test".to_string(),
         functions: vec![func],
         structs: vec![],
+        globals: vec![],
+        data_layout: None,
     }
 }
 
