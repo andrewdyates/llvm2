@@ -3067,7 +3067,22 @@ impl InstructionSelector {
     ///
     /// Maps tMIR Sextend/Uextend to the appropriate AArch64 extension
     /// instruction. The AArch64 extension instructions are actually aliases
-    /// of SBFM (sign) or AND (zero) with specific bit patterns.
+    /// of SBFM (sign) or UBFM (zero) with specific bit patterns.
+    ///
+    /// AArch64 extension instruction mapping:
+    ///
+    /// | From | To  | Signed | Instruction | Encoding |
+    /// |------|-----|--------|-------------|----------|
+    /// | I8   | I32 | yes    | SXTB Wd,Wn | SBFM Wd,Wn,#0,#7  |
+    /// | I8   | I64 | yes    | SXTB Xd,Wn | SBFM Xd,Wn,#0,#7  |
+    /// | I16  | I32 | yes    | SXTH Wd,Wn | SBFM Wd,Wn,#0,#15 |
+    /// | I16  | I64 | yes    | SXTH Xd,Wn | SBFM Xd,Wn,#0,#15 |
+    /// | I32  | I64 | yes    | SXTW Xd,Wn | SBFM Xd,Wn,#0,#31 |
+    /// | I8   | I32 | no     | UXTB Wd,Wn | UBFM Wd,Wn,#0,#7  |
+    /// | I8   | I64 | no     | UXTB Wd,Wn | UBFM Wd,Wn,#0,#7  |
+    /// | I16  | I32 | no     | UXTH Wd,Wn | UBFM Wd,Wn,#0,#15 |
+    /// | I16  | I64 | no     | UXTH Wd,Wn | UBFM Wd,Wn,#0,#15 |
+    /// | I32  | I64 | no     | MOV Wd,Wn  | W-write zeroes top 32 |
     fn select_extend(
         &mut self,
         signed: bool,
@@ -5887,6 +5902,196 @@ mod tests {
         // Trunc to i8 uses AND with mask 0xFF
         assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::AndRI);
         assert_eq!(mfunc.blocks[&entry].insts[1].operands[2], ISelOperand::Imm(0xFF));
+    }
+
+    // =======================================================================
+    // Extension/truncation: additional coverage
+    // =======================================================================
+
+    #[test]
+    fn select_uxtb_to_i64() {
+        let sig = Signature {
+            params: vec![Type::I8],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("select_uxtb_to_i64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Uextend {
+                    from_ty: Type::I8,
+                    to_ty: Type::I64,
+                },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::Uxtb);
+    }
+
+    #[test]
+    fn select_uxth_to_i64() {
+        let sig = Signature {
+            params: vec![Type::I16],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("select_uxth_to_i64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Uextend {
+                    from_ty: Type::I16,
+                    to_ty: Type::I64,
+                },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::Uxth);
+    }
+
+    #[test]
+    fn select_sextb_to_i64() {
+        let sig = Signature {
+            params: vec![Type::I8],
+            returns: vec![Type::I64],
+        };
+        let mut isel = InstructionSelector::new("select_sextb_to_i64".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Sextend {
+                    from_ty: Type::I8,
+                    to_ty: Type::I64,
+                },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::Sxtb);
+    }
+
+    #[test]
+    fn select_sexth_to_i32() {
+        let sig = Signature {
+            params: vec![Type::I16],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("select_sexth_to_i32".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Sextend {
+                    from_ty: Type::I16,
+                    to_ty: Type::I32,
+                },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::Sxth);
+    }
+
+    #[test]
+    fn select_trunc_i64_to_i16() {
+        let sig = Signature {
+            params: vec![Type::I64],
+            returns: vec![Type::I16],
+        };
+        let mut isel = InstructionSelector::new("select_trunc_i64_to_i16".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Trunc { to_ty: Type::I16 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::AndRI);
+        assert_eq!(mfunc.blocks[&entry].insts[1].operands[2], ISelOperand::Imm(0xFFFF));
+    }
+
+    #[test]
+    fn select_trunc_i32_to_i8() {
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::I8],
+        };
+        let mut isel = InstructionSelector::new("select_trunc_i32_to_i8".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Trunc { to_ty: Type::I8 },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::AndRI);
+        assert_eq!(mfunc.blocks[&entry].insts[1].operands[2], ISelOperand::Imm(0xFF));
+    }
+
+    #[test]
+    fn select_same_width_uext_copy() {
+        // Unsigned extension with same source and target type falls through to Copy.
+        let sig = Signature {
+            params: vec![Type::I32],
+            returns: vec![Type::I32],
+        };
+        let mut isel = InstructionSelector::new("select_same_width_copy".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Uextend {
+                    from_ty: Type::I32,
+                    to_ty: Type::I32,
+                },
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        assert_eq!(mfunc.blocks[&entry].insts[1].opcode, AArch64Opcode::Copy);
     }
 
     // =======================================================================
