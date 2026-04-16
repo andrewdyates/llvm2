@@ -157,6 +157,39 @@ pub const ARM64_RELOC_ADDEND: u32 = 10;
 /// Authenticated pointer (arm64e).
 pub const ARM64_RELOC_AUTHENTICATED_POINTER: u32 = 11;
 
+// --- x86-64 relocation types ---
+// Reference: enum reloc_type_x86_64 in mach-o/x86_64/reloc.h
+
+/// For absolute addresses (64-bit or 32-bit absolute).
+pub const X86_64_RELOC_UNSIGNED: u32 = 0;
+
+/// For signed 32-bit displacement (RIP-relative data access).
+pub const X86_64_RELOC_SIGNED: u32 = 1;
+
+/// A CALL/JMP instruction with 32-bit displacement.
+pub const X86_64_RELOC_BRANCH: u32 = 2;
+
+/// A MOVQ load of a GOT entry.
+pub const X86_64_RELOC_GOT_LOAD: u32 = 3;
+
+/// Other GOT references.
+pub const X86_64_RELOC_GOT: u32 = 4;
+
+/// Must be followed by X86_64_RELOC_UNSIGNED (used for symbol difference).
+pub const X86_64_RELOC_SUBTRACTOR: u32 = 5;
+
+/// For signed 32-bit displacement with a -1 addend.
+pub const X86_64_RELOC_SIGNED_1: u32 = 6;
+
+/// For signed 32-bit displacement with a -2 addend.
+pub const X86_64_RELOC_SIGNED_2: u32 = 7;
+
+/// For signed 32-bit displacement with a -4 addend.
+pub const X86_64_RELOC_SIGNED_4: u32 = 8;
+
+/// For thread-local variables.
+pub const X86_64_RELOC_TLV: u32 = 9;
+
 // --- Relocation info encoding helpers ---
 
 /// Relocation length: byte (1 byte).

@@ -46,6 +46,20 @@ impl MachHeader {
         }
     }
 
+    /// Create a new header for an x86-64 object file.
+    pub fn new_x86_64_object(ncmds: u32, sizeofcmds: u32) -> Self {
+        Self {
+            magic: MH_MAGIC_64,
+            cputype: CPU_TYPE_X86_64,
+            cpusubtype: CPU_SUBTYPE_X86_64_ALL,
+            filetype: MH_OBJECT,
+            ncmds,
+            sizeofcmds,
+            flags: MH_SUBSECTIONS_VIA_SYMBOLS,
+            reserved: 0,
+        }
+    }
+
     /// Serialize the header to bytes (little-endian).
     pub fn write(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&self.magic.to_le_bytes());
@@ -93,5 +107,34 @@ mod tests {
         // CPU type at offset 4: CPU_TYPE_ARM64 = 0x0100000C
         let cputype = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
         assert_eq!(cputype, CPU_TYPE_ARM64);
+    }
+
+    #[test]
+    fn test_x86_64_header_size() {
+        let header = MachHeader::new_x86_64_object(4, 360);
+        let mut buf = Vec::new();
+        header.write(&mut buf);
+        assert_eq!(buf.len(), 32);
+    }
+
+    #[test]
+    fn test_x86_64_header_magic() {
+        let header = MachHeader::new_x86_64_object(0, 0);
+        let mut buf = Vec::new();
+        header.write(&mut buf);
+        assert_eq!(&buf[0..4], &[0xCF, 0xFA, 0xED, 0xFE]);
+    }
+
+    #[test]
+    fn test_x86_64_header_cpu_type() {
+        let header = MachHeader::new_x86_64_object(0, 0);
+        let mut buf = Vec::new();
+        header.write(&mut buf);
+        // CPU type at offset 4: CPU_TYPE_X86_64 = 0x01000007
+        let cputype = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        assert_eq!(cputype, CPU_TYPE_X86_64);
+        // CPU subtype at offset 8: CPU_SUBTYPE_X86_64_ALL = 3
+        let cpusubtype = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+        assert_eq!(cpusubtype, CPU_SUBTYPE_X86_64_ALL);
     }
 }

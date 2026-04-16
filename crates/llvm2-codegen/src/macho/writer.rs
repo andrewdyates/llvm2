@@ -30,7 +30,20 @@
 use super::constants::*;
 use super::header::MachHeader;
 use super::reloc::{encode_relocation, Relocation};
+use super::x86_64_reloc::{encode_x86_64_relocation, X86_64Relocation};
 use super::section::{Section64, SegmentCommand64};
+
+/// Target CPU for the Mach-O object file.
+///
+/// Determines the CPU type in the Mach-O header and which relocation
+/// encoding is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MachOTarget {
+    /// AArch64 (Apple Silicon).
+    AArch64,
+    /// x86-64 (Intel).
+    X86_64,
+}
 
 /// A symbol to be emitted in the object file.
 #[derive(Debug, Clone)]
@@ -43,6 +56,15 @@ pub struct Symbol {
     pub value: u64,
     /// Whether the symbol is externally visible.
     pub is_global: bool,
+}
+
+/// A target-independent relocation that holds either AArch64 or x86-64 data.
+#[derive(Debug, Clone)]
+pub enum MachORelocation {
+    /// AArch64 relocation.
+    AArch64(Relocation),
+    /// x86-64 relocation.
+    X86_64(X86_64Relocation),
 }
 
 /// Internal section data held by the writer.
@@ -58,47 +80,84 @@ struct SectionData {
     align: u32,
     /// Section flags.
     flags: u32,
-    /// Relocations for this section.
+    /// AArch64 relocations for this section.
     relocations: Vec<Relocation>,
+    /// x86-64 relocations for this section.
+    x86_64_relocations: Vec<X86_64Relocation>,
 }
 
 /// Assembles a complete Mach-O 64-bit relocatable object file.
 ///
+/// Supports both AArch64 and x86-64 targets. The target is selected at
+/// construction time and determines the CPU type in the header, the text
+/// section alignment, and which relocation encoding is used.
+///
 /// # Example
 ///
 /// ```
-/// use llvm2_codegen::macho::MachOWriter;
+/// use llvm2_codegen::macho::{MachOWriter, MachOTarget};
 ///
+/// // AArch64 (default)
 /// let mut writer = MachOWriter::new();
-/// // ARM64 NOP = 0xD503201F
 /// writer.add_text_section(&[0x1F, 0x20, 0x03, 0xD5]);
 /// writer.add_symbol("_main", 1, 0, true);
 /// let bytes = writer.write();
-/// // bytes now contains a valid Mach-O .o file
+///
+/// // x86-64
+/// let mut writer = MachOWriter::for_target(MachOTarget::X86_64);
+/// writer.add_text_section(&[0xC3]); // RET
+/// writer.add_symbol("_main", 1, 0, true);
+/// let bytes = writer.write();
 /// ```
 pub struct MachOWriter {
+    /// Target CPU for this object file.
+    target: MachOTarget,
     sections: Vec<SectionData>,
     symbols: Vec<Symbol>,
 }
 
 impl MachOWriter {
-    /// Create a new empty Mach-O writer.
+    /// Create a new empty Mach-O writer for AArch64 (default target).
     pub fn new() -> Self {
         Self {
+            target: MachOTarget::AArch64,
             sections: Vec::new(),
             symbols: Vec::new(),
         }
     }
 
+    /// Create a new empty Mach-O writer for the specified target.
+    pub fn for_target(target: MachOTarget) -> Self {
+        Self {
+            target,
+            sections: Vec::new(),
+            symbols: Vec::new(),
+        }
+    }
+
+    /// Returns the target CPU for this writer.
+    pub fn target(&self) -> MachOTarget {
+        self.target
+    }
+
     /// Add a text section (__text in __TEXT) with the given machine code bytes.
+    ///
+    /// Alignment is chosen based on the target:
+    /// - AArch64: 4-byte aligned (2^2) for fixed-width instructions
+    /// - x86-64: 16-byte aligned (2^4) per System V ABI convention
     pub fn add_text_section(&mut self, code: &[u8]) {
+        let align = match self.target {
+            MachOTarget::AArch64 => 2, // 2^2 = 4-byte
+            MachOTarget::X86_64 => 4,  // 2^4 = 16-byte
+        };
         self.sections.push(SectionData {
             sectname: b"__text".to_vec(),
             segname: b"__TEXT".to_vec(),
             data: code.to_vec(),
-            align: 2, // 2^2 = 4-byte (ARM64 instruction alignment)
+            align,
             flags: S_REGULAR | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS,
             relocations: Vec::new(),
+            x86_64_relocations: Vec::new(),
         });
     }
 
@@ -111,6 +170,7 @@ impl MachOWriter {
             align: 3, // 2^3 = 8-byte alignment
             flags: S_REGULAR,
             relocations: Vec::new(),
+            x86_64_relocations: Vec::new(),
         });
     }
 
@@ -142,6 +202,7 @@ impl MachOWriter {
             align,
             flags,
             relocations: Vec::new(),
+            x86_64_relocations: Vec::new(),
         });
         index
     }
@@ -162,14 +223,29 @@ impl MachOWriter {
         });
     }
 
-    /// Add a relocation entry to the specified section.
+    /// Add an AArch64 relocation entry to the specified section.
     ///
     /// - `section`: 0-based section index.
-    /// - `reloc`: The relocation entry.
+    /// - `reloc`: The AArch64 relocation entry.
     pub fn add_relocation(&mut self, section: usize, reloc: Relocation) {
         if section < self.sections.len() {
             self.sections[section].relocations.push(reloc);
         }
+    }
+
+    /// Add an x86-64 relocation entry to the specified section.
+    ///
+    /// - `section`: 0-based section index.
+    /// - `reloc`: The x86-64 relocation entry.
+    pub fn add_x86_64_relocation(&mut self, section: usize, reloc: X86_64Relocation) {
+        if section < self.sections.len() {
+            self.sections[section].x86_64_relocations.push(reloc);
+        }
+    }
+
+    /// Returns the total number of relocations for a section (across both targets).
+    fn section_reloc_count(&self, sec: &SectionData) -> u32 {
+        (sec.relocations.len() + sec.x86_64_relocations.len()) as u32
     }
 
     /// Produce the complete .o file as a byte vector.
@@ -210,11 +286,12 @@ impl MachOWriter {
         let mut reloc_offsets: Vec<u32> = Vec::new();
         let mut reloc_offset = section_data_end;
         for sec in &self.sections {
-            if sec.relocations.is_empty() {
+            let nreloc = self.section_reloc_count(sec);
+            if nreloc == 0 {
                 reloc_offsets.push(0);
             } else {
                 reloc_offsets.push(reloc_offset);
-                reloc_offset += sec.relocations.len() as u32 * RELOCATION_INFO_SIZE;
+                reloc_offset += nreloc * RELOCATION_INFO_SIZE;
             }
         }
         let relocs_end = reloc_offset;
@@ -300,9 +377,12 @@ impl MachOWriter {
         // --- Write the file ---
         let mut buf = Vec::with_capacity((strtab_off + strtab_size_val) as usize);
 
-        // 1. Header
+        // 1. Header — target-aware
         let ncmds = 4u32; // LC_SEGMENT_64, LC_BUILD_VERSION, LC_SYMTAB, LC_DYSYMTAB
-        let header = MachHeader::new_arm64_object(ncmds, total_lc_size);
+        let header = match self.target {
+            MachOTarget::AArch64 => MachHeader::new_arm64_object(ncmds, total_lc_size),
+            MachOTarget::X86_64 => MachHeader::new_x86_64_object(ncmds, total_lc_size),
+        };
         header.write(&mut buf);
 
         // 2. LC_SEGMENT_64 command
@@ -326,7 +406,7 @@ impl MachOWriter {
                 section_offsets[i],
                 sec.align,
                 reloc_offsets[i],
-                sec.relocations.len() as u32,
+                self.section_reloc_count(sec),
                 sec.flags,
             );
             section_header.write(&mut buf);
@@ -352,10 +432,13 @@ impl MachOWriter {
             buf.extend_from_slice(&sec.data);
         }
 
-        // 8. Relocation entries
+        // 8. Relocation entries (AArch64 + x86-64)
         for sec in &self.sections {
             for reloc in &sec.relocations {
                 buf.extend_from_slice(&encode_relocation(reloc));
+            }
+            for reloc in &sec.x86_64_relocations {
+                buf.extend_from_slice(&encode_x86_64_relocation(reloc));
             }
         }
 
@@ -1015,5 +1098,141 @@ mod tests {
         assert!(vmsize >= 24, "vmsize should cover all sections: got {}", vmsize);
         // filesize should also cover all section data.
         assert!(filesize >= 24, "filesize should cover all sections: got {}", filesize);
+    }
+
+    // =====================================================================
+    // x86-64 Mach-O writer tests
+    // =====================================================================
+
+    #[test]
+    fn test_x86_64_empty_writer() {
+        let writer = MachOWriter::for_target(MachOTarget::X86_64);
+        let bytes = writer.write();
+        // Should at least have a header
+        assert!(bytes.len() >= 32);
+        // Check magic
+        assert_eq!(&bytes[0..4], &[0xCF, 0xFA, 0xED, 0xFE]);
+        // CPU type = x86-64
+        assert_eq!(read_u32(&bytes, 4), CPU_TYPE_X86_64);
+        // CPU subtype = ALL
+        assert_eq!(read_u32(&bytes, 8), CPU_SUBTYPE_X86_64_ALL);
+    }
+
+    #[test]
+    fn test_x86_64_writer_with_text() {
+        let mut writer = MachOWriter::for_target(MachOTarget::X86_64);
+        // x86-64: push rbp; mov rbp, rsp; pop rbp; ret
+        let code = vec![
+            0x55,             // push rbp
+            0x48, 0x89, 0xE5, // mov rbp, rsp
+            0x5D,             // pop rbp
+            0xC3,             // ret
+        ];
+        writer.add_text_section(&code);
+        writer.add_symbol("_main", 1, 0, true);
+
+        let bytes = writer.write();
+        // Check magic
+        assert_eq!(&bytes[0..4], &[0xCF, 0xFA, 0xED, 0xFE]);
+        // CPU type = x86-64
+        assert_eq!(read_u32(&bytes, 4), CPU_TYPE_X86_64);
+        // File type = MH_OBJECT
+        assert_eq!(read_u32(&bytes, 12), MH_OBJECT);
+    }
+
+    #[test]
+    fn test_x86_64_writer_with_relocation() {
+        use super::super::x86_64_reloc::X86_64Relocation;
+
+        let mut writer = MachOWriter::for_target(MachOTarget::X86_64);
+        // CALL rel32 (E8 + 4 bytes displacement)
+        let code = vec![0xE8, 0x00, 0x00, 0x00, 0x00]; // call +0 (placeholder)
+        writer.add_text_section(&code);
+        writer.add_symbol("_callee", 0, 0, true); // undefined external
+
+        // Add a BRANCH relocation at offset 1 (the displacement field)
+        writer.add_x86_64_relocation(0, X86_64Relocation::branch(0x01, 0));
+
+        let bytes = writer.write();
+        assert_eq!(&bytes[0..4], &[0xCF, 0xFA, 0xED, 0xFE]);
+        assert_eq!(read_u32(&bytes, 4), CPU_TYPE_X86_64);
+
+        // Find section header to verify nreloc = 1
+        let section_hdr_offset = (MACH_HEADER_64_SIZE + SEGMENT_COMMAND_64_SIZE) as usize;
+        // nreloc at offset 60 in section_64
+        let nreloc = read_u32(&bytes, section_hdr_offset + 60);
+        assert_eq!(nreloc, 1, "section should have 1 relocation");
+    }
+
+    #[test]
+    fn test_x86_64_writer_with_data_section() {
+        let mut writer = MachOWriter::for_target(MachOTarget::X86_64);
+        writer.add_text_section(&[0xC3]); // ret
+        writer.add_data_section(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        writer.add_symbol("_main", 1, 0, true);
+        writer.add_symbol("_data", 2, 0, true);
+
+        let bytes = writer.write();
+        assert_eq!(read_u32(&bytes, 4), CPU_TYPE_X86_64);
+
+        // Verify ncmds
+        let ncmds = read_u32(&bytes, 16);
+        assert_eq!(ncmds, 4);
+
+        // Verify data appears in the output
+        let found = bytes.windows(4).any(|w| w == &[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert!(found, "data section content should be in the output");
+    }
+
+    #[test]
+    fn test_x86_64_target_accessor() {
+        let writer_arm = MachOWriter::new();
+        assert_eq!(writer_arm.target(), MachOTarget::AArch64);
+
+        let writer_x86 = MachOWriter::for_target(MachOTarget::X86_64);
+        assert_eq!(writer_x86.target(), MachOTarget::X86_64);
+    }
+
+    #[test]
+    fn test_x86_64_got_relocation() {
+        use super::super::x86_64_reloc::X86_64Relocation;
+
+        let mut writer = MachOWriter::for_target(MachOTarget::X86_64);
+        // mov rax, [rip + disp32] (GOT load pattern)
+        let code = vec![0x48, 0x8B, 0x05, 0x00, 0x00, 0x00, 0x00];
+        writer.add_text_section(&code);
+        writer.add_symbol("_extern_sym", 0, 0, true);
+
+        writer.add_x86_64_relocation(0, X86_64Relocation::got_load(0x03, 0));
+
+        let bytes = writer.write();
+        assert_eq!(read_u32(&bytes, 4), CPU_TYPE_X86_64);
+
+        // Verify relocation was emitted
+        let section_hdr_offset = (MACH_HEADER_64_SIZE + SEGMENT_COMMAND_64_SIZE) as usize;
+        let nreloc = read_u32(&bytes, section_hdr_offset + 60);
+        assert_eq!(nreloc, 1);
+    }
+
+    #[test]
+    fn test_x86_64_multiple_relocations() {
+        use super::super::x86_64_reloc::X86_64Relocation;
+
+        let mut writer = MachOWriter::for_target(MachOTarget::X86_64);
+        // Two calls + RIP-relative load
+        let code = vec![0u8; 20];
+        writer.add_text_section(&code);
+        writer.add_symbol("_func1", 0, 0, true);
+        writer.add_symbol("_func2", 0, 0, true);
+        writer.add_symbol("_data", 0, 0, true);
+
+        writer.add_x86_64_relocation(0, X86_64Relocation::branch(0x01, 0));
+        writer.add_x86_64_relocation(0, X86_64Relocation::branch(0x06, 1));
+        writer.add_x86_64_relocation(0, X86_64Relocation::signed(0x0C, 2));
+
+        let bytes = writer.write();
+        let section_hdr_offset = (MACH_HEADER_64_SIZE + SEGMENT_COMMAND_64_SIZE) as usize;
+        let nreloc = read_u32(&bytes, section_hdr_offset + 60);
+        assert_eq!(nreloc, 3, "section should have 3 relocations");
     }
 }
