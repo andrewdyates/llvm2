@@ -73,6 +73,8 @@ pub enum X86ISelError {
     MissingResult(&'static str),
     #[error("too many arguments for System V ABI: {0} (max 6 integer + 8 float)")]
     TooManyArgs(usize),
+    #[error("unsupported opcode for x86-64 ISel: {0}")]
+    UnsupportedOpcode(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -447,12 +449,10 @@ impl X86InstructionSelector {
             // Switch (multi-way branch)
             Opcode::Switch { cases, default } => self.select_switch(inst, cases, *default, block)?,
 
-            // Unsupported opcodes emit a NOP placeholder for now
-            _ => {
-                self.func.push_inst(
-                    block,
-                    X86ISelInst::new(X86Opcode::Nop, vec![]),
-                );
+            // Unsupported opcodes are errors — silent NOP emission would
+            // cause miscompilation by silently dropping instructions.
+            other => {
+                return Err(X86ISelError::UnsupportedOpcode(format!("{:?}", other)));
             }
         }
         Ok(())
@@ -1747,7 +1747,7 @@ impl X86InstructionSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instructions::{Block, Instruction, Opcode, Value};
+    use crate::instructions::{AtomicOrdering, Block, Instruction, IntCC, Opcode, Value};
     use crate::types::Type;
     use llvm2_ir::x86_64_regs::{RAX, RCX, RDI, RDX, RSI, R8, R9};
 
@@ -3131,5 +3131,86 @@ mod tests {
         assert_eq!(insts.len(), 1);
         assert_eq!(insts[0].opcode, X86Opcode::Jmp);
         assert_eq!(insts[0].operands[0], X86ISelOperand::Block(default_block));
+    }
+
+    // -----------------------------------------------------------------------
+    // Unsupported opcode error (regression test for #276)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_unsupported_opcode_returns_error() {
+        // Opcodes not yet handled by x86-64 ISel must produce an error,
+        // not a silent NOP that causes miscompilation.
+        let unsupported_opcodes: Vec<Opcode> = vec![
+            Opcode::Fabs,
+            Opcode::Fsqrt,
+            Opcode::BandNot,
+            Opcode::BorNot,
+            Opcode::Sextend { from_ty: Type::I32, to_ty: Type::I64 },
+            Opcode::Uextend { from_ty: Type::I32, to_ty: Type::I64 },
+            Opcode::Trunc { to_ty: Type::I32 },
+            Opcode::Bitcast { to_ty: Type::I64 },
+            Opcode::Select { cond: IntCC::Equal },
+            Opcode::CallIndirect,
+            Opcode::Resume,
+            Opcode::GlobalRef { name: "sym".to_string() },
+            Opcode::ExternRef { name: "ext".to_string() },
+            Opcode::StackAddr { slot: 0 },
+            Opcode::Fence { ordering: AtomicOrdering::SeqCst },
+            Opcode::StructGep { struct_ty: Type::I64, field_index: 0 },
+        ];
+
+        for opcode in unsupported_opcodes {
+            let (mut isel, entry) = make_empty_isel();
+            // Some opcodes need defined values in args
+            define_vreg(&mut isel, Value(0), Type::I64);
+            define_vreg(&mut isel, Value(1), Type::I64);
+
+            let result = isel.select_instruction(
+                &Instruction {
+                    opcode: opcode.clone(),
+                    args: vec![Value(0), Value(1)],
+                    results: vec![Value(2)],
+                },
+                entry,
+            );
+
+            assert!(
+                result.is_err(),
+                "Expected error for unsupported opcode {:?}, but got Ok",
+                opcode,
+            );
+            let err = result.unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("unsupported opcode"),
+                "Error message for {:?} should mention 'unsupported opcode', got: {}",
+                opcode,
+                msg,
+            );
+        }
+    }
+
+    #[test]
+    fn test_unsupported_opcode_error_message_contains_opcode_name() {
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::I64);
+
+        let result = isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fabs,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Fabs"),
+            "Error message should name the unsupported opcode, got: {}",
+            msg,
+        );
     }
 }
