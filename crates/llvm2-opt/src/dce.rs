@@ -34,7 +34,7 @@
 
 use std::collections::HashSet;
 
-use llvm2_ir::{InstFlags, InstId, MachFunction, MachOperand, AArch64Opcode};
+use llvm2_ir::{InstFlags, InstId, MachFunction, MachOperand};
 
 use crate::effects::inst_produces_value;
 use crate::pass_manager::MachinePass;
@@ -82,7 +82,7 @@ impl MachinePass for DeadCodeElimination {
                     // not branches/terminators are dead. But be conservative:
                     // only Nop qualifies here.
                     None => {
-                        if inst.opcode == AArch64Opcode::Nop {
+                        if inst.is_nop() {
                             dead_insts.insert(inst_id);
                             changed = true;
                         }

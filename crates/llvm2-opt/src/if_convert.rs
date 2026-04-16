@@ -202,7 +202,7 @@ fn collect_diamond_transforms(func: &MachFunction) -> Vec<DiamondTransform> {
         }
         let true_last = func.inst(*true_blk.insts.last().unwrap());
         let false_last = func.inst(*false_blk.insts.last().unwrap());
-        if true_last.opcode != AArch64Opcode::B || false_last.opcode != AArch64Opcode::B {
+        if !true_last.is_unconditional_branch() || !false_last.is_unconditional_branch() {
             continue;
         }
 

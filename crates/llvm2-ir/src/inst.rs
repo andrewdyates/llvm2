@@ -528,6 +528,107 @@ impl AArch64Opcode {
     pub fn is_phi(self) -> bool {
         matches!(self, Self::Phi)
     }
+
+    // -- Generic instruction property queries --
+    //
+    // These enable optimization passes to operate on generic instruction
+    // properties rather than matching target-specific opcode variants.
+    // This is the foundation for multi-target optimization support.
+
+    /// Returns true if this is a no-op instruction (can be deleted without
+    /// affecting program semantics).
+    pub fn is_nop(self) -> bool {
+        matches!(self, Self::Nop)
+    }
+
+    /// Returns true if this is a register-to-register move (copy).
+    ///
+    /// Move instructions transfer a value from one register to another
+    /// without modifying it. Includes both generic pseudo-moves and
+    /// target-specific move variants.
+    pub fn is_move(self) -> bool {
+        matches!(
+            self,
+            Self::MovR | Self::Copy | Self::MOVWrr | Self::MOVXrr
+        )
+    }
+
+    /// Returns true if this is a move-immediate instruction (loads a
+    /// constant value into a register).
+    pub fn is_move_imm(self) -> bool {
+        matches!(
+            self,
+            Self::MovI | Self::Movz | Self::Movn | Self::MOVZWi | Self::MOVZXi
+        )
+    }
+
+    /// Returns true if this is an unconditional branch (always transfers
+    /// control, no fallthrough).
+    pub fn is_unconditional_branch(self) -> bool {
+        matches!(self, Self::B | Self::Br)
+    }
+
+    /// Returns true if this is a conditional branch (may or may not transfer
+    /// control; has a fallthrough path).
+    pub fn is_conditional_branch(self) -> bool {
+        matches!(
+            self,
+            Self::BCond | Self::Bcc | Self::Cbz | Self::Cbnz | Self::Tbz | Self::Tbnz
+        )
+    }
+
+    /// Returns true if this is a compare-and-branch-if-zero instruction.
+    pub fn is_cbz(self) -> bool {
+        matches!(self, Self::Cbz)
+    }
+
+    /// Returns true if this is a compare-and-branch-if-not-zero instruction.
+    pub fn is_cbnz(self) -> bool {
+        matches!(self, Self::Cbnz)
+    }
+
+    /// Returns true if this is a commutative operation (operand order does
+    /// not affect the result).
+    pub fn is_commutative(self) -> bool {
+        matches!(
+            self,
+            Self::AddRR | Self::MulRR | Self::AndRR | Self::OrrRR | Self::EorRR
+            | Self::FaddRR | Self::FmulRR
+            | Self::NeonAddV | Self::NeonMulV | Self::NeonFaddV | Self::NeonFmulV
+            | Self::NeonAndV | Self::NeonOrrV | Self::NeonEorV
+        )
+    }
+
+    /// Returns true if this opcode produces a value (operand[0] is a def).
+    ///
+    /// Instructions that don't produce values: CMP, TST, STR, STP, branches,
+    /// returns, NOP, calls, traps, and reference counting ops.
+    pub fn produces_value(self) -> bool {
+        use AArch64Opcode::*;
+        match self {
+            // Compare/test: set flags, no register def
+            CmpRR | CmpRI | Tst | Fcmp | CMPWrr | CMPXrr | CMPWri | CMPXri => false,
+            // Stores: write to memory, no register def
+            StrRI | StrbRI | StrhRI | StpRI | StpPreIndex | StrRO
+            | STRWui | STRXui | STRSui | STRDui | NeonSt1Post => false,
+            // Branches and returns: control flow, no register def
+            B | BCond | Bcc | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => false,
+            // Trap pseudo-instructions: control flow, no register def
+            TrapOverflow | TrapBoundsCheck | TrapNull | TrapDivZero | TrapShiftRange => false,
+            // Reference counting: side effects, no register def
+            Retain | Release => false,
+            // Nop: no def
+            Nop => false,
+            // Calls: produce result via implicit defs; for simple model, not a value producer
+            Bl | Blr | BL | BLR => false,
+            // Memory barriers: no register def
+            Dmb | Dsb | Isb => false,
+            // Atomic stores: no register def for the store itself
+            Stlr | Stlrb | Stlrh | Stlxr => false,
+            // Everything else produces a value in operand[0]
+            _ => true,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -923,6 +1024,50 @@ impl MachInst {
     #[inline]
     pub fn writes_memory(&self) -> bool {
         self.flags.contains(InstFlags::WRITES_MEMORY)
+    }
+
+    // -- Generic instruction property queries (delegates to opcode) --
+
+    /// Returns true if this is a no-op instruction.
+    #[inline]
+    pub fn is_nop(&self) -> bool {
+        self.opcode.is_nop()
+    }
+
+    /// Returns true if this is a register-to-register move/copy.
+    #[inline]
+    pub fn is_move(&self) -> bool {
+        self.opcode.is_move()
+    }
+
+    /// Returns true if this is a move-immediate instruction.
+    #[inline]
+    pub fn is_move_imm(&self) -> bool {
+        self.opcode.is_move_imm()
+    }
+
+    /// Returns true if this is an unconditional branch.
+    #[inline]
+    pub fn is_unconditional_branch(&self) -> bool {
+        self.opcode.is_unconditional_branch()
+    }
+
+    /// Returns true if this is a conditional branch.
+    #[inline]
+    pub fn is_conditional_branch(&self) -> bool {
+        self.opcode.is_conditional_branch()
+    }
+
+    /// Returns true if this is a commutative operation.
+    #[inline]
+    pub fn is_commutative(&self) -> bool {
+        self.opcode.is_commutative()
+    }
+
+    /// Returns true if this instruction produces a value (operand[0] is a def).
+    #[inline]
+    pub fn produces_value(&self) -> bool {
+        self.opcode.produces_value()
     }
 }
 

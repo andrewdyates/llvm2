@@ -44,6 +44,9 @@
 use std::collections::HashMap;
 
 use llvm2_ir::{AArch64Opcode, BlockId, InstId, MachFunction, MachOperand, ProofAnnotation, VReg};
+// NOTE: AArch64Opcode is still needed for ExprKey (canonical key includes opcode)
+// and for the `produces_value` delegation in effects.rs. The `is_commutative`
+// check now uses the generic method on AArch64Opcode.
 
 use crate::dom::DomTree;
 use crate::effects::{opcode_effect, produces_value, MemoryEffect};
@@ -229,7 +232,7 @@ fn make_expr_key(opcode: AArch64Opcode, operands: &[MachOperand]) -> ExprKey {
     let mut canon_ops: Vec<CanonOperand> = operands[1..].iter().map(CanonOperand::from).collect();
 
     // For commutative operations, sort operands for canonical form.
-    if is_commutative(opcode) && canon_ops.len() == 2 {
+    if opcode.is_commutative() && canon_ops.len() == 2 {
         canon_ops.sort_by(canon_operand_cmp);
     }
 
@@ -237,15 +240,6 @@ fn make_expr_key(opcode: AArch64Opcode, operands: &[MachOperand]) -> ExprKey {
         opcode,
         operands: canon_ops,
     }
-}
-
-/// Returns true if the opcode is commutative (operand order doesn't matter).
-fn is_commutative(opcode: AArch64Opcode) -> bool {
-    use AArch64Opcode::*;
-    matches!(
-        opcode,
-        AddRR | MulRR | AndRR | OrrRR | EorRR | FaddRR | FmulRR
-    )
 }
 
 /// Comparison function for canonicalizing operand order.

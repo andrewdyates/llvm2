@@ -145,7 +145,7 @@ fn detect_tail_call(func: &MachFunction, insts: &[InstId]) -> Option<TailCallInf
             break;
         }
         // Allow pure register moves between call and ret (return value setup).
-        if inst.opcode == AArch64Opcode::MovR || inst.opcode == AArch64Opcode::Copy {
+        if inst.is_move() {
             continue;
         }
         // Any other instruction blocks tail call detection.
@@ -163,11 +163,10 @@ fn detect_tail_call(func: &MachFunction, insts: &[InstId]) -> Option<TailCallInf
 }
 
 /// Returns true if the opcode is a call instruction.
+///
+/// Uses the generic IS_CALL flag for multi-target compatibility.
 fn is_call_opcode(opcode: AArch64Opcode) -> bool {
-    matches!(
-        opcode,
-        AArch64Opcode::Bl | AArch64Opcode::BL | AArch64Opcode::Blr | AArch64Opcode::BLR
-    )
+    opcode.default_flags().is_call()
 }
 
 /// Extract the call target symbol name from a call instruction.
@@ -207,13 +206,14 @@ fn guards_pass(
             return false;
         }
 
-        // Release operations (destructor-like cleanup).
+        // Release operations (destructor-like cleanup): check HAS_SIDE_EFFECTS
+        // on the specific Release opcode.
         if inst.opcode == AArch64Opcode::Release {
             return false;
         }
 
-        // Only allow pure register copies (MovR, Copy) between call and ret.
-        if inst.opcode != AArch64Opcode::MovR && inst.opcode != AArch64Opcode::Copy {
+        // Only allow pure register copies (moves) between call and ret.
+        if !inst.is_move() {
             return false;
         }
     }

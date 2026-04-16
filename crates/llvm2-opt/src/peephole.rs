@@ -94,9 +94,24 @@ enum PeepholeResult {
 }
 
 /// Try to apply a peephole optimization to a single instruction.
+///
+/// Dispatch uses generic instruction properties where possible:
+/// - `is_nop()` for nop elimination
+/// - `is_move()` for self-move detection
+/// Remaining patterns (add/sub/shift/logical identity) still reference
+/// AArch64Opcode because they are target-specific encodings that may
+/// differ on x86-64 or RISC-V.
 fn try_peephole(inst: &MachInst) -> PeepholeResult {
+    // Generic: delete nops on any target.
+    if inst.is_nop() {
+        return PeepholeResult::Delete;
+    }
+    // Generic: delete self-moves on any target.
+    if inst.is_move() {
+        return peephole_mov(inst);
+    }
+    // Target-specific patterns.
     match inst.opcode {
-        AArch64Opcode::MovR => peephole_mov(inst),
         AArch64Opcode::AddRI => peephole_add_ri(inst),
         AArch64Opcode::SubRI => peephole_sub_ri(inst),
         AArch64Opcode::LslRI => peephole_shift_ri_zero(inst),
@@ -104,7 +119,6 @@ fn try_peephole(inst: &MachInst) -> PeepholeResult {
         AArch64Opcode::AsrRI => peephole_shift_ri_zero(inst),
         AArch64Opcode::OrrRR => peephole_logical_self(inst),
         AArch64Opcode::AndRR => peephole_logical_self(inst),
-        AArch64Opcode::Nop => PeepholeResult::Delete,
         _ => PeepholeResult::NoChange,
     }
 }

@@ -252,12 +252,11 @@ impl ScopedValueTable {
 // ---------------------------------------------------------------------------
 
 /// Returns true if the opcode is commutative (operand order doesn't matter).
+///
+/// Delegates to the generic [`AArch64Opcode::is_commutative`] method for
+/// multi-target compatibility.
 fn is_commutative(opcode: AArch64Opcode) -> bool {
-    use AArch64Opcode::*;
-    matches!(
-        opcode,
-        AddRR | MulRR | AndRR | OrrRR | EorRR | FaddRR | FmulRR
-    )
+    opcode.is_commutative()
 }
 
 // ---------------------------------------------------------------------------

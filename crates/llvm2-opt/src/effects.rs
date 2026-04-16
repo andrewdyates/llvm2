@@ -181,32 +181,11 @@ pub fn opcode_effect(opcode: AArch64Opcode) -> MemoryEffect {
 /// Instructions that don't produce values: CMP, TST, STR, STP, branches,
 /// returns, NOP, calls, traps, and reference counting ops.
 ///
-/// This is the **authoritative, single definition** — all passes (DCE, CSE,
-/// LICM, addr-mode, etc.) must call this rather than maintaining their own
-/// copy. See issue #96.
+/// Delegates to [`AArch64Opcode::produces_value`] — the single source of
+/// truth. This wrapper preserves the existing function signature for callers.
+/// See issue #96.
 pub fn produces_value(opcode: AArch64Opcode) -> bool {
-    use AArch64Opcode::*;
-    match opcode {
-        // Compare/test: set flags, no register def
-        CmpRR | CmpRI | Tst | Fcmp => false,
-        // Stores: write to memory, no register def
-        StrRI | StrbRI | StrhRI | StpRI | StpPreIndex | StrRO => false,
-        // Branches and returns: control flow, no register def
-        B | BCond | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => false,
-        // Trap pseudo-instructions: control flow, no register def
-        TrapOverflow | TrapBoundsCheck | TrapNull | TrapDivZero | TrapShiftRange => false,
-        // Reference counting: side effects, no register def
-        Retain | Release => false,
-        // Nop: no def
-        Nop => false,
-        // Calls: they DO produce a result (in X0 typically), but that's
-        // handled via implicit defs. For our simple model, calls have
-        // side effects and won't be DCE'd anyway.
-        Bl | Blr => false,
-        // Everything else produces a value in operand[0]
-        // (including AddsRR/SubsRR which produce a result plus set flags)
-        _ => true,
-    }
+    opcode.produces_value()
 }
 
 /// Returns true if this instruction produces a value.
