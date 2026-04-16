@@ -3628,6 +3628,7 @@ mod eh_pipeline_tests {
             verify_dispatch: DispatchVerifyMode::Off,
             verify: false,
             enable_post_ra_opt: false,
+            use_pressure_aware_scheduler: false,
         });
 
         let obj_bytes = pipeline.encode_and_emit(&mut func).unwrap();
@@ -3650,6 +3651,7 @@ mod eh_pipeline_tests {
             verify_dispatch: DispatchVerifyMode::Off,
             verify: false,
             enable_post_ra_opt: false,
+            use_pressure_aware_scheduler: false,
         });
 
         let obj_bytes = pipeline.encode_and_emit(&mut func).unwrap();
