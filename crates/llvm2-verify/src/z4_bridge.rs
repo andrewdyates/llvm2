@@ -2331,10 +2331,48 @@ pub fn verify_with_chc(
             if result.is_safe() {
                 Z4Result::Verified
             } else if result.is_unsafe() {
-                // CHC counterexamples are traces, not simple assignments.
-                // Return an empty counterexample for now; full extraction
-                // would require mapping CHC trace steps back to BV values.
-                Z4Result::CounterExample(vec![])
+                // Extract variable assignments from the CHC counterexample trace.
+                // The VerifiedCounterexample wraps a Counterexample whose steps
+                // contain FxHashMap<String, i64> assignments. We collect all
+                // assignments across steps and map variable names back to the
+                // obligation's input names where possible.
+                let mut cex_entries: Vec<(String, u64)> = Vec::new();
+                if let Some(vcex) = result.unsafe_counterexample() {
+                    let cex = vcex.counterexample();
+                    let input_names: Vec<&str> = obligation.inputs.iter()
+                        .map(|(name, _)| name.as_str())
+                        .collect();
+                    for step in &cex.steps {
+                        for (var_name, val) in &step.assignments {
+                            // Map CHC variable names back to obligation inputs.
+                            // CHC uses names like __p0_a0, __p0_a1 for predicate args;
+                            // also may use the original variable names directly.
+                            let mapped_name = if input_names.contains(&var_name.as_str()) {
+                                var_name.clone()
+                            } else if let Some(idx) = var_name.strip_prefix("__p0_a") {
+                                if let Ok(i) = idx.parse::<usize>() {
+                                    if i < input_names.len() {
+                                        input_names[i].to_string()
+                                    } else {
+                                        var_name.clone()
+                                    }
+                                } else {
+                                    var_name.clone()
+                                }
+                            } else {
+                                var_name.clone()
+                            };
+                            cex_entries.push((mapped_name, *val as u64));
+                        }
+                    }
+                }
+                if cex_entries.is_empty() {
+                    eprintln!(
+                        "WARNING: CHC solver reported Unsafe but no variable assignments \
+                         were available in the counterexample trace"
+                    );
+                }
+                Z4Result::CounterExample(cex_entries)
             } else {
                 Z4Result::Timeout
             }
@@ -5304,8 +5342,15 @@ mod tests {
 
         let config = Z4Config::default().with_timeout(10_000);
         let result = verify_with_chc(&obligation, &config);
-        // CHC solver should prove this safe (Verified) or return Unknown
-        // due to the bitvector theory being harder for CHC engines.
+        // a + b == a + b involves bitvector theory which is harder for CHC engines.
+        // The portfolio may timeout on BV problems in CI, so we allow Timeout.
+        if !matches!(result, Z4Result::Verified) {
+            eprintln!(
+                "WARNING: CHC solver did not prove trivial identity obligation, got {:?}",
+                result
+            );
+        }
+        // Must not be a CounterExample — that would be a soundness bug.
         assert!(
             matches!(result, Z4Result::Verified | Z4Result::Timeout | Z4Result::Error(_)),
             "Unexpected CHC result for trivial identity: {}",
@@ -5316,7 +5361,8 @@ mod tests {
     #[cfg(feature = "z4")]
     #[test]
     fn test_chc_verify_scalar_identity() {
-        // x == x (simplest possible obligation)
+        // x == x is tautologically true — the negated equivalence (not (= x x))
+        // is unsatisfiable, so any CHC engine should prove this Safe.
         let x = SmtExpr::var("x", 32);
         let obligation = ProofObligation {
             name: "chc_scalar_identity".to_string(),
@@ -5330,8 +5376,8 @@ mod tests {
         let config = Z4Config::default().with_timeout(10_000);
         let result = verify_with_chc(&obligation, &config);
         assert!(
-            matches!(result, Z4Result::Verified | Z4Result::Timeout | Z4Result::Error(_)),
-            "Unexpected CHC result for scalar identity: {}",
+            matches!(result, Z4Result::Verified),
+            "expected Verified for x == x identity, got {:?}",
             result
         );
     }
@@ -5366,7 +5412,8 @@ mod tests {
     #[cfg(feature = "z4")]
     #[test]
     fn test_chc_verify_obligation_chc_alias() {
-        // verify_obligation_chc is an alias for verify_with_chc
+        // verify_obligation_chc is an alias for verify_with_chc.
+        // x == x is tautologically true so we expect Verified.
         let x = SmtExpr::var("x", 32);
         let obligation = ProofObligation {
             name: "chc_alias_test".to_string(),
@@ -5380,9 +5427,84 @@ mod tests {
         let config = Z4Config::default().with_timeout(10_000);
         let result = verify_obligation_chc(&obligation, &config);
         assert!(
-            matches!(result, Z4Result::Verified | Z4Result::Timeout | Z4Result::Error(_)),
-            "verify_obligation_chc should behave like verify_with_chc: {}",
+            matches!(result, Z4Result::Verified),
+            "expected Verified for x == x via verify_obligation_chc, got {:?}",
             result
+        );
+    }
+
+    #[cfg(feature = "z4")]
+    #[test]
+    fn test_verify_proof_database_with_chc() {
+        use crate::proof_database::{ProofDatabase, ProofCategory, CategorizedProof};
+
+        // Build a small database of trivially-valid identity obligations.
+        // Each uses expr == expr so the CHC engine should prove them Safe.
+        let x32 = SmtExpr::var("x", 32);
+        let y64 = SmtExpr::var("y", 64);
+        let a8 = SmtExpr::var("a", 8);
+
+        let proofs = vec![
+            CategorizedProof {
+                obligation: ProofObligation {
+                    name: "chc_db_identity_i32".to_string(),
+                    tmir_expr: x32.clone(),
+                    aarch64_expr: x32,
+                    inputs: vec![("x".to_string(), 32)],
+                    preconditions: vec![],
+                    fp_inputs: vec![],
+                },
+                category: ProofCategory::Arithmetic,
+            },
+            CategorizedProof {
+                obligation: ProofObligation {
+                    name: "chc_db_identity_i64".to_string(),
+                    tmir_expr: y64.clone(),
+                    aarch64_expr: y64,
+                    inputs: vec![("y".to_string(), 64)],
+                    preconditions: vec![],
+                    fp_inputs: vec![],
+                },
+                category: ProofCategory::Arithmetic,
+            },
+            CategorizedProof {
+                obligation: ProofObligation {
+                    name: "chc_db_identity_i8".to_string(),
+                    tmir_expr: a8.clone(),
+                    aarch64_expr: a8,
+                    inputs: vec![("a".to_string(), 8)],
+                    preconditions: vec![],
+                    fp_inputs: vec![],
+                },
+                category: ProofCategory::Comparison,
+            },
+        ];
+
+        let db = ProofDatabase::from_proofs(proofs);
+        assert_eq!(db.len(), 3);
+
+        let config = Z4Config::default().with_timeout(10_000);
+        let report = verify_proof_database_with_chc(&db, &config);
+
+        // Report should have one entry per obligation.
+        assert_eq!(
+            report.total(), 3,
+            "expected 3 results in CHC proof database report, got {}",
+            report.total()
+        );
+
+        // All three are trivial identities (x == x), so they should be Verified.
+        assert!(
+            report.all_verified(),
+            "expected all identity obligations Verified via CHC, report:\n{}",
+            report
+        );
+
+        // Verify category breakdown is present.
+        let by_cat = report.by_category();
+        assert!(
+            !by_cat.is_empty(),
+            "category breakdown should be non-empty"
         );
     }
 }
