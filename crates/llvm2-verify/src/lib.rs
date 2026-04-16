@@ -128,6 +128,7 @@ pub mod fp_convert_proofs;
 pub mod ext_trunc_proofs;
 pub mod atomic_proofs;
 pub mod call_lowering_proofs;
+pub mod proof_certificate;
 pub mod proof_database;
 pub mod verification_runner;
 pub mod function_verifier;
@@ -152,3 +153,6 @@ pub use verification_runner::{VerificationRunner, VerificationRunReport, Verific
     CategoryBreakdown, FailedProofDetail, Z4VerificationMode};
 pub use function_verifier::{FunctionVerifier, FunctionVerificationReport, InstructionVerificationResult,
     InstructionReport, verify_function};
+pub use proof_certificate::{ProofCertificate, CertificateChain, CertificateResult, SolverUsed,
+    ChainVerificationResult, ChainSummary, CertificateError,
+    generate_certificate, generate_certificate_chain};
