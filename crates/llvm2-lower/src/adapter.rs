@@ -1470,36 +1470,21 @@ impl<'a> TmirAdapter<'a> {
         let true_v = self.map_value(*true_val);
         let false_v = self.map_value(*false_val);
         let dst = self.map_result(results)?;
-        let mut instrs = Vec::new();
 
-        // Compare condition to 1 (true) to set NZCV flags.
-        let one = self.fresh_value();
-        instrs.push(Instruction {
-            opcode: Opcode::Iconst {
-                ty: Type::I32,
-                imm: 1,
-            },
-            args: vec![],
-            results: vec![one],
-        });
-        let cmp_result = self.fresh_value();
-        instrs.push(Instruction {
-            opcode: Opcode::Icmp {
-                cond: IntCC::Equal,
-            },
-            args: vec![cond_val, one],
-            results: vec![cmp_result],
-        });
-        // Select based on the comparison result.
-        instrs.push(Instruction {
+        // ISel's select_csel does CMP cond, #0 then CSEL with the given CC.
+        // For a tMIR boolean (0=false, 1=true), we want: if cond != 0, pick
+        // true_val. So we use IntCC::NotEqual — after CMP cond, #0, NE means
+        // the condition was true (non-zero).
+        // ISel expects args order: [cond_val, true_val, false_val]
+        let inst = Instruction {
             opcode: Opcode::Select {
-                cond: IntCC::Equal,
+                cond: IntCC::NotEqual,
             },
-            args: vec![true_v, false_v, cmp_result],
+            args: vec![cond_val, true_v, false_v],
             results: vec![dst],
-        });
+        };
 
-        Ok(instrs)
+        Ok(vec![inst])
     }
 
     // -----------------------------------------------------------------------

@@ -1378,11 +1378,11 @@ fn test_select_adapter() {
     assert_eq!(lir_func.name, "abs_select");
     let entry = &lir_func.blocks[&lir_func.entry_block];
 
-    // Should have: Ineg, Iconst(0), Icmp, Iconst(1), Icmp(eq), Select, Return
-    // The Select lowering emits: Iconst(1) + Icmp(eq) + Select = 3 extra instructions
+    // Should have: Ineg, Iconst(0), Icmp, Select(NE), Return
+    // The Select lowering passes the boolean condition directly with NE
     assert!(
-        entry.instructions.len() >= 6,
-        "Expected at least 6 instructions for select pattern, got {}",
+        entry.instructions.len() >= 4,
+        "Expected at least 4 instructions for select pattern, got {}",
         entry.instructions.len()
     );
 

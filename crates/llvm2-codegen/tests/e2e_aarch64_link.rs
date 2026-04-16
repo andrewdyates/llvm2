@@ -16,8 +16,8 @@ use llvm2_codegen::pipeline::{self, OptLevel};
 
 // Multi-block test imports
 use tmir_func::{Block as TmirBlock, Function as TmirFunction};
-use tmir_instrs::{CmpOp, UnOp};
-use tmir_types::{BlockId, FuncId, FuncTy};
+use tmir_instrs::{BinOp, CmpOp, Instr, InstrNode, UnOp};
+use tmir_types::{BlockId, FuncId, FuncTy, Ty, ValueId};
 
 // =============================================================================
 // Helper: write bytes to a temp file and return the path
@@ -1610,6 +1610,1565 @@ fn e2e_aarch64_multiblock_all_opt_levels() {
         ("abs_val", build_tmir_abs_module()),
         ("fibonacci", build_tmir_fibonacci_module()),
         ("sum_1_to_n", build_tmir_sum_1_to_n_module()),
+    ];
+
+    for (name, module) in modules {
+        for opt in &[OptLevel::O0, OptLevel::O1, OptLevel::O2, OptLevel::O3] {
+            let compiler = Compiler::new(CompilerConfig {
+                opt_level: *opt,
+                ..CompilerConfig::default()
+            });
+            let result = compiler.compile(module).unwrap_or_else(|e| {
+                panic!("{} at {:?} failed: {}", name, opt, e)
+            });
+
+            assert!(
+                !result.object_code.is_empty(),
+                "{} at {:?} produced empty object code",
+                name, opt
+            );
+
+            let obj = &result.object_code;
+            let magic = u32::from_le_bytes([obj[0], obj[1], obj[2], obj[3]]);
+            assert_eq!(
+                magic, 0xFEED_FACF,
+                "{} at {:?} produced invalid Mach-O",
+                name, opt
+            );
+
+            eprintln!(
+                "  {} {:?}: {} bytes",
+                name, opt, result.metrics.code_size_bytes
+            );
+        }
+    }
+}
+
+// =============================================================================
+// Additional multi-block E2E tests: nested conditionals, select, factorial,
+// bitwise ops, negation patterns.
+//
+// Part of #242 -- Comprehensive multi-block E2E tests
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Builder: classify(x) -- nested conditionals (3-level diamond)
+//
+// fn classify(x: i64) -> i64 {
+//     if x < 0 { return -1 }
+//     if x == 0 { return 0 }
+//     return 1
+// }
+//
+// bb0 (entry): const 0, cmp x < 0, condbr -> bb1 (neg), bb2 (check_zero)
+// bb1: return -1
+// bb2: cmp x == 0, condbr -> bb3 (zero), bb4 (positive)
+// bb3: return 0
+// bb4: return 1
+// ---------------------------------------------------------------------------
+
+fn build_tmir_classify_module() -> tmir_func::Module {
+    let func = TmirFunction {
+        id: FuncId(0),
+        name: "_classify".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(64)],
+            returns: vec![Ty::Int(64)],
+        },
+        entry: BlockId(0),
+        blocks: vec![
+            // bb0 (entry): check x < 0
+            TmirBlock {
+                id: BlockId(0),
+                params: vec![(ValueId(0), Ty::Int(64))], // x
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 0,
+                        },
+                        results: vec![ValueId(1)], // zero
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Cmp {
+                            op: CmpOp::Slt,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(0), // x
+                            rhs: ValueId(1), // 0
+                        },
+                        results: vec![ValueId(2)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::CondBr {
+                            cond: ValueId(2),
+                            then_target: BlockId(1), // negative
+                            then_args: vec![],
+                            else_target: BlockId(2), // check_zero
+                            else_args: vec![],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb1: return -1
+            TmirBlock {
+                id: BlockId(1),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: -1,
+                        },
+                        results: vec![ValueId(10)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(10)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb2: check x == 0
+            TmirBlock {
+                id: BlockId(2),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Cmp {
+                            op: CmpOp::Eq,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(0), // x
+                            rhs: ValueId(1), // 0 (from bb0)
+                        },
+                        results: vec![ValueId(20)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::CondBr {
+                            cond: ValueId(20),
+                            then_target: BlockId(3), // zero
+                            then_args: vec![],
+                            else_target: BlockId(4), // positive
+                            else_args: vec![],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb3: return 0
+            TmirBlock {
+                id: BlockId(3),
+                params: vec![],
+                body: vec![InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(1)], // 0 from bb0
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                }],
+            },
+            // bb4: return 1
+            TmirBlock {
+                id: BlockId(4),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 1,
+                        },
+                        results: vec![ValueId(30)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(30)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+        ],
+        proofs: vec![],
+    };
+
+    tmir_func::Module {
+        name: "e2e_classify_test".to_string(),
+        functions: vec![func],
+        structs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Builder: min_val(a, b) -- branchless Select instruction
+//
+// fn min_val(a: i64, b: i64) -> i64 {
+//     let cond = a < b;
+//     select(cond, a, b)
+// }
+//
+// Single block -- but exercises the Select tMIR instruction which lowers to
+// CSEL on AArch64, verifying branchless conditional code generation.
+//
+// bb0 (entry): cmp a < b, select(cond, a, b), return result
+// ---------------------------------------------------------------------------
+
+fn build_tmir_min_select_module() -> tmir_func::Module {
+    let func = TmirFunction {
+        id: FuncId(0),
+        name: "_min_val".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(64), Ty::Int(64)],
+            returns: vec![Ty::Int(64)],
+        },
+        entry: BlockId(0),
+        blocks: vec![TmirBlock {
+            id: BlockId(0),
+            params: vec![
+                (ValueId(0), Ty::Int(64)), // a
+                (ValueId(1), Ty::Int(64)), // b
+            ],
+            body: vec![
+                InstrNode {
+                    instr: Instr::Cmp {
+                        op: CmpOp::Slt,
+                        ty: Ty::Int(64),
+                        lhs: ValueId(0), // a
+                        rhs: ValueId(1), // b
+                    },
+                    results: vec![ValueId(2)], // cond: a < b
+                    proofs: vec![],
+                },
+                InstrNode {
+                    instr: Instr::Select {
+                        ty: Ty::Int(64),
+                        cond: ValueId(2),
+                        true_val: ValueId(0),  // a (when a < b)
+                        false_val: ValueId(1), // b (when a >= b)
+                    },
+                    results: vec![ValueId(3)],
+                    proofs: vec![],
+                },
+                InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(3)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                },
+            ],
+        }],
+        proofs: vec![],
+    };
+
+    tmir_func::Module {
+        name: "e2e_min_select_test".to_string(),
+        functions: vec![func],
+        structs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Builder: factorial(n) -- loop with multiply
+//
+// fn factorial(n: i64) -> i64 {
+//     if n <= 1 { return 1 }
+//     result = 1; i = 2
+//     while i <= n { result *= i; i += 1 }
+//     return result
+// }
+//
+// bb0 (entry): const 1, cmp n <= 1, condbr -> bb1 (base case), bb2 (loop init)
+// bb1: return 1
+// bb2: result=1, i=2, br -> bb3
+// bb3 (loop): params(result, i)
+//   new_result = result * i, new_i = i + 1, cmp new_i <= n
+//   condbr -> bb3(new_result, new_i), bb4(new_result)
+// bb4 (exit): params(final_result), return final_result
+// ---------------------------------------------------------------------------
+
+fn build_tmir_factorial_module() -> tmir_func::Module {
+    let func = TmirFunction {
+        id: FuncId(0),
+        name: "_factorial".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(64)],
+            returns: vec![Ty::Int(64)],
+        },
+        entry: BlockId(0),
+        blocks: vec![
+            // bb0 (entry): check n <= 1
+            TmirBlock {
+                id: BlockId(0),
+                params: vec![(ValueId(0), Ty::Int(64))], // n
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 1,
+                        },
+                        results: vec![ValueId(1)], // const_1
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Cmp {
+                            op: CmpOp::Sle,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(0), // n
+                            rhs: ValueId(1), // 1
+                        },
+                        results: vec![ValueId(2)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::CondBr {
+                            cond: ValueId(2),
+                            then_target: BlockId(1), // base case
+                            then_args: vec![],
+                            else_target: BlockId(2), // loop init
+                            else_args: vec![],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb1: return 1
+            TmirBlock {
+                id: BlockId(1),
+                params: vec![],
+                body: vec![InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(1)], // const_1 from bb0
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                }],
+            },
+            // bb2 (loop init): result=1, i=2, jump to loop
+            TmirBlock {
+                id: BlockId(2),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 1,
+                        },
+                        results: vec![ValueId(10)], // result_init = 1
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 2,
+                        },
+                        results: vec![ValueId(11)], // i_init = 2
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Br {
+                            target: BlockId(3),
+                            args: vec![ValueId(10), ValueId(11)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb3 (loop body): params(result, i)
+            TmirBlock {
+                id: BlockId(3),
+                params: vec![
+                    (ValueId(20), Ty::Int(64)), // result
+                    (ValueId(21), Ty::Int(64)), // i
+                ],
+                body: vec![
+                    // new_result = result * i
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::Mul,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(20), // result
+                            rhs: ValueId(21), // i
+                        },
+                        results: vec![ValueId(22)], // new_result
+                        proofs: vec![],
+                    },
+                    // new_i = i + 1
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 1,
+                        },
+                        results: vec![ValueId(23)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(21), // i
+                            rhs: ValueId(23), // 1
+                        },
+                        results: vec![ValueId(24)], // new_i
+                        proofs: vec![],
+                    },
+                    // cmp new_i <= n
+                    InstrNode {
+                        instr: Instr::Cmp {
+                            op: CmpOp::Sle,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(24), // new_i
+                            rhs: ValueId(0),  // n (from entry)
+                        },
+                        results: vec![ValueId(25)],
+                        proofs: vec![],
+                    },
+                    // condbr: loop back or exit
+                    InstrNode {
+                        instr: Instr::CondBr {
+                            cond: ValueId(25),
+                            then_target: BlockId(3), // loop(new_result, new_i)
+                            then_args: vec![ValueId(22), ValueId(24)],
+                            else_target: BlockId(4), // exit(new_result)
+                            else_args: vec![ValueId(22)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb4 (exit): return final result
+            TmirBlock {
+                id: BlockId(4),
+                params: vec![(ValueId(30), Ty::Int(64))],
+                body: vec![InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(30)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                }],
+            },
+        ],
+        proofs: vec![],
+    };
+
+    tmir_func::Module {
+        name: "e2e_factorial_test".to_string(),
+        functions: vec![func],
+        structs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Builder: is_power_of_two(x) -- bitwise AND in multi-block
+//
+// fn is_power_of_two(x: i64) -> i64 {
+//     if x <= 0 { return 0 }
+//     let y = x - 1;
+//     let z = x & y;
+//     if z == 0 { return 1 } else { return 0 }
+// }
+//
+// bb0 (entry): const 0, cmp x <= 0, condbr -> bb1 (ret 0), bb2 (check)
+// bb1: return 0
+// bb2: y = x - 1, z = x & y, const 0, cmp z == 0, condbr -> bb3 (yes), bb4 (no)
+// bb3: return 1
+// bb4: return 0
+// ---------------------------------------------------------------------------
+
+fn build_tmir_is_power_of_two_module() -> tmir_func::Module {
+    let func = TmirFunction {
+        id: FuncId(0),
+        name: "_is_power_of_two".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(64)],
+            returns: vec![Ty::Int(64)],
+        },
+        entry: BlockId(0),
+        blocks: vec![
+            // bb0 (entry): check x <= 0
+            TmirBlock {
+                id: BlockId(0),
+                params: vec![(ValueId(0), Ty::Int(64))], // x
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 0,
+                        },
+                        results: vec![ValueId(1)], // zero
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Cmp {
+                            op: CmpOp::Sle,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(0), // x
+                            rhs: ValueId(1), // 0
+                        },
+                        results: vec![ValueId(2)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::CondBr {
+                            cond: ValueId(2),
+                            then_target: BlockId(1), // x <= 0 => return 0
+                            then_args: vec![],
+                            else_target: BlockId(2), // check bit pattern
+                            else_args: vec![],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb1: return 0 (not power of two: non-positive)
+            TmirBlock {
+                id: BlockId(1),
+                params: vec![],
+                body: vec![InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(1)], // 0 from bb0
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                }],
+            },
+            // bb2: y = x - 1, z = x & y, check z == 0
+            TmirBlock {
+                id: BlockId(2),
+                params: vec![],
+                body: vec![
+                    // y = x - 1
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 1,
+                        },
+                        results: vec![ValueId(10)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::Sub,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(0),  // x
+                            rhs: ValueId(10), // 1
+                        },
+                        results: vec![ValueId(11)], // y = x - 1
+                        proofs: vec![],
+                    },
+                    // z = x & y
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::And,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(0),  // x
+                            rhs: ValueId(11), // y
+                        },
+                        results: vec![ValueId(12)], // z = x & (x-1)
+                        proofs: vec![],
+                    },
+                    // cmp z == 0
+                    InstrNode {
+                        instr: Instr::Cmp {
+                            op: CmpOp::Eq,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(12), // z
+                            rhs: ValueId(1),  // 0 from bb0
+                        },
+                        results: vec![ValueId(13)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::CondBr {
+                            cond: ValueId(13),
+                            then_target: BlockId(3), // yes, power of two
+                            then_args: vec![],
+                            else_target: BlockId(4), // no
+                            else_args: vec![],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb3: return 1 (is power of two)
+            TmirBlock {
+                id: BlockId(3),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 1,
+                        },
+                        results: vec![ValueId(20)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(20)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb4: return 0 (not power of two)
+            TmirBlock {
+                id: BlockId(4),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 0,
+                        },
+                        results: vec![ValueId(21)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(21)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+        ],
+        proofs: vec![],
+    };
+
+    tmir_func::Module {
+        name: "e2e_is_power_of_two_test".to_string(),
+        functions: vec![func],
+        structs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Builder: negate_if_negative(x) -- UnOp::Neg in multi-block
+//
+// fn negate_if_negative(x: i64) -> i64 {
+//     if x < 0 { return -x } else { return x }
+// }
+//
+// This exercises the Neg unary op (SUB XZR, Xn) inside a conditional block,
+// combining control flow with unary operations.
+//
+// bb0 (entry): const 0, cmp x < 0, condbr -> bb1 (negate), bb2 (return x)
+// bb1: neg_x = -x, return neg_x
+// bb2: return x
+// ---------------------------------------------------------------------------
+
+fn build_tmir_negate_if_neg_module() -> tmir_func::Module {
+    let func = TmirFunction {
+        id: FuncId(0),
+        name: "_negate_if_neg".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(64)],
+            returns: vec![Ty::Int(64)],
+        },
+        entry: BlockId(0),
+        blocks: vec![
+            // bb0 (entry): check x < 0
+            TmirBlock {
+                id: BlockId(0),
+                params: vec![(ValueId(0), Ty::Int(64))], // x
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 0,
+                        },
+                        results: vec![ValueId(1)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Cmp {
+                            op: CmpOp::Slt,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(0), // x
+                            rhs: ValueId(1), // 0
+                        },
+                        results: vec![ValueId(2)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::CondBr {
+                            cond: ValueId(2),
+                            then_target: BlockId(1),
+                            then_args: vec![],
+                            else_target: BlockId(2),
+                            else_args: vec![],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb1: negate and return
+            TmirBlock {
+                id: BlockId(1),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::UnOp {
+                            op: UnOp::Neg,
+                            ty: Ty::Int(64),
+                            operand: ValueId(0),
+                        },
+                        results: vec![ValueId(10)], // -x
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(10)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb2: return x directly
+            TmirBlock {
+                id: BlockId(2),
+                params: vec![],
+                body: vec![InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(0)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                }],
+            },
+        ],
+        proofs: vec![],
+    };
+
+    tmir_func::Module {
+        name: "e2e_negate_if_neg_test".to_string(),
+        functions: vec![func],
+        structs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Builder: collatz_steps(n) -- complex loop with nested branch
+//
+// fn collatz_steps(n: i64) -> i64 {
+//     if n <= 1 { return 0 }
+//     steps = 0; current = n
+//     while current != 1 {
+//         if current & 1 == 0 { current = current / 2 }
+//         else { current = current * 3 + 1 }
+//         steps += 1
+//     }
+//     return steps
+// }
+//
+// This exercises: loop + nested conditional + multiply + divide + bitwise AND
+// It is the most complex control flow pattern, combining loop back-edges with
+// conditional branches inside the loop body.
+//
+// bb0 (entry): cmp n <= 1, condbr -> bb1 (base), bb2 (init)
+// bb1: return 0
+// bb2: steps=0, current=n, br -> bb3
+// bb3 (loop header): params(steps, current), cmp current != 1, condbr -> bb4 (body), bb7 (exit)
+// bb4 (body): z = current & 1, cmp z == 0, condbr -> bb5 (even), bb6 (odd)
+// bb5 (even): new_current = current / 2, br -> bb3 with (steps+1, new_current)
+// bb6 (odd): tmp = current * 3, new_current = tmp + 1, br -> bb3 with (steps+1, new_current)
+// bb7 (exit): return steps
+// ---------------------------------------------------------------------------
+
+fn build_tmir_collatz_module() -> tmir_func::Module {
+    let func = TmirFunction {
+        id: FuncId(0),
+        name: "_collatz_steps".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(64)],
+            returns: vec![Ty::Int(64)],
+        },
+        entry: BlockId(0),
+        blocks: vec![
+            // bb0 (entry): check n <= 1
+            TmirBlock {
+                id: BlockId(0),
+                params: vec![(ValueId(0), Ty::Int(64))], // n
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 1,
+                        },
+                        results: vec![ValueId(1)], // const_1
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Cmp {
+                            op: CmpOp::Sle,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(0), // n
+                            rhs: ValueId(1), // 1
+                        },
+                        results: vec![ValueId(2)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::CondBr {
+                            cond: ValueId(2),
+                            then_target: BlockId(1), // base case
+                            then_args: vec![],
+                            else_target: BlockId(2), // init loop
+                            else_args: vec![],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb1: return 0
+            TmirBlock {
+                id: BlockId(1),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 0,
+                        },
+                        results: vec![ValueId(3)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Return {
+                            values: vec![ValueId(3)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb2 (init): steps=0, current=n, jump to loop
+            TmirBlock {
+                id: BlockId(2),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 0,
+                        },
+                        results: vec![ValueId(10)], // steps_init = 0
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Br {
+                            target: BlockId(3),
+                            args: vec![ValueId(10), ValueId(0)], // (steps=0, current=n)
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb3 (loop header): params(steps, current)
+            TmirBlock {
+                id: BlockId(3),
+                params: vec![
+                    (ValueId(20), Ty::Int(64)), // steps
+                    (ValueId(21), Ty::Int(64)), // current
+                ],
+                body: vec![
+                    // cmp current != 1
+                    InstrNode {
+                        instr: Instr::Cmp {
+                            op: CmpOp::Ne,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(21), // current
+                            rhs: ValueId(1),  // 1 (from entry)
+                        },
+                        results: vec![ValueId(22)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::CondBr {
+                            cond: ValueId(22),
+                            then_target: BlockId(4), // body
+                            then_args: vec![],
+                            else_target: BlockId(7), // exit
+                            else_args: vec![],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb4 (body): check even/odd
+            TmirBlock {
+                id: BlockId(4),
+                params: vec![],
+                body: vec![
+                    // z = current & 1
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::And,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(21), // current
+                            rhs: ValueId(1),  // 1
+                        },
+                        results: vec![ValueId(30)], // z
+                        proofs: vec![],
+                    },
+                    // cmp z == 0
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 0,
+                        },
+                        results: vec![ValueId(31)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Cmp {
+                            op: CmpOp::Eq,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(30), // z
+                            rhs: ValueId(31), // 0
+                        },
+                        results: vec![ValueId(32)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::CondBr {
+                            cond: ValueId(32),
+                            then_target: BlockId(5), // even
+                            then_args: vec![],
+                            else_target: BlockId(6), // odd
+                            else_args: vec![],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb5 (even): new_current = current / 2, loop back
+            TmirBlock {
+                id: BlockId(5),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 2,
+                        },
+                        results: vec![ValueId(40)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::SDiv,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(21), // current
+                            rhs: ValueId(40), // 2
+                        },
+                        results: vec![ValueId(41)], // current / 2
+                        proofs: vec![],
+                    },
+                    // steps + 1
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(20), // steps
+                            rhs: ValueId(1),  // 1
+                        },
+                        results: vec![ValueId(42)], // steps + 1
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Br {
+                            target: BlockId(3),
+                            args: vec![ValueId(42), ValueId(41)], // (steps+1, current/2)
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb6 (odd): new_current = current * 3 + 1, loop back
+            TmirBlock {
+                id: BlockId(6),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        instr: Instr::Const {
+                            ty: Ty::Int(64),
+                            value: 3,
+                        },
+                        results: vec![ValueId(50)],
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::Mul,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(21), // current
+                            rhs: ValueId(50), // 3
+                        },
+                        results: vec![ValueId(51)], // current * 3
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(51), // current * 3
+                            rhs: ValueId(1),  // 1
+                        },
+                        results: vec![ValueId(52)], // current * 3 + 1
+                        proofs: vec![],
+                    },
+                    // steps + 1
+                    InstrNode {
+                        instr: Instr::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::Int(64),
+                            lhs: ValueId(20), // steps
+                            rhs: ValueId(1),  // 1
+                        },
+                        results: vec![ValueId(53)], // steps + 1
+                        proofs: vec![],
+                    },
+                    InstrNode {
+                        instr: Instr::Br {
+                            target: BlockId(3),
+                            args: vec![ValueId(53), ValueId(52)], // (steps+1, 3n+1)
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                    },
+                ],
+            },
+            // bb7 (exit): return steps
+            TmirBlock {
+                id: BlockId(7),
+                params: vec![],
+                body: vec![InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(20)], // steps from bb3
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                }],
+            },
+        ],
+        proofs: vec![],
+    };
+
+    tmir_func::Module {
+        name: "e2e_collatz_test".to_string(),
+        functions: vec![func],
+        structs: vec![],
+    }
+}
+
+// =============================================================================
+// Test 20: classify(x) -- nested conditionals, compile to valid Mach-O
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_classify_compile() {
+    let module = build_tmir_classify_module();
+    let compiler = Compiler::new(CompilerConfig {
+        opt_level: OptLevel::O0,
+        trace_level: CompilerTraceLevel::Full,
+        ..CompilerConfig::default()
+    });
+
+    let result = compiler.compile(&module).expect("classify compilation should succeed");
+
+    assert!(!result.object_code.is_empty());
+    assert_eq!(result.metrics.function_count, 1);
+
+    let obj = &result.object_code;
+    let magic = u32::from_le_bytes([obj[0], obj[1], obj[2], obj[3]]);
+    assert_eq!(magic, 0xFEED_FACF);
+
+    // 5 blocks should generate non-trivial code
+    assert!(
+        result.metrics.code_size_bytes > 30,
+        "classify (5 blocks, nested branches) should produce substantial code, got {} bytes",
+        result.metrics.code_size_bytes
+    );
+
+    let trace = result.trace.expect("trace should be present");
+    eprintln!(
+        "classify: {} bytes, {} instructions, {} trace entries",
+        result.metrics.code_size_bytes,
+        result.metrics.instruction_count,
+        trace.entries.len()
+    );
+}
+
+// =============================================================================
+// Test 21: classify(x) -- link and run (nested conditionals)
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_classify_link_and_run() {
+    let module = build_tmir_classify_module();
+    let obj_bytes = compile_tmir_module_to_obj(&module);
+
+    let driver = r#"
+#include <stdio.h>
+
+extern long _classify(long x);
+
+int main(void) {
+    long r1 = _classify(-100);
+    long r2 = _classify(-1);
+    long r3 = _classify(0);
+    long r4 = _classify(1);
+    long r5 = _classify(42);
+    printf("classify(-100)=%ld classify(-1)=%ld classify(0)=%ld classify(1)=%ld classify(42)=%ld\n",
+           r1, r2, r3, r4, r5);
+    if (r1 != -1) return 1;
+    if (r2 != -1) return 2;
+    if (r3 != 0)  return 3;
+    if (r4 != 1)  return 4;
+    if (r5 != 1)  return 5;
+    return 0;
+}
+"#;
+
+    let (exit_code, stdout) = link_and_run("classify", "classify", &obj_bytes, driver);
+    eprintln!("classify link+run stdout: {}", stdout.trim());
+    assert_eq!(
+        exit_code, 0,
+        "classify link+run failed (exit {}). \
+         1=classify(-100)!=-1, 2=classify(-1)!=-1, 3=classify(0)!=0, 4=classify(1)!=1, 5=classify(42)!=1. \
+         stdout: {}",
+        exit_code, stdout
+    );
+}
+
+// =============================================================================
+// Test 22: min_val(a, b) -- branchless Select, compile to valid Mach-O
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_min_select_compile() {
+    let module = build_tmir_min_select_module();
+    let compiler = Compiler::new(CompilerConfig {
+        opt_level: OptLevel::O0,
+        ..CompilerConfig::default()
+    });
+
+    let result = compiler.compile(&module).expect("min_select compilation should succeed");
+
+    assert!(!result.object_code.is_empty());
+    assert_eq!(result.metrics.function_count, 1);
+
+    let obj = &result.object_code;
+    let magic = u32::from_le_bytes([obj[0], obj[1], obj[2], obj[3]]);
+    assert_eq!(magic, 0xFEED_FACF);
+
+    eprintln!(
+        "min_select: {} bytes, {} instructions",
+        result.metrics.code_size_bytes,
+        result.metrics.instruction_count
+    );
+}
+
+// =============================================================================
+// Test 23: min_val(a, b) -- link and run (branchless Select)
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_min_select_link_and_run() {
+    let module = build_tmir_min_select_module();
+    let obj_bytes = compile_tmir_module_to_obj(&module);
+
+    let driver = r#"
+#include <stdio.h>
+
+extern long _min_val(long a, long b);
+
+int main(void) {
+    long r1 = _min_val(10, 20);
+    long r2 = _min_val(20, 10);
+    long r3 = _min_val(5, 5);
+    long r4 = _min_val(-3, -7);
+    long r5 = _min_val(-1, 1);
+    long r6 = _min_val(0, 0);
+    printf("min(10,20)=%ld min(20,10)=%ld min(5,5)=%ld min(-3,-7)=%ld min(-1,1)=%ld min(0,0)=%ld\n",
+           r1, r2, r3, r4, r5, r6);
+    if (r1 != 10) return 1;
+    if (r2 != 10) return 2;
+    if (r3 != 5)  return 3;
+    if (r4 != -7) return 4;
+    if (r5 != -1) return 5;
+    if (r6 != 0)  return 6;
+    return 0;
+}
+"#;
+
+    let (exit_code, stdout) = link_and_run("min_select", "min_val", &obj_bytes, driver);
+    eprintln!("min_select link+run stdout: {}", stdout.trim());
+    assert_eq!(
+        exit_code, 0,
+        "min_select link+run failed (exit {}). \
+         1=min(10,20)!=10, 2=min(20,10)!=10, 3=min(5,5)!=5, 4=min(-3,-7)!=-7, 5=min(-1,1)!=-1, 6=min(0,0)!=0. \
+         stdout: {}",
+        exit_code, stdout
+    );
+}
+
+// =============================================================================
+// Test 24: factorial(n) -- loop with multiply, compile to valid Mach-O
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_factorial_compile() {
+    let module = build_tmir_factorial_module();
+    let compiler = Compiler::new(CompilerConfig {
+        opt_level: OptLevel::O0,
+        trace_level: CompilerTraceLevel::Full,
+        ..CompilerConfig::default()
+    });
+
+    let result = compiler.compile(&module).expect("factorial compilation should succeed");
+
+    assert!(!result.object_code.is_empty());
+    assert_eq!(result.metrics.function_count, 1);
+
+    let obj = &result.object_code;
+    let magic = u32::from_le_bytes([obj[0], obj[1], obj[2], obj[3]]);
+    assert_eq!(magic, 0xFEED_FACF);
+
+    assert!(
+        result.metrics.code_size_bytes > 50,
+        "factorial (5 blocks, multiply loop) should produce substantial code, got {} bytes",
+        result.metrics.code_size_bytes
+    );
+
+    let trace = result.trace.expect("trace should be present");
+    eprintln!(
+        "factorial: {} bytes, {} instructions, {} trace entries",
+        result.metrics.code_size_bytes,
+        result.metrics.instruction_count,
+        trace.entries.len()
+    );
+}
+
+// =============================================================================
+// Test 25: factorial(n) -- link and run
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_factorial_link_and_run() {
+    let module = build_tmir_factorial_module();
+    let obj_bytes = compile_tmir_module_to_obj(&module);
+
+    // 0! = 1, 1! = 1, 5! = 120, 10! = 3628800, 12! = 479001600
+    let driver = r#"
+#include <stdio.h>
+
+extern long _factorial(long n);
+
+int main(void) {
+    long r0  = _factorial(0);
+    long r1  = _factorial(1);
+    long r5  = _factorial(5);
+    long r10 = _factorial(10);
+    long r12 = _factorial(12);
+    printf("fact(0)=%ld fact(1)=%ld fact(5)=%ld fact(10)=%ld fact(12)=%ld\n",
+           r0, r1, r5, r10, r12);
+    if (r0 != 1)         return 1;
+    if (r1 != 1)         return 2;
+    if (r5 != 120)       return 3;
+    if (r10 != 3628800)  return 4;
+    if (r12 != 479001600) return 5;
+    return 0;
+}
+"#;
+
+    let (exit_code, stdout) = link_and_run("factorial", "factorial", &obj_bytes, driver);
+    eprintln!("factorial link+run stdout: {}", stdout.trim());
+    assert_eq!(
+        exit_code, 0,
+        "factorial link+run failed (exit {}). \
+         1=fact(0)!=1, 2=fact(1)!=1, 3=fact(5)!=120, 4=fact(10)!=3628800, 5=fact(12)!=479001600. \
+         stdout: {}",
+        exit_code, stdout
+    );
+}
+
+// =============================================================================
+// Test 26: is_power_of_two(x) -- bitwise AND, compile to valid Mach-O
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_is_power_of_two_compile() {
+    let module = build_tmir_is_power_of_two_module();
+    let compiler = Compiler::new(CompilerConfig {
+        opt_level: OptLevel::O0,
+        ..CompilerConfig::default()
+    });
+
+    let result = compiler
+        .compile(&module)
+        .expect("is_power_of_two compilation should succeed");
+
+    assert!(!result.object_code.is_empty());
+    assert_eq!(result.metrics.function_count, 1);
+
+    let obj = &result.object_code;
+    let magic = u32::from_le_bytes([obj[0], obj[1], obj[2], obj[3]]);
+    assert_eq!(magic, 0xFEED_FACF);
+
+    eprintln!(
+        "is_power_of_two: {} bytes, {} instructions",
+        result.metrics.code_size_bytes,
+        result.metrics.instruction_count
+    );
+}
+
+// =============================================================================
+// Test 27: is_power_of_two(x) -- link and run (bitwise AND in multi-block)
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_is_power_of_two_link_and_run() {
+    let module = build_tmir_is_power_of_two_module();
+    let obj_bytes = compile_tmir_module_to_obj(&module);
+
+    let driver = r#"
+#include <stdio.h>
+
+extern long _is_power_of_two(long x);
+
+int main(void) {
+    long r0 = _is_power_of_two(0);    /* 0 (non-positive) */
+    long r1 = _is_power_of_two(1);    /* 1 (2^0) */
+    long r2 = _is_power_of_two(2);    /* 1 (2^1) */
+    long r3 = _is_power_of_two(3);    /* 0 */
+    long r4 = _is_power_of_two(4);    /* 1 (2^2) */
+    long r5 = _is_power_of_two(16);   /* 1 (2^4) */
+    long r6 = _is_power_of_two(15);   /* 0 */
+    long r7 = _is_power_of_two(-1);   /* 0 (negative) */
+    long r8 = _is_power_of_two(1024); /* 1 (2^10) */
+    printf("pot(0)=%ld pot(1)=%ld pot(2)=%ld pot(3)=%ld pot(4)=%ld pot(16)=%ld pot(15)=%ld pot(-1)=%ld pot(1024)=%ld\n",
+           r0, r1, r2, r3, r4, r5, r6, r7, r8);
+    if (r0 != 0) return 1;
+    if (r1 != 1) return 2;
+    if (r2 != 1) return 3;
+    if (r3 != 0) return 4;
+    if (r4 != 1) return 5;
+    if (r5 != 1) return 6;
+    if (r6 != 0) return 7;
+    if (r7 != 0) return 8;
+    if (r8 != 1) return 9;
+    return 0;
+}
+"#;
+
+    let (exit_code, stdout) = link_and_run("is_power_of_two", "is_power_of_two", &obj_bytes, driver);
+    eprintln!("is_power_of_two link+run stdout: {}", stdout.trim());
+    assert_eq!(
+        exit_code, 0,
+        "is_power_of_two link+run failed (exit {}). stdout: {}",
+        exit_code, stdout
+    );
+}
+
+// =============================================================================
+// Test 28: negate_if_negative(x) -- UnOp::Neg in multi-block, compile
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_negate_if_neg_compile() {
+    let module = build_tmir_negate_if_neg_module();
+    let compiler = Compiler::new(CompilerConfig {
+        opt_level: OptLevel::O0,
+        ..CompilerConfig::default()
+    });
+
+    let result = compiler
+        .compile(&module)
+        .expect("negate_if_neg compilation should succeed");
+
+    assert!(!result.object_code.is_empty());
+    assert_eq!(result.metrics.function_count, 1);
+
+    let obj = &result.object_code;
+    let magic = u32::from_le_bytes([obj[0], obj[1], obj[2], obj[3]]);
+    assert_eq!(magic, 0xFEED_FACF);
+
+    eprintln!(
+        "negate_if_neg: {} bytes, {} instructions",
+        result.metrics.code_size_bytes,
+        result.metrics.instruction_count
+    );
+}
+
+// =============================================================================
+// Test 29: negate_if_negative(x) -- link and run (UnOp::Neg + branch)
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_negate_if_neg_link_and_run() {
+    let module = build_tmir_negate_if_neg_module();
+    let obj_bytes = compile_tmir_module_to_obj(&module);
+
+    let driver = r#"
+#include <stdio.h>
+
+extern long _negate_if_neg(long x);
+
+int main(void) {
+    long r1 = _negate_if_neg(42);     /* 42 (positive, unchanged) */
+    long r2 = _negate_if_neg(-42);    /* 42 (negative, negated) */
+    long r3 = _negate_if_neg(0);      /* 0 (zero, unchanged) */
+    long r4 = _negate_if_neg(-1);     /* 1 (negative, negated) */
+    long r5 = _negate_if_neg(1);      /* 1 (positive, unchanged) */
+    long r6 = _negate_if_neg(-9999);  /* 9999 (negative, negated) */
+    printf("neg_if_neg(42)=%ld neg_if_neg(-42)=%ld neg_if_neg(0)=%ld neg_if_neg(-1)=%ld neg_if_neg(1)=%ld neg_if_neg(-9999)=%ld\n",
+           r1, r2, r3, r4, r5, r6);
+    if (r1 != 42)   return 1;
+    if (r2 != 42)   return 2;
+    if (r3 != 0)    return 3;
+    if (r4 != 1)    return 4;
+    if (r5 != 1)    return 5;
+    if (r6 != 9999) return 6;
+    return 0;
+}
+"#;
+
+    let (exit_code, stdout) = link_and_run("negate_if_neg", "negate_if_neg", &obj_bytes, driver);
+    eprintln!("negate_if_neg link+run stdout: {}", stdout.trim());
+    assert_eq!(
+        exit_code, 0,
+        "negate_if_neg link+run failed (exit {}). \
+         1=f(42)!=42, 2=f(-42)!=42, 3=f(0)!=0, 4=f(-1)!=1, 5=f(1)!=1, 6=f(-9999)!=9999. \
+         stdout: {}",
+        exit_code, stdout
+    );
+}
+
+// =============================================================================
+// Test 30: collatz_steps(n) -- complex loop with nested branch, compile
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_collatz_compile() {
+    let module = build_tmir_collatz_module();
+    let compiler = Compiler::new(CompilerConfig {
+        opt_level: OptLevel::O0,
+        trace_level: CompilerTraceLevel::Full,
+        ..CompilerConfig::default()
+    });
+
+    let result = compiler.compile(&module).expect("collatz compilation should succeed");
+
+    assert!(!result.object_code.is_empty());
+    assert_eq!(result.metrics.function_count, 1);
+
+    let obj = &result.object_code;
+    let magic = u32::from_le_bytes([obj[0], obj[1], obj[2], obj[3]]);
+    assert_eq!(magic, 0xFEED_FACF);
+
+    // 8 blocks with loop + nested branch should produce substantial code
+    assert!(
+        result.metrics.code_size_bytes > 80,
+        "collatz (8 blocks, nested loop) should produce substantial code, got {} bytes",
+        result.metrics.code_size_bytes
+    );
+
+    let trace = result.trace.expect("trace should be present");
+    eprintln!(
+        "collatz: {} bytes, {} instructions, {} trace entries",
+        result.metrics.code_size_bytes,
+        result.metrics.instruction_count,
+        trace.entries.len()
+    );
+}
+
+// =============================================================================
+// Test 31: collatz_steps(n) -- link and run (loop + nested branch + mul/div/and)
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_collatz_link_and_run() {
+    let module = build_tmir_collatz_module();
+    let obj_bytes = compile_tmir_module_to_obj(&module);
+
+    // Known Collatz step counts:
+    // collatz(1) = 0, collatz(2) = 1, collatz(3) = 7, collatz(6) = 8,
+    // collatz(7) = 16, collatz(27) = 111
+    let driver = r#"
+#include <stdio.h>
+
+extern long _collatz_steps(long n);
+
+int main(void) {
+    long r1  = _collatz_steps(1);   /* 0 */
+    long r2  = _collatz_steps(2);   /* 1 */
+    long r3  = _collatz_steps(3);   /* 7 */
+    long r6  = _collatz_steps(6);   /* 8 */
+    long r7  = _collatz_steps(7);   /* 16 */
+    long r27 = _collatz_steps(27);  /* 111 */
+    printf("collatz(1)=%ld collatz(2)=%ld collatz(3)=%ld collatz(6)=%ld collatz(7)=%ld collatz(27)=%ld\n",
+           r1, r2, r3, r6, r7, r27);
+    if (r1 != 0)   return 1;
+    if (r2 != 1)   return 2;
+    if (r3 != 7)   return 3;
+    if (r6 != 8)   return 4;
+    if (r7 != 16)  return 5;
+    if (r27 != 111) return 6;
+    return 0;
+}
+"#;
+
+    let (exit_code, stdout) = link_and_run("collatz", "collatz_steps", &obj_bytes, driver);
+    eprintln!("collatz link+run stdout: {}", stdout.trim());
+    assert_eq!(
+        exit_code, 0,
+        "collatz link+run failed (exit {}). \
+         1=collatz(1)!=0, 2=collatz(2)!=1, 3=collatz(3)!=7, 4=collatz(6)!=8, 5=collatz(7)!=16, 6=collatz(27)!=111. \
+         stdout: {}",
+        exit_code, stdout
+    );
+}
+
+// =============================================================================
+// Test 32: new multi-block functions at all optimization levels
+// =============================================================================
+
+#[test]
+fn e2e_aarch64_new_multiblock_all_opt_levels() {
+    let modules: &[(&str, tmir_func::Module)] = &[
+        ("classify", build_tmir_classify_module()),
+        ("min_select", build_tmir_min_select_module()),
+        ("factorial", build_tmir_factorial_module()),
+        ("is_power_of_two", build_tmir_is_power_of_two_module()),
+        ("negate_if_neg", build_tmir_negate_if_neg_module()),
+        ("collatz", build_tmir_collatz_module()),
     ];
 
     for (name, module) in modules {
