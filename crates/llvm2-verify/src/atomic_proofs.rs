@@ -803,6 +803,9 @@ pub fn proof_atomic_store_non_interference_i32() -> ProofObligation {
     let four = SmtExpr::bv_const(4, 64);
     let max_safe = SmtExpr::bv_const(0xFFFF_FFFF_FFFF_FFFCu64, 64);
 
+    // Precondition 0: addresses are distinct (prevents wrap-around edge case
+    // where addr_a + 4 overflows to 0, making the disjointness check trivially true)
+    let precond_distinct = addr_a.clone().eq_expr(addr_b.clone()).not_expr();
     // Precondition 1: addr_a doesn't wrap on +4
     let precond_a_safe = SmtExpr::bvuge(max_safe.clone(), addr_a.clone());
     // Precondition 2: addr_b doesn't wrap on +4
@@ -828,7 +831,7 @@ pub fn proof_atomic_store_non_interference_i32() -> ProofObligation {
             ("value".to_string(), 32),
             ("mem_default".to_string(), 8),
         ],
-        preconditions: vec![precond_a_safe, precond_b_safe, precond_disjoint],
+        preconditions: vec![precond_distinct, precond_a_safe, precond_b_safe, precond_disjoint],
         fp_inputs: vec![],
     }
 }
