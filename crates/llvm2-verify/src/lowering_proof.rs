@@ -191,12 +191,17 @@ impl ProofObligation {
 
     /// Serialize the proof obligation to SMT-LIB2 format (for z4 CLI).
     pub fn to_smt2(&self) -> String {
-        use crate::z4_bridge::infer_logic;
+        use crate::z4_bridge::{infer_logic, prepare_formula_for_smt};
 
         let mut lines = Vec::new();
 
-        // Infer logic from the formula content.
-        let formula = self.negated_equivalence();
+        // Build the negated equivalence, then expand small bounded quantifiers
+        // into conjunctions/disjunctions to keep the formula quantifier-free
+        // when possible (QF_* logics are faster for SMT solvers).
+        let raw_formula = self.negated_equivalence();
+        let formula = prepare_formula_for_smt(&raw_formula);
+
+        // Infer logic from the (potentially expanded) formula content.
         let logic = infer_logic(&formula);
         lines.push(format!("(set-logic {})", logic));
 
@@ -216,7 +221,7 @@ impl ProofObligation {
             ));
         }
 
-        // Assert the negated equivalence
+        // Assert the negated equivalence (with quantifiers expanded where possible)
         lines.push(format!("(assert {})", formula));
         lines.push("(check-sat)".to_string());
 
