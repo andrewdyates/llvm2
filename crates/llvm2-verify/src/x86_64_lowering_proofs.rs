@@ -694,6 +694,470 @@ pub fn proof_x86_imul_i8() -> ProofObligation {
 }
 
 // ===========================================================================
+// Comparison lowering proofs (32-bit)
+// ===========================================================================
+
+/// Proof: `tMIR::Icmp(EQ, I32, a, b) -> x86-64 CMP+SETE`
+pub fn proof_x86_icmp_eq_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "x86_64: Icmp_EQ_I32 -> CMP+SETE".to_string(),
+        tmir_expr: encode_tmir_icmp(&IntCC::Equal, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_cmp_setcc(a, b, 32, X86CondCode::E),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(NE, I32, a, b) -> x86-64 CMP+SETNE`
+pub fn proof_x86_icmp_ne_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "x86_64: Icmp_NE_I32 -> CMP+SETNE".to_string(),
+        tmir_expr: encode_tmir_icmp(&IntCC::NotEqual, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_cmp_setcc(a, b, 32, X86CondCode::NE),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(SLT, I32, a, b) -> x86-64 CMP+SETL`
+pub fn proof_x86_icmp_slt_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "x86_64: Icmp_SLT_I32 -> CMP+SETL".to_string(),
+        tmir_expr: encode_tmir_icmp(&IntCC::SignedLessThan, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_cmp_setcc(a, b, 32, X86CondCode::L),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(SGE, I32, a, b) -> x86-64 CMP+SETGE`
+pub fn proof_x86_icmp_sge_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "x86_64: Icmp_SGE_I32 -> CMP+SETGE".to_string(),
+        tmir_expr: encode_tmir_icmp(
+            &IntCC::SignedGreaterThanOrEqual, Type::I32, a.clone(), b.clone(),
+        ),
+        aarch64_expr: encode_cmp_setcc(a, b, 32, X86CondCode::GE),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(SGT, I32, a, b) -> x86-64 CMP+SETG`
+pub fn proof_x86_icmp_sgt_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "x86_64: Icmp_SGT_I32 -> CMP+SETG".to_string(),
+        tmir_expr: encode_tmir_icmp(&IntCC::SignedGreaterThan, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_cmp_setcc(a, b, 32, X86CondCode::G),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(SLE, I32, a, b) -> x86-64 CMP+SETLE`
+pub fn proof_x86_icmp_sle_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "x86_64: Icmp_SLE_I32 -> CMP+SETLE".to_string(),
+        tmir_expr: encode_tmir_icmp(&IntCC::SignedLessThanOrEqual, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_cmp_setcc(a, b, 32, X86CondCode::LE),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(ULT, I32, a, b) -> x86-64 CMP+SETB`
+pub fn proof_x86_icmp_ult_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "x86_64: Icmp_ULT_I32 -> CMP+SETB".to_string(),
+        tmir_expr: encode_tmir_icmp(&IntCC::UnsignedLessThan, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_cmp_setcc(a, b, 32, X86CondCode::B),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(UGE, I32, a, b) -> x86-64 CMP+SETAE`
+pub fn proof_x86_icmp_uge_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "x86_64: Icmp_UGE_I32 -> CMP+SETAE".to_string(),
+        tmir_expr: encode_tmir_icmp(
+            &IntCC::UnsignedGreaterThanOrEqual, Type::I32, a.clone(), b.clone(),
+        ),
+        aarch64_expr: encode_cmp_setcc(a, b, 32, X86CondCode::AE),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(UGT, I32, a, b) -> x86-64 CMP+SETA`
+pub fn proof_x86_icmp_ugt_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "x86_64: Icmp_UGT_I32 -> CMP+SETA".to_string(),
+        tmir_expr: encode_tmir_icmp(
+            &IntCC::UnsignedGreaterThan, Type::I32, a.clone(), b.clone(),
+        ),
+        aarch64_expr: encode_cmp_setcc(a, b, 32, X86CondCode::A),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(ULE, I32, a, b) -> x86-64 CMP+SETBE`
+pub fn proof_x86_icmp_ule_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "x86_64: Icmp_ULE_I32 -> CMP+SETBE".to_string(),
+        tmir_expr: encode_tmir_icmp(
+            &IntCC::UnsignedLessThanOrEqual, Type::I32, a.clone(), b.clone(),
+        ),
+        aarch64_expr: encode_cmp_setcc(a, b, 32, X86CondCode::BE),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+// ===========================================================================
+// Comparison lowering proofs (64-bit)
+// ===========================================================================
+
+/// Proof: `tMIR::Icmp(EQ, I64, a, b) -> x86-64 CMP+SETE`
+pub fn proof_x86_icmp_eq_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "x86_64: Icmp_EQ_I64 -> CMP+SETE".to_string(),
+        tmir_expr: encode_tmir_icmp(&IntCC::Equal, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_cmp_setcc(a, b, 64, X86CondCode::E),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(NE, I64, a, b) -> x86-64 CMP+SETNE`
+pub fn proof_x86_icmp_ne_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "x86_64: Icmp_NE_I64 -> CMP+SETNE".to_string(),
+        tmir_expr: encode_tmir_icmp(&IntCC::NotEqual, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_cmp_setcc(a, b, 64, X86CondCode::NE),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(SLT, I64, a, b) -> x86-64 CMP+SETL`
+pub fn proof_x86_icmp_slt_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "x86_64: Icmp_SLT_I64 -> CMP+SETL".to_string(),
+        tmir_expr: encode_tmir_icmp(&IntCC::SignedLessThan, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_cmp_setcc(a, b, 64, X86CondCode::L),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(SGE, I64, a, b) -> x86-64 CMP+SETGE`
+pub fn proof_x86_icmp_sge_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "x86_64: Icmp_SGE_I64 -> CMP+SETGE".to_string(),
+        tmir_expr: encode_tmir_icmp(
+            &IntCC::SignedGreaterThanOrEqual, Type::I64, a.clone(), b.clone(),
+        ),
+        aarch64_expr: encode_cmp_setcc(a, b, 64, X86CondCode::GE),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(SGT, I64, a, b) -> x86-64 CMP+SETG`
+pub fn proof_x86_icmp_sgt_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "x86_64: Icmp_SGT_I64 -> CMP+SETG".to_string(),
+        tmir_expr: encode_tmir_icmp(&IntCC::SignedGreaterThan, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_cmp_setcc(a, b, 64, X86CondCode::G),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(SLE, I64, a, b) -> x86-64 CMP+SETLE`
+pub fn proof_x86_icmp_sle_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "x86_64: Icmp_SLE_I64 -> CMP+SETLE".to_string(),
+        tmir_expr: encode_tmir_icmp(&IntCC::SignedLessThanOrEqual, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_cmp_setcc(a, b, 64, X86CondCode::LE),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(ULT, I64, a, b) -> x86-64 CMP+SETB`
+pub fn proof_x86_icmp_ult_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "x86_64: Icmp_ULT_I64 -> CMP+SETB".to_string(),
+        tmir_expr: encode_tmir_icmp(&IntCC::UnsignedLessThan, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_cmp_setcc(a, b, 64, X86CondCode::B),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(UGE, I64, a, b) -> x86-64 CMP+SETAE`
+pub fn proof_x86_icmp_uge_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "x86_64: Icmp_UGE_I64 -> CMP+SETAE".to_string(),
+        tmir_expr: encode_tmir_icmp(
+            &IntCC::UnsignedGreaterThanOrEqual, Type::I64, a.clone(), b.clone(),
+        ),
+        aarch64_expr: encode_cmp_setcc(a, b, 64, X86CondCode::AE),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(UGT, I64, a, b) -> x86-64 CMP+SETA`
+pub fn proof_x86_icmp_ugt_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "x86_64: Icmp_UGT_I64 -> CMP+SETA".to_string(),
+        tmir_expr: encode_tmir_icmp(
+            &IntCC::UnsignedGreaterThan, Type::I64, a.clone(), b.clone(),
+        ),
+        aarch64_expr: encode_cmp_setcc(a, b, 64, X86CondCode::A),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Icmp(ULE, I64, a, b) -> x86-64 CMP+SETBE`
+pub fn proof_x86_icmp_ule_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_icmp;
+    use crate::x86_64_eflags::encode_cmp_setcc;
+    use llvm2_ir::X86CondCode;
+    use llvm2_lower::instructions::IntCC;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "x86_64: Icmp_ULE_I64 -> CMP+SETBE".to_string(),
+        tmir_expr: encode_tmir_icmp(
+            &IntCC::UnsignedLessThanOrEqual, Type::I64, a.clone(), b.clone(),
+        ),
+        aarch64_expr: encode_cmp_setcc(a, b, 64, X86CondCode::BE),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+// ===========================================================================
 // Collect all proofs
 // ===========================================================================
 
@@ -740,6 +1204,28 @@ pub fn all_x86_64_proofs() -> Vec<ProofObligation> {
         proof_x86_iadd_i8(),
         proof_x86_isub_i8(),
         proof_x86_imul_i8(),
+        // Comparisons (32-bit)
+        proof_x86_icmp_eq_i32(),
+        proof_x86_icmp_ne_i32(),
+        proof_x86_icmp_slt_i32(),
+        proof_x86_icmp_sge_i32(),
+        proof_x86_icmp_sgt_i32(),
+        proof_x86_icmp_sle_i32(),
+        proof_x86_icmp_ult_i32(),
+        proof_x86_icmp_uge_i32(),
+        proof_x86_icmp_ugt_i32(),
+        proof_x86_icmp_ule_i32(),
+        // Comparisons (64-bit)
+        proof_x86_icmp_eq_i64(),
+        proof_x86_icmp_ne_i64(),
+        proof_x86_icmp_slt_i64(),
+        proof_x86_icmp_sge_i64(),
+        proof_x86_icmp_sgt_i64(),
+        proof_x86_icmp_sle_i64(),
+        proof_x86_icmp_ult_i64(),
+        proof_x86_icmp_uge_i64(),
+        proof_x86_icmp_ugt_i64(),
+        proof_x86_icmp_ule_i64(),
     ]
 }
 
@@ -989,13 +1475,161 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Comparison lowering proof tests (32-bit)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_x86_64_icmp_eq_i32_proof() {
+        let obligation = proof_x86_icmp_eq_i32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_EQ_I32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_ne_i32_proof() {
+        let obligation = proof_x86_icmp_ne_i32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_NE_I32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_slt_i32_proof() {
+        let obligation = proof_x86_icmp_slt_i32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_SLT_I32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_sge_i32_proof() {
+        let obligation = proof_x86_icmp_sge_i32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_SGE_I32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_sgt_i32_proof() {
+        let obligation = proof_x86_icmp_sgt_i32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_SGT_I32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_sle_i32_proof() {
+        let obligation = proof_x86_icmp_sle_i32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_SLE_I32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_ult_i32_proof() {
+        let obligation = proof_x86_icmp_ult_i32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_ULT_I32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_uge_i32_proof() {
+        let obligation = proof_x86_icmp_uge_i32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_UGE_I32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_ugt_i32_proof() {
+        let obligation = proof_x86_icmp_ugt_i32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_UGT_I32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_ule_i32_proof() {
+        let obligation = proof_x86_icmp_ule_i32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_ULE_I32 proof failed: {:?}", result);
+    }
+
+    // -----------------------------------------------------------------------
+    // Comparison lowering proof tests (64-bit)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_x86_64_icmp_eq_i64_proof() {
+        let obligation = proof_x86_icmp_eq_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_EQ_I64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_ne_i64_proof() {
+        let obligation = proof_x86_icmp_ne_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_NE_I64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_slt_i64_proof() {
+        let obligation = proof_x86_icmp_slt_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_SLT_I64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_sge_i64_proof() {
+        let obligation = proof_x86_icmp_sge_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_SGE_I64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_sgt_i64_proof() {
+        let obligation = proof_x86_icmp_sgt_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_SGT_I64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_sle_i64_proof() {
+        let obligation = proof_x86_icmp_sle_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_SLE_I64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_ult_i64_proof() {
+        let obligation = proof_x86_icmp_ult_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_ULT_I64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_uge_i64_proof() {
+        let obligation = proof_x86_icmp_uge_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_UGE_I64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_ugt_i64_proof() {
+        let obligation = proof_x86_icmp_ugt_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_UGT_I64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_icmp_ule_i64_proof() {
+        let obligation = proof_x86_icmp_ule_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Icmp_ULE_I64 proof failed: {:?}", result);
+    }
+
+    // -----------------------------------------------------------------------
     // Meta: verify all proofs at once
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_all_x86_64_proofs() {
         let proofs = all_x86_64_proofs();
-        assert_eq!(proofs.len(), 29, "Expected 29 x86-64 proof obligations");
+        assert_eq!(proofs.len(), 49, "Expected 49 x86-64 proof obligations");
 
         for proof in &proofs {
             let result = verify_by_evaluation(proof);
