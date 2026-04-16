@@ -608,9 +608,22 @@ pub fn schedule_list(dag: &mut ScheduleDAG) -> Vec<InstId> {
                 }
             }
             if min_start == u32::MAX {
-                // All remaining nodes have unsatisfied deps — advance cycle.
-                // This shouldn't happen in a well-formed DAG.
-                cycle += 1;
+                // All remaining nodes have unsatisfied deps — likely a cycle
+                // in the DAG (shouldn't happen but must be handled).
+                // Force-schedule the unscheduled node with the fewest remaining deps.
+                let mut best_stuck = None;
+                let mut min_rem = usize::MAX;
+                for i in 0..n {
+                    if !dag.nodes[i].scheduled && remaining_deps[i] < min_rem {
+                        min_rem = remaining_deps[i];
+                        best_stuck = Some(i);
+                    }
+                }
+                if let Some(stuck) = best_stuck {
+                    remaining_deps[stuck] = 0;
+                } else {
+                    break; // No unscheduled nodes at all — done.
+                }
                 continue;
             }
             cycle = min_start;
@@ -718,7 +731,22 @@ pub fn schedule_list_pressure_aware(
                 }
             }
             if min_start == u32::MAX {
-                cycle += 1;
+                // All remaining nodes have unsatisfied deps — likely a cycle
+                // in the DAG (shouldn't happen but must be handled).
+                // Force-schedule the unscheduled node with the fewest remaining deps.
+                let mut best_stuck = None;
+                let mut min_rem = usize::MAX;
+                for i in 0..n {
+                    if !dag.nodes[i].scheduled && remaining_deps[i] < min_rem {
+                        min_rem = remaining_deps[i];
+                        best_stuck = Some(i);
+                    }
+                }
+                if let Some(stuck) = best_stuck {
+                    remaining_deps[stuck] = 0;
+                } else {
+                    break; // No unscheduled nodes at all — done.
+                }
                 continue;
             }
             cycle = min_start;
