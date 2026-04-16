@@ -263,6 +263,21 @@ pub struct SwitchCase {
     pub target: BlockId,
 }
 
+/// A clause in a landing pad instruction.
+///
+/// Catch clauses match a specific exception type. Filter clauses specify a set
+/// of types that may be thrown; if the thrown type is not in the filter list,
+/// the filter matches (triggering unexpected-exception handling).
+///
+/// This mirrors the LLVM landingpad clause model used by C++ EH and Rust panics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LandingPadClause {
+    /// Catch an exception of the given type.
+    Catch(Ty),
+    /// Filter: matches if the thrown type is NOT in the list (for `throw()` specs).
+    Filter(Vec<Ty>),
+}
+
 /// tMIR instruction set.
 ///
 /// These are the ~25 core instructions that LLVM2 must lower to machine code.
@@ -449,6 +464,42 @@ pub enum Instr {
         values: Vec<Operand>,
     },
 
+    // -- Exception handling --
+
+    /// Invoke a function that may throw an exception.
+    ///
+    /// Like Call, but with normal and unwind successor blocks.
+    /// If the callee returns normally, control transfers to normal_dest with normal_args.
+    /// If the callee throws, control transfers to unwind_dest with unwind_args.
+    /// Arguments may be values or constants (matching real tMIR).
+    Invoke {
+        func: FuncId,
+        args: Vec<Operand>,
+        ret_ty: Vec<Ty>,
+        normal_dest: BlockId,
+        normal_args: Vec<Operand>,
+        unwind_dest: BlockId,
+        unwind_args: Vec<Operand>,
+    },
+
+    /// Exception landing pad.
+    ///
+    /// This is the first instruction in an unwind destination block.
+    /// It specifies the personality function's catch/filter clauses.
+    /// The result is the caught exception value.
+    LandingPad {
+        ty: Ty,
+        clauses: Vec<LandingPadClause>,
+    },
+
+    /// Resume unwinding after a landing pad.
+    ///
+    /// Continues propagating the exception to the next handler up the call stack.
+    /// The value operand is the exception value from the landing pad.
+    Resume {
+        value: ValueId,
+    },
+
     /// Direct function call.
     /// Arguments may be values or constants (matching real tMIR).
     Call {
@@ -563,7 +614,7 @@ pub struct InstrNode {
     /// The instruction opcode and operands.
     pub instr: Instr,
     /// Result value(s) produced by this instruction. Empty for void ops
-    /// (Store, Br, CondBr, Switch, Return, Nop, EndBorrow, Retain, Release, Dealloc).
+    /// (Store, Br, CondBr, Switch, Return, Resume, Nop, EndBorrow, Retain, Release, Dealloc).
     pub results: Vec<ValueId>,
     /// Proof annotations attached to this instruction by the source-language
     /// compiler (tRust, tSwift, tC). These have been formally verified by z4.
@@ -589,5 +640,125 @@ impl InstrNode {
             results,
             proofs,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: JSON round-trip an InstrNode and verify equality.
+    fn round_trip_instr(node: &InstrNode) -> InstrNode {
+        let json = serde_json::to_string(node).expect("serialize");
+        serde_json::from_str(&json).expect("deserialize")
+    }
+
+    #[test]
+    fn test_invoke_serde_round_trip() {
+        let instr = InstrNode::new(
+            Instr::Invoke {
+                func: FuncId(1),
+                args: vec![Operand::Value(ValueId(0)), Operand::int(42, Ty::i32())],
+                ret_ty: vec![Ty::i32()],
+                normal_dest: BlockId(1),
+                normal_args: vec![],
+                unwind_dest: BlockId(2),
+                unwind_args: vec![],
+            },
+            vec![ValueId(10)],
+        );
+        let rt = round_trip_instr(&instr);
+        assert_eq!(instr, rt);
+    }
+
+    #[test]
+    fn test_landing_pad_serde_round_trip() {
+        let instr = InstrNode::new(
+            Instr::LandingPad {
+                ty: Ty::i64(),
+                clauses: vec![
+                    LandingPadClause::Catch(Ty::i32()),
+                    LandingPadClause::Filter(vec![Ty::i32(), Ty::i64()]),
+                ],
+            },
+            vec![ValueId(5)],
+        );
+        let rt = round_trip_instr(&instr);
+        assert_eq!(instr, rt);
+    }
+
+    #[test]
+    fn test_landing_pad_empty_clauses() {
+        let instr = InstrNode::new(
+            Instr::LandingPad {
+                ty: Ty::i64(),
+                clauses: vec![],
+            },
+            vec![ValueId(0)],
+        );
+        let rt = round_trip_instr(&instr);
+        assert_eq!(instr, rt);
+    }
+
+    #[test]
+    fn test_resume_serde_round_trip() {
+        let instr = InstrNode::new(
+            Instr::Resume {
+                value: ValueId(5),
+            },
+            vec![],
+        );
+        let rt = round_trip_instr(&instr);
+        assert_eq!(instr, rt);
+    }
+
+    #[test]
+    fn test_landing_pad_clause_serde() {
+        let catch = LandingPadClause::Catch(Ty::i32());
+        let json = serde_json::to_string(&catch).unwrap();
+        let rt: LandingPadClause = serde_json::from_str(&json).unwrap();
+        assert_eq!(catch, rt);
+
+        let filter = LandingPadClause::Filter(vec![Ty::i32(), Ty::i64()]);
+        let json = serde_json::to_string(&filter).unwrap();
+        let rt: LandingPadClause = serde_json::from_str(&json).unwrap();
+        assert_eq!(filter, rt);
+    }
+
+    #[test]
+    fn test_invoke_no_results() {
+        // Invoke for a void function
+        let instr = InstrNode::new(
+            Instr::Invoke {
+                func: FuncId(0),
+                args: vec![],
+                ret_ty: vec![],
+                normal_dest: BlockId(1),
+                normal_args: vec![Operand::Value(ValueId(0))],
+                unwind_dest: BlockId(2),
+                unwind_args: vec![Operand::Value(ValueId(1))],
+            },
+            vec![],
+        );
+        let rt = round_trip_instr(&instr);
+        assert_eq!(instr, rt);
+    }
+
+    #[test]
+    fn test_invoke_multiple_return_types() {
+        let instr = InstrNode::new(
+            Instr::Invoke {
+                func: FuncId(3),
+                args: vec![Operand::Value(ValueId(0))],
+                ret_ty: vec![Ty::i32(), Ty::i64()],
+                normal_dest: BlockId(10),
+                normal_args: vec![],
+                unwind_dest: BlockId(20),
+                unwind_args: vec![],
+            },
+            vec![ValueId(1), ValueId(2)],
+        );
+        let rt = round_trip_instr(&instr);
+        assert_eq!(instr, rt);
     }
 }
