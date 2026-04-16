@@ -249,29 +249,26 @@ pub fn detect_input_format(path: &std::path::Path) -> InputFormat {
 }
 
 /// Load a tMIR module from a file, auto-detecting the format.
-pub fn load_module(path: &std::path::Path) -> Result<tmir_func::Module, PipelineError> {
-    match detect_input_format(path) {
-        InputFormat::Json => tmir_func::reader::read_module_from_json(path)
-            .map_err(|err| PipelineError::ISel(err.to_string())),
-        InputFormat::Tmbc => tmir_func::binary::read_module_from_tmbc(path)
-            .map_err(|err| PipelineError::ISel(err.to_string())),
-    }
+///
+/// NOTE: tMIR serialization (reader/binary modules) is not yet available in the
+/// new `tmir` crate. Use `tmir_build::ModuleBuilder` to construct modules
+/// programmatically until the serialization API is ported.
+pub fn load_module(path: &std::path::Path) -> Result<tmir::Module, PipelineError> {
+    let _ = detect_input_format(path);
+    Err(PipelineError::ISel(
+        "tMIR module loading not yet available — use tmir_build::ModuleBuilder".to_string(),
+    ))
 }
 
 /// Load a tMIR module from in-memory bytes, auto-detecting the format.
 ///
-/// Bytes starting with `tMBC` magic are decoded as binary bitcode; otherwise
-/// the bytes are interpreted as a UTF-8 JSON string.
-pub fn load_module_from_bytes(bytes: &[u8]) -> Result<tmir_func::Module, PipelineError> {
-    if bytes.starts_with(b"tMBC") {
-        tmir_func::binary::read_module_from_binary(bytes)
-            .map_err(|err| PipelineError::ISel(err.to_string()))
-    } else {
-        let json = std::str::from_utf8(bytes)
-            .map_err(|err| PipelineError::ISel(err.to_string()))?;
-        tmir_func::reader::read_module_from_str(json)
-            .map_err(|err| PipelineError::ISel(err.to_string()))
-    }
+/// NOTE: tMIR serialization is not yet available in the new `tmir` crate.
+/// Use `tmir_build::ModuleBuilder` to construct modules programmatically.
+pub fn load_module_from_bytes(bytes: &[u8]) -> Result<tmir::Module, PipelineError> {
+    let _ = bytes;
+    Err(PipelineError::ISel(
+        "tMIR module loading not yet available — use tmir_build::ModuleBuilder".to_string(),
+    ))
 }
 
 // ---------------------------------------------------------------------------

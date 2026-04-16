@@ -3196,4 +3196,359 @@ mod tests {
         let result = enc.encode_instruction(X86Opcode::LeaRip, &X86InstOperands::none());
         assert!(result.is_err());
     }
+
+    // ===================================================================
+    // Cross-reference encoding verification
+    //
+    // These tests systematically verify byte-level encoding against the
+    // Intel 64 and IA-32 Architectures SDM Volume 2 (Instruction Set
+    // Reference). Each test cites the relevant SDM instruction family.
+    // ===================================================================
+
+    // -------------------------------------------------------------------
+    // 1. MOV reg,reg for all 16 GPRs -- verify REX bits
+    // Intel SDM Vol 2, MOV instruction: opcode 89 /r (MOV r/m64, r64)
+    // REX prefix 0100_WRXB: W=1 (64-bit), R=src>>3, B=dst>>3
+    // ModRM = 11_src[2:0]_dst[2:0]
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_mov_all_16_gprs() {
+        // Pairs: (dst, src, expected_bytes)
+        // Format: REX.W prefix + 0x89 + ModRM(11, src[2:0], dst[2:0])
+        let cases: &[(X86PReg, X86PReg, &[u8])] = &[
+            // Legacy-to-legacy (no extended regs): REX.W = 0x48
+            (RAX, RAX, &[0x48, 0x89, 0xC0]),  // MOV RAX,RAX: ModRM=11_000_000=C0
+            (RCX, RAX, &[0x48, 0x89, 0xC1]),  // MOV RCX,RAX: ModRM=11_000_001=C1
+            (RDX, RBX, &[0x48, 0x89, 0xDA]),  // MOV RDX,RBX: ModRM=11_011_010=DA
+            (RSP, RBP, &[0x48, 0x89, 0xEC]),  // MOV RSP,RBP: ModRM=11_101_100=EC
+            (RSI, RDI, &[0x48, 0x89, 0xFE]),  // MOV RSI,RDI: ModRM=11_111_110=FE
+            (RDI, RSI, &[0x48, 0x89, 0xF7]),  // MOV RDI,RSI: ModRM=11_110_111=F7
+
+            // Extended dst only: REX.WB = 0x49 (W=1, B=1)
+            (R8,  RAX, &[0x49, 0x89, 0xC0]),  // MOV R8,RAX:  ModRM=11_000_000=C0
+            (R12, RCX, &[0x49, 0x89, 0xCC]),  // MOV R12,RCX: ModRM=11_001_100=CC
+            (R15, RDI, &[0x49, 0x89, 0xFF]),  // MOV R15,RDI: ModRM=11_111_111=FF
+
+            // Extended src only: REX.WR = 0x4C (W=1, R=1)
+            (RAX, R8,  &[0x4C, 0x89, 0xC0]),  // MOV RAX,R8:  ModRM=11_000_000=C0
+            (RCX, R12, &[0x4C, 0x89, 0xE1]),  // MOV RCX,R12: ModRM=11_100_001=E1
+            (RDI, R15, &[0x4C, 0x89, 0xFF]),  // MOV RDI,R15: ModRM=11_111_111=FF
+
+            // Both extended: REX.WRB = 0x4D (W=1, R=1, B=1)
+            (R8,  R9,  &[0x4D, 0x89, 0xC8]),  // MOV R8,R9:   ModRM=11_001_000=C8
+            (R10, R11, &[0x4D, 0x89, 0xDA]),  // MOV R10,R11: ModRM=11_011_010=DA
+            (R14, R13, &[0x4D, 0x89, 0xEE]),  // MOV R14,R13: ModRM=11_101_110=EE
+            (R15, R15, &[0x4D, 0x89, 0xFF]),  // MOV R15,R15: ModRM=11_111_111=FF
+        ];
+
+        for (i, (dst, src, expected)) in cases.iter().enumerate() {
+            let bytes = encode(X86Opcode::MovRR, &X86InstOperands::rr(*dst, *src));
+            assert_eq!(
+                bytes, expected.to_vec(),
+                "MOV case {}: dst={:?}, src={:?}", i, dst, src
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // 2. PUSH/POP for all 16 GPRs
+    // Intel SDM Vol 2, PUSH: opcode 50+rd (no REX.W needed for PUSH r64)
+    //   R8-R15 need REX.B prefix (0x41) to extend the opcode register field
+    // Intel SDM Vol 2, POP:  opcode 58+rd (same REX.B rule)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_push_pop_all_16_gprs() {
+        // PUSH register tests: (reg, expected_bytes)
+        let push_cases: &[(X86PReg, &[u8])] = &[
+            (RAX, &[0x50]),          // 50+0
+            (RCX, &[0x51]),          // 50+1
+            (RDX, &[0x52]),          // 50+2
+            (RBX, &[0x53]),          // 50+3
+            (RSP, &[0x54]),          // 50+4
+            (RBP, &[0x55]),          // 50+5
+            (RSI, &[0x56]),          // 50+6
+            (RDI, &[0x57]),          // 50+7
+            (R8,  &[0x41, 0x50]),    // REX.B + 50+0
+            (R9,  &[0x41, 0x51]),    // REX.B + 50+1
+            (R10, &[0x41, 0x52]),    // REX.B + 50+2
+            (R11, &[0x41, 0x53]),    // REX.B + 50+3
+            (R12, &[0x41, 0x54]),    // REX.B + 50+4
+            (R13, &[0x41, 0x55]),    // REX.B + 50+5
+            (R14, &[0x41, 0x56]),    // REX.B + 50+6
+            (R15, &[0x41, 0x57]),    // REX.B + 50+7
+        ];
+
+        for (i, (reg, expected)) in push_cases.iter().enumerate() {
+            let bytes = encode(X86Opcode::Push, &X86InstOperands::r(*reg));
+            assert_eq!(
+                bytes, expected.to_vec(),
+                "PUSH case {}: reg={:?}", i, reg
+            );
+        }
+
+        // POP register tests: (reg, expected_bytes)
+        let pop_cases: &[(X86PReg, &[u8])] = &[
+            (RAX, &[0x58]),          // 58+0
+            (RCX, &[0x59]),          // 58+1
+            (RDX, &[0x5A]),          // 58+2
+            (RBX, &[0x5B]),          // 58+3
+            (RSP, &[0x5C]),          // 58+4
+            (RBP, &[0x5D]),          // 58+5
+            (RSI, &[0x5E]),          // 58+6
+            (RDI, &[0x5F]),          // 58+7
+            (R8,  &[0x41, 0x58]),    // REX.B + 58+0
+            (R9,  &[0x41, 0x59]),    // REX.B + 58+1
+            (R10, &[0x41, 0x5A]),    // REX.B + 58+2
+            (R11, &[0x41, 0x5B]),    // REX.B + 58+3
+            (R12, &[0x41, 0x5C]),    // REX.B + 58+4
+            (R13, &[0x41, 0x5D]),    // REX.B + 58+5
+            (R14, &[0x41, 0x5E]),    // REX.B + 58+6
+            (R15, &[0x41, 0x5F]),    // REX.B + 58+7
+        ];
+
+        for (i, (reg, expected)) in pop_cases.iter().enumerate() {
+            let bytes = encode(X86Opcode::Pop, &X86InstOperands::r(*reg));
+            assert_eq!(
+                bytes, expected.to_vec(),
+                "POP case {}: reg={:?}", i, reg
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // 3. Negative displacement: MOV RAX, [RBX-8]
+    // Intel SDM Vol 2, MOV: opcode 8B /r (MOV r64, r/m64)
+    // disp=-8 fits in signed byte (0xF8), so mod=01 (disp8)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_negative_displacement() {
+        // MOV RAX, [RBX-8]: REX.W(48) + 8B + ModRM(01_000_011=43) + disp8(F8)
+        // -8 as signed byte = 0xF8
+        let bytes = encode(X86Opcode::MovRM, &X86InstOperands::rm(RAX, RBX, -8));
+        assert_eq!(bytes, vec![0x48, 0x8B, 0x43, 0xF8]);
+
+        // MOV RCX, [RDX-1]: REX.W(48) + 8B + ModRM(01_001_010=4A) + disp8(FF)
+        let bytes = encode(X86Opcode::MovRM, &X86InstOperands::rm(RCX, RDX, -1));
+        assert_eq!(bytes, vec![0x48, 0x8B, 0x4A, 0xFF]);
+
+        // MOV RDI, [RSI-128]: disp=-128 still fits in disp8 (0x80)
+        // REX.W(48) + 8B + ModRM(01_111_110=7E) + disp8(80)
+        let bytes = encode(X86Opcode::MovRM, &X86InstOperands::rm(RDI, RSI, -128));
+        assert_eq!(bytes, vec![0x48, 0x8B, 0x7E, 0x80]);
+
+        // MOV RAX, [RBX-129]: disp=-129 does NOT fit in disp8, needs disp32
+        // REX.W(48) + 8B + ModRM(10_000_011=83) + disp32(FFFFFF7F in LE)
+        let bytes = encode(X86Opcode::MovRM, &X86InstOperands::rm(RAX, RBX, -129));
+        assert_eq!(bytes, vec![0x48, 0x8B, 0x83, 0x7F, 0xFF, 0xFF, 0xFF]);
+    }
+
+    // -------------------------------------------------------------------
+    // 4. RSP and RBP base addressing special cases
+    // Intel SDM Vol 2, Table 2-2 (ModRM with SIB):
+    //   rm=100 (RSP/R12) always emits SIB byte
+    //   rm=101 (RBP/R13) with mod=00 is RIP-relative, so disp=0 needs mod=01+disp8(00)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_rsp_rbp_addressing() {
+        // MOV RAX, [RSP+0]: needs SIB byte (base=RSP, no index)
+        // REX.W(48) + 8B + ModRM(00_000_100=04) + SIB(00_100_100=24)
+        let bytes = encode(X86Opcode::MovRM, &X86InstOperands::rm(RAX, RSP, 0));
+        assert_eq!(bytes, vec![0x48, 0x8B, 0x04, 0x24]);
+
+        // MOV RAX, [RSP+8]: SIB + disp8
+        // REX.W(48) + 8B + ModRM(01_000_100=44) + SIB(00_100_100=24) + disp8(08)
+        let bytes = encode(X86Opcode::MovRM, &X86InstOperands::rm(RAX, RSP, 8));
+        assert_eq!(bytes, vec![0x48, 0x8B, 0x44, 0x24, 0x08]);
+
+        // MOV RAX, [RSP+256]: SIB + disp32
+        // REX.W(48) + 8B + ModRM(10_000_100=84) + SIB(00_100_100=24) + disp32
+        let bytes = encode(X86Opcode::MovRM, &X86InstOperands::rm(RAX, RSP, 256));
+        assert_eq!(bytes, vec![0x48, 0x8B, 0x84, 0x24, 0x00, 0x01, 0x00, 0x00]);
+
+        // MOV RAX, [RBP+0]: RBP base with no displacement needs disp8=0
+        // REX.W(48) + 8B + ModRM(01_000_101=45) + disp8(00)
+        let bytes = encode(X86Opcode::MovRM, &X86InstOperands::rm(RAX, RBP, 0));
+        assert_eq!(bytes, vec![0x48, 0x8B, 0x45, 0x00]);
+
+        // MOV RAX, [RBP+16]: normal disp8
+        // REX.W(48) + 8B + ModRM(01_000_101=45) + disp8(10)
+        let bytes = encode(X86Opcode::MovRM, &X86InstOperands::rm(RAX, RBP, 16));
+        assert_eq!(bytes, vec![0x48, 0x8B, 0x45, 0x10]);
+
+        // MOV R8, [R12+0]: R12 (hw=4) behaves like RSP -- needs SIB
+        // REX.WRB(4D) + 8B + ModRM(00_000_100=04) + SIB(00_100_100=24)
+        let bytes = encode(X86Opcode::MovRM, &X86InstOperands::rm(R8, R12, 0));
+        assert_eq!(bytes, vec![0x4D, 0x8B, 0x04, 0x24]);
+
+        // MOV R8, [R13+0]: R13 (hw=5) behaves like RBP -- needs disp8=0
+        // REX.WRB(4D) + 8B + ModRM(01_000_101=45) + disp8(00)
+        let bytes = encode(X86Opcode::MovRM, &X86InstOperands::rm(R8, R13, 0));
+        assert_eq!(bytes, vec![0x4D, 0x8B, 0x45, 0x00]);
+    }
+
+    // -------------------------------------------------------------------
+    // 5. Jcc condition codes -- verify 0F 80+cc rel32 encoding
+    // Intel SDM Vol 2, Jcc: 0F 80+cc cd (near jump with 32-bit displacement)
+    // cc values: O=0, NO=1, B=2, AE=3, E=4, NE=5, BE=6, A=7,
+    //            S=8, NS=9, P=A, NP=B, L=C, GE=D, LE=E, G=F
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_all_jcc_condition_codes() {
+        // Each Jcc with disp=0 should produce: 0F (80+cc) 00 00 00 00
+        let cases: &[(X86CondCode, u8)] = &[
+            (X86CondCode::O,  0x80),
+            (X86CondCode::NO, 0x81),
+            (X86CondCode::B,  0x82),
+            (X86CondCode::AE, 0x83),
+            (X86CondCode::E,  0x84),
+            (X86CondCode::NE, 0x85),
+            (X86CondCode::BE, 0x86),
+            (X86CondCode::A,  0x87),
+            (X86CondCode::S,  0x88),
+            (X86CondCode::NS, 0x89),
+            (X86CondCode::P,  0x8A),
+            (X86CondCode::NP, 0x8B),
+            (X86CondCode::L,  0x8C),
+            (X86CondCode::GE, 0x8D),
+            (X86CondCode::LE, 0x8E),
+            (X86CondCode::G,  0x8F),
+        ];
+
+        for (cc, expected_opcode2) in cases {
+            let bytes = encode(
+                X86Opcode::Jcc,
+                &X86InstOperands::jcc(*cc, 0),
+            );
+            assert_eq!(bytes.len(), 6, "Jcc {:?} should be 6 bytes", cc);
+            assert_eq!(bytes[0], 0x0F, "Jcc {:?} first byte", cc);
+            assert_eq!(bytes[1], *expected_opcode2, "Jcc {:?} second byte", cc);
+            // disp32=0 -> 00 00 00 00
+            assert_eq!(&bytes[2..], &[0x00, 0x00, 0x00, 0x00], "Jcc {:?} disp", cc);
+        }
+
+        // Verify a nonzero displacement: JNE +100
+        // 0F 85 64 00 00 00  (100 = 0x64)
+        let bytes = encode(
+            X86Opcode::Jcc,
+            &X86InstOperands::jcc(X86CondCode::NE, 100),
+        );
+        assert_eq!(bytes, vec![0x0F, 0x85, 0x64, 0x00, 0x00, 0x00]);
+
+        // Verify negative displacement: JL -16
+        // 0F 8C F0 FF FF FF  (-16 as i32 = 0xFFFF_FFF0)
+        let bytes = encode(
+            X86Opcode::Jcc,
+            &X86InstOperands::jcc(X86CondCode::L, -16),
+        );
+        assert_eq!(bytes, vec![0x0F, 0x8C, 0xF0, 0xFF, 0xFF, 0xFF]);
+    }
+
+    // -------------------------------------------------------------------
+    // 6. XOR reg,reg zero idiom
+    // Intel SDM Vol 2, XOR: opcode 31 /r (XOR r/m64, r64)
+    // REX.W(48) + 31 + ModRM(11, src[2:0], dst[2:0])
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_xor_zero_idiom() {
+        // XOR RAX, RAX: REX.W(48) + 31 + ModRM(11_000_000=C0)
+        let bytes = encode(X86Opcode::XorRR, &X86InstOperands::rr(RAX, RAX));
+        assert_eq!(bytes, vec![0x48, 0x31, 0xC0]);
+
+        // XOR RCX, RCX: REX.W(48) + 31 + ModRM(11_001_001=C9)
+        let bytes = encode(X86Opcode::XorRR, &X86InstOperands::rr(RCX, RCX));
+        assert_eq!(bytes, vec![0x48, 0x31, 0xC9]);
+
+        // XOR RDX, RDX: REX.W(48) + 31 + ModRM(11_010_010=D2)
+        let bytes = encode(X86Opcode::XorRR, &X86InstOperands::rr(RDX, RDX));
+        assert_eq!(bytes, vec![0x48, 0x31, 0xD2]);
+
+        // XOR R8, R8: REX.WRB(4D) + 31 + ModRM(11_000_000=C0)
+        let bytes = encode(X86Opcode::XorRR, &X86InstOperands::rr(R8, R8));
+        assert_eq!(bytes, vec![0x4D, 0x31, 0xC0]);
+
+        // XOR R15, R15: REX.WRB(4D) + 31 + ModRM(11_111_111=FF)
+        let bytes = encode(X86Opcode::XorRR, &X86InstOperands::rr(R15, R15));
+        assert_eq!(bytes, vec![0x4D, 0x31, 0xFF]);
+
+        // XOR R10, R10: REX.WRB(4D) + 31 + ModRM(11_010_010=D2)
+        let bytes = encode(X86Opcode::XorRR, &X86InstOperands::rr(R10, R10));
+        assert_eq!(bytes, vec![0x4D, 0x31, 0xD2]);
+    }
+
+    // -------------------------------------------------------------------
+    // 7. SUB RSP, imm32 -- common prologue stack frame allocation
+    // Intel SDM Vol 2, SUB: opcode 81 /5 id (SUB r/m64, imm32)
+    // REX.W(48) + 81 + ModRM(11_101_100=EC) + imm32
+    // RSP hw_enc=4, /5 means reg field=5 in ModRM
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_sub_rsp_imm32() {
+        // SUB RSP, 32:  REX.W(48) + 81 + ModRM(11_101_100=EC) + imm32(20 00 00 00)
+        let bytes = encode(X86Opcode::SubRI, &X86InstOperands::ri(RSP, 32));
+        assert_eq!(bytes, vec![0x48, 0x81, 0xEC, 0x20, 0x00, 0x00, 0x00]);
+
+        // SUB RSP, 128: REX.W(48) + 81 + EC + imm32(80 00 00 00)
+        let bytes = encode(X86Opcode::SubRI, &X86InstOperands::ri(RSP, 128));
+        assert_eq!(bytes, vec![0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00]);
+
+        // ADD RSP, 32 (epilogue counterpart):
+        // REX.W(48) + 81 + ModRM(11_000_100=C4) + imm32(20 00 00 00)
+        // /0 means reg field=0 in ModRM for ADD
+        let bytes = encode(X86Opcode::AddRI, &X86InstOperands::ri(RSP, 32));
+        assert_eq!(bytes, vec![0x48, 0x81, 0xC4, 0x20, 0x00, 0x00, 0x00]);
+    }
+
+    // -------------------------------------------------------------------
+    // 8. Complete prologue/epilogue sequence
+    // Verifies concatenated bytes for a standard System V AMD64 ABI
+    // function frame setup and teardown.
+    //
+    //   PUSH RBP           ; 55
+    //   MOV RBP, RSP       ; 48 89 E5 (REX.W + 89 + ModRM 11_100_101)
+    //   SUB RSP, 32        ; 48 81 EC 20 00 00 00
+    //   ADD RSP, 32        ; 48 81 C4 20 00 00 00
+    //   POP RBP            ; 5D
+    //   RET                ; C3
+    //
+    // Total: 1 + 3 + 7 + 7 + 1 + 1 = 20 bytes
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_prologue_epilogue_sequence() {
+        let mut enc = X86Encoder::new();
+
+        // PUSH RBP
+        enc.encode_instruction(X86Opcode::Push, &X86InstOperands::r(RBP)).unwrap();
+        // MOV RBP, RSP
+        enc.encode_instruction(X86Opcode::MovRR, &X86InstOperands::rr(RBP, RSP)).unwrap();
+        // SUB RSP, 32
+        enc.encode_instruction(X86Opcode::SubRI, &X86InstOperands::ri(RSP, 32)).unwrap();
+        // ADD RSP, 32
+        enc.encode_instruction(X86Opcode::AddRI, &X86InstOperands::ri(RSP, 32)).unwrap();
+        // POP RBP
+        enc.encode_instruction(X86Opcode::Pop, &X86InstOperands::r(RBP)).unwrap();
+        // RET
+        enc.encode_instruction(X86Opcode::Ret, &X86InstOperands::none()).unwrap();
+
+        let bytes = enc.finish();
+
+        let expected: Vec<u8> = vec![
+            0x55,                               // PUSH RBP
+            0x48, 0x89, 0xE5,                   // MOV RBP, RSP
+            0x48, 0x81, 0xEC, 0x20, 0x00, 0x00, 0x00, // SUB RSP, 32
+            0x48, 0x81, 0xC4, 0x20, 0x00, 0x00, 0x00, // ADD RSP, 32
+            0x5D,                               // POP RBP
+            0xC3,                               // RET
+        ];
+
+        assert_eq!(bytes.len(), 20, "prologue/epilogue should be 20 bytes");
+        assert_eq!(bytes, expected);
+    }
 }
