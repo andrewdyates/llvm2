@@ -98,12 +98,20 @@ pub fn x86cc_from_intcc(cc: IntCC) -> X86CondCode {
 /// Map tMIR floating-point comparison condition to x86-64 condition code.
 ///
 /// x86-64 UCOMISD sets CF, ZF, PF:
-///   Equal: ZF=1, PF=0 (E)
-///   LessThan: CF=1 (B)
-///   GreaterThan: CF=0, ZF=0 (A)
-///   Unordered (NaN): PF=1 (P)
+///   Equal:   CF=0, ZF=1, PF=0
+///   Less:    CF=1, ZF=0, PF=0
+///   Greater: CF=0, ZF=0, PF=0
+///   NaN:     CF=1, ZF=1, PF=1
+///
+/// Note: Fully NaN-correct float comparisons on x86-64 generally require
+/// two-instruction sequences (e.g., ordered equal = JE + JNP). The single-CC
+/// mappings below are best-effort for the current scaffolding ISel. The
+/// unordered variants use the negation of the complementary ordered CC,
+/// which is correct except for UnorderedEqual (E || P) and NotEqual
+/// (NE && NP) which need multi-instruction sequences.
 pub fn x86cc_from_floatcc(cc: FloatCC) -> X86CondCode {
     match cc {
+        // Ordered (false for NaN)
         FloatCC::Equal => X86CondCode::E,
         FloatCC::NotEqual => X86CondCode::NE,
         FloatCC::LessThan => X86CondCode::B,
@@ -112,6 +120,13 @@ pub fn x86cc_from_floatcc(cc: FloatCC) -> X86CondCode {
         FloatCC::GreaterThanOrEqual => X86CondCode::AE,
         FloatCC::Ordered => X86CondCode::NP,
         FloatCC::Unordered => X86CondCode::P,
+        // Unordered (true for NaN) — invert complementary ordered CC
+        FloatCC::UnorderedNotEqual => X86CondCode::NE,  // !OEQ (best single-CC approx)
+        FloatCC::UnorderedLessThan => X86CondCode::B,    // CF=1; NaN has CF=1
+        FloatCC::UnorderedLessThanOrEqual => X86CondCode::BE, // CF=1||ZF=1; NaN has both
+        FloatCC::UnorderedGreaterThan => X86CondCode::A, // CF=0&&ZF=0; needs two CCs
+        FloatCC::UnorderedGreaterThanOrEqual => X86CondCode::AE, // CF=0; needs two CCs
+        FloatCC::UnorderedEqual => X86CondCode::E,       // ZF=1; NaN has ZF=1 (correct!)
     }
 }
 
