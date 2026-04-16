@@ -218,6 +218,12 @@ impl Default for PipelineConfig {
 // Input format detection and module loading
 // ---------------------------------------------------------------------------
 
+/// Magic bytes for the binary tMIR bitcode (.tmbc) format.
+pub const TMBC_MAGIC: &[u8; 4] = b"tMBC";
+
+/// Current version of the .tmbc wire format.
+pub const TMBC_VERSION: u32 = 1;
+
 /// Detected input format for tMIR module files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputFormat {
@@ -257,9 +263,11 @@ pub fn load_module(path: &std::path::Path) -> Result<tmir::Module, PipelineError
             serde_json::from_str(&json)
                 .map_err(|err: serde_json::Error| PipelineError::ISel(format!("JSON error: {err}")))
         }
-        InputFormat::Tmbc => Err(PipelineError::ISel(
-            "binary tMIR bitcode (.tmbc) not yet supported with real tmir crate".to_string(),
-        )),
+        InputFormat::Tmbc => {
+            let bytes = std::fs::read(path)
+                .map_err(|err| PipelineError::ISel(format!("I/O error: {err}")))?;
+            decode_tmbc(&bytes)
+        }
     }
 }
 
@@ -268,16 +276,75 @@ pub fn load_module(path: &std::path::Path) -> Result<tmir::Module, PipelineError
 /// Bytes starting with `tMBC` magic are decoded as binary bitcode; otherwise
 /// the bytes are interpreted as a UTF-8 JSON string.
 pub fn load_module_from_bytes(bytes: &[u8]) -> Result<tmir::Module, PipelineError> {
-    if bytes.starts_with(b"tMBC") {
-        Err(PipelineError::ISel(
-            "binary tMIR bitcode (.tmbc) not yet supported with real tmir crate".to_string(),
-        ))
+    if bytes.starts_with(TMBC_MAGIC) {
+        decode_tmbc(bytes)
     } else {
         let json = std::str::from_utf8(bytes)
             .map_err(|err| PipelineError::ISel(err.to_string()))?;
         serde_json::from_str(json)
             .map_err(|err: serde_json::Error| PipelineError::ISel(format!("JSON error: {err}")))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Binary tMIR bitcode (.tmbc) codec
+// ---------------------------------------------------------------------------
+
+/// Decode a binary tMIR bitcode (.tmbc) buffer into a `tmir::Module`.
+///
+/// Format: `tMBC` magic (4 bytes) + version u32-LE (4 bytes) + MessagePack payload.
+pub fn decode_tmbc(bytes: &[u8]) -> Result<tmir::Module, PipelineError> {
+    if bytes.len() < 8 {
+        return Err(PipelineError::ISel(format!(
+            "invalid tMBC data: expected at least 8 bytes, got {}",
+            bytes.len()
+        )));
+    }
+
+    if &bytes[..4] != TMBC_MAGIC {
+        return Err(PipelineError::ISel(format!(
+            "invalid tMBC magic: expected {:?}, got {:?}",
+            TMBC_MAGIC,
+            &bytes[..4]
+        )));
+    }
+
+    let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    if version != TMBC_VERSION {
+        return Err(PipelineError::ISel(format!(
+            "unsupported tMBC version: {version}"
+        )));
+    }
+
+    rmp_serde::from_slice(&bytes[8..])
+        .map_err(|e| PipelineError::ISel(format!("failed to deserialize tMBC payload: {e}")))
+}
+
+/// Encode a `tmir::Module` into binary tMIR bitcode (.tmbc) format.
+///
+/// Format: `tMBC` magic (4 bytes) + version u32-LE (4 bytes) + MessagePack payload.
+pub fn encode_tmbc(module: &tmir::Module) -> Result<Vec<u8>, PipelineError> {
+    let payload = rmp_serde::to_vec(module)
+        .map_err(|e| PipelineError::ISel(format!("failed to serialize tMBC payload: {e}")))?;
+
+    let mut buf = Vec::with_capacity(8 + payload.len());
+    buf.extend_from_slice(TMBC_MAGIC);
+    buf.extend_from_slice(&TMBC_VERSION.to_le_bytes());
+    buf.extend_from_slice(&payload);
+    Ok(buf)
+}
+
+/// Serialize a `tmir::Module` and write it to a `.tmbc` file on disk.
+pub fn save_module_to_tmbc(
+    module: &tmir::Module,
+    path: &std::path::Path,
+) -> Result<(), PipelineError> {
+    let buf = encode_tmbc(module)?;
+    std::fs::write(path, buf)
+        .map_err(|e| PipelineError::ISel(format!(
+            "failed to write tMBC file {}: {e}",
+            path.display()
+        )))
 }
 
 // ---------------------------------------------------------------------------
