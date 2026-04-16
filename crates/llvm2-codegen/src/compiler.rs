@@ -260,19 +260,26 @@ impl Compiler {
         let total_code_size = obj_bytes.len();
         let total_instruction_count = total_code_size / 4; // rough estimate
 
-        // Estimate optimization passes from opt level.
-        let opt_passes = match self.config.opt_level {
-            OptLevel::O0 => 0,
-            OptLevel::O1 => 3,  // DCE, const fold, copy prop
-            OptLevel::O2 => 6,  // + peephole, CSE, LICM
-            OptLevel::O3 => 8,  // + aggressive inlining, unrolling
+        // Query actual pass count from the optimization pipeline rather than
+        // using hardcoded estimates (fixes #272).
+        let opt_passes_per_func = {
+            use llvm2_opt::pipeline::{
+                OptLevel as OptOptLevel, OptimizationPipeline,
+            };
+            let opt_level = match self.config.opt_level {
+                OptLevel::O0 => OptOptLevel::O0,
+                OptLevel::O1 => OptOptLevel::O1,
+                OptLevel::O2 => OptOptLevel::O2,
+                OptLevel::O3 => OptOptLevel::O3,
+            };
+            OptimizationPipeline::new(opt_level).pass_count()
         };
 
         let metrics = CompilationMetrics {
             code_size_bytes: total_code_size,
             instruction_count: total_instruction_count,
             function_count,
-            optimization_passes_run: opt_passes * function_count,
+            optimization_passes_run: opt_passes_per_func * function_count,
         };
 
         let trace = if tracing {
@@ -313,11 +320,18 @@ impl Compiler {
         let obj_bytes = pipeline.compile_ir_function(ir_func)?;
 
         let code_insts = obj_bytes.len() / 4;
-        let opt_passes = match self.config.opt_level {
-            OptLevel::O0 => 0,
-            OptLevel::O1 => 3,
-            OptLevel::O2 => 6,
-            OptLevel::O3 => 8,
+        // Query actual pass count from the optimization pipeline (fixes #272).
+        let opt_passes = {
+            use llvm2_opt::pipeline::{
+                OptLevel as OptOptLevel, OptimizationPipeline,
+            };
+            let opt_level = match self.config.opt_level {
+                OptLevel::O0 => OptOptLevel::O0,
+                OptLevel::O1 => OptOptLevel::O1,
+                OptLevel::O2 => OptOptLevel::O2,
+                OptLevel::O3 => OptOptLevel::O3,
+            };
+            OptimizationPipeline::new(opt_level).pass_count()
         };
 
         let metrics = CompilationMetrics {

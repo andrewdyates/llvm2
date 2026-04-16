@@ -137,6 +137,13 @@ impl OptimizationPipeline {
         }
     }
 
+    /// Return the number of passes registered for the current optimization
+    /// level (single iteration). For `O3` this is the per-iteration count;
+    /// actual executions may be higher due to fixpoint iteration.
+    pub fn pass_count(&self) -> usize {
+        self.build_pass_manager().num_passes()
+    }
+
     /// Run the optimization pipeline on a machine function.
     ///
     /// Returns statistics about the optimization run.

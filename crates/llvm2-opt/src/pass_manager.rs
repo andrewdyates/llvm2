@@ -50,6 +50,16 @@ pub struct PassStats {
     pub iterations: u32,
 }
 
+impl PassStats {
+    /// Total number of individual pass executions across all iterations.
+    ///
+    /// For a single-iteration run this equals the number of registered passes.
+    /// For fixpoint iteration this equals `passes * iterations`.
+    pub fn total_pass_runs(&self) -> usize {
+        self.runs.iter().map(|(_, count)| *count as usize).sum()
+    }
+}
+
 /// Manages and executes a pipeline of optimization passes.
 ///
 /// Passes are run in insertion order. The pass manager supports both
