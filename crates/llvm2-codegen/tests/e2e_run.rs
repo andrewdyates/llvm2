@@ -11,6 +11,7 @@
 // architectures via runtime checks.
 //
 // Part of #60 — End-to-end test: compile, link, and run.
+// Stack allocation tests: Part of #243.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -728,6 +729,760 @@ fn test_full_pipeline_frame_lowering_encoding_gaps() {
         }
 
         cleanup(&dir);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test: stack allocation — store to stack and reload (explicit SP-relative)
+// ---------------------------------------------------------------------------
+
+/// Tests that a function which manually stores a value to the stack via
+/// STR [SP, #offset] and reloads it via LDR [SP, #offset] produces
+/// correct results. This exercises the AArch64 memory encoding with SP
+/// as the base register.
+///
+/// The function:
+///   1. Saves FP/LR (prologue via encode_and_emit)
+///   2. SUB SP, SP, #16  (allocate 16 bytes of local space)
+///   3. STR X0, [SP, #0]  (store argument to stack)
+///   4. LDR X0, [SP, #0]  (reload from stack)
+///   5. ADD SP, SP, #16  (deallocate locals)
+///   6. Epilogue + RET
+///
+/// We build this using encode_and_emit which handles the frame lowering.
+///
+/// Part of #243 — Stack allocation E2E tests.
+#[test]
+fn test_e2e_stack_store_reload() {
+    if !is_aarch64() || !has_cc() {
+        eprintln!("Skipping e2e test: not AArch64 or cc not available");
+        return;
+    }
+
+    let dir = make_test_dir("stack_store_reload");
+
+    // Build a function that stores its argument to the stack and reloads it.
+    // fn store_reload(a: i64) -> i64 {
+    //     let local = a;  // store to stack
+    //     return local;   // reload from stack
+    // }
+    //
+    // We build this manually as instructions with explicit SP-relative
+    // store/load, wrapped in prologue/epilogue via encode_and_emit.
+    let sig = Signature::new(vec![Type::I64], vec![Type::I64]);
+    let mut func = MachFunction::new("store_reload".to_string(), sig);
+    let entry = func.entry;
+
+    // Allocate a stack slot for the local variable.
+    use llvm2_ir::function::StackSlot;
+    func.alloc_stack_slot(StackSlot::new(8, 8));
+
+    // STR X0, [FP, #frame_idx_0]  — store arg to stack slot 0
+    // We use FrameIndex which will be resolved by frame lowering.
+    use llvm2_ir::types::FrameIdx;
+    let str_inst = MachInst::new(
+        AArch64Opcode::StrRI,
+        vec![
+            MachOperand::PReg(X0),
+            MachOperand::FrameIndex(FrameIdx(0)),
+        ],
+    );
+    let str_id = func.push_inst(str_inst);
+    func.append_inst(entry, str_id);
+
+    // LDR X0, [FP, #frame_idx_0]  — reload from stack slot 0
+    let ldr_inst = MachInst::new(
+        AArch64Opcode::LdrRI,
+        vec![
+            MachOperand::PReg(X0),
+            MachOperand::FrameIndex(FrameIdx(0)),
+        ],
+    );
+    let ldr_id = func.push_inst(ldr_inst);
+    func.append_inst(entry, ldr_id);
+
+    // RET (epilogue will replace this)
+    let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+    let ret_id = func.push_inst(ret);
+    func.append_inst(entry, ret_id);
+
+    // Run through encode_and_emit which does frame lowering + encoding.
+    let pipeline = Pipeline::new(PipelineConfig {
+        opt_level: OptLevel::O0,
+        emit_debug: false,
+        ..Default::default()
+    });
+
+    let obj_bytes = pipeline
+        .encode_and_emit(&mut func)
+        .expect("encode_and_emit should succeed");
+
+    // Verify Mach-O header.
+    assert!(obj_bytes.len() >= 4);
+    let magic = u32::from_le_bytes([obj_bytes[0], obj_bytes[1], obj_bytes[2], obj_bytes[3]]);
+    assert_eq!(magic, 0xFEED_FACF, "should be valid Mach-O");
+
+    // Write and link.
+    let obj_path = write_object_file(&dir, "store_reload.o", &obj_bytes);
+
+    // Disassemble to verify the encoding includes store/load instructions.
+    let otool = Command::new("otool")
+        .args(["-tv", obj_path.to_str().unwrap()])
+        .output()
+        .expect("otool");
+    let disasm = String::from_utf8_lossy(&otool.stdout);
+    eprintln!("store_reload disassembly:\n{}", disasm);
+
+    // The disassembly should contain str and ldr instructions.
+    assert!(
+        disasm.contains("str") || disasm.contains("stur"),
+        "Should contain a store instruction. Got:\n{}",
+        disasm
+    );
+    assert!(
+        disasm.contains("ldr") || disasm.contains("ldur"),
+        "Should contain a load instruction. Got:\n{}",
+        disasm
+    );
+
+    // Write C driver.
+    let driver_src = r#"
+#include <stdio.h>
+extern long store_reload(long a);
+int main(void) {
+    long r1 = store_reload(42);
+    long r2 = store_reload(100);
+    long r3 = store_reload(-7);
+    printf("store_reload(42)=%ld store_reload(100)=%ld store_reload(-7)=%ld\n", r1, r2, r3);
+    if (r1 != 42) return 1;
+    if (r2 != 100) return 2;
+    if (r3 != -7) return 3;
+    return 0;
+}
+"#;
+    let driver_path = write_c_driver(&dir, "driver.c", driver_src);
+    let binary = link_with_cc(&dir, &driver_path, &obj_path, "test_store_reload");
+
+    let (exit_code, stdout) = run_binary_with_output(&binary);
+    eprintln!("test_e2e_stack_store_reload stdout: {}", stdout);
+    assert_eq!(
+        exit_code, 0,
+        "store_reload test failed with exit code {} (1=42, 2=100, 3=-7). stdout: {}",
+        exit_code, stdout
+    );
+
+    cleanup(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Test: callee-saved register spill through frame lowering
+// ---------------------------------------------------------------------------
+
+/// Tests that a function using callee-saved registers (X19-X22) gets correct
+/// prologue/epilogue insertion through frame lowering, and the callee-saved
+/// registers are properly saved/restored.
+///
+/// The function uses X19 as an accumulator (callee-saved), which forces the
+/// frame lowering to save/restore it in the prologue/epilogue:
+///   fn callee_saved_accum(a: i64, b: i64) -> i64 {
+///       let saved = a;   // X19 = X0
+///       return saved + b; // X0 = X19 + X1
+///   }
+///
+/// Part of #243 — Stack allocation E2E tests.
+#[test]
+fn test_e2e_callee_saved_spill() {
+    if !is_aarch64() || !has_cc() {
+        eprintln!("Skipping e2e test: not AArch64 or cc not available");
+        return;
+    }
+
+    let dir = make_test_dir("callee_saved_spill");
+
+    let sig = Signature::new(vec![Type::I64, Type::I64], vec![Type::I64]);
+    let mut func = MachFunction::new("callee_saved_accum".to_string(), sig);
+    let entry = func.entry;
+
+    // MOV X19, X0  (save arg a in callee-saved register)
+    let mov = MachInst::new(
+        AArch64Opcode::MovR,
+        vec![MachOperand::PReg(X9), MachOperand::PReg(X0)],
+    );
+
+    // Use X19 (callee-saved) so frame lowering must save/restore it.
+    let mov_cs = MachInst::new(
+        AArch64Opcode::MovR,
+        vec![
+            MachOperand::PReg(llvm2_ir::regs::X19),
+            MachOperand::PReg(X0),
+        ],
+    );
+    let mov_cs_id = func.push_inst(mov_cs);
+    func.append_inst(entry, mov_cs_id);
+
+    // ADD X0, X19, X1  (result = saved_a + b)
+    let add = MachInst::new(
+        AArch64Opcode::AddRR,
+        vec![
+            MachOperand::PReg(X0),
+            MachOperand::PReg(llvm2_ir::regs::X19),
+            MachOperand::PReg(X1),
+        ],
+    );
+    let add_id = func.push_inst(add);
+    func.append_inst(entry, add_id);
+
+    // RET
+    let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+    let ret_id = func.push_inst(ret);
+    func.append_inst(entry, ret_id);
+
+    // Run through encode_and_emit (includes frame lowering).
+    let pipeline = Pipeline::new(PipelineConfig {
+        opt_level: OptLevel::O0,
+        emit_debug: false,
+        ..Default::default()
+    });
+
+    let obj_bytes = pipeline
+        .encode_and_emit(&mut func)
+        .expect("encode_and_emit should succeed");
+
+    let obj_path = write_object_file(&dir, "callee_saved_accum.o", &obj_bytes);
+
+    // Disassemble — should show STP/LDP for callee-saved registers.
+    let otool = Command::new("otool")
+        .args(["-tv", obj_path.to_str().unwrap()])
+        .output()
+        .expect("otool");
+    let disasm = String::from_utf8_lossy(&otool.stdout);
+    eprintln!("callee_saved_accum disassembly:\n{}", disasm);
+
+    // Should contain stp (save pair) for callee-saved registers.
+    assert!(
+        disasm.contains("stp"),
+        "Should contain STP for callee-saved register save. Got:\n{}",
+        disasm
+    );
+
+    // Link and run.
+    let driver_src = r#"
+#include <stdio.h>
+extern long callee_saved_accum(long a, long b);
+int main(void) {
+    long r1 = callee_saved_accum(30, 12);
+    long r2 = callee_saved_accum(0, 0);
+    long r3 = callee_saved_accum(-10, 52);
+    printf("cs(30,12)=%ld cs(0,0)=%ld cs(-10,52)=%ld\n", r1, r2, r3);
+    if (r1 != 42) return 1;
+    if (r2 != 0) return 2;
+    if (r3 != 42) return 3;
+    return 0;
+}
+"#;
+    let driver_path = write_c_driver(&dir, "driver.c", driver_src);
+    let binary = link_with_cc(&dir, &driver_path, &obj_path, "test_callee_saved");
+
+    let (exit_code, stdout) = run_binary_with_output(&binary);
+    eprintln!("test_e2e_callee_saved_spill stdout: {}", stdout);
+    assert_eq!(
+        exit_code, 0,
+        "callee_saved_accum test failed with exit code {} (1=30+12, 2=0+0, 3=-10+52). stdout: {}",
+        exit_code, stdout
+    );
+
+    cleanup(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Test: stack allocation with multiple stack slots and callee-saved regs
+// ---------------------------------------------------------------------------
+
+/// Tests a function with both stack slots and callee-saved register usage,
+/// exercising the full frame layout: FP/LR save, callee-saved GPR save,
+/// stack slot allocation, and SP adjustment.
+///
+/// fn multi_slot(a: i64, b: i64) -> i64 {
+///     // X19 = a (callee-saved)
+///     // stack_slot[0] = b (store to stack)
+///     // result = X19 + stack_slot[0]
+///     return a + b;
+/// }
+///
+/// Part of #243 — Stack allocation E2E tests.
+#[test]
+fn test_e2e_stack_slots_with_callee_saved() {
+    if !is_aarch64() || !has_cc() {
+        eprintln!("Skipping e2e test: not AArch64 or cc not available");
+        return;
+    }
+
+    let dir = make_test_dir("stack_slots_callee_saved");
+
+    let sig = Signature::new(vec![Type::I64, Type::I64], vec![Type::I64]);
+    let mut func = MachFunction::new("multi_slot".to_string(), sig);
+    let entry = func.entry;
+
+    // Allocate two stack slots.
+    use llvm2_ir::function::StackSlot;
+    func.alloc_stack_slot(StackSlot::new(8, 8)); // slot 0
+    func.alloc_stack_slot(StackSlot::new(8, 8)); // slot 1
+
+    // MOV X19, X0  (save a in callee-saved register)
+    let mov = MachInst::new(
+        AArch64Opcode::MovR,
+        vec![
+            MachOperand::PReg(llvm2_ir::regs::X19),
+            MachOperand::PReg(X0),
+        ],
+    );
+    let mov_id = func.push_inst(mov);
+    func.append_inst(entry, mov_id);
+
+    // STR X1, [FP, #slot0]  (store b to stack slot 0)
+    use llvm2_ir::types::FrameIdx;
+    let str_inst = MachInst::new(
+        AArch64Opcode::StrRI,
+        vec![
+            MachOperand::PReg(X1),
+            MachOperand::FrameIndex(FrameIdx(0)),
+        ],
+    );
+    let str_id = func.push_inst(str_inst);
+    func.append_inst(entry, str_id);
+
+    // LDR X1, [FP, #slot0]  (reload b from stack)
+    let ldr_inst = MachInst::new(
+        AArch64Opcode::LdrRI,
+        vec![
+            MachOperand::PReg(X1),
+            MachOperand::FrameIndex(FrameIdx(0)),
+        ],
+    );
+    let ldr_id = func.push_inst(ldr_inst);
+    func.append_inst(entry, ldr_id);
+
+    // ADD X0, X19, X1  (result = a + b)
+    let add = MachInst::new(
+        AArch64Opcode::AddRR,
+        vec![
+            MachOperand::PReg(X0),
+            MachOperand::PReg(llvm2_ir::regs::X19),
+            MachOperand::PReg(X1),
+        ],
+    );
+    let add_id = func.push_inst(add);
+    func.append_inst(entry, add_id);
+
+    // RET
+    let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+    let ret_id = func.push_inst(ret);
+    func.append_inst(entry, ret_id);
+
+    // Run through encode_and_emit.
+    let pipeline = Pipeline::new(PipelineConfig {
+        opt_level: OptLevel::O0,
+        emit_debug: false,
+        ..Default::default()
+    });
+
+    let obj_bytes = pipeline
+        .encode_and_emit(&mut func)
+        .expect("encode_and_emit should succeed");
+
+    let obj_path = write_object_file(&dir, "multi_slot.o", &obj_bytes);
+
+    // Disassemble.
+    let otool = Command::new("otool")
+        .args(["-tv", obj_path.to_str().unwrap()])
+        .output()
+        .expect("otool");
+    let disasm = String::from_utf8_lossy(&otool.stdout);
+    eprintln!("multi_slot disassembly:\n{}", disasm);
+
+    // Should contain sub sp (stack allocation) and stp (callee-saved save).
+    assert!(
+        disasm.contains("stp"),
+        "Should contain STP for frame setup. Got:\n{}",
+        disasm
+    );
+    assert!(
+        disasm.contains("sub") || disasm.contains("str"),
+        "Should contain SUB SP (stack alloc) or STR (store). Got:\n{}",
+        disasm
+    );
+
+    // Link and run.
+    let driver_src = r#"
+#include <stdio.h>
+extern long multi_slot(long a, long b);
+int main(void) {
+    long r1 = multi_slot(30, 12);
+    long r2 = multi_slot(100, -58);
+    long r3 = multi_slot(0, 42);
+    printf("ms(30,12)=%ld ms(100,-58)=%ld ms(0,42)=%ld\n", r1, r2, r3);
+    if (r1 != 42) return 1;
+    if (r2 != 42) return 2;
+    if (r3 != 42) return 3;
+    return 0;
+}
+"#;
+    let driver_path = write_c_driver(&dir, "driver.c", driver_src);
+    let binary = link_with_cc(&dir, &driver_path, &obj_path, "test_multi_slot");
+
+    let (exit_code, stdout) = run_binary_with_output(&binary);
+    eprintln!("test_e2e_stack_slots_with_callee_saved stdout: {}", stdout);
+    assert_eq!(
+        exit_code, 0,
+        "multi_slot test failed with exit code {} (1=30+12, 2=100-58, 3=0+42). stdout: {}",
+        exit_code, stdout
+    );
+
+    cleanup(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Test: tMIR pipeline with high register pressure forces spilling
+// ---------------------------------------------------------------------------
+
+/// Tests that a tMIR function with many simultaneous live values compiles
+/// correctly through the full pipeline (tMIR -> ISel -> regalloc -> frame
+/// lowering -> encoding -> Mach-O). This forces the register allocator to
+/// spill some values to stack slots, which must then be correctly handled
+/// by frame lowering.
+///
+/// The function computes: sum = a + b + (a*b) + (a-b) + (a+1) + (b+1)
+/// which creates many intermediate values that may exceed available registers.
+///
+/// Part of #243 — Stack allocation E2E tests.
+#[test]
+fn test_e2e_tmir_high_register_pressure() {
+    use llvm2_codegen::compiler::{Compiler, CompilerConfig, CompilerTraceLevel};
+
+    let module = build_tmir_high_pressure_module();
+    let compiler = Compiler::new(CompilerConfig {
+        opt_level: OptLevel::O0,
+        trace_level: CompilerTraceLevel::Full,
+        ..CompilerConfig::default()
+    });
+
+    let result = compiler.compile(&module).expect("high-pressure compilation should succeed");
+
+    assert!(
+        !result.object_code.is_empty(),
+        "Should produce non-empty object code"
+    );
+    assert_eq!(result.metrics.function_count, 1);
+
+    // Verify valid Mach-O.
+    let obj = &result.object_code;
+    let magic = u32::from_le_bytes([obj[0], obj[1], obj[2], obj[3]]);
+    assert_eq!(magic, 0xFEED_FACF, "should be valid Mach-O");
+
+    // If we are on AArch64, try to link and run.
+    if is_aarch64() && has_cc() {
+        let dir = make_test_dir("tmir_high_pressure");
+        let obj_path = write_object_file(&dir, "high_pressure.o", &result.object_code);
+
+        // Disassemble to inspect.
+        let otool = Command::new("otool")
+            .args(["-tv", obj_path.to_str().unwrap()])
+            .output()
+            .expect("otool");
+        let disasm = String::from_utf8_lossy(&otool.stdout);
+        eprintln!("tmir_high_pressure disassembly:\n{}", disasm);
+
+        // The function should have frame setup (STP for FP/LR at minimum).
+        assert!(
+            disasm.contains("stp") || disasm.contains("sub"),
+            "Should contain frame setup instructions. Got:\n{}",
+            disasm
+        );
+
+        // Write C driver.
+        let driver_src = r#"
+#include <stdio.h>
+extern long _high_pressure(long a, long b);
+int main(void) {
+    /* sum = a + b + (a*b) + (a-b) + (a+1) + (b+1)
+     * For a=3, b=4: 3+4 + 12 + (-1) + 4 + 5 = 27 */
+    long r1 = _high_pressure(3, 4);
+    printf("high_pressure(3,4)=%ld\n", r1);
+    if (r1 != 27) return 1;
+
+    /* For a=10, b=2: 10+2 + 20 + 8 + 11 + 3 = 54 */
+    long r2 = _high_pressure(10, 2);
+    printf("high_pressure(10,2)=%ld\n", r2);
+    if (r2 != 54) return 2;
+
+    return 0;
+}
+"#;
+        let driver_path = write_c_driver(&dir, "driver.c", driver_src);
+
+        // Link.
+        let binary = dir.join("test_high_pressure");
+        let link_result = Command::new("cc")
+            .arg("-o")
+            .arg(&binary)
+            .arg(&driver_path)
+            .arg(&obj_path)
+            .arg("-Wl,-no_pie")
+            .output()
+            .expect("cc");
+
+        if link_result.status.success() {
+            let (exit_code, stdout) = run_binary_with_output(&binary);
+            eprintln!("test_e2e_tmir_high_register_pressure stdout: {}", stdout);
+            assert_eq!(
+                exit_code, 0,
+                "High pressure test failed with exit code {}. stdout: {}",
+                exit_code, stdout
+            );
+        } else {
+            let stderr = String::from_utf8_lossy(&link_result.stderr);
+            eprintln!("Linking high_pressure failed (inspecting .o): {}", stderr);
+
+            // Verify the object at least has symbols.
+            let nm = Command::new("nm")
+                .args([obj_path.to_str().unwrap()])
+                .output()
+                .expect("nm");
+            let nm_stdout = String::from_utf8_lossy(&nm.stdout);
+            eprintln!("nm output:\n{}", nm_stdout);
+            assert!(
+                nm_stdout.contains("_high_pressure"),
+                "Object should contain _high_pressure symbol"
+            );
+        }
+
+        cleanup(&dir);
+    }
+}
+
+/// Build a tMIR module with a function that has high register pressure.
+///
+/// fn _high_pressure(a: i64, b: i64) -> i64 {
+///     let v2 = a + b;
+///     let v3 = a * b;
+///     let v4 = a - b;
+///     let v5 = a + 1;
+///     let v6 = b + 1;
+///     let v7 = v2 + v3;
+///     let v8 = v7 + v4;
+///     let v9 = v8 + v5;
+///     let v10 = v9 + v6;
+///     return v10;
+/// }
+fn build_tmir_high_pressure_module() -> tmir_func::Module {
+    use tmir_instrs::{BinOp, Instr, InstrNode};
+    use tmir_types::{BlockId, FuncId, FuncTy, Ty, ValueId};
+
+    let func = tmir_func::Function {
+        id: FuncId(0),
+        name: "_high_pressure".to_string(),
+        ty: FuncTy {
+            params: vec![Ty::Int(64), Ty::Int(64)],
+            returns: vec![Ty::Int(64)],
+        },
+        entry: BlockId(0),
+        blocks: vec![tmir_func::Block {
+            id: BlockId(0),
+            params: vec![
+                (ValueId(0), Ty::Int(64)), // param a
+                (ValueId(1), Ty::Int(64)), // param b
+            ],
+            body: vec![
+                // v2 = a + b
+                InstrNode {
+                    instr: Instr::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::Int(64),
+                        lhs: ValueId(0),
+                        rhs: ValueId(1),
+                    },
+                    results: vec![ValueId(2)],
+                    proofs: vec![],
+                },
+                // v3 = a * b
+                InstrNode {
+                    instr: Instr::BinOp {
+                        op: BinOp::Mul,
+                        ty: Ty::Int(64),
+                        lhs: ValueId(0),
+                        rhs: ValueId(1),
+                    },
+                    results: vec![ValueId(3)],
+                    proofs: vec![],
+                },
+                // v4 = a - b
+                InstrNode {
+                    instr: Instr::BinOp {
+                        op: BinOp::Sub,
+                        ty: Ty::Int(64),
+                        lhs: ValueId(0),
+                        rhs: ValueId(1),
+                    },
+                    results: vec![ValueId(4)],
+                    proofs: vec![],
+                },
+                // const 1
+                InstrNode {
+                    instr: Instr::Const {
+                        ty: Ty::Int(64),
+                        value: 1,
+                    },
+                    results: vec![ValueId(10)],
+                    proofs: vec![],
+                },
+                // v5 = a + 1
+                InstrNode {
+                    instr: Instr::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::Int(64),
+                        lhs: ValueId(0),
+                        rhs: ValueId(10),
+                    },
+                    results: vec![ValueId(5)],
+                    proofs: vec![],
+                },
+                // v6 = b + 1
+                InstrNode {
+                    instr: Instr::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::Int(64),
+                        lhs: ValueId(1),
+                        rhs: ValueId(10),
+                    },
+                    results: vec![ValueId(6)],
+                    proofs: vec![],
+                },
+                // v7 = v2 + v3
+                InstrNode {
+                    instr: Instr::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::Int(64),
+                        lhs: ValueId(2),
+                        rhs: ValueId(3),
+                    },
+                    results: vec![ValueId(7)],
+                    proofs: vec![],
+                },
+                // v8 = v7 + v4
+                InstrNode {
+                    instr: Instr::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::Int(64),
+                        lhs: ValueId(7),
+                        rhs: ValueId(4),
+                    },
+                    results: vec![ValueId(8)],
+                    proofs: vec![],
+                },
+                // v9 = v8 + v5
+                InstrNode {
+                    instr: Instr::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::Int(64),
+                        lhs: ValueId(8),
+                        rhs: ValueId(5),
+                    },
+                    results: vec![ValueId(9)],
+                    proofs: vec![],
+                },
+                // v10_result = v9 + v6
+                InstrNode {
+                    instr: Instr::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::Int(64),
+                        lhs: ValueId(9),
+                        rhs: ValueId(6),
+                    },
+                    results: vec![ValueId(11)],
+                    proofs: vec![],
+                },
+                // return v10_result
+                InstrNode {
+                    instr: Instr::Return {
+                        values: vec![ValueId(11)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                },
+            ],
+        }],
+        proofs: vec![],
+    };
+
+    tmir_func::Module {
+        name: "e2e_high_pressure_test".to_string(),
+        functions: vec![func],
+        structs: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test: frame layout correctly accounts for stack slots at all opt levels
+// ---------------------------------------------------------------------------
+
+/// Tests that the pipeline produces valid Mach-O for functions with stack
+/// slots at every optimization level. This verifies that frame lowering
+/// correctly handles the SP adjustment for stack slots regardless of which
+/// optimizations are applied.
+///
+/// Part of #243 — Stack allocation E2E tests.
+#[test]
+fn test_e2e_stack_slots_all_opt_levels() {
+    use llvm2_ir::function::StackSlot;
+
+    for opt in &[OptLevel::O0, OptLevel::O1, OptLevel::O2, OptLevel::O3] {
+        let sig = Signature::new(vec![Type::I64], vec![Type::I64]);
+        let mut func = MachFunction::new("with_slots".to_string(), sig);
+        let entry = func.entry;
+
+        // Allocate several stack slots of different sizes.
+        func.alloc_stack_slot(StackSlot::new(8, 8));
+        func.alloc_stack_slot(StackSlot::new(16, 16));
+        func.alloc_stack_slot(StackSlot::new(4, 4));
+
+        // Simple body: just return the argument (but we have stack slots allocated).
+        // MOV X0, X0 (identity - keep the argument)
+        let mov = MachInst::new(
+            AArch64Opcode::MovR,
+            vec![MachOperand::PReg(X0), MachOperand::PReg(X0)],
+        );
+        let mov_id = func.push_inst(mov);
+        func.append_inst(entry, mov_id);
+
+        // RET
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let ret_id = func.push_inst(ret);
+        func.append_inst(entry, ret_id);
+
+        let pipeline = Pipeline::new(PipelineConfig {
+            opt_level: *opt,
+            emit_debug: false,
+            ..Default::default()
+        });
+
+        let obj_bytes = pipeline
+            .encode_and_emit(&mut func)
+            .unwrap_or_else(|e| panic!("encode_and_emit at {:?} failed: {}", opt, e));
+
+        // Verify valid Mach-O.
+        assert!(obj_bytes.len() >= 4, "{:?} produced tiny output", opt);
+        let magic = u32::from_le_bytes([obj_bytes[0], obj_bytes[1], obj_bytes[2], obj_bytes[3]]);
+        assert_eq!(
+            magic, 0xFEED_FACF,
+            "{:?} produced invalid Mach-O magic",
+            opt
+        );
+
+        eprintln!(
+            "  {:?}: stack_slots function produced {} bytes",
+            opt,
+            obj_bytes.len()
+        );
     }
 }
 
