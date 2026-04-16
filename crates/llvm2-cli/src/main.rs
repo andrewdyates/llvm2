@@ -19,7 +19,7 @@ use clap::Parser;
 use llvm2_codegen::compiler::{Compiler, CompilerConfig, CompilerTraceLevel};
 use llvm2_codegen::pipeline::OptLevel;
 use llvm2_codegen::target::Target;
-use tmir_func::reader;
+use llvm2_codegen::pipeline;
 
 /// LLVM2 -- verified compiler backend for tMIR.
 ///
@@ -118,43 +118,25 @@ fn main() {
     };
 
     // Read and deserialize the tMIR module.
-    // --input-json uses the validated reader; positional uses raw serde.
-    let module: tmir_func::Module = if cli.input_json.is_some() {
-        match reader::read_module_from_json(&input_path) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!(
-                    "llvm2: error: failed to read tMIR JSON from '{}': {}",
-                    input_path.display(),
-                    e
-                );
-                process::exit(1);
-            }
-        }
-    } else {
-        let input_bytes = match fs::read(&input_path) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                eprintln!("llvm2: error: cannot read '{}': {}", input_path.display(), e);
-                process::exit(1);
-            }
-        };
-        match serde_json::from_slice(&input_bytes) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!(
-                    "llvm2: error: failed to parse '{}' as tMIR module: {}",
-                    input_path.display(),
-                    e
-                );
-                process::exit(1);
-            }
+    // Both paths use pipeline::load_module which auto-detects JSON vs binary format.
+    let module: tmir::Module = match pipeline::load_module(&input_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!(
+                "llvm2: error: failed to read tMIR module from '{}': {}",
+                input_path.display(),
+                e
+            );
+            process::exit(1);
         }
     };
 
     // Emit JSON round-trip output if requested.
     if let Some(ref emit_path) = cli.emit_json {
-        match reader::write_module_to_json(&module, emit_path) {
+        match serde_json::to_string_pretty(&module)
+            .map_err(|e| e.to_string())
+            .and_then(|json| fs::write(emit_path, json).map_err(|e| e.to_string()))
+        {
             Ok(()) => {
                 eprintln!("llvm2: wrote tMIR JSON to {}", emit_path.display());
             }

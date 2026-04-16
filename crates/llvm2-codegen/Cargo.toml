@@ -21,9 +21,9 @@ llvm2-verify = { workspace = true }
 tmir = { workspace = true }
 tmir-build = { workspace = true }
 thiserror = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 
 [[bench]]
 name = "compile_bench"

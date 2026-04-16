@@ -281,7 +281,7 @@ impl Compiler {
     /// optional proof certificates.
     pub fn compile(
         &self,
-        module: &tmir_func::Module,
+        module: &tmir::Module,
     ) -> Result<CompilationResult, CompileError> {
         let total_start = Instant::now();
         let tracing = self.config.trace_level != CompilerTraceLevel::None;

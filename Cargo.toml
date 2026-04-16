@@ -44,7 +44,7 @@ anyhow = "1.0"
 z4 = { path = "/Users/ayates/z4/crates/z4" }
 
 # Input IR (tMIR) — real crate from the tMIR repo.
-tmir = { git = "ssh://git@github.com/dropbox-ai-prototypes/tMIR.git", rev = "f9b132a" }
+tmir = { git = "ssh://git@github.com/dropbox-ai-prototypes/tMIR.git", rev = "f9b132a", features = ["serde"] }
 tmir-build = { git = "ssh://git@github.com/dropbox-ai-prototypes/tMIR.git", rev = "f9b132a" }
 
 # Internal crates

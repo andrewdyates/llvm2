@@ -249,12 +249,17 @@ pub fn detect_input_format(path: &std::path::Path) -> InputFormat {
 }
 
 /// Load a tMIR module from a file, auto-detecting the format.
-pub fn load_module(path: &std::path::Path) -> Result<tmir_func::Module, PipelineError> {
+pub fn load_module(path: &std::path::Path) -> Result<tmir::Module, PipelineError> {
     match detect_input_format(path) {
-        InputFormat::Json => tmir_func::reader::read_module_from_json(path)
-            .map_err(|err| PipelineError::ISel(err.to_string())),
-        InputFormat::Tmbc => tmir_func::binary::read_module_from_tmbc(path)
-            .map_err(|err| PipelineError::ISel(err.to_string())),
+        InputFormat::Json => {
+            let json = std::fs::read_to_string(path)
+                .map_err(|err| PipelineError::ISel(format!("I/O error: {err}")))?;
+            serde_json::from_str(&json)
+                .map_err(|err: serde_json::Error| PipelineError::ISel(format!("JSON error: {err}")))
+        }
+        InputFormat::Tmbc => Err(PipelineError::ISel(
+            "binary tMIR bitcode (.tmbc) not yet supported with real tmir crate".to_string(),
+        )),
     }
 }
 
@@ -262,15 +267,16 @@ pub fn load_module(path: &std::path::Path) -> Result<tmir_func::Module, Pipeline
 ///
 /// Bytes starting with `tMBC` magic are decoded as binary bitcode; otherwise
 /// the bytes are interpreted as a UTF-8 JSON string.
-pub fn load_module_from_bytes(bytes: &[u8]) -> Result<tmir_func::Module, PipelineError> {
+pub fn load_module_from_bytes(bytes: &[u8]) -> Result<tmir::Module, PipelineError> {
     if bytes.starts_with(b"tMBC") {
-        tmir_func::binary::read_module_from_binary(bytes)
-            .map_err(|err| PipelineError::ISel(err.to_string()))
+        Err(PipelineError::ISel(
+            "binary tMIR bitcode (.tmbc) not yet supported with real tmir crate".to_string(),
+        ))
     } else {
         let json = std::str::from_utf8(bytes)
             .map_err(|err| PipelineError::ISel(err.to_string()))?;
-        tmir_func::reader::read_module_from_str(json)
-            .map_err(|err| PipelineError::ISel(err.to_string()))
+        serde_json::from_str(json)
+            .map_err(|err: serde_json::Error| PipelineError::ISel(format!("JSON error: {err}")))
     }
 }
 
