@@ -25,7 +25,7 @@ use llvm2_codegen::elf::constants::*;
 use llvm2_codegen::x86_64::{
     build_x86_add_test_function, build_x86_const_test_function,
     x86_compile_to_bytes, x86_compile_to_elf,
-    X86Pipeline, X86PipelineConfig,
+    X86OutputFormat, X86Pipeline, X86PipelineConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -565,6 +565,7 @@ fn test_e2e_elf_pipeline_configs() {
 
     // Config: no ELF, no frame
     let pipeline1 = X86Pipeline::new(X86PipelineConfig {
+        output_format: X86OutputFormat::RawBytes,
         emit_elf: false,
         emit_frame: false,
     });
@@ -574,6 +575,7 @@ fn test_e2e_elf_pipeline_configs() {
 
     // Config: no ELF, with frame
     let pipeline2 = X86Pipeline::new(X86PipelineConfig {
+        output_format: X86OutputFormat::RawBytes,
         emit_elf: false,
         emit_frame: true,
     });
@@ -589,6 +591,7 @@ fn test_e2e_elf_pipeline_configs() {
 
     // Config: ELF, with frame
     let pipeline3 = X86Pipeline::new(X86PipelineConfig {
+        output_format: X86OutputFormat::Elf,
         emit_elf: true,
         emit_frame: true,
     });
@@ -603,6 +606,7 @@ fn test_e2e_elf_pipeline_configs() {
 
     // Config: ELF, no frame
     let pipeline4 = X86Pipeline::new(X86PipelineConfig {
+        output_format: X86OutputFormat::Elf,
         emit_elf: true,
         emit_frame: false,
     });
@@ -666,6 +670,7 @@ fn test_e2e_elf_frame_lowering_patterns() {
 
     // Compile with frame enabled.
     let pipeline = X86Pipeline::new(X86PipelineConfig {
+        output_format: X86OutputFormat::RawBytes,
         emit_elf: false,
         emit_frame: true,
     });
