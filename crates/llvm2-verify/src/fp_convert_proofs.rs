@@ -286,23 +286,49 @@ pub fn proof_roundtrip_scvtf_fcvtzs() -> ProofObligation {
 // NaN handling: FCVTZS on NaN produces zero
 // ---------------------------------------------------------------------------
 
-/// Proof: `FCVTZS(NaN) == 0` (AArch64 behavior).
+/// Proof: `FCVTZS(NaN_f32) == 0` (AArch64 behavior, 32-bit result).
 ///
 /// Per ARM DDI 0487, when the FP source is NaN, FCVTZS produces zero in the
 /// destination integer register (with FPSR.IOC flag set, which we don't model).
-/// This is a concrete proof -- no symbolic variables.
 ///
-/// NOTE: We encode both sides as `bv_const(0, 32)` because the ARM-specific
-/// NaN-to-zero behavior is NOT part of the SMT-LIB2 FP theory. In SMT-LIB2,
-/// `fp.to_sbv` on NaN is undefined (z3 can produce any value), so encoding the
-/// AArch64 side as `fp_to_sbv(RTZ, NaN, 32)` yields a false counterexample.
-/// The tMIR semantics also define NaN -> 0 for FcvtToInt (matching C cast
-/// semantics with saturation), so both sides are concretely zero.
+/// We encode the tMIR side as `bv_const(0, 32)` (tMIR defines NaN -> 0 for
+/// FcvtToInt, matching C saturating cast semantics) and the AArch64 side as
+/// `fp_to_sbv(RTZ, NaN, 32)`. Our concrete evaluator implements
+/// `f64::NAN as i64 == 0` (Rust saturating cast, matching ARM behavior), so the
+/// AArch64 expression concretely evaluates to 0, proving the equivalence.
+///
+/// Previous encoding used `bv_const(0, 32)` on both sides -- a tautology that
+/// proved nothing about actual NaN handling. This version exercises the
+/// fp_to_sbv evaluator on a real NaN bit pattern.
+///
+/// Reference: ARM DDI 0487, C7.2.69 (FCVTZS NaN handling).
 pub fn proof_fcvtzs_nan_produces_zero() -> ProofObligation {
+    // Construct a concrete F32 NaN (canonical quiet NaN: 0x7FC00000)
+    let nan_f32 = SmtExpr::fp32_const(f32::NAN);
     ProofObligation {
         name: "FCVTZS_NaN_produces_zero".to_string(),
         tmir_expr: SmtExpr::bv_const(0, 32),
-        aarch64_expr: SmtExpr::bv_const(0, 32),
+        aarch64_expr: SmtExpr::fp_to_sbv(RoundingMode::RTZ, nan_f32, 32),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: `FCVTZS(NaN_f64) == 0` (AArch64 behavior, 64-bit result).
+///
+/// Same NaN-to-zero property as `proof_fcvtzs_nan_produces_zero` but for
+/// F64 -> I64 conversion. Uses canonical F64 quiet NaN (0x7FF8000000000000).
+///
+/// Reference: ARM DDI 0487, C7.2.69 (FCVTZS NaN handling).
+pub fn proof_fcvtzs_nan_f64_produces_zero() -> ProofObligation {
+    // Construct a concrete F64 NaN (canonical quiet NaN: 0x7FF8000000000000)
+    let nan_f64 = SmtExpr::fp64_const(f64::NAN);
+    ProofObligation {
+        name: "FCVTZS_NaN_f64_produces_zero".to_string(),
+        tmir_expr: SmtExpr::bv_const(0, 64),
+        aarch64_expr: SmtExpr::fp_to_sbv(RoundingMode::RTZ, nan_f64, 64),
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![],
@@ -316,8 +342,8 @@ pub fn proof_fcvtzs_nan_produces_zero() -> ProofObligation {
 
 /// Return all FP conversion lowering proofs.
 ///
-/// 12 proofs covering FCVTZS, FCVTZU, SCVTF, UCVTF, FCVT, roundtrip,
-/// and NaN handling.
+/// 13 proofs covering FCVTZS, FCVTZU, SCVTF, UCVTF, FCVT, roundtrip,
+/// and NaN handling (F32 + F64).
 pub fn all_fp_convert_proofs() -> Vec<ProofObligation> {
     vec![
         proof_fcvtzs_i32_f32(),
@@ -332,6 +358,7 @@ pub fn all_fp_convert_proofs() -> Vec<ProofObligation> {
         proof_fcvt_f32_f64(),
         proof_roundtrip_scvtf_fcvtzs(),
         proof_fcvtzs_nan_produces_zero(),
+        proof_fcvtzs_nan_f64_produces_zero(),
     ]
 }
 
@@ -551,6 +578,7 @@ fn f32_convert_test_values() -> Vec<f32> {
         -f32::MIN_POSITIVE,
         f32::INFINITY,
         f32::NEG_INFINITY,
+        f32::NAN,
         // Small fractions
         0.1f32,
         -0.1f32,
@@ -594,6 +622,7 @@ fn f64_convert_test_values() -> Vec<f64> {
         -f64::MIN_POSITIVE,
         f64::INFINITY,
         f64::NEG_INFINITY,
+        f64::NAN,
         // Small fractions
         0.1,
         -0.1,
@@ -803,6 +832,11 @@ mod tests {
         assert_fp_convert_valid(&proof_fcvtzs_nan_produces_zero());
     }
 
+    #[test]
+    fn test_proof_fcvtzs_nan_f64_produces_zero() {
+        assert_fp_convert_valid(&proof_fcvtzs_nan_f64_produces_zero());
+    }
+
     // =======================================================================
     // Registry
     // =======================================================================
@@ -810,7 +844,7 @@ mod tests {
     #[test]
     fn test_all_fp_convert_proofs() {
         let proofs = all_fp_convert_proofs();
-        assert_eq!(proofs.len(), 12, "expected 12 FP conversion proofs");
+        assert_eq!(proofs.len(), 13, "expected 13 FP conversion proofs");
         for obligation in &proofs {
             assert_fp_convert_valid(obligation);
         }
