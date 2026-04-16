@@ -42,6 +42,7 @@ anyhow = "1.0"
 # Verification (z4 SMT solver)
 # For git dep: z4 = { git = "https://github.com/ayates_dbx/z4" }
 z4 = { path = "/Users/ayates/z4/crates/z4" }
+z4-chc = { path = "/Users/ayates/z4/crates/z4-chc" }
 
 # Input IR (tMIR) — real crate from the tMIR repo.
 tmir = { git = "ssh://git@github.com/dropbox-ai-prototypes/tMIR.git", rev = "f9b132a" }
