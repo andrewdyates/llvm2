@@ -23,12 +23,12 @@ use std::collections::HashMap;
 
 use tmir::{
     Block as TmirBlock, Function as TmirFunction, Module as TmirModule,
-    BinOp, CastOp, UnOp, Inst, InstrNode, Constant,
+    BinOp, CastOp, UnOp, OverflowOp, Inst, InstrNode, Constant,
     ICmpOp, FCmpOp, Ordering as TmirOrdering, AtomicRMWOp as TmirAtomicRmwOp,
     SwitchCase, ProofAnnotation,
-    BlockId, FuncId, FuncTyId, StructId, StructDef, Ty, ValueId,
+    BlockId, FuncId, StructDef, Ty, ValueId,
 };
-use crate::tmir_compat::{CmpOp, Operand, OperandConstant, MemoryOrdering};
+use crate::tmir_compat::{CmpOp, MemoryOrdering};
 
 use crate::function::{BasicBlock, Function, Signature, StackSlotInfo};
 use crate::instructions::{AtomicOrdering, AtomicRmwOp, Block, FloatCC, Instruction, IntCC, Opcode, Value};
@@ -417,6 +417,9 @@ fn translate_float_cmp(op: &CmpOp) -> Option<FloatCC> {
 
 /// The tMIR-to-LIR adapter. Translates one function at a time.
 struct TmirAdapter<'a> {
+    /// Reference to the tMIR module (for func_types lookup in signature translation).
+    module: Option<&'a TmirModule>,
+
     /// Struct definitions from the module (for aggregate type translation).
     structs: &'a [StructDef],
 
@@ -462,6 +465,7 @@ struct TmirAdapter<'a> {
 impl<'a> TmirAdapter<'a> {
     fn new(structs: &'a [StructDef], func_names: HashMap<FuncId, String>) -> Self {
         Self {
+            module: None,
             structs,
             value_map: HashMap::new(),
             block_map: HashMap::new(),
@@ -532,99 +536,6 @@ impl<'a> TmirAdapter<'a> {
     }
 
     // -----------------------------------------------------------------------
-    // Operand resolution (new operand model support)
-    // -----------------------------------------------------------------------
-
-    /// Resolve an Operand to a ValueId, materializing constants as needed.
-    ///
-    /// For Operand::Value, returns the ValueId directly.
-    /// For Operand::Constant, creates a synthetic ValueId, generates an
-    /// Iconst/Fconst instruction to materialize it, and stores the instruction
-    /// in the provided `extra_instrs` buffer.
-    ///
-    /// This is the key bridge between the real tMIR operand model (where
-    /// constants are inline in instructions) and our LIR model (where all
-    /// values are SSA references to instruction results).
-    fn resolve_operand(
-        &mut self,
-        operand: &Operand,
-        extra_instrs: &mut Vec<Instruction>,
-    ) -> Result<ValueId, AdapterError> {
-        match operand {
-            Operand::Value(vid) => Ok(*vid),
-            Operand::Constant(constant) => {
-                // Allocate a fresh internal Value for the materialized constant.
-                let val = self.fresh_value();
-                let inst = match constant {
-                    Constant::Int { value, ty } => {
-                        let lir_ty = self.translate_ty(ty)?;
-                        Instruction {
-                            opcode: Opcode::Iconst {
-                                ty: lir_ty,
-                                imm: *value as i64,
-                            },
-                            args: vec![],
-                            results: vec![val],
-                        }
-                    }
-                    Constant::Float { value, ty } => {
-                        let lir_ty = self.translate_ty(ty)?;
-                        Instruction {
-                            opcode: Opcode::Fconst {
-                                ty: lir_ty,
-                                imm: *value,
-                            },
-                            args: vec![],
-                            results: vec![val],
-                        }
-                    }
-                    Constant::Bool(b) => Instruction {
-                        opcode: Opcode::Iconst {
-                            ty: Type::B1,
-                            imm: if *b { 1 } else { 0 },
-                        },
-                        args: vec![],
-                        results: vec![val],
-                    },
-                    Constant::Unit => {
-                        // Unit is zero-sized; materialize as a zero i8 placeholder.
-                        Instruction {
-                            opcode: Opcode::Iconst {
-                                ty: Type::I8,
-                                imm: 0,
-                            },
-                            args: vec![],
-                            results: vec![val],
-                        }
-                    }
-                };
-                extra_instrs.push(inst);
-                // Create a synthetic ValueId that maps to the fresh Value.
-                // The fresh_value already assigned the Value; we need a ValueId
-                // that will map to it. We use the Value's index as the ValueId
-                // and register the mapping.
-                let vid = ValueId(val.0 + 1_000_000); // Synthetic range to avoid collision
-                self.value_map.insert(vid, val);
-                Ok(vid)
-            }
-        }
-    }
-
-    /// Resolve a slice of Operands to ValueIds, accumulating materialization
-    /// instructions for any inline constants.
-    fn resolve_operands(
-        &mut self,
-        operands: &[Operand],
-        extra_instrs: &mut Vec<Instruction>,
-    ) -> Result<Vec<ValueId>, AdapterError> {
-        let mut vids = Vec::with_capacity(operands.len());
-        for op in operands {
-            vids.push(self.resolve_operand(op, extra_instrs)?);
-        }
-        Ok(vids)
-    }
-
-    // -----------------------------------------------------------------------
     // Top-level translation
     // -----------------------------------------------------------------------
 
@@ -635,7 +546,8 @@ impl<'a> TmirAdapter<'a> {
     ) -> Result<(Function, ProofContext), AdapterError> {
         self.tmir_func = Some(func);
 
-        let sig = translate_signature(func)?;
+        let module = self.module.expect("module must be set before translate()");
+        let sig = translate_signature(func, module)?;
         let entry = self.map_block(func.entry);
 
         let mut lir_func = Function::new(func.name.clone(), sig);
@@ -648,7 +560,7 @@ impl<'a> TmirAdapter<'a> {
         }
 
         // Translate all blocks.
-        for tmir_block in func.iter_blocks() {
+        for tmir_block in func.blocks.iter() {
             let block_id = self.map_block(tmir_block.id);
             let basic_block = self.translate_block(tmir_block)?;
             lir_func.blocks.insert(block_id, basic_block);
@@ -734,244 +646,627 @@ impl<'a> TmirAdapter<'a> {
 
     /// Translate a single tMIR instruction node into one or more LIR instructions.
     ///
-    /// Operands of type `Operand` are resolved via `resolve_operand`, which
-    /// materializes inline constants as Iconst/Fconst instructions prepended to
-    /// the output. Fields that are still `ValueId` (e.g., ptr in Load) are
-    /// mapped directly by the downstream translate methods.
+    /// All operands in real tmir are ValueId (no inline constants),
+    /// so there is no operand resolution step.
     fn translate_instruction(
         &mut self,
         node: &InstrNode,
     ) -> Result<Vec<Instruction>, AdapterError> {
-        // Buffer for materialized constant instructions from operand resolution.
-        let mut pre = Vec::new();
+        // Real tMIR uses block parameters for phi semantics, so there is no Inst::Phi arm here.
+        match &node.inst {
+            Inst::BinOp { op, ty: _, lhs, rhs } => {
+                let opcode = match op {
+                    BinOp::Add => Opcode::Iadd,
+                    BinOp::Sub => Opcode::Isub,
+                    BinOp::Mul => Opcode::Imul,
+                    BinOp::UDiv => Opcode::Udiv,
+                    BinOp::SDiv => Opcode::Sdiv,
+                    BinOp::URem => Opcode::Urem,
+                    BinOp::SRem => Opcode::Srem,
+                    BinOp::FAdd => Opcode::Fadd,
+                    BinOp::FSub => Opcode::Fsub,
+                    BinOp::FMul => Opcode::Fmul,
+                    BinOp::FDiv => Opcode::Fdiv,
+                    BinOp::FRem => Opcode::Fdiv, // TODO(#283): add a dedicated LIR Frem opcode
+                    BinOp::And => Opcode::Band,
+                    BinOp::Or => Opcode::Bor,
+                    BinOp::Xor => Opcode::Bxor,
+                    BinOp::Shl => Opcode::Ishl,
+                    BinOp::LShr => Opcode::Ushr,
+                    BinOp::AShr => Opcode::Sshr,
+                };
 
-        let instrs = match &node.inst {
-            Inst::BinOp { op, ty, lhs, rhs } => {
-                let lhs_vid = self.resolve_operand(lhs, &mut pre)?;
-                let rhs_vid = self.resolve_operand(rhs, &mut pre)?;
-                self.translate_binop(op, ty, &lhs_vid, &rhs_vid, &node.results)?
+                let lhs_val = self.map_value(*lhs);
+                let rhs_val = self.map_value(*rhs);
+                let result = self.map_result(&node.results)?;
+
+                Ok(vec![Instruction {
+                    opcode,
+                    args: vec![lhs_val, rhs_val],
+                    results: vec![result],
+                }])
             }
-            Inst::UnOp { op, ty, operand } => {
-                let op_vid = self.resolve_operand(operand, &mut pre)?;
-                self.translate_unop(op, ty, &op_vid, &node.results)?
+
+            Inst::UnOp {
+                op,
+                ty: _,
+                operand,
+            } => {
+                let opcode = match op {
+                    UnOp::Neg => Opcode::Ineg,
+                    UnOp::FNeg => Opcode::Fneg,
+                    UnOp::Not => Opcode::Bnot,
+                };
+
+                let src = self.map_value(*operand);
+                let dst = self.map_result(&node.results)?;
+
+                Ok(vec![Instruction {
+                    opcode,
+                    args: vec![src],
+                    results: vec![dst],
+                }])
             }
-            Inst::Cmp { op, ty, lhs, rhs } => {
-                let lhs_vid = self.resolve_operand(lhs, &mut pre)?;
-                let rhs_vid = self.resolve_operand(rhs, &mut pre)?;
-                self.translate_cmp(op, ty, &lhs_vid, &rhs_vid, &node.results)?
+
+            Inst::Overflow {
+                op,
+                ty: _,
+                lhs,
+                rhs,
+            } => {
+                let opcode = match op {
+                    OverflowOp::AddOverflow => Opcode::Iadd,
+                    OverflowOp::SubOverflow => Opcode::Isub,
+                    OverflowOp::MulOverflow => Opcode::Imul,
+                };
+
+                let lhs_val = self.map_value(*lhs);
+                let rhs_val = self.map_value(*rhs);
+                let result = self.map_result(&node.results)?;
+                let mut instrs = vec![Instruction {
+                    opcode,
+                    args: vec![lhs_val, rhs_val],
+                    results: vec![result],
+                }];
+
+                if let Some(flag_vid) = node.results.get(1) {
+                    let flag = self.map_value(*flag_vid);
+                    instrs.push(Instruction {
+                        opcode: Opcode::Iconst {
+                            ty: Type::B1,
+                            imm: 0,
+                        },
+                        args: vec![],
+                        results: vec![flag],
+                    });
+                }
+
+                Ok(instrs)
             }
+
+            Inst::ICmp { op, ty: _, lhs, rhs } => {
+                let cond = match op {
+                    ICmpOp::Eq => IntCC::Equal,
+                    ICmpOp::Ne => IntCC::NotEqual,
+                    ICmpOp::Ult => IntCC::UnsignedLessThan,
+                    ICmpOp::Ule => IntCC::UnsignedLessThanOrEqual,
+                    ICmpOp::Ugt => IntCC::UnsignedGreaterThan,
+                    ICmpOp::Uge => IntCC::UnsignedGreaterThanOrEqual,
+                    ICmpOp::Slt => IntCC::SignedLessThan,
+                    ICmpOp::Sle => IntCC::SignedLessThanOrEqual,
+                    ICmpOp::Sgt => IntCC::SignedGreaterThan,
+                    ICmpOp::Sge => IntCC::SignedGreaterThanOrEqual,
+                };
+
+                let lhs_val = self.map_value(*lhs);
+                let rhs_val = self.map_value(*rhs);
+                let result = self.map_result(&node.results)?;
+
+                Ok(vec![Instruction {
+                    opcode: Opcode::Icmp { cond },
+                    args: vec![lhs_val, rhs_val],
+                    results: vec![result],
+                }])
+            }
+
+            Inst::FCmp { op, ty: _, lhs, rhs } => {
+                let cond = match op {
+                    FCmpOp::OEq => FloatCC::Equal,
+                    FCmpOp::ONe => FloatCC::NotEqual,
+                    FCmpOp::OLt => FloatCC::LessThan,
+                    FCmpOp::OLe => FloatCC::LessThanOrEqual,
+                    FCmpOp::OGt => FloatCC::GreaterThan,
+                    FCmpOp::OGe => FloatCC::GreaterThanOrEqual,
+                    FCmpOp::UEq => FloatCC::UnorderedEqual,
+                    FCmpOp::UNe => FloatCC::UnorderedNotEqual,
+                    FCmpOp::ULt => FloatCC::UnorderedLessThan,
+                    FCmpOp::ULe => FloatCC::UnorderedLessThanOrEqual,
+                    FCmpOp::UGt => FloatCC::UnorderedGreaterThan,
+                    FCmpOp::UGe => FloatCC::UnorderedGreaterThanOrEqual,
+                };
+
+                let lhs_val = self.map_value(*lhs);
+                let rhs_val = self.map_value(*rhs);
+                let result = self.map_result(&node.results)?;
+
+                Ok(vec![Instruction {
+                    opcode: Opcode::Fcmp { cond },
+                    args: vec![lhs_val, rhs_val],
+                    results: vec![result],
+                }])
+            }
+
             Inst::Cast {
                 op,
                 src_ty,
                 dst_ty,
                 operand,
+            } => self.translate_cast(op, src_ty, dst_ty, operand, &node.results),
+
+            Inst::Load { ty, ptr } => self.translate_load(ty, ptr, &node.results),
+
+            Inst::Store { ty: _, ptr, value } => self.translate_store(ptr, value),
+
+            Inst::Alloca { ty, count } => self.translate_alloc(ty, count, &node.results),
+
+            Inst::GEP {
+                pointee_ty,
+                base,
+                indices,
+            } => match indices.as_slice() {
+                [] => {
+                    let src = self.map_value(*base);
+                    let dst = self.map_result(&node.results)?;
+                    Ok(vec![Instruction {
+                        opcode: Opcode::Iadd,
+                        args: vec![src],
+                        results: vec![dst],
+                    }])
+                }
+                [index] => {
+                    let base_ptr = self.map_value(*base);
+                    let index_val = self.map_value(*index);
+                    let dst = self.map_result(&node.results)?;
+                    let elem_size = self
+                        .translate_ty(pointee_ty)
+                        .map(|t| t.bytes())
+                        .unwrap_or(1) as i64;
+
+                    let mut instrs = Vec::new();
+                    let scaled_index = if elem_size == 1 {
+                        index_val
+                    } else {
+                        let size_val = self.fresh_value();
+                        instrs.push(Instruction {
+                            opcode: Opcode::Iconst {
+                                ty: Type::I64,
+                                imm: elem_size,
+                            },
+                            args: vec![],
+                            results: vec![size_val],
+                        });
+
+                        let scaled = self.fresh_value();
+                        instrs.push(Instruction {
+                            opcode: Opcode::Imul,
+                            args: vec![index_val, size_val],
+                            results: vec![scaled],
+                        });
+                        scaled
+                    };
+
+                    instrs.push(Instruction {
+                        opcode: Opcode::Iadd,
+                        args: vec![base_ptr, scaled_index],
+                        results: vec![dst],
+                    });
+
+                    Ok(instrs)
+                }
+                _ => Err(AdapterError::UnsupportedInstruction(format!(
+                    "multi-index GEP is not lowered yet: {:?}",
+                    node.inst
+                ))),
+            },
+
+            Inst::AtomicLoad { ty, ptr, ordering } => {
+                self.translate_atomic_load(ty, ptr, ordering, &node.results)
+            }
+
+            Inst::AtomicStore {
+                ty: _,
+                ptr,
+                value,
+                ordering,
+            } => self.translate_atomic_store(ptr, value, ordering),
+
+            Inst::AtomicRMW {
+                op,
+                ty,
+                ptr,
+                value,
+                ordering,
+            } => self.translate_atomic_rmw(op, ty, ptr, value, ordering, &node.results),
+
+            Inst::CmpXchg {
+                ty,
+                ptr,
+                expected,
+                desired,
+                success,
+                failure: _,
             } => {
-                let op_vid = self.resolve_operand(operand, &mut pre)?;
-                self.translate_cast(op, src_ty, dst_ty, &op_vid, &node.results)?
+                let lir_ty = translate_type(ty)?;
+                let ptr_val = self.map_value(*ptr);
+                let exp_val = self.map_value(*expected);
+                let des_val = self.map_value(*desired);
+                let old_val = self.map_result(&node.results)?;
+                let ordering = translate_ordering(success);
+
+                let mut instrs = vec![Instruction {
+                    opcode: Opcode::CmpXchg {
+                        ty: lir_ty,
+                        ordering,
+                    },
+                    args: vec![exp_val, des_val, ptr_val],
+                    results: vec![old_val],
+                }];
+
+                if let Some(success_vid) = node.results.get(1) {
+                    let success_val = self.map_value(*success_vid);
+                    instrs.push(Instruction {
+                        opcode: Opcode::Icmp {
+                            cond: IntCC::Equal,
+                        },
+                        args: vec![old_val, exp_val],
+                        results: vec![success_val],
+                    });
+                }
+
+                Ok(instrs)
             }
-            Inst::Load { ty, ptr } => self.translate_load(ty, ptr, &node.results)?,
-            Inst::Store { ty: _, ptr, value } => {
-                let val_vid = self.resolve_operand(value, &mut pre)?;
-                self.translate_store(ptr, &val_vid)?
-            }
-            Inst::Alloc { ty, count } => self.translate_alloc(ty, count, &node.results)?,
-            Inst::Br { target, args } => {
-                let arg_vids = self.resolve_operands(args, &mut pre)?;
-                self.translate_br(target, &arg_vids)?
-            }
+
+            Inst::Fence { ordering } => self.translate_fence(ordering),
+
+            Inst::Br { target, args } => self.translate_br(target, args),
+
             Inst::CondBr {
                 cond,
                 then_target,
                 then_args,
                 else_target,
                 else_args,
-            } => {
-                let cond_vid = self.resolve_operand(cond, &mut pre)?;
-                let then_vids = self.resolve_operands(then_args, &mut pre)?;
-                let else_vids = self.resolve_operands(else_args, &mut pre)?;
-                self.translate_condbr(
-                    &cond_vid, then_target, &then_vids, else_target, &else_vids,
-                )?
-            }
-            Inst::Return { values } => {
-                let ret_vids = self.resolve_operands(values, &mut pre)?;
-                self.translate_return(&ret_vids)?
-            }
-            Inst::Call {
-                func,
-                args,
-                ret_ty,
-            } => {
-                let arg_vids = self.resolve_operands(args, &mut pre)?;
-                self.translate_call(func, &arg_vids, ret_ty, &node.results)?
-            }
-            Inst::Phi { ty, incoming } => {
-                // Resolve operands in phi incoming edges.
-                let mut resolved_incoming = Vec::with_capacity(incoming.len());
-                for (block, op) in incoming {
-                    let vid = self.resolve_operand(op, &mut pre)?;
-                    resolved_incoming.push((*block, vid));
-                }
-                self.translate_phi(ty, &resolved_incoming, &node.results)?
-            }
-            Inst::Const { ty, value } => self.translate_const(ty, *value, &node.results)?,
-            Inst::FConst { ty, value } => self.translate_fconst(ty, *value, &node.results)?,
-            Inst::Nop => vec![],
-            // Ownership instructions: lower as no-ops or pointer copies for now.
-            Inst::Borrow { ty: _, value } | Inst::BorrowMut { ty: _, value } => {
-                // Borrow/BorrowMut: result is a copy of the pointer.
-                if node.results.is_empty() {
-                    return Ok(vec![]);
-                }
-                let src = self.map_value(*value);
-                let dst = self.map_result(&node.results)?;
-                vec![Instruction {
-                    opcode: Opcode::Iadd, // Copy via add-zero pattern (no dedicated Copy opcode yet)
-                    args: vec![src],
-                    results: vec![dst],
-                }]
-            }
-            Inst::EndBorrow { .. }
-            | Inst::Retain { .. }
-            | Inst::Release { .. }
-            | Inst::Dealloc { .. } => {
-                // Void ownership ops: no-op in the LIR for now.
-                vec![]
-            }
-            Inst::IsUnique { value } => {
-                // Lower as a constant true for now (no ARC runtime).
-                if node.results.is_empty() {
-                    return Ok(vec![]);
-                }
-                let _ = value;
-                let dst = self.map_result(&node.results)?;
-                vec![Instruction {
-                    opcode: Opcode::Iconst {
-                        ty: Type::B1,
-                        imm: 1,
-                    },
-                    args: vec![],
-                    results: vec![dst],
-                }]
-            }
-            // Aggregate operations: lowered to stack allocation + loads/stores.
-            Inst::Struct { ty, fields } => {
-                let field_vids = self.resolve_operands(fields, &mut pre)?;
-                self.translate_struct_construct(ty, &field_vids, &node.results)?
-            }
-            Inst::Field { ty, value, index } => {
-                self.translate_field_extract(ty, value, *index, &node.results)?
-            }
-            Inst::Index { ty, base, index } => {
-                let idx_vid = self.resolve_operand(index, &mut pre)?;
-                self.translate_array_index(ty, base, &idx_vid, &node.results)?
-            }
-            // Atomic operations: translate to LIR atomic opcodes.
-            Inst::AtomicLoad { ty, ptr, ordering } => {
-                self.translate_atomic_load(ty, ptr, ordering, &node.results)?
-            }
-            Inst::AtomicStore { ty: _, ptr, value, ordering } => {
-                let val_vid = self.resolve_operand(value, &mut pre)?;
-                self.translate_atomic_store(ptr, &val_vid, ordering)?
-            }
-            Inst::AtomicRmw { op, ty, ptr, value, ordering } => {
-                let val_vid = self.resolve_operand(value, &mut pre)?;
-                self.translate_atomic_rmw(op, ty, ptr, &val_vid, ordering, &node.results)?
-            }
-            Inst::CmpXchg { ty, ptr, expected, desired, success_ordering, .. } => {
-                let exp_vid = self.resolve_operand(expected, &mut pre)?;
-                let des_vid = self.resolve_operand(desired, &mut pre)?;
-                self.translate_cmpxchg(ty, ptr, &exp_vid, &des_vid, success_ordering, &node.results)?
-            }
-            Inst::Fence { ordering } => {
-                self.translate_fence(ordering)?
-            }
-            // Switch: multi-way branch.
+            } => self.translate_condbr(cond, then_target, then_args, else_target, else_args),
+
             Inst::Switch {
                 value,
-                cases,
                 default,
+                default_args,
+                cases,
             } => {
-                let val_vid = self.resolve_operand(value, &mut pre)?;
-                self.translate_switch(&val_vid, cases, default)?
+                let mut instrs = self.resolve_block_args(*default, default_args)?;
+
+                for case in cases {
+                    instrs.extend(self.resolve_block_args(case.target, &case.args)?);
+                }
+
+                let selector = self.map_value(*value);
+                let default_block = self.map_block(*default);
+                let mut lir_cases = Vec::with_capacity(cases.len());
+
+                for case in cases {
+                    let case_value = match &case.value {
+                        Constant::Int(v) => *v as i64,
+                        Constant::Bool(b) => {
+                            if *b { 1 } else { 0 }
+                        }
+                        Constant::Float(_) | Constant::Aggregate(_) => {
+                            return Err(AdapterError::UnsupportedInstruction(format!(
+                                "non-integer switch case value: {:?}",
+                                case.value
+                            )));
+                        }
+                    };
+
+                    lir_cases.push((case_value, self.map_block(case.target)));
+                }
+
+                instrs.push(Instruction {
+                    opcode: Opcode::Switch {
+                        cases: lir_cases,
+                        default: default_block,
+                    },
+                    args: vec![selector],
+                    results: vec![],
+                });
+
+                Ok(instrs)
             }
-            // CallIndirect: call through pointer.
+
+            Inst::Call { callee, args } => {
+                let arg_vals: Vec<Value> = args.iter().map(|vid| self.map_value(*vid)).collect();
+                let result_vals = self.map_results(&node.results);
+                let callee_name = self
+                    .func_names
+                    .get(callee)
+                    .cloned()
+                    .unwrap_or_else(|| format!("__func_{}", callee.index()));
+
+                Ok(vec![Instruction {
+                    opcode: Opcode::Call { name: callee_name },
+                    args: arg_vals,
+                    results: result_vals,
+                }])
+            }
+
             Inst::CallIndirect {
                 callee,
+                sig: _,
                 args,
-                ret_ty,
             } => {
-                let arg_vids = self.resolve_operands(args, &mut pre)?;
-                self.translate_call_indirect(callee, &arg_vids, ret_ty, &node.results)?
+                let callee_val = self.map_value(*callee);
+                let mut arg_vals = vec![callee_val];
+                arg_vals.extend(args.iter().map(|vid| self.map_value(*vid)));
+                let result_vals = self.map_results(&node.results);
+
+                Ok(vec![Instruction {
+                    opcode: Opcode::CallIndirect,
+                    args: arg_vals,
+                    results: result_vals,
+                }])
             }
-            // Exception handling: stub lowering (full codegen in #140).
-            // Invoke: for now, lower as a regular call + unconditional branch to normal_dest.
-            // The unwind path is not yet wired up in the LIR.
-            Inst::Invoke {
-                func,
-                args,
-                ret_ty,
-                normal_dest,
-                normal_args,
-                unwind_dest: _,
-                unwind_args: _,
+
+            Inst::Return { values } => self.translate_return(values),
+
+            Inst::ExtractField {
+                ty,
+                aggregate,
+                field,
+            } => self.translate_field_extract(ty, aggregate, *field, &node.results),
+
+            Inst::InsertField {
+                ty,
+                aggregate,
+                field,
+                value,
             } => {
-                let arg_vids = self.resolve_operands(args, &mut pre)?;
-                let normal_vids = self.resolve_operands(normal_args, &mut pre)?;
-                let mut result = self.translate_call(func, &arg_vids, ret_ty, &node.results)?;
-                result.extend(self.translate_br(normal_dest, &normal_vids)?);
-                result
+                let struct_ty = self.translate_ty(ty)?;
+                let base_ptr = self.map_value(*aggregate);
+                let field_val = self.map_value(*value);
+                let dst = self.map_result(&node.results)?;
+                let field_ptr = self.fresh_value();
+
+                Ok(vec![
+                    Instruction {
+                        opcode: Opcode::StructGep {
+                            struct_ty,
+                            field_index: *field,
+                        },
+                        args: vec![base_ptr],
+                        results: vec![field_ptr],
+                    },
+                    Instruction {
+                        opcode: Opcode::Store,
+                        args: vec![field_val, field_ptr],
+                        results: vec![],
+                    },
+                    Instruction {
+                        opcode: Opcode::Iadd,
+                        args: vec![base_ptr],
+                        results: vec![dst],
+                    },
+                ])
             }
-            // LandingPad: no-op stub, result is undefined (exception value placeholder).
-            Inst::LandingPad { .. } => {
-                if node.results.is_empty() {
-                    vec![]
+
+            Inst::ExtractElement { ty, array, index } => {
+                let elem_ty = self.translate_ty(ty)?;
+                let elem_size = elem_ty.bytes() as i64;
+                let base_ptr = self.map_value(*array);
+                let index_val = self.map_value(*index);
+                let dst = self.map_result(&node.results)?;
+                let mut instrs = Vec::new();
+
+                let elem_ptr = if elem_size == 1 {
+                    let ptr = self.fresh_value();
+                    instrs.push(Instruction {
+                        opcode: Opcode::Iadd,
+                        args: vec![base_ptr, index_val],
+                        results: vec![ptr],
+                    });
+                    ptr
                 } else {
-                    let dst = self.map_result(&node.results)?;
-                    vec![Instruction {
+                    let size_val = self.fresh_value();
+                    instrs.push(Instruction {
                         opcode: Opcode::Iconst {
                             ty: Type::I64,
-                            imm: 0,
+                            imm: elem_size,
                         },
                         args: vec![],
-                        results: vec![dst],
-                    }]
-                }
+                        results: vec![size_val],
+                    });
+
+                    let offset = self.fresh_value();
+                    instrs.push(Instruction {
+                        opcode: Opcode::Imul,
+                        args: vec![index_val, size_val],
+                        results: vec![offset],
+                    });
+
+                    let ptr = self.fresh_value();
+                    instrs.push(Instruction {
+                        opcode: Opcode::Iadd,
+                        args: vec![base_ptr, offset],
+                        results: vec![ptr],
+                    });
+                    ptr
+                };
+
+                instrs.push(Instruction {
+                    opcode: Opcode::Load { ty: elem_ty },
+                    args: vec![elem_ptr],
+                    results: vec![dst],
+                });
+
+                Ok(instrs)
             }
-            // Resume: no-op stub (unwinding not yet supported in LIR).
-            Inst::Resume { .. } => vec![],
-            // Select: conditional value (branchless).
+
+            Inst::InsertElement {
+                ty,
+                array,
+                index,
+                value,
+            } => {
+                let module = self
+                    .module
+                    .expect("module must be set before translate_instruction()");
+                let elem_ty = match ty {
+                    Ty::Array(elem_ty_id, _) => *module
+                        .types
+                        .get(elem_ty_id.as_usize())
+                        .ok_or_else(|| {
+                            AdapterError::UnsupportedInstruction(format!(
+                                "unknown array element type id in insertelement: {:?}",
+                                ty
+                            ))
+                        })?,
+                    _ => {
+                        return Err(AdapterError::UnsupportedInstruction(format!(
+                            "insertelement requires array aggregate type, got {:?}",
+                            ty
+                        )));
+                    }
+                };
+
+                let lir_elem_ty = self.translate_ty(&elem_ty)?;
+                let elem_size = lir_elem_ty.bytes() as i64;
+                let base_ptr = self.map_value(*array);
+                let index_val = self.map_value(*index);
+                let elem_val = self.map_value(*value);
+                let dst = self.map_result(&node.results)?;
+                let mut instrs = Vec::new();
+
+                let elem_ptr = if elem_size == 1 {
+                    let ptr = self.fresh_value();
+                    instrs.push(Instruction {
+                        opcode: Opcode::Iadd,
+                        args: vec![base_ptr, index_val],
+                        results: vec![ptr],
+                    });
+                    ptr
+                } else {
+                    let size_val = self.fresh_value();
+                    instrs.push(Instruction {
+                        opcode: Opcode::Iconst {
+                            ty: Type::I64,
+                            imm: elem_size,
+                        },
+                        args: vec![],
+                        results: vec![size_val],
+                    });
+
+                    let offset = self.fresh_value();
+                    instrs.push(Instruction {
+                        opcode: Opcode::Imul,
+                        args: vec![index_val, size_val],
+                        results: vec![offset],
+                    });
+
+                    let ptr = self.fresh_value();
+                    instrs.push(Instruction {
+                        opcode: Opcode::Iadd,
+                        args: vec![base_ptr, offset],
+                        results: vec![ptr],
+                    });
+                    ptr
+                };
+
+                instrs.push(Instruction {
+                    opcode: Opcode::Store,
+                    args: vec![elem_val, elem_ptr],
+                    results: vec![],
+                });
+                instrs.push(Instruction {
+                    opcode: Opcode::Iadd,
+                    args: vec![base_ptr],
+                    results: vec![dst],
+                });
+
+                Ok(instrs)
+            }
+
+            Inst::Const { ty, value } => match value {
+                Constant::Int(v) => self.translate_const(ty, *v as i64, &node.results),
+                Constant::Float(v) => self.translate_fconst(ty, *v, &node.results),
+                Constant::Bool(b) => {
+                    self.translate_const(ty, if *b { 1 } else { 0 }, &node.results)
+                }
+                Constant::Aggregate(_) => Err(AdapterError::UnsupportedInstruction(format!(
+                    "aggregate const is not lowered yet: {:?}",
+                    value
+                ))),
+            },
+
+            Inst::NullPtr => self.translate_const(&Ty::Ptr, 0, &node.results),
+
+            Inst::Undef { ty } => match ty {
+                Ty::F32 | Ty::F64 => self.translate_fconst(ty, 0.0, &node.results),
+                Ty::Bool | Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::I128 | Ty::Ptr => {
+                    self.translate_const(ty, 0, &node.results)
+                }
+                Ty::Void => Ok(vec![]),
+                Ty::Struct(_) | Ty::Array(_, _) | Ty::Func(_) => {
+                    Err(AdapterError::UnsupportedInstruction(format!(
+                        "aggregate/function undef is not lowered yet: {:?}",
+                        ty
+                    )))
+                }
+            },
+
+            Inst::Assume { cond: _ } => Ok(vec![]),
+
+            Inst::Assert { cond: _ } => Ok(vec![]),
+
+            Inst::Unreachable => {
+                // TODO(#283): lower to a dedicated trap/unreachable LIR opcode.
+                Ok(vec![Instruction {
+                    opcode: Opcode::Return,
+                    args: vec![],
+                    results: vec![],
+                }])
+            }
+
+            Inst::Copy { ty: _, operand } => {
+                let src = self.map_value(*operand);
+                let dst = self.map_result(&node.results)?;
+                Ok(vec![Instruction {
+                    opcode: Opcode::Iadd,
+                    args: vec![src],
+                    results: vec![dst],
+                }])
+            }
+
             Inst::Select {
                 ty: _,
                 cond,
-                true_val,
-                false_val,
+                then_val,
+                else_val,
             } => {
-                let cond_vid = self.resolve_operand(cond, &mut pre)?;
-                let tv_vid = self.resolve_operand(true_val, &mut pre)?;
-                let fv_vid = self.resolve_operand(false_val, &mut pre)?;
-                self.translate_select(&cond_vid, &tv_vid, &fv_vid, &node.results)?
-            }
-            // GetElementPtr: typed pointer arithmetic.
-            Inst::GetElementPtr {
-                elem_ty,
-                base,
-                index,
-                offset,
-            } => {
-                let idx_vid = self.resolve_operand(index, &mut pre)?;
-                self.translate_gep(elem_ty, base, &idx_vid, *offset, &node.results)?
-            }
-        };
+                let cond_val = self.map_value(*cond);
+                let then_v = self.map_value(*then_val);
+                let else_v = self.map_value(*else_val);
+                let dst = self.map_result(&node.results)?;
 
-        // Prepend any constant materialization instructions before the main instruction(s).
-        if !pre.is_empty() {
-            pre.extend(instrs);
-            Ok(pre)
-        } else {
-            Ok(instrs)
+                Ok(vec![Instruction {
+                    opcode: Opcode::Select {
+                        cond: IntCC::NotEqual,
+                    },
+                    args: vec![cond_val, then_v, else_v],
+                    results: vec![dst],
+                }])
+            }
         }
     }
+
 
     // -----------------------------------------------------------------------
     // Binary operations
@@ -1004,6 +1299,7 @@ impl<'a> TmirAdapter<'a> {
             // Remainder: emitted as native LIR opcodes; ISel lowers to SDIV/UDIV + MSUB.
             BinOp::SRem => Opcode::Srem,
             BinOp::URem => Opcode::Urem,
+            BinOp::FRem => Opcode::Fdiv, // TODO(#283): add dedicated LIR Frem opcode
         };
 
         let lhs_val = self.map_value(*lhs);
@@ -1062,26 +1358,8 @@ impl<'a> TmirAdapter<'a> {
                 };
                 Ok(vec![fneg_inst])
             }
-            UnOp::FAbs => {
-                // FAbs: result = |operand|
-                // Directly emit Fabs; ISel lowers to FABS Sd/Dd, Sn/Dn.
-                let fabs_inst = Instruction {
-                    opcode: Opcode::Fabs,
-                    args: vec![src],
-                    results: vec![dst],
-                };
-                Ok(vec![fabs_inst])
-            }
-            UnOp::FSqrt => {
-                // FSqrt: result = sqrt(operand)
-                // Directly emit Fsqrt; ISel lowers to FSQRT Sd/Dd, Sn/Dn.
-                let fsqrt_inst = Instruction {
-                    opcode: Opcode::Fsqrt,
-                    args: vec![src],
-                    results: vec![dst],
-                };
-                Ok(vec![fsqrt_inst])
-            }
+            // NOTE: UnOp::FAbs and UnOp::FSqrt don't exist in real tmir.
+            // The new translate_instruction handles UnOp inline.
         }
     }
 
@@ -1411,7 +1689,6 @@ impl<'a> TmirAdapter<'a> {
         &mut self,
         func: &FuncId,
         args: &[ValueId],
-        _ret_ty: &[Ty],
         results: &[ValueId],
     ) -> Result<Vec<Instruction>, AdapterError> {
         let arg_vals: Vec<Value> = args.iter().map(|vid| self.map_value(*vid)).collect();
@@ -1631,12 +1908,9 @@ impl<'a> TmirAdapter<'a> {
         let elem_size = match &array_ty {
             Type::Array(elem, _) => elem.bytes(),
             _ => {
-                // For pointer indexing (Ptr type), use the pointee size.
-                // Fall back to 1-byte elements if we can't determine.
-                match ty {
-                    Ty::Ref { pointee, .. } => translate_type(pointee).map(|t| t.bytes()).unwrap_or(1),
-                    _ => 1,
-                }
+                // For pointer indexing (Ptr type), fall back to 1-byte elements.
+                // Real tmir has no Ty::Ref — pointers are opaque Ty::Ptr.
+                1
             }
         };
 
@@ -1693,7 +1967,14 @@ impl<'a> TmirAdapter<'a> {
 
         let lir_cases: Vec<(i64, Block)> = cases
             .iter()
-            .map(|c| (c.value, self.map_block(c.target)))
+            .map(|c| {
+                let val = match &c.value {
+                    Constant::Int(v) => *v as i64,
+                    Constant::Bool(b) => if *b { 1 } else { 0 },
+                    _ => 0, // TODO(#283): handle other constant types in switch
+                };
+                (val, self.map_block(c.target))
+            })
             .collect();
 
         Ok(vec![Instruction {
@@ -1718,7 +1999,6 @@ impl<'a> TmirAdapter<'a> {
         &mut self,
         callee: &ValueId,
         args: &[ValueId],
-        _ret_ty: &[Ty],
         results: &[ValueId],
     ) -> Result<Vec<Instruction>, AdapterError> {
         let callee_val = self.map_value(*callee);
@@ -1932,7 +2212,7 @@ impl<'a> TmirAdapter<'a> {
             .tmir_func
             .ok_or(AdapterError::UnknownBlock(target.0))?;
         let target_block = tmir_func
-            .block(target)
+            .blocks.iter().find(|b| b.id == target)
             .ok_or(AdapterError::UnknownBlock(target.0))?;
 
         for (arg, (param_id, _param_ty)) in args.iter().zip(target_block.params.iter()) {
@@ -1969,7 +2249,9 @@ pub fn translate_module(
 
     let mut results = Vec::new();
     for func in &module.functions {
-        let (lir_func, proofs) = translate_function_with_names(func, &module.structs, &func_names)?;
+        let mut adapter = TmirAdapter::new(&module.structs, func_names.clone());
+        adapter.module = Some(module);
+        let (lir_func, proofs) = adapter.translate(func)?;
         results.push((lir_func, proofs));
     }
     Ok(results)
@@ -1977,25 +2259,27 @@ pub fn translate_module(
 
 /// Translate a single tMIR function to internal LIR + proof context.
 ///
-/// When called standalone (not from `translate_module`), call targets are
-/// resolved to synthetic names (`__func_N`). For proper symbol resolution,
-/// prefer `translate_module` which builds a function name table.
+/// When called standalone (not from `translate_module`), a minimal module
+/// is constructed to provide the func_types table. For proper symbol
+/// resolution, prefer `translate_module` which builds a function name table.
 pub fn translate_function(
     func: &TmirFunction,
-    structs: &[StructDef],
+    module: &TmirModule,
 ) -> Result<(Function, ProofContext), AdapterError> {
     let func_names = HashMap::new();
-    let mut adapter = TmirAdapter::new(structs, func_names);
+    let mut adapter = TmirAdapter::new(&module.structs, func_names);
+    adapter.module = Some(module);
     adapter.translate(func)
 }
 
 /// Translate a single tMIR function with an explicit function name table.
 pub fn translate_function_with_names(
     func: &TmirFunction,
-    structs: &[StructDef],
+    module: &TmirModule,
     func_names: &HashMap<FuncId, String>,
 ) -> Result<(Function, ProofContext), AdapterError> {
-    let mut adapter = TmirAdapter::new(structs, func_names.clone());
+    let mut adapter = TmirAdapter::new(&module.structs, func_names.clone());
+    adapter.module = Some(module);
     adapter.translate(func)
 }
 
@@ -2028,28 +2312,49 @@ pub fn extract_function_proofs(func: &TmirFunction) -> Vec<Proof> {
         .collect()
 }
 
-/// Translate a single TmirProof to the adapter's Proof representation.
-fn translate_tmir_proof(p: &TmirProof) -> Option<Proof> {
+/// Translate a single tmir ProofAnnotation to the adapter's Proof representation.
+///
+/// The real tmir ProofAnnotation has flat unit variants (no struct fields).
+/// We map to the internal Proof enum using dummy ValueId values where the
+/// internal Proof expects references. Downstream passes that need the actual
+/// values will need to reconstruct them from the instruction context.
+fn translate_tmir_proof(p: &ProofAnnotation) -> Option<Proof> {
+    const DUMMY_VALUE: ValueId = ValueId::new(0);
+    const DUMMY_INDEX: ValueId = ValueId::new(1);
+    const DEFAULT_SHIFT_BITWIDTH: u16 = 64;
+
     match p {
-        TmirProof::NoOverflow { signed } => Some(Proof::NoOverflow { signed: *signed }),
-        TmirProof::InBounds { base, index } => Some(Proof::InBounds {
-            base: *base,
-            index: *index,
+        ProofAnnotation::InBounds => Some(Proof::InBounds {
+            base: DUMMY_VALUE,
+            index: DUMMY_INDEX,
         }),
-        TmirProof::NotNull { ptr } => Some(Proof::NotNull { ptr: *ptr }),
-        TmirProof::ValidBorrow { borrow } => Some(Proof::ValidBorrow { borrow: *borrow }),
-        TmirProof::InRange { lo, hi } => Some(Proof::InRange { lo: *lo, hi: *hi }),
-        TmirProof::NonZeroDivisor { divisor } => {
-            Some(Proof::NonZeroDivisor { divisor: *divisor })
-        }
-        TmirProof::ValidShift { amount, bitwidth } => Some(Proof::ValidShift {
-            amount: *amount,
-            bitwidth: *bitwidth,
+        ProofAnnotation::NotNull => Some(Proof::NotNull { ptr: DUMMY_VALUE }),
+        ProofAnnotation::ValidBorrow
+        | ProofAnnotation::UniqueBorrow
+        | ProofAnnotation::SharedBorrow => Some(Proof::ValidBorrow { borrow: DUMMY_VALUE }),
+        ProofAnnotation::ValidDealloc => None,
+        ProofAnnotation::NoOverflow => Some(Proof::NoOverflow { signed: true }),
+        ProofAnnotation::NoWrap => Some(Proof::NoOverflow { signed: false }),
+        ProofAnnotation::DivNonZero => Some(Proof::NonZeroDivisor {
+            divisor: DUMMY_VALUE,
         }),
-        TmirProof::Pure => Some(Proof::Pure),
-        TmirProof::Associative => Some(Proof::Associative),
-        TmirProof::Commutative => Some(Proof::Commutative),
-        TmirProof::Idempotent => Some(Proof::Idempotent),
+        ProofAnnotation::ShiftInRange => Some(Proof::ValidShift {
+            amount: DUMMY_VALUE,
+            bitwidth: DEFAULT_SHIFT_BITWIDTH,
+        }),
+        ProofAnnotation::Pure => Some(Proof::Pure),
+        ProofAnnotation::Terminates => None,
+        ProofAnnotation::Deterministic => None,
+        ProofAnnotation::Associative => Some(Proof::Associative),
+        ProofAnnotation::Commutative => Some(Proof::Commutative),
+        ProofAnnotation::DataRaceFree => None,
+        ProofAnnotation::AtomicOrdering(_) => None,
+        ProofAnnotation::BoundedOutput { lo, hi } => Some(Proof::InRange {
+            lo: lo.floor() as i128,
+            hi: hi.ceil() as i128,
+        }),
+        ProofAnnotation::Monotonic => None,
+        ProofAnnotation::Custom(_) => None,
     }
 }
 
