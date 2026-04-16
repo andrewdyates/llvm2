@@ -8,6 +8,7 @@
 
 #![allow(dead_code)]
 
+pub mod binary;
 pub mod builder;
 pub mod reader;
 
@@ -55,6 +56,12 @@ impl Function {
     /// Number of blocks.
     pub fn num_blocks(&self) -> usize {
         self.blocks.len()
+    }
+
+    /// Add a function-level proof annotation (builder-style).
+    pub fn with_proof(mut self, proof: TmirProof) -> Self {
+        self.proofs.push(proof);
+        self
     }
 }
 
