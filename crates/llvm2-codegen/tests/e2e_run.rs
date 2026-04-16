@@ -1281,22 +1281,22 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
         id: FuncId(0),
         name: "_high_pressure".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64), Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64), Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![tmir_func::Block {
             id: BlockId(0),
             params: vec![
-                (ValueId(0), Ty::Int(64)), // param a
-                (ValueId(1), Ty::Int(64)), // param b
+                (ValueId(0), Ty::int(64)), // param a
+                (ValueId(1), Ty::int(64)), // param b
             ],
             body: vec![
                 // v2 = a + b
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(0)),
                         rhs: Operand::Value(ValueId(1)),
                     },
@@ -1307,7 +1307,7 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Mul,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(0)),
                         rhs: Operand::Value(ValueId(1)),
                     },
@@ -1318,7 +1318,7 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Sub,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(0)),
                         rhs: Operand::Value(ValueId(1)),
                     },
@@ -1328,7 +1328,7 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                 // const 1
                 InstrNode {
                     instr: Instr::Const {
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         value: 1,
                     },
                     results: vec![ValueId(10)],
@@ -1338,7 +1338,7 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(0)),
                         rhs: Operand::Value(ValueId(10)),
                     },
@@ -1349,7 +1349,7 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(1)),
                         rhs: Operand::Value(ValueId(10)),
                     },
@@ -1360,7 +1360,7 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(2)),
                         rhs: Operand::Value(ValueId(3)),
                     },
@@ -1371,7 +1371,7 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(7)),
                         rhs: Operand::Value(ValueId(4)),
                     },
@@ -1382,7 +1382,7 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(8)),
                         rhs: Operand::Value(ValueId(5)),
                     },
@@ -1393,7 +1393,7 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(9)),
                         rhs: Operand::Value(ValueId(6)),
                     },

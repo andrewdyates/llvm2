@@ -155,8 +155,8 @@ impl InstrSemantics for ConcreteSemantics {
             | Instr::Const { ty, .. }
             | Instr::FConst { ty, .. } => vec![ty.clone()],
             Instr::Select { ty, .. } => vec![ty.clone()],
-            Instr::GetElementPtr { .. } => vec![Ty::Ptr(Box::new(Ty::Void))],
-            Instr::Cmp { .. } | Instr::IsUnique { .. } => vec![Ty::Bool],
+            Instr::GetElementPtr { .. } => vec![Ty::ptr(Ty::void())],
+            Instr::Cmp { .. } | Instr::IsUnique { .. } => vec![Ty::bool_ty()],
             Instr::Cast { dst_ty, .. } => vec![dst_ty.clone()],
             Instr::Call { ret_ty, .. } | Instr::CallIndirect { ret_ty, .. } => ret_ty.clone(),
             // Void instructions

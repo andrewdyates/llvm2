@@ -6,11 +6,32 @@
       "name": "max_i64",
       "ty": {
         "params": [
-          { "Int": 64 },
-          { "Int": 64 }
+          {
+            "Primitive": {
+              "Int": {
+                "width": "I64",
+                "signed": true
+              }
+            }
+          },
+          {
+            "Primitive": {
+              "Int": {
+                "width": "I64",
+                "signed": true
+              }
+            }
+          }
         ],
         "returns": [
-          { "Int": 64 }
+          {
+            "Primitive": {
+              "Int": {
+                "width": "I64",
+                "signed": true
+              }
+            }
+          }
         ]
       },
       "entry": 0,
@@ -18,30 +39,73 @@
         {
           "id": 0,
           "params": [
-            [0, { "Int": 64 }],
-            [1, { "Int": 64 }]
+            [
+              0,
+              {
+                "Primitive": {
+                  "Int": {
+                    "width": "I64",
+                    "signed": true
+                  }
+                }
+              }
+            ],
+            [
+              1,
+              {
+                "Primitive": {
+                  "Int": {
+                    "width": "I64",
+                    "signed": true
+                  }
+                }
+              }
+            ]
           ],
           "body": [
             {
               "instr": {
                 "Cmp": {
                   "op": "Sgt",
-                  "ty": { "Int": 64 },
-                  "lhs": 0,
-                  "rhs": 1
+                  "ty": {
+                    "Primitive": {
+                      "Int": {
+                        "width": "I64",
+                        "signed": true
+                      }
+                    }
+                  },
+                  "lhs": {
+                    "Value": 0
+                  },
+                  "rhs": {
+                    "Value": 1
+                  }
                 }
               },
-              "results": [2],
+              "results": [
+                2
+              ],
               "proofs": []
             },
             {
               "instr": {
                 "CondBr": {
-                  "cond": 2,
+                  "cond": {
+                    "Value": 2
+                  },
                   "then_target": 1,
-                  "then_args": [0],
+                  "then_args": [
+                    {
+                      "Value": 0
+                    }
+                  ],
                   "else_target": 2,
-                  "else_args": [1]
+                  "else_args": [
+                    {
+                      "Value": 1
+                    }
+                  ]
                 }
               },
               "results": [],
@@ -52,13 +116,27 @@
         {
           "id": 1,
           "params": [
-            [3, { "Int": 64 }]
+            [
+              3,
+              {
+                "Primitive": {
+                  "Int": {
+                    "width": "I64",
+                    "signed": true
+                  }
+                }
+              }
+            ]
           ],
           "body": [
             {
               "instr": {
                 "Return": {
-                  "values": [3]
+                  "values": [
+                    {
+                      "Value": 3
+                    }
+                  ]
                 }
               },
               "results": [],
@@ -69,13 +147,27 @@
         {
           "id": 2,
           "params": [
-            [4, { "Int": 64 }]
+            [
+              4,
+              {
+                "Primitive": {
+                  "Int": {
+                    "width": "I64",
+                    "signed": true
+                  }
+                }
+              }
+            ]
           ],
           "body": [
             {
               "instr": {
                 "Return": {
-                  "values": [4]
+                  "values": [
+                    {
+                      "Value": 4
+                    }
+                  ]
                 }
               },
               "results": [],
