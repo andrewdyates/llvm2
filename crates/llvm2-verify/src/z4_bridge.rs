@@ -1406,8 +1406,8 @@ fn extract_bv_value(model_text: &str, var_name: &str) -> Option<u64> {
 /// Supports QF_BV, QF_ABV (arrays), QF_BVFP (floating-point), and
 /// QF_UFBV (uninterpreted functions) based on the formula content.
 #[cfg(feature = "z4")]
-pub fn verify_with_z4_api(obligation: &ProofObligation, config: &Z4Config) -> Z4Result {
-    use z4::{Logic, SolveResult, Sort, Solver, BitVecSort};
+pub fn verify_with_z4_api(obligation: &ProofObligation, _config: &Z4Config) -> Z4Result {
+    use z4::{Logic, SolveResult, Sort, Solver};
 
     // Build formula, expand small bounded quantifiers, then infer logic.
     let raw_formula = obligation.negated_equivalence();
@@ -1451,7 +1451,11 @@ pub fn verify_with_z4_api(obligation: &ProofObligation, config: &Z4Config) -> Z4
     // Build and assert the negated equivalence formula
     let formula_term = translate_expr_to_z4(&formula, &mut solver, &var_terms, &mut func_decls);
     match formula_term {
-        Ok(term) => solver.assert_term(term),
+        Ok(term) => {
+            if let Err(e) = solver.try_assert_term(term) {
+                return Z4Result::Error(format!("Failed to assert formula: {}", e));
+            }
+        }
         Err(e) => return Z4Result::Error(format!("Failed to translate formula: {}", e)),
     }
 
@@ -1869,7 +1873,7 @@ fn translate_expr_to_z4(
 /// Convert an [`SmtSort`] to the z4 native [`z4::Sort`].
 #[cfg(feature = "z4")]
 fn smt_sort_to_z4(sort: &SmtSort) -> Result<z4::Sort, String> {
-    use z4::{Sort, BitVecSort, ArraySort};
+    use z4::{Sort, ArraySort};
     match sort {
         SmtSort::BitVec(w) => Ok(Sort::bitvec(*w)),
         SmtSort::Bool => Ok(Sort::Bool),
@@ -2429,7 +2433,7 @@ pub fn verify_with_chc(
     // 3. Configure the adaptive portfolio
     let timeout = Duration::from_millis(config.timeout_ms);
     let mut adaptive = AdaptiveConfig::with_budget(timeout, false);
-    adaptive.strict_proofs = true;
+    adaptive.validate = true;
 
     // 4. Solve
     let solver = AdaptivePortfolio::new(problem, adaptive);
