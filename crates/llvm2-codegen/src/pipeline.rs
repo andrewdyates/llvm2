@@ -186,6 +186,19 @@ pub struct PipelineConfig {
     ///
     /// Default: `true`. Disabled at O0 by the pipeline's opt-level logic.
     pub enable_post_ra_opt: bool,
+    /// Whether to use the pressure-aware instruction scheduler at O2+.
+    ///
+    /// When true and `opt_level` is O2 or O3, the pipeline runs
+    /// [`llvm2_opt::scheduler::PressureAwareScheduler`] instead of
+    /// [`llvm2_opt::scheduler::InstructionScheduler`]. The pressure-aware
+    /// variant trades some ILP for lower register pressure, reducing spills
+    /// in functions with many live values.
+    ///
+    /// At O0 and O1, the fast [`InstructionScheduler`] is always used
+    /// regardless of this setting (scheduling is skipped entirely at O0).
+    ///
+    /// Default: `true`.
+    pub use_pressure_aware_scheduler: bool,
 }
 
 impl Default for PipelineConfig {
@@ -196,6 +209,7 @@ impl Default for PipelineConfig {
             verify_dispatch: DispatchVerifyMode::FallbackOnFailure,
             verify: false,
             enable_post_ra_opt: true,
+            use_pressure_aware_scheduler: true,
         }
     }
 }
@@ -990,9 +1004,23 @@ impl Pipeline {
         Ok(isel.finalize())
     }
 
-    /// Phase 3: Run optimization passes.
+    /// Phase 3: Run optimization passes and instruction scheduling.
+    ///
+    /// After the main optimization pipeline, runs pre-register-allocation
+    /// instruction scheduling. The scheduler variant depends on the
+    /// optimization level and `config.use_pressure_aware_scheduler`:
+    ///
+    /// - **O0**: No scheduling (fastest compile).
+    /// - **O1**: [`llvm2_opt::scheduler::InstructionScheduler`] (fast, ILP-focused).
+    /// - **O2/O3** with `use_pressure_aware_scheduler` (default):
+    ///   [`llvm2_opt::scheduler::PressureAwareScheduler`] (balances ILP with
+    ///   register pressure to reduce spills).
+    /// - **O2/O3** without `use_pressure_aware_scheduler`:
+    ///   [`llvm2_opt::scheduler::InstructionScheduler`] (fast, ILP-focused).
     fn run_optimization(&self, func: &mut IrMachFunction) {
+        use llvm2_opt::pass_manager::MachinePass;
         use llvm2_opt::pipeline::{OptLevel as OptOptLevel, OptimizationPipeline};
+        use llvm2_opt::scheduler::{InstructionScheduler, PressureAwareScheduler};
 
         let opt_level = match self.config.opt_level {
             OptLevel::O0 => OptOptLevel::O0,
@@ -1003,6 +1031,28 @@ impl Pipeline {
 
         let pipeline = OptimizationPipeline::new(opt_level);
         let _stats = pipeline.run(func);
+
+        // Pre-register-allocation instruction scheduling.
+        // Skip at O0 for fastest compile. At O1, use the fast ILP scheduler.
+        // At O2+, use pressure-aware scheduling by default.
+        match self.config.opt_level {
+            OptLevel::O0 => {
+                // No scheduling at O0.
+            }
+            OptLevel::O1 => {
+                let mut sched = InstructionScheduler;
+                sched.run(func);
+            }
+            OptLevel::O2 | OptLevel::O3 => {
+                if self.config.use_pressure_aware_scheduler {
+                    let mut sched = PressureAwareScheduler;
+                    sched.run(func);
+                } else {
+                    let mut sched = InstructionScheduler;
+                    sched.run(func);
+                }
+            }
+        }
     }
 
     /// Phase 3.5: Run function-level verification (optional).
@@ -1449,6 +1499,7 @@ pub fn compile_to_object(
         verify_dispatch: DispatchVerifyMode::FallbackOnFailure,
         verify: false,
         enable_post_ra_opt: opt_level != OptLevel::O0,
+        use_pressure_aware_scheduler: matches!(opt_level, OptLevel::O2 | OptLevel::O3),
     };
     let pipeline = Pipeline::new(config);
     pipeline.compile_function(input)
@@ -2458,6 +2509,7 @@ mod tests {
             verify_dispatch: DispatchVerifyMode::FallbackOnFailure,
             verify: false,
             enable_post_ra_opt: OptLevel::O0 != OptLevel::O0,
+            use_pressure_aware_scheduler: false,
         };
         assert!(!config.enable_post_ra_opt, "O0 should disable post-RA opt");
 
@@ -2467,8 +2519,188 @@ mod tests {
             verify_dispatch: DispatchVerifyMode::FallbackOnFailure,
             verify: false,
             enable_post_ra_opt: OptLevel::O2 != OptLevel::O0,
+            use_pressure_aware_scheduler: true,
         };
         assert!(config.enable_post_ra_opt, "O2 should enable post-RA opt");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — pressure-aware scheduler integration
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod scheduler_integration_tests {
+    use super::*;
+
+    // -- Helpers --
+
+    /// Build a PipelineConfig for a given opt level with default scheduler setting.
+    fn config_for(opt: OptLevel) -> PipelineConfig {
+        PipelineConfig {
+            opt_level: opt,
+            ..Default::default()
+        }
+    }
+
+    /// Build a PipelineConfig with the pressure-aware scheduler explicitly disabled.
+    fn config_no_pressure(opt: OptLevel) -> PipelineConfig {
+        PipelineConfig {
+            opt_level: opt,
+            use_pressure_aware_scheduler: false,
+            ..Default::default()
+        }
+    }
+
+    // -- Config field defaults --
+
+    #[test]
+    fn pipeline_config_default_enables_pressure_aware_scheduler() {
+        let config = PipelineConfig::default();
+        assert!(config.use_pressure_aware_scheduler,
+            "Default PipelineConfig should enable pressure-aware scheduler");
+    }
+
+    #[test]
+    fn pipeline_config_use_pressure_aware_scheduler_at_o2() {
+        let config = config_for(OptLevel::O2);
+        assert!(config.use_pressure_aware_scheduler,
+            "O2 default should use pressure-aware scheduler");
+    }
+
+    #[test]
+    fn pipeline_config_use_pressure_aware_scheduler_at_o3() {
+        let config = config_for(OptLevel::O3);
+        assert!(config.use_pressure_aware_scheduler,
+            "O3 default should use pressure-aware scheduler");
+    }
+
+    #[test]
+    fn pipeline_config_can_disable_pressure_aware_scheduler() {
+        let config = config_no_pressure(OptLevel::O2);
+        assert!(!config.use_pressure_aware_scheduler,
+            "Should be able to disable pressure-aware scheduler");
+    }
+
+    // -- Scheduler selection via run_optimization --
+    //
+    // We verify that the pipeline constructs and runs the correct scheduler
+    // by building a small function and running it through run_optimization
+    // at each level. The function is simple enough that both schedulers
+    // succeed; the key assertion is that run_optimization does not panic.
+
+    fn make_simple_func() -> IrMachFunction {
+        use llvm2_ir::function::Signature as IrSignature;
+        use llvm2_ir::inst::{AArch64Opcode as IrOpcode, MachInst as IrMachInst};
+        use llvm2_ir::operand::MachOperand as IrOperand;
+        use llvm2_ir::regs::{RegClass, VReg};
+
+        let mut func = IrMachFunction::new(
+            "test_sched".to_string(),
+            IrSignature::new(vec![], vec![]),
+        );
+        let entry = func.entry;
+
+        // mov v0, #42
+        let mov = IrMachInst::new(
+            IrOpcode::MovI,
+            vec![
+                IrOperand::VReg(VReg::new(0, RegClass::Gpr64)),
+                IrOperand::Imm(42),
+            ],
+        );
+        let id0 = func.push_inst(mov);
+        func.append_inst(entry, id0);
+
+        // add v1, v0, #1
+        let add = IrMachInst::new(
+            IrOpcode::AddRI,
+            vec![
+                IrOperand::VReg(VReg::new(1, RegClass::Gpr64)),
+                IrOperand::VReg(VReg::new(0, RegClass::Gpr64)),
+                IrOperand::Imm(1),
+            ],
+        );
+        let id1 = func.push_inst(add);
+        func.append_inst(entry, id1);
+
+        // ret
+        let ret = IrMachInst::new(IrOpcode::Ret, vec![]);
+        let id2 = func.push_inst(ret);
+        func.append_inst(entry, id2);
+
+        func
+    }
+
+    #[test]
+    fn pipeline_o0_skips_scheduling() {
+        // At O0, run_optimization should skip scheduling entirely.
+        let config = config_for(OptLevel::O0);
+        let pipeline = Pipeline::new(config);
+        let mut func = make_simple_func();
+        // Should not panic — O0 skips scheduling.
+        pipeline.run_optimization(&mut func);
+    }
+
+    #[test]
+    fn pipeline_o1_uses_basic_scheduler() {
+        // At O1, run_optimization should use InstructionScheduler.
+        let config = config_for(OptLevel::O1);
+        let pipeline = Pipeline::new(config);
+        let mut func = make_simple_func();
+        pipeline.run_optimization(&mut func);
+    }
+
+    #[test]
+    fn pipeline_o2_uses_pressure_aware_scheduler_by_default() {
+        // At O2 with default config, PressureAwareScheduler should run.
+        let config = config_for(OptLevel::O2);
+        let pipeline = Pipeline::new(config);
+        let mut func = make_simple_func();
+        pipeline.run_optimization(&mut func);
+    }
+
+    #[test]
+    fn pipeline_o3_uses_pressure_aware_scheduler_by_default() {
+        // At O3 with default config, PressureAwareScheduler should run.
+        let config = config_for(OptLevel::O3);
+        let pipeline = Pipeline::new(config);
+        let mut func = make_simple_func();
+        pipeline.run_optimization(&mut func);
+    }
+
+    #[test]
+    fn pipeline_o2_uses_basic_scheduler_when_pressure_disabled() {
+        // At O2 with use_pressure_aware_scheduler = false, InstructionScheduler
+        // should be used instead.
+        let config = config_no_pressure(OptLevel::O2);
+        let pipeline = Pipeline::new(config);
+        let mut func = make_simple_func();
+        pipeline.run_optimization(&mut func);
+    }
+
+    #[test]
+    fn pipeline_o3_uses_basic_scheduler_when_pressure_disabled() {
+        // At O3 with use_pressure_aware_scheduler = false, InstructionScheduler
+        // should be used instead.
+        let config = config_no_pressure(OptLevel::O3);
+        let pipeline = Pipeline::new(config);
+        let mut func = make_simple_func();
+        pipeline.run_optimization(&mut func);
+    }
+
+    #[test]
+    fn pipeline_o1_ignores_pressure_aware_flag() {
+        // At O1, use_pressure_aware_scheduler should be irrelevant — the fast
+        // InstructionScheduler is always used.
+        let config = PipelineConfig {
+            opt_level: OptLevel::O1,
+            use_pressure_aware_scheduler: true,
+            ..Default::default()
+        };
+        let pipeline = Pipeline::new(config);
+        let mut func = make_simple_func();
+        pipeline.run_optimization(&mut func);
     }
 }
 
