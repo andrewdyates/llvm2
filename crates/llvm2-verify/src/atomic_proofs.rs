@@ -872,6 +872,189 @@ pub fn proof_atomic_store_non_interference_i64() -> ProofObligation {
 }
 
 // ---------------------------------------------------------------------------
+// Atomic RMW non-interference
+// ---------------------------------------------------------------------------
+
+/// Build a non-interference proof for atomic RMW: an RMW at addr_a
+/// does not affect the value loaded from addr_b.
+///
+/// Atomic RMW instructions (LDADD, LDSET, LDEOR, SWP, LDCLR) perform
+/// a load-modify-store at addr_a. We verify the value at a disjoint
+/// addr_b is unchanged. The same preconditions as store non-interference
+/// apply:
+///   0. addr_a != addr_b (distinct addresses)
+///   1. addr_a + size does not wrap
+///   2. addr_b + size does not wrap
+///   3. addr_b >= addr_a + size (no overlap)
+fn proof_atomic_rmw_non_interference<F>(
+    name: &str,
+    size_bytes: u32,
+    op: F,
+) -> ProofObligation
+where
+    F: FnOnce(SmtExpr, SmtExpr) -> SmtExpr,
+{
+    let result_width = size_bytes * 8;
+    let mem = symbolic_memory("mem_default");
+    let addr_a = SmtExpr::var("addr_a", 64);
+    let addr_b = SmtExpr::var("addr_b", 64);
+    let operand = SmtExpr::var("operand", result_width);
+
+    let size = SmtExpr::bv_const(size_bytes as u64, 64);
+    let max_safe = SmtExpr::bv_const(u64::MAX - (size_bytes as u64) + 1, 64);
+
+    // Precondition 0: addresses are distinct
+    let precond_distinct = addr_a.clone().eq_expr(addr_b.clone()).not_expr();
+    // Precondition 1: addr_a doesn't wrap on +size
+    let precond_a_safe = SmtExpr::bvuge(max_safe.clone(), addr_a.clone());
+    // Precondition 2: addr_b doesn't wrap on +size
+    let precond_b_safe = SmtExpr::bvuge(max_safe, addr_b.clone());
+    // Precondition 3: B starts after A's region ends
+    let a_plus_size = addr_a.clone().bvadd(size);
+    let precond_disjoint = SmtExpr::bvuge(addr_b.clone(), a_plus_size);
+
+    // Value at B before the RMW at A
+    let before = encode_load_le(&mem, &addr_b, size_bytes);
+
+    // Perform the RMW at addr_a: load old, compute new, store new
+    let (_old_value, mem_after) = encode_atomic_rmw(&mem, &addr_a, &operand, size_bytes, op);
+
+    // Value at B after the RMW at A
+    let after = encode_load_le(&mem_after, &addr_b, size_bytes);
+
+    ProofObligation {
+        name: name.to_string(),
+        tmir_expr: before,
+        aarch64_expr: after,
+        inputs: vec![
+            ("addr_a".to_string(), 64),
+            ("addr_b".to_string(), 64),
+            ("operand".to_string(), result_width),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![precond_distinct, precond_a_safe, precond_b_safe, precond_disjoint],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: LDADD at addr A does not affect memory at addr B (32-bit).
+pub fn proof_ldadd_non_interference_i32() -> ProofObligation {
+    proof_atomic_rmw_non_interference(
+        "LDADD_I32: non-interference (RMW at A, read at B unchanged)",
+        4,
+        |old, op| old.bvadd(op),
+    )
+}
+
+/// Proof: LDADD at addr A does not affect memory at addr B (64-bit).
+pub fn proof_ldadd_non_interference_i64() -> ProofObligation {
+    proof_atomic_rmw_non_interference(
+        "LDADD_I64: non-interference (RMW at A, read at B unchanged)",
+        8,
+        |old, op| old.bvadd(op),
+    )
+}
+
+/// Proof: SWP at addr A does not affect memory at addr B (32-bit).
+pub fn proof_swp_non_interference_i32() -> ProofObligation {
+    proof_atomic_rmw_non_interference(
+        "SWP_I32: non-interference (RMW at A, read at B unchanged)",
+        4,
+        |_old, op| op,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// CAS non-interference
+// ---------------------------------------------------------------------------
+
+/// Build a non-interference proof for CAS: a successful CAS at addr_a
+/// does not affect the value loaded from addr_b.
+///
+/// CAS performs a conditional store: if *addr_a == expected, then
+/// *addr_a = desired. On the success path (the only path that modifies
+/// memory), we verify the value at disjoint addr_b is unchanged.
+///
+/// Same preconditions apply:
+///   0. addr_a != addr_b (distinct addresses)
+///   1. addr_a + size does not wrap
+///   2. addr_b + size does not wrap
+///   3. addr_b >= addr_a + size (no overlap)
+fn proof_cas_non_interference(name: &str, size_bytes: u32) -> ProofObligation {
+    let result_width = size_bytes * 8;
+    let mem = symbolic_memory("mem_default");
+    let addr_a = SmtExpr::var("addr_a", 64);
+    let addr_b = SmtExpr::var("addr_b", 64);
+    let expected = SmtExpr::var("expected", result_width);
+    let desired = SmtExpr::var("desired", result_width);
+
+    let size = SmtExpr::bv_const(size_bytes as u64, 64);
+    let max_safe = SmtExpr::bv_const(u64::MAX - (size_bytes as u64) + 1, 64);
+
+    // Precondition 0: addresses are distinct
+    let precond_distinct = addr_a.clone().eq_expr(addr_b.clone()).not_expr();
+    // Precondition 1: addr_a doesn't wrap on +size
+    let precond_a_safe = SmtExpr::bvuge(max_safe.clone(), addr_a.clone());
+    // Precondition 2: addr_b doesn't wrap on +size
+    let precond_b_safe = SmtExpr::bvuge(max_safe, addr_b.clone());
+    // Precondition 3: B starts after A's region ends
+    let a_plus_size = addr_a.clone().bvadd(size);
+    let precond_disjoint = SmtExpr::bvuge(addr_b.clone(), a_plus_size);
+
+    // CAS success precondition: *addr_a == expected
+    let old_value = encode_load_le(&mem, &addr_a, size_bytes);
+    let precond_cas_match = old_value.eq_expr(expected.clone());
+
+    // Value at B before CAS at A
+    let before = encode_load_le(&mem, &addr_b, size_bytes);
+
+    // CAS success: store desired at addr_a
+    let mem_after = encode_store_le(&mem, &addr_a, &desired, size_bytes);
+
+    // Value at B after CAS at A
+    let after = encode_load_le(&mem_after, &addr_b, size_bytes);
+
+    ProofObligation {
+        name: name.to_string(),
+        tmir_expr: before,
+        aarch64_expr: after,
+        inputs: vec![
+            ("addr_a".to_string(), 64),
+            ("addr_b".to_string(), 64),
+            ("expected".to_string(), result_width),
+            ("desired".to_string(), result_width),
+            ("mem_default".to_string(), 8),
+        ],
+        preconditions: vec![
+            precond_distinct,
+            precond_a_safe,
+            precond_b_safe,
+            precond_disjoint,
+            precond_cas_match,
+        ],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: CAS at addr A does not affect memory at addr B (32-bit).
+pub fn proof_cas_non_interference_i32() -> ProofObligation {
+    proof_cas_non_interference(
+        "CAS_I32: non-interference (CAS at A, read at B unchanged)",
+        4,
+    )
+}
+
+/// Proof: CAS at addr A does not affect memory at addr B (64-bit).
+pub fn proof_cas_non_interference_i64() -> ProofObligation {
+    proof_cas_non_interference(
+        "CAS_I64: non-interference (CAS at A, read at B unchanged)",
+        8,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Registry: all atomic proofs
 // ---------------------------------------------------------------------------
 
@@ -954,6 +1137,11 @@ pub fn all_atomic_non_interference_proofs() -> Vec<ProofObligation> {
     vec![
         proof_atomic_store_non_interference_i32(),
         proof_atomic_store_non_interference_i64(),
+        proof_ldadd_non_interference_i32(),
+        proof_ldadd_non_interference_i64(),
+        proof_swp_non_interference_i32(),
+        proof_cas_non_interference_i32(),
+        proof_cas_non_interference_i64(),
     ]
 }
 
@@ -967,9 +1155,9 @@ pub fn all_atomic_non_interference_proofs() -> Vec<ProofObligation> {
 /// - 3 fence proofs (DMB ISH, ISHLD, ISHST)
 /// - 2 SUB via NEG+LDADD proofs (I32, I64)
 /// - 2 AND via MVN+LDCLR proofs (I32, I64)
-/// - 2 non-interference proofs (I32, I64)
+/// - 7 non-interference proofs (store I32/I64, LDADD I32/I64, SWP I32, CAS I32/I64)
 ///
-/// Total: 34 proofs.
+/// Total: 39 proofs.
 pub fn all_atomic_proofs() -> Vec<ProofObligation> {
     let mut proofs = Vec::new();
     proofs.extend(all_atomic_load_proofs());
@@ -1279,6 +1467,41 @@ mod tests {
             "Atomic store at A should not affect read at B (I64)");
     }
 
+    #[test]
+    fn test_ldadd_non_interference_i32() {
+        let p = proof_ldadd_non_interference_i32();
+        assert!(matches!(verify_by_evaluation(&p), VerificationResult::Valid),
+            "LDADD at A should not affect read at B (I32)");
+    }
+
+    #[test]
+    fn test_ldadd_non_interference_i64() {
+        let p = proof_ldadd_non_interference_i64();
+        assert!(matches!(verify_by_evaluation(&p), VerificationResult::Valid),
+            "LDADD at A should not affect read at B (I64)");
+    }
+
+    #[test]
+    fn test_swp_non_interference_i32() {
+        let p = proof_swp_non_interference_i32();
+        assert!(matches!(verify_by_evaluation(&p), VerificationResult::Valid),
+            "SWP at A should not affect read at B (I32)");
+    }
+
+    #[test]
+    fn test_cas_non_interference_i32() {
+        let p = proof_cas_non_interference_i32();
+        assert!(matches!(verify_by_evaluation(&p), VerificationResult::Valid),
+            "CAS at A should not affect read at B (I32)");
+    }
+
+    #[test]
+    fn test_cas_non_interference_i64() {
+        let p = proof_cas_non_interference_i64();
+        assert!(matches!(verify_by_evaluation(&p), VerificationResult::Valid),
+            "CAS at A should not affect read at B (I64)");
+    }
+
     // -----------------------------------------------------------------------
     // Registry tests
     // -----------------------------------------------------------------------
@@ -1286,8 +1509,8 @@ mod tests {
     #[test]
     fn test_all_atomic_proofs_count() {
         let proofs = all_atomic_proofs();
-        assert_eq!(proofs.len(), 34,
-            "expected 34 atomic proofs, got {}", proofs.len());
+        assert_eq!(proofs.len(), 39,
+            "expected 39 atomic proofs, got {}", proofs.len());
     }
 
     #[test]
