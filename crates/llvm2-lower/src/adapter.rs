@@ -448,6 +448,16 @@ struct TmirAdapter<'a> {
 
     /// Function name table: FuncId -> name, for resolving call targets.
     func_names: HashMap<FuncId, String>,
+
+    /// Pending phi copy instructions to insert into predecessor blocks.
+    ///
+    /// Explicit `Phi { incoming }` instructions need copies placed in each
+    /// predecessor block (same as block parameter passing). Since predecessors
+    /// may already be translated when a phi is encountered, we collect the
+    /// copies here and insert them in a post-pass after all blocks are done.
+    ///
+    /// Each entry: (predecessor tMIR BlockId, source Value, destination Value).
+    pending_phi_copies: Vec<(BlockId, Value, Value)>,
 }
 
 impl<'a> TmirAdapter<'a> {
@@ -461,6 +471,7 @@ impl<'a> TmirAdapter<'a> {
             proof_ctx: ProofContext::default(),
             tmir_func: None,
             func_names,
+            pending_phi_copies: Vec::new(),
         }
     }
 
@@ -631,6 +642,37 @@ impl<'a> TmirAdapter<'a> {
             let block_id = self.map_block(tmir_block.id);
             let basic_block = self.translate_block(tmir_block)?;
             lir_func.blocks.insert(block_id, basic_block);
+        }
+
+        // Post-pass: insert pending phi copies into predecessor blocks.
+        //
+        // Explicit Phi instructions were lowered to copies that need to be
+        // placed at the end of each predecessor block (before terminators).
+        // This mirrors how `resolve_block_args` handles block parameters.
+        for (pred_tmir_block, src, dst) in std::mem::take(&mut self.pending_phi_copies) {
+            let pred_lir_block = self.map_block(pred_tmir_block);
+            if let Some(pred_bb) = lir_func.blocks.get_mut(&pred_lir_block) {
+                let copy_inst = Instruction {
+                    opcode: Opcode::Iadd, // single-arg Iadd = COPY (same as resolve_block_args)
+                    args: vec![src],
+                    results: vec![dst],
+                };
+                // Insert before the terminator. Find the last instruction
+                // that is a control-flow terminator and insert before it.
+                let term_pos = pred_bb.instructions.iter().rposition(|inst| {
+                    matches!(
+                        inst.opcode,
+                        Opcode::Jump { .. }
+                            | Opcode::Brif { .. }
+                            | Opcode::Return
+                            | Opcode::Invoke { .. }
+                    )
+                });
+                match term_pos {
+                    Some(pos) => pred_bb.instructions.insert(pos, copy_inst),
+                    None => pred_bb.instructions.push(copy_inst),
+                }
+            }
         }
 
         Ok((lir_func, self.proof_ctx.clone()))
@@ -1352,20 +1394,22 @@ impl<'a> TmirAdapter<'a> {
     ) -> Result<Vec<Instruction>, AdapterError> {
         // Phi nodes: tMIR uses block parameters for phis (the canonical form).
         // Explicit Phi instructions are redundant with block params but may appear.
-        // Translate as a series of conditional moves (placeholder).
+        //
+        // We lower them the same way block parameters are handled: emit a copy
+        // instruction in each predecessor block that moves the incoming value
+        // into the phi result. This is collected in `pending_phi_copies` and
+        // inserted into predecessor blocks after all blocks are translated
+        // (since predecessors may not exist yet during forward translation).
         let result = self.map_result(results)?;
-        let args: Vec<Value> = incoming.iter().map(|(_, vid)| self.map_value(*vid)).collect();
 
-        // If there are incoming values, use the first as default.
-        if let Some(&first) = args.first() {
-            Ok(vec![Instruction {
-                opcode: Opcode::Iadd, // placeholder for phi/copy
-                args: vec![first],
-                results: vec![result],
-            }])
-        } else {
-            Ok(vec![])
+        for &(pred_block, vid) in incoming {
+            let src = self.map_value(vid);
+            self.pending_phi_copies.push((pred_block, src, result));
         }
+
+        // No instructions emitted in the merge block itself — the copies
+        // go into predecessor blocks via the post-pass in translate().
+        Ok(vec![])
     }
 
     // -----------------------------------------------------------------------
