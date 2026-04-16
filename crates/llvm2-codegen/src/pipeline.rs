@@ -509,7 +509,28 @@ fn encode_ir_inst(inst: &IrMachInst) -> Result<u32, PipelineError> {
 ///
 /// Walks blocks in layout order, encoding each non-pseudo instruction.
 pub fn encode_function(func: &IrMachFunction) -> Result<Vec<u8>, PipelineError> {
+    let (code, _fixups) = encode_function_with_fixups(func)?;
+    Ok(code)
+}
+
+/// Encode all instructions in a function to machine code bytes, collecting
+/// fixups for cross-function references.
+///
+/// When a BL/B instruction has a [`Symbol`](IrOperand::Symbol) operand instead
+/// of an immediate, the encoder emits a placeholder (`BL 0`) and records a
+/// [`Fixup`](crate::macho::fixup::Fixup) with a `Branch26` relocation kind.
+/// The caller (typically [`Pipeline::compile_module`]) resolves these fixups
+/// into relocations for the linker.
+///
+/// Returns `(code_bytes, fixup_list)`.
+pub fn encode_function_with_fixups(
+    func: &IrMachFunction,
+) -> Result<(Vec<u8>, crate::macho::fixup::FixupList), PipelineError> {
+    use crate::macho::fixup::{Fixup, FixupList};
+    use llvm2_ir::inst::AArch64Opcode;
+
     let mut code = Vec::new();
+    let mut fixups = FixupList::new();
 
     for &block_id in &func.block_order {
         let block = func.block(block_id);
@@ -519,12 +540,36 @@ pub fn encode_function(func: &IrMachFunction) -> Result<Vec<u8>, PipelineError> 
             if inst.is_pseudo() {
                 continue;
             }
-            let word = encode_ir_inst(inst)?;
-            code.extend_from_slice(&word.to_le_bytes());
+
+            let byte_offset = code.len() as u32;
+
+            // Check for BL/B with Symbol operand — needs a relocation fixup.
+            let has_symbol_target = matches!(
+                inst.opcode,
+                AArch64Opcode::Bl | AArch64Opcode::BL | AArch64Opcode::B
+            ) && inst.operands.first().map_or(false, |op| op.is_symbol());
+
+            if has_symbol_target {
+                // Emit BL/B with imm26=0 (placeholder — linker will patch via relocation).
+                let op_bit = match inst.opcode {
+                    AArch64Opcode::B => 0u32,
+                    _ => 1u32, // Bl and BL are both BL
+                };
+                let placeholder = crate::aarch64::encoding::encode_uncond_branch(op_bit, 0);
+                code.extend_from_slice(&placeholder.to_le_bytes());
+
+                // Record a Branch26 fixup. The symbol name is stored in the fixup
+                // target — the module-level emitter resolves it to a symbol index.
+                let sym_name = inst.operands[0].as_symbol().unwrap();
+                fixups.push(Fixup::branch_sym(byte_offset, sym_name.to_string()));
+            } else {
+                let word = encode_ir_inst(inst)?;
+                code.extend_from_slice(&word.to_le_bytes());
+            }
         }
     }
 
-    Ok(code)
+    Ok((code, fixups))
 }
 
 // ---------------------------------------------------------------------------
@@ -735,6 +780,84 @@ impl Pipeline {
         let obj_bytes = self.emit_macho(&ir_func.name, &code, Some(&frame_layout), lsda.as_deref());
 
         Ok(obj_bytes)
+    }
+
+    /// Compile multiple pre-built IR functions into a single Mach-O .o file.
+    ///
+    /// All functions are concatenated into one `__text` section. Cross-function
+    /// BL/B instructions with [`Symbol`](IrOperand::Symbol) operands are resolved
+    /// into `ARM64_RELOC_BRANCH26` relocations, allowing the linker (or a
+    /// subsequent static link step) to patch the call targets.
+    ///
+    /// This is the correct path for producing .o files with multiple functions —
+    /// unlike [`compile_function`](Self::compile_function) which produces one .o
+    /// per function and cannot represent cross-function calls.
+    ///
+    /// Each function must already be in post-regalloc, post-frame-lowering state
+    /// (physical registers, branches resolved). The caller can prepare functions
+    /// using the pipeline's individual phases or by building IR directly.
+    pub fn compile_module(
+        &self,
+        functions: &[IrMachFunction],
+    ) -> Result<Vec<u8>, PipelineError> {
+        use crate::macho::MachOWriter;
+        use crate::macho::fixup::FixupList;
+        use crate::macho::reloc::Relocation;
+
+        // Phase 1: Encode each function, collecting code bytes and fixups.
+        // Track each function's byte offset within the combined __text section.
+        let mut combined_code = Vec::new();
+        let mut combined_fixups = FixupList::new();
+        let mut func_offsets: Vec<(String, u64)> = Vec::new(); // (name, byte_offset)
+
+        for func in functions {
+            let func_start = combined_code.len() as u64;
+            func_offsets.push((func.name.clone(), func_start));
+
+            let (code, fixups) = encode_function_with_fixups(func)?;
+
+            // Adjust fixup offsets to be relative to the combined section.
+            for fixup in fixups.iter() {
+                let mut adjusted = fixup.clone();
+                adjusted.offset += func_start as u32;
+                combined_fixups.push(adjusted);
+            }
+
+            combined_code.extend_from_slice(&code);
+        }
+
+        // Phase 2: Build the MachOWriter with combined code and symbols.
+        let mut writer = MachOWriter::new();
+        writer.add_text_section(&combined_code);
+
+        // Add function symbols (Mach-O convention: _prefix).
+        // Track symbol indices for fixup resolution.
+        let mut symbol_map: HashMap<String, u32> = HashMap::new();
+        for (i, (name, offset)) in func_offsets.iter().enumerate() {
+            let symbol_name = format!("_{}", name);
+            writer.add_symbol(&symbol_name, 1, *offset, true);
+            // Symbol index in the nlist array matches insertion order.
+            symbol_map.insert(name.clone(), i as u32);
+            // Also index by the mangled name for external references.
+            symbol_map.insert(symbol_name, i as u32);
+        }
+
+        // Phase 3: Resolve named symbol fixups to numeric indices, then
+        // convert fixups to relocations.
+        combined_fixups.resolve_named_symbols(|name| {
+            // Try bare name first (e.g., "func_b"), then mangled ("_func_b").
+            symbol_map.get(name).copied().or_else(|| {
+                let mangled = format!("_{}", name);
+                symbol_map.get(&mangled).copied()
+            })
+        });
+
+        let relocations = combined_fixups.resolve_to_relocations();
+        for reloc in relocations {
+            writer.add_relocation(0, reloc); // section 0 = __text
+        }
+
+        Ok(writer.write())
     }
 
     // --- Phase implementations ---
