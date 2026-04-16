@@ -142,6 +142,54 @@ pub fn encode_fneg(_size: FPSize, rn: SmtExpr) -> SmtExpr {
     rn.fp_neg()
 }
 
+/// Encode `FDIV Sd, Sn, Sm` or `FDIV Dd, Dn, Dm` -- floating-point divide.
+///
+/// Semantics: `Fd = Fn / Fm` using RNE rounding mode.
+/// Reference: ARM DDI 0487, C7.2.77 FDIV (scalar).
+pub fn encode_fdiv_rr(_size: FPSize, rn: SmtExpr, rm: SmtExpr) -> SmtExpr {
+    use crate::smt::RoundingMode;
+    SmtExpr::fp_div(RoundingMode::RNE, rn, rm)
+}
+
+/// Encode `FCMP Sn, Sm` / `FCMP Dn, Dm` + condition code extraction.
+///
+/// AArch64 FCMP sets NZCV flags; the condition code determines the boolean
+/// result. This function returns a 1-bit bitvector: `bv1(1)` if the
+/// condition holds, `bv1(0)` otherwise.
+///
+/// All 14 `FloatCC` variants are supported, covering both ordered (false
+/// when NaN) and unordered (true when NaN) comparisons.
+///
+/// Reference: ARM DDI 0487, C7.2.76 FCMP (scalar).
+pub fn encode_fcmp(_size: FPSize, rn: SmtExpr, rm: SmtExpr, cond: &llvm2_lower::instructions::FloatCC) -> SmtExpr {
+    use llvm2_lower::instructions::FloatCC;
+
+    let a_nan = rn.clone().fp_is_nan();
+    let b_nan = rm.clone().fp_is_nan();
+    let either_nan = a_nan.clone().or_expr(b_nan.clone());
+
+    let bool_result = match cond {
+        // Ordered comparisons (false when NaN)
+        FloatCC::Equal => rn.fp_eq(rm),
+        FloatCC::NotEqual => rn.fp_eq(rm).not_expr(),
+        FloatCC::LessThan => rn.fp_lt(rm),
+        FloatCC::LessThanOrEqual => rn.fp_le(rm),
+        FloatCC::GreaterThan => rn.fp_gt(rm),
+        FloatCC::GreaterThanOrEqual => rn.fp_ge(rm),
+        FloatCC::Ordered => a_nan.not_expr().and_expr(b_nan.not_expr()),
+        FloatCC::Unordered => either_nan,
+        // Unordered comparisons (true when NaN)
+        FloatCC::UnorderedEqual => rn.fp_eq(rm).or_expr(either_nan),
+        FloatCC::UnorderedNotEqual => rn.fp_eq(rm).not_expr().or_expr(either_nan),
+        FloatCC::UnorderedLessThan => rn.fp_lt(rm).or_expr(either_nan),
+        FloatCC::UnorderedLessThanOrEqual => rn.fp_le(rm).or_expr(either_nan),
+        FloatCC::UnorderedGreaterThan => rn.fp_gt(rm).or_expr(either_nan),
+        FloatCC::UnorderedGreaterThanOrEqual => rn.fp_ge(rm).or_expr(either_nan),
+    };
+
+    SmtExpr::ite(bool_result, SmtExpr::bv_const(1, 1), SmtExpr::bv_const(0, 1))
+}
+
 // ---------------------------------------------------------------------------
 // Bitwise instruction semantics
 // ---------------------------------------------------------------------------
@@ -368,6 +416,84 @@ mod tests {
         let expr = encode_fneg(FPSize::Double, a);
         let result = expr.try_eval(&env(&[])).unwrap();
         assert_eq!(result, EvalResult::Float(100.0));
+    }
+
+    #[test]
+    fn test_fdiv_single() {
+        let a = SmtExpr::fp32_const(10.0f32);
+        let b = SmtExpr::fp32_const(4.0f32);
+        let expr = encode_fdiv_rr(FPSize::Single, a, b);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Float(2.5));
+    }
+
+    #[test]
+    fn test_fdiv_double() {
+        let a = SmtExpr::fp64_const(10.0);
+        let b = SmtExpr::fp64_const(4.0);
+        let expr = encode_fdiv_rr(FPSize::Double, a, b);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Float(2.5));
+    }
+
+    #[test]
+    fn test_fcmp_eq_true() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(1.0);
+        let expr = encode_fcmp(FPSize::Double, a, b, &FloatCC::Equal);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Bv(1));
+    }
+
+    #[test]
+    fn test_fcmp_eq_false() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let expr = encode_fcmp(FPSize::Double, a, b, &FloatCC::Equal);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Bv(0));
+    }
+
+    #[test]
+    fn test_fcmp_lt_true() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let expr = encode_fcmp(FPSize::Double, a, b, &FloatCC::LessThan);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Bv(1));
+    }
+
+    #[test]
+    fn test_fcmp_gt_true() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp64_const(3.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let expr = encode_fcmp(FPSize::Double, a, b, &FloatCC::GreaterThan);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Bv(1));
+    }
+
+    #[test]
+    fn test_fcmp_ordered_no_nan() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let expr = encode_fcmp(FPSize::Double, a, b, &FloatCC::Ordered);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Bv(1));
+    }
+
+    #[test]
+    fn test_fcmp_unordered_no_nan() {
+        use llvm2_lower::instructions::FloatCC;
+        let a = SmtExpr::fp64_const(1.0);
+        let b = SmtExpr::fp64_const(2.0);
+        let expr = encode_fcmp(FPSize::Double, a, b, &FloatCC::Unordered);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Bv(0));
     }
 
     #[test]

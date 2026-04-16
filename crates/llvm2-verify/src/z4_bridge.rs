@@ -4035,10 +4035,10 @@ mod tests {
         verify_category_batch(ProofCategory::Division, 4);
     }
 
-    /// Verify all floating-point lowering proofs (fadd/fsub/fmul/fneg F32/F64) through z3.
+    /// Verify all floating-point lowering proofs (fadd/fsub/fmul/fdiv/fneg/fcmp F32/F64) through z3.
     #[test]
     fn test_z4_batch_verify_floating_point_proofs() {
-        verify_category_batch(ProofCategory::FloatingPoint, 8);
+        verify_category_batch(ProofCategory::FloatingPoint, 38);
     }
 
     /// Verify all general optimization pass proofs through z3.
