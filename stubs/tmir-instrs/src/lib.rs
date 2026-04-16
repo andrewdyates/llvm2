@@ -6,6 +6,19 @@
 // This is a development stub. The real tMIR crate (ayates_dbx/tMIR) defines
 // the full instruction set. This stub provides the ~25 core instructions
 // needed by LLVM2's instruction selector.
+//
+// Operand model: The real tMIR uses Operand (Value | Constant) for instruction
+// inputs, matching how SSA IRs carry inline constants. Our stub mirrors this
+// model so the adapter layer can handle both value references and inline
+// constants uniformly. See ~/tMIR/crates/tmir-instrs/src/lib.rs for reference.
+//
+// Key differences from real tMIR that are intentional LLVM2 extensions:
+//   - InstrNode wrapper: carries proof annotations (real tMIR has no proofs)
+//   - Atomic instructions: AtomicLoad/Store/Rmw/CmpXchg/Fence
+//   - Select instruction: branchless conditional (real tMIR uses control flow)
+//   - GetElementPtr: typed pointer arithmetic (real tMIR uses Index)
+//   - Const/FConst instructions: kept for backward compat, prefer Operand::Constant
+//   - Signed/unsigned op variants: SDiv/UDiv, Slt/Ult, etc. (real tMIR is simpler)
 
 #![allow(dead_code)]
 
@@ -13,6 +26,11 @@ use serde::{Deserialize, Serialize};
 use tmir_types::{BlockId, FuncId, TmirProof, Ty, ValueId};
 
 /// Binary arithmetic/logic operations.
+///
+/// Note: Real tMIR uses simpler variants (Div instead of SDiv/UDiv, Shr instead
+/// of AShr/LShr). Our stub preserves the signed/unsigned distinction because the
+/// adapter and ISel need it for correct AArch64 lowering. The adapter maps
+/// real tMIR's Div/Rem/Shr based on the operand type's signedness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BinOp {
     Add,
@@ -35,6 +53,9 @@ pub enum BinOp {
 }
 
 /// Unary operations.
+///
+/// Note: Real tMIR has only Neg and Not. FNeg/FAbs/FSqrt are LLVM2 extensions
+/// for float-specific operations that the ISel needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UnOp {
     Neg,
@@ -45,6 +66,9 @@ pub enum UnOp {
 }
 
 /// Integer/float comparison predicates.
+///
+/// Note: Real tMIR has simpler predicates (Lt/Le/Gt/Ge without signed/unsigned
+/// distinction, no float comparisons). The adapter maps based on operand type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CmpOp {
     Eq,
@@ -74,6 +98,9 @@ pub enum CmpOp {
 }
 
 /// Type cast operations.
+///
+/// Note: Real tMIR has simpler cast ops (IntToFloat/FloatToInt without
+/// signed/unsigned distinction). The adapter maps based on source type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CastOp {
     /// Zero-extend integer.
@@ -134,6 +161,101 @@ pub enum AtomicRmwOp {
     Xchg,
 }
 
+// ---------------------------------------------------------------------------
+// Operand model (aligned with real tMIR)
+// ---------------------------------------------------------------------------
+
+/// A constant value (inline in an operand, not a separate instruction).
+///
+/// In the real tMIR, constants are carried inline within Operand::Constant
+/// rather than as separate Const/FConst instructions. This stub mirrors that
+/// model. The adapter layer resolves Operand::Constant to LIR Iconst/Fconst
+/// instructions during lowering.
+///
+/// Reference: ~/tMIR/crates/tmir-instrs/src/lib.rs (Constant enum)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Constant {
+    /// Integer constant with type. Uses i128 to match real tMIR (not i64).
+    Int { value: i128, ty: Ty },
+    /// Float constant with type.
+    Float { value: f64, ty: Ty },
+    /// Boolean constant.
+    Bool(bool),
+    /// Unit constant (void/zero-sized).
+    Unit,
+}
+
+/// An operand: either an SSA value reference or an inline constant.
+///
+/// This is the fundamental operand model of real tMIR. Instructions reference
+/// their inputs as Operand rather than bare ValueId, allowing constants to be
+/// carried inline without separate Const instructions. This enables simpler
+/// pattern matching in the instruction selector.
+///
+/// Reference: ~/tMIR/crates/tmir-instrs/src/lib.rs (Operand enum)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Operand {
+    /// Reference to an SSA value defined by another instruction.
+    Value(ValueId),
+    /// Inline constant value.
+    Constant(Constant),
+}
+
+impl Operand {
+    /// Create an operand referencing an SSA value.
+    pub fn value(vid: ValueId) -> Self {
+        Operand::Value(vid)
+    }
+
+    /// Create an integer constant operand.
+    pub fn int(value: i128, ty: Ty) -> Self {
+        Operand::Constant(Constant::Int { value, ty })
+    }
+
+    /// Create a float constant operand.
+    pub fn float(value: f64, ty: Ty) -> Self {
+        Operand::Constant(Constant::Float { value, ty })
+    }
+
+    /// Create a boolean constant operand.
+    pub fn bool_const(value: bool) -> Self {
+        Operand::Constant(Constant::Bool(value))
+    }
+
+    /// Returns true if this operand is a constant.
+    pub fn is_constant(&self) -> bool {
+        matches!(self, Operand::Constant(_))
+    }
+
+    /// Returns true if this operand is a value reference.
+    pub fn is_value(&self) -> bool {
+        matches!(self, Operand::Value(_))
+    }
+
+    /// Get the ValueId if this is a value reference.
+    pub fn as_value(&self) -> Option<ValueId> {
+        match self {
+            Operand::Value(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Get the constant if this is a constant operand.
+    pub fn as_constant(&self) -> Option<&Constant> {
+        match self {
+            Operand::Constant(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+
+/// Convenience: convert a ValueId directly into an Operand::Value.
+impl From<ValueId> for Operand {
+    fn from(vid: ValueId) -> Self {
+        Operand::Value(vid)
+    }
+}
+
 /// A single switch case: value -> target block.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SwitchCase {
@@ -145,29 +267,40 @@ pub struct SwitchCase {
 ///
 /// These are the ~25 core instructions that LLVM2 must lower to machine code.
 /// Each instruction operates on SSA values and produces zero or more results.
+///
+/// ## Operand model
+///
+/// Instructions that accept general inputs use `Operand` (value or constant),
+/// matching the real tMIR operand model. Instructions that require a specific
+/// SSA value (e.g., pointer for Load, borrow target) use bare `ValueId`.
+///
+/// The adapter layer's `resolve_operand` method materializes constants into
+/// LIR Iconst/Fconst instructions when an `Operand::Constant` is encountered.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Instr {
     /// Binary operation: result = lhs op rhs.
+    /// Both operands may be values or inline constants.
     BinOp {
         op: BinOp,
         ty: Ty,
-        lhs: ValueId,
-        rhs: ValueId,
+        lhs: Operand,
+        rhs: Operand,
     },
 
     /// Unary operation: result = op operand.
     UnOp {
         op: UnOp,
         ty: Ty,
-        operand: ValueId,
+        operand: Operand,
     },
 
     /// Comparison: result (Bool) = lhs cmp rhs.
+    /// Both operands may be values or inline constants.
     Cmp {
         op: CmpOp,
         ty: Ty,
-        lhs: ValueId,
-        rhs: ValueId,
+        lhs: Operand,
+        rhs: Operand,
     },
 
     /// Type cast: result = cast operand from src_ty to dst_ty.
@@ -175,20 +308,22 @@ pub enum Instr {
         op: CastOp,
         src_ty: Ty,
         dst_ty: Ty,
-        operand: ValueId,
+        operand: Operand,
     },
 
     /// Load from memory: result = *ptr.
+    /// ptr must be a value (cannot load from a constant address).
     Load {
         ty: Ty,
         ptr: ValueId,
     },
 
     /// Store to memory: *ptr = value.
+    /// ptr must be a value; stored value may be a constant.
     Store {
         ty: Ty,
         ptr: ValueId,
-        value: ValueId,
+        value: Operand,
     },
 
     /// Stack allocation: result = alloca(ty, count).
@@ -202,7 +337,7 @@ pub enum Instr {
         ptr: ValueId,
     },
 
-    // -- Atomic memory operations --
+    // -- Atomic memory operations (LLVM2 extension, not in real tMIR yet) --
 
     /// Atomic load: result = atomic_load(ptr, ordering).
     /// Provides acquire semantics (or stronger).
@@ -217,7 +352,7 @@ pub enum Instr {
     AtomicStore {
         ty: Ty,
         ptr: ValueId,
-        value: ValueId,
+        value: Operand,
         ordering: MemoryOrdering,
     },
 
@@ -226,7 +361,7 @@ pub enum Instr {
         op: AtomicRmwOp,
         ty: Ty,
         ptr: ValueId,
-        value: ValueId,
+        value: Operand,
         ordering: MemoryOrdering,
     },
 
@@ -236,8 +371,8 @@ pub enum Instr {
     CmpXchg {
         ty: Ty,
         ptr: ValueId,
-        expected: ValueId,
-        desired: ValueId,
+        expected: Operand,
+        desired: Operand,
         success_ordering: MemoryOrdering,
         failure_ordering: MemoryOrdering,
     },
@@ -284,55 +419,63 @@ pub enum Instr {
     // -- Control flow --
 
     /// Unconditional branch.
+    /// Branch args may be values or constants (matching real tMIR).
     Br {
         target: BlockId,
-        args: Vec<ValueId>,
+        args: Vec<Operand>,
     },
 
     /// Conditional branch.
+    /// Condition and branch args may be values or constants.
     CondBr {
-        cond: ValueId,
+        cond: Operand,
         then_target: BlockId,
-        then_args: Vec<ValueId>,
+        then_args: Vec<Operand>,
         else_target: BlockId,
-        else_args: Vec<ValueId>,
+        else_args: Vec<Operand>,
     },
 
     /// Multi-way branch (switch).
+    /// The switched value may be a value or constant.
     Switch {
-        value: ValueId,
+        value: Operand,
         cases: Vec<SwitchCase>,
         default: BlockId,
     },
 
     /// Return from function.
+    /// Return values may be values or constants (matching real tMIR).
     Return {
-        values: Vec<ValueId>,
+        values: Vec<Operand>,
     },
 
     /// Direct function call.
+    /// Arguments may be values or constants (matching real tMIR).
     Call {
         func: FuncId,
-        args: Vec<ValueId>,
+        args: Vec<Operand>,
         ret_ty: Vec<Ty>,
     },
 
     /// Indirect function call (call through pointer).
+    /// callee must be a value; arguments may be values or constants.
     CallIndirect {
         callee: ValueId,
-        args: Vec<ValueId>,
+        args: Vec<Operand>,
         ret_ty: Vec<Ty>,
     },
 
     // -- Aggregate operations --
 
     /// Construct a struct value.
+    /// Fields may be values or constants.
     Struct {
         ty: Ty,
-        fields: Vec<ValueId>,
+        fields: Vec<Operand>,
     },
 
     /// Extract a struct field: result = value.field[index].
+    /// The value must be an SSA value (cannot extract from a constant).
     Field {
         ty: Ty,
         value: ValueId,
@@ -340,27 +483,30 @@ pub enum Instr {
     },
 
     /// Array/pointer index: result = base[index].
+    /// Index may be a value or constant.
     Index {
         ty: Ty,
         base: ValueId,
-        index: ValueId,
+        index: Operand,
     },
 
     /// SSA phi node (block parameter).
+    /// Incoming values may be values or constants (matching real tMIR).
     Phi {
         ty: Ty,
-        incoming: Vec<(BlockId, ValueId)>,
+        incoming: Vec<(BlockId, Operand)>,
     },
 
     /// Conditional value selection: result = cond ? true_val : false_val.
     ///
     /// Unlike CondBr (which is control flow), Select is a value-level operation
     /// that produces a result without branching. Lowered to CSEL on AArch64.
+    /// LLVM2 extension (real tMIR uses control flow for this).
     Select {
         ty: Ty,
-        cond: ValueId,
-        true_val: ValueId,
-        false_val: ValueId,
+        cond: Operand,
+        true_val: Operand,
+        false_val: Operand,
     },
 
     /// Get element pointer: typed pointer arithmetic with stride.
@@ -377,8 +523,8 @@ pub enum Instr {
         elem_ty: Ty,
         /// Base pointer.
         base: ValueId,
-        /// Index (multiplied by element size).
-        index: ValueId,
+        /// Index (multiplied by element size). May be value or constant.
+        index: Operand,
         /// Additional byte offset added after indexing.
         offset: i32,
     },
@@ -386,13 +532,19 @@ pub enum Instr {
     /// No operation (used as placeholder).
     Nop,
 
-    /// Integer constant.
+    /// Integer constant (legacy — prefer Operand::Constant for new code).
+    ///
+    /// Kept for backward compatibility. The adapter handles both this form and
+    /// Operand::Constant(Constant::Int{..}).
     Const {
         ty: Ty,
         value: i64,
     },
 
-    /// Float constant.
+    /// Float constant (legacy — prefer Operand::Constant for new code).
+    ///
+    /// Kept for backward compatibility. The adapter handles both this form and
+    /// Operand::Constant(Constant::Float{..}).
     FConst {
         ty: Ty,
         value: f64,
@@ -400,6 +552,12 @@ pub enum Instr {
 }
 
 /// A tMIR instruction with its result value(s) and proof annotations.
+///
+/// This is an LLVM2 extension over real tMIR. In real tMIR, result values are
+/// fields on each instruction variant (e.g., `BinOp { result: Value, ... }`).
+/// Our InstrNode wrapper separates results from the instruction for uniform
+/// handling in the adapter and ISel. Proof annotations are another LLVM2
+/// extension (real tMIR does not yet carry per-instruction proofs).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstrNode {
     /// The instruction opcode and operands.

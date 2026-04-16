@@ -6,11 +6,20 @@
 // Provides a fluent builder API for constructing tMIR functions and modules,
 // making it easier to write integration tests and programmatically generate
 // tMIR programs for LLVM2's adapter and ISel pipeline.
+//
+// The builder accepts bare ValueId for convenience and wraps them in
+// Operand::Value internally. For tests that need inline constants, use the
+// _operand variants or construct Operand directly.
 
-use tmir_instrs::{BinOp, CastOp, CmpOp, Instr, InstrNode, SwitchCase, UnOp};
+use tmir_instrs::{BinOp, CastOp, CmpOp, Instr, InstrNode, Operand, SwitchCase, UnOp};
 use tmir_types::{BlockId, FuncId, FuncTy, StructDef, TmirProof, Ty, ValueId};
 
 use crate::{Block, Function, Module};
+
+/// Helper to convert Vec<ValueId> to Vec<Operand>.
+fn values_to_operands(vals: Vec<ValueId>) -> Vec<Operand> {
+    vals.into_iter().map(Operand::Value).collect()
+}
 
 /// Builder for constructing tMIR modules.
 pub struct ModuleBuilder {
@@ -158,31 +167,64 @@ impl FunctionBuilder {
 
 // ---------------------------------------------------------------------------
 // Instruction construction helpers
+//
+// These accept ValueId for convenience and wrap in Operand::Value internally.
+// For explicit constant operands, use the Operand constructors directly.
 // ---------------------------------------------------------------------------
 
-/// Create an integer constant instruction.
+/// Create an integer constant instruction (legacy form).
+/// Prefer using Operand::int() for inline constants in the new operand model.
 pub fn iconst(ty: Ty, value: i64, result: ValueId) -> InstrNode {
     InstrNode::new(Instr::Const { ty, value }, vec![result])
 }
 
-/// Create a float constant instruction.
+/// Create a float constant instruction (legacy form).
+/// Prefer using Operand::float() for inline constants in the new operand model.
 pub fn fconst(ty: Ty, value: f64, result: ValueId) -> InstrNode {
     InstrNode::new(Instr::FConst { ty, value }, vec![result])
 }
 
 /// Create a binary operation instruction.
 pub fn binop(op: BinOp, ty: Ty, lhs: ValueId, rhs: ValueId, result: ValueId) -> InstrNode {
+    InstrNode::new(
+        Instr::BinOp {
+            op,
+            ty,
+            lhs: Operand::Value(lhs),
+            rhs: Operand::Value(rhs),
+        },
+        vec![result],
+    )
+}
+
+/// Create a binary operation instruction with explicit operands (supports constants).
+pub fn binop_op(op: BinOp, ty: Ty, lhs: Operand, rhs: Operand, result: ValueId) -> InstrNode {
     InstrNode::new(Instr::BinOp { op, ty, lhs, rhs }, vec![result])
 }
 
 /// Create a unary operation instruction.
 pub fn unop(op: UnOp, ty: Ty, operand: ValueId, result: ValueId) -> InstrNode {
-    InstrNode::new(Instr::UnOp { op, ty, operand }, vec![result])
+    InstrNode::new(
+        Instr::UnOp {
+            op,
+            ty,
+            operand: Operand::Value(operand),
+        },
+        vec![result],
+    )
 }
 
 /// Create a comparison instruction.
 pub fn cmp(op: CmpOp, ty: Ty, lhs: ValueId, rhs: ValueId, result: ValueId) -> InstrNode {
-    InstrNode::new(Instr::Cmp { op, ty, lhs, rhs }, vec![result])
+    InstrNode::new(
+        Instr::Cmp {
+            op,
+            ty,
+            lhs: Operand::Value(lhs),
+            rhs: Operand::Value(rhs),
+        },
+        vec![result],
+    )
 }
 
 /// Create a type cast instruction.
@@ -198,7 +240,7 @@ pub fn cast(
             op,
             src_ty,
             dst_ty,
-            operand,
+            operand: Operand::Value(operand),
         },
         vec![result],
     )
@@ -211,7 +253,14 @@ pub fn load(ty: Ty, ptr: ValueId, result: ValueId) -> InstrNode {
 
 /// Create a store instruction.
 pub fn store(ty: Ty, ptr: ValueId, value: ValueId) -> InstrNode {
-    InstrNode::new(Instr::Store { ty, ptr, value }, vec![])
+    InstrNode::new(
+        Instr::Store {
+            ty,
+            ptr,
+            value: Operand::Value(value),
+        },
+        vec![],
+    )
 }
 
 /// Create a stack allocation instruction.
@@ -221,7 +270,13 @@ pub fn alloc(ty: Ty, result: ValueId) -> InstrNode {
 
 /// Create an unconditional branch.
 pub fn br(target: BlockId, args: Vec<ValueId>) -> InstrNode {
-    InstrNode::new(Instr::Br { target, args }, vec![])
+    InstrNode::new(
+        Instr::Br {
+            target,
+            args: values_to_operands(args),
+        },
+        vec![],
+    )
 }
 
 /// Create a conditional branch.
@@ -234,11 +289,11 @@ pub fn condbr(
 ) -> InstrNode {
     InstrNode::new(
         Instr::CondBr {
-            cond,
+            cond: Operand::Value(cond),
             then_target,
-            then_args,
+            then_args: values_to_operands(then_args),
             else_target,
-            else_args,
+            else_args: values_to_operands(else_args),
         },
         vec![],
     )
@@ -246,12 +301,24 @@ pub fn condbr(
 
 /// Create a return instruction.
 pub fn ret(values: Vec<ValueId>) -> InstrNode {
-    InstrNode::new(Instr::Return { values }, vec![])
+    InstrNode::new(
+        Instr::Return {
+            values: values_to_operands(values),
+        },
+        vec![],
+    )
 }
 
 /// Create a direct function call.
 pub fn call(func: FuncId, args: Vec<ValueId>, ret_ty: Vec<Ty>, results: Vec<ValueId>) -> InstrNode {
-    InstrNode::new(Instr::Call { func, args, ret_ty }, results)
+    InstrNode::new(
+        Instr::Call {
+            func,
+            args: values_to_operands(args),
+            ret_ty,
+        },
+        results,
+    )
 }
 
 /// Create an indirect function call.
@@ -264,7 +331,7 @@ pub fn call_indirect(
     InstrNode::new(
         Instr::CallIndirect {
             callee,
-            args,
+            args: values_to_operands(args),
             ret_ty,
         },
         results,
@@ -277,7 +344,14 @@ pub fn switch(value: ValueId, cases: Vec<(i64, BlockId)>, default: BlockId) -> I
         .into_iter()
         .map(|(v, target)| SwitchCase { value: v, target })
         .collect();
-    InstrNode::new(Instr::Switch { value, cases, default }, vec![])
+    InstrNode::new(
+        Instr::Switch {
+            value: Operand::Value(value),
+            cases,
+            default,
+        },
+        vec![],
+    )
 }
 
 /// Create a select (conditional value) instruction.
@@ -291,9 +365,9 @@ pub fn select(
     InstrNode::new(
         Instr::Select {
             ty,
-            cond,
-            true_val,
-            false_val,
+            cond: Operand::Value(cond),
+            true_val: Operand::Value(true_val),
+            false_val: Operand::Value(false_val),
         },
         vec![result],
     )
@@ -311,7 +385,7 @@ pub fn gep(
         Instr::GetElementPtr {
             elem_ty,
             base,
-            index,
+            index: Operand::Value(index),
             offset,
         },
         vec![result],
@@ -325,7 +399,13 @@ pub fn field(ty: Ty, value: ValueId, index: u32, result: ValueId) -> InstrNode {
 
 /// Create a struct construction instruction.
 pub fn struct_val(ty: Ty, fields: Vec<ValueId>, result: ValueId) -> InstrNode {
-    InstrNode::new(Instr::Struct { ty, fields }, vec![result])
+    InstrNode::new(
+        Instr::Struct {
+            ty,
+            fields: values_to_operands(fields),
+        },
+        vec![result],
+    )
 }
 
 /// Create an array/pointer index instruction.
@@ -334,7 +414,7 @@ pub fn index(ty: Ty, base: ValueId, index_val: ValueId, result: ValueId) -> Inst
         Instr::Index {
             ty,
             base,
-            index: index_val,
+            index: Operand::Value(index_val),
         },
         vec![result],
     )

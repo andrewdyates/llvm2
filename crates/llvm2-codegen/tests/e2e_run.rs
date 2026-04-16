@@ -1274,7 +1274,7 @@ int main(void) {
 ///     return v10;
 /// }
 fn build_tmir_high_pressure_module() -> tmir_func::Module {
-    use tmir_instrs::{BinOp, Instr, InstrNode};
+    use tmir_instrs::{BinOp, Instr, InstrNode, Operand};
     use tmir_types::{BlockId, FuncId, FuncTy, Ty, ValueId};
 
     let func = tmir_func::Function {
@@ -1297,8 +1297,8 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
                         ty: Ty::Int(64),
-                        lhs: ValueId(0),
-                        rhs: ValueId(1),
+                        lhs: Operand::Value(ValueId(0)),
+                        rhs: Operand::Value(ValueId(1)),
                     },
                     results: vec![ValueId(2)],
                     proofs: vec![],
@@ -1308,8 +1308,8 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                     instr: Instr::BinOp {
                         op: BinOp::Mul,
                         ty: Ty::Int(64),
-                        lhs: ValueId(0),
-                        rhs: ValueId(1),
+                        lhs: Operand::Value(ValueId(0)),
+                        rhs: Operand::Value(ValueId(1)),
                     },
                     results: vec![ValueId(3)],
                     proofs: vec![],
@@ -1319,8 +1319,8 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                     instr: Instr::BinOp {
                         op: BinOp::Sub,
                         ty: Ty::Int(64),
-                        lhs: ValueId(0),
-                        rhs: ValueId(1),
+                        lhs: Operand::Value(ValueId(0)),
+                        rhs: Operand::Value(ValueId(1)),
                     },
                     results: vec![ValueId(4)],
                     proofs: vec![],
@@ -1339,8 +1339,8 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
                         ty: Ty::Int(64),
-                        lhs: ValueId(0),
-                        rhs: ValueId(10),
+                        lhs: Operand::Value(ValueId(0)),
+                        rhs: Operand::Value(ValueId(10)),
                     },
                     results: vec![ValueId(5)],
                     proofs: vec![],
@@ -1350,8 +1350,8 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
                         ty: Ty::Int(64),
-                        lhs: ValueId(1),
-                        rhs: ValueId(10),
+                        lhs: Operand::Value(ValueId(1)),
+                        rhs: Operand::Value(ValueId(10)),
                     },
                     results: vec![ValueId(6)],
                     proofs: vec![],
@@ -1361,8 +1361,8 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
                         ty: Ty::Int(64),
-                        lhs: ValueId(2),
-                        rhs: ValueId(3),
+                        lhs: Operand::Value(ValueId(2)),
+                        rhs: Operand::Value(ValueId(3)),
                     },
                     results: vec![ValueId(7)],
                     proofs: vec![],
@@ -1372,8 +1372,8 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
                         ty: Ty::Int(64),
-                        lhs: ValueId(7),
-                        rhs: ValueId(4),
+                        lhs: Operand::Value(ValueId(7)),
+                        rhs: Operand::Value(ValueId(4)),
                     },
                     results: vec![ValueId(8)],
                     proofs: vec![],
@@ -1383,8 +1383,8 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
                         ty: Ty::Int(64),
-                        lhs: ValueId(8),
-                        rhs: ValueId(5),
+                        lhs: Operand::Value(ValueId(8)),
+                        rhs: Operand::Value(ValueId(5)),
                     },
                     results: vec![ValueId(9)],
                     proofs: vec![],
@@ -1394,8 +1394,8 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
                         ty: Ty::Int(64),
-                        lhs: ValueId(9),
-                        rhs: ValueId(6),
+                        lhs: Operand::Value(ValueId(9)),
+                        rhs: Operand::Value(ValueId(6)),
                     },
                     results: vec![ValueId(11)],
                     proofs: vec![],
@@ -1403,7 +1403,7 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
                 // return v10_result
                 InstrNode {
                     instr: Instr::Return {
-                        values: vec![ValueId(11)],
+                        values: vec![Operand::Value(ValueId(11))],
                     },
                     results: vec![],
                     proofs: vec![],

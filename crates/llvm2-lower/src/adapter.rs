@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 
 use tmir_func::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule};
-use tmir_instrs::{AtomicRmwOp as TmirAtomicRmwOp, BinOp, CastOp, CmpOp, Instr, InstrNode, MemoryOrdering, SwitchCase, UnOp};
+use tmir_instrs::{AtomicRmwOp as TmirAtomicRmwOp, BinOp, CastOp, CmpOp, Constant, Instr, InstrNode, MemoryOrdering, Operand, SwitchCase, UnOp};
 use tmir_types::{BlockId, FuncId, StructDef, TmirProof, Ty, ValueId};
 
 use crate::function::{BasicBlock, Function, Signature};
@@ -488,6 +488,99 @@ impl<'a> TmirAdapter<'a> {
     }
 
     // -----------------------------------------------------------------------
+    // Operand resolution (new operand model support)
+    // -----------------------------------------------------------------------
+
+    /// Resolve an Operand to a ValueId, materializing constants as needed.
+    ///
+    /// For Operand::Value, returns the ValueId directly.
+    /// For Operand::Constant, creates a synthetic ValueId, generates an
+    /// Iconst/Fconst instruction to materialize it, and stores the instruction
+    /// in the provided `extra_instrs` buffer.
+    ///
+    /// This is the key bridge between the real tMIR operand model (where
+    /// constants are inline in instructions) and our LIR model (where all
+    /// values are SSA references to instruction results).
+    fn resolve_operand(
+        &mut self,
+        operand: &Operand,
+        extra_instrs: &mut Vec<Instruction>,
+    ) -> Result<ValueId, AdapterError> {
+        match operand {
+            Operand::Value(vid) => Ok(*vid),
+            Operand::Constant(constant) => {
+                // Allocate a fresh internal Value for the materialized constant.
+                let val = self.fresh_value();
+                let inst = match constant {
+                    Constant::Int { value, ty } => {
+                        let lir_ty = self.translate_ty(ty)?;
+                        Instruction {
+                            opcode: Opcode::Iconst {
+                                ty: lir_ty,
+                                imm: *value as i64,
+                            },
+                            args: vec![],
+                            results: vec![val],
+                        }
+                    }
+                    Constant::Float { value, ty } => {
+                        let lir_ty = self.translate_ty(ty)?;
+                        Instruction {
+                            opcode: Opcode::Fconst {
+                                ty: lir_ty,
+                                imm: *value,
+                            },
+                            args: vec![],
+                            results: vec![val],
+                        }
+                    }
+                    Constant::Bool(b) => Instruction {
+                        opcode: Opcode::Iconst {
+                            ty: Type::B1,
+                            imm: if *b { 1 } else { 0 },
+                        },
+                        args: vec![],
+                        results: vec![val],
+                    },
+                    Constant::Unit => {
+                        // Unit is zero-sized; materialize as a zero i8 placeholder.
+                        Instruction {
+                            opcode: Opcode::Iconst {
+                                ty: Type::I8,
+                                imm: 0,
+                            },
+                            args: vec![],
+                            results: vec![val],
+                        }
+                    }
+                };
+                extra_instrs.push(inst);
+                // Create a synthetic ValueId that maps to the fresh Value.
+                // The fresh_value already assigned the Value; we need a ValueId
+                // that will map to it. We use the Value's index as the ValueId
+                // and register the mapping.
+                let vid = ValueId(val.0 + 1_000_000); // Synthetic range to avoid collision
+                self.value_map.insert(vid, val);
+                Ok(vid)
+            }
+        }
+    }
+
+    /// Resolve a slice of Operands to ValueIds, accumulating materialization
+    /// instructions for any inline constants.
+    fn resolve_operands(
+        &mut self,
+        operands: &[Operand],
+        extra_instrs: &mut Vec<Instruction>,
+    ) -> Result<Vec<ValueId>, AdapterError> {
+        let mut vids = Vec::with_capacity(operands.len());
+        for op in operands {
+            vids.push(self.resolve_operand(op, extra_instrs)?);
+        }
+        Ok(vids)
+    }
+
+    // -----------------------------------------------------------------------
     // Top-level translation
     // -----------------------------------------------------------------------
 
@@ -562,47 +655,90 @@ impl<'a> TmirAdapter<'a> {
     // -----------------------------------------------------------------------
 
     /// Translate a single tMIR instruction node into one or more LIR instructions.
+    ///
+    /// Operands of type `Operand` are resolved via `resolve_operand`, which
+    /// materializes inline constants as Iconst/Fconst instructions prepended to
+    /// the output. Fields that are still `ValueId` (e.g., ptr in Load) are
+    /// mapped directly by the downstream translate methods.
     fn translate_instruction(
         &mut self,
         node: &InstrNode,
     ) -> Result<Vec<Instruction>, AdapterError> {
-        match &node.instr {
+        // Buffer for materialized constant instructions from operand resolution.
+        let mut pre = Vec::new();
+
+        let instrs = match &node.instr {
             Instr::BinOp { op, ty, lhs, rhs } => {
-                self.translate_binop(op, ty, lhs, rhs, &node.results)
+                let lhs_vid = self.resolve_operand(lhs, &mut pre)?;
+                let rhs_vid = self.resolve_operand(rhs, &mut pre)?;
+                self.translate_binop(op, ty, &lhs_vid, &rhs_vid, &node.results)?
             }
             Instr::UnOp { op, ty, operand } => {
-                self.translate_unop(op, ty, operand, &node.results)
+                let op_vid = self.resolve_operand(operand, &mut pre)?;
+                self.translate_unop(op, ty, &op_vid, &node.results)?
             }
             Instr::Cmp { op, ty, lhs, rhs } => {
-                self.translate_cmp(op, ty, lhs, rhs, &node.results)
+                let lhs_vid = self.resolve_operand(lhs, &mut pre)?;
+                let rhs_vid = self.resolve_operand(rhs, &mut pre)?;
+                self.translate_cmp(op, ty, &lhs_vid, &rhs_vid, &node.results)?
             }
             Instr::Cast {
                 op,
                 src_ty,
                 dst_ty,
                 operand,
-            } => self.translate_cast(op, src_ty, dst_ty, operand, &node.results),
-            Instr::Load { ty, ptr } => self.translate_load(ty, ptr, &node.results),
-            Instr::Store { ty: _, ptr, value } => self.translate_store(ptr, value),
-            Instr::Alloc { ty, count } => self.translate_alloc(ty, count, &node.results),
-            Instr::Br { target, args } => self.translate_br(target, args),
+            } => {
+                let op_vid = self.resolve_operand(operand, &mut pre)?;
+                self.translate_cast(op, src_ty, dst_ty, &op_vid, &node.results)?
+            }
+            Instr::Load { ty, ptr } => self.translate_load(ty, ptr, &node.results)?,
+            Instr::Store { ty: _, ptr, value } => {
+                let val_vid = self.resolve_operand(value, &mut pre)?;
+                self.translate_store(ptr, &val_vid)?
+            }
+            Instr::Alloc { ty, count } => self.translate_alloc(ty, count, &node.results)?,
+            Instr::Br { target, args } => {
+                let arg_vids = self.resolve_operands(args, &mut pre)?;
+                self.translate_br(target, &arg_vids)?
+            }
             Instr::CondBr {
                 cond,
                 then_target,
                 then_args,
                 else_target,
                 else_args,
-            } => self.translate_condbr(cond, then_target, then_args, else_target, else_args),
-            Instr::Return { values } => self.translate_return(values),
+            } => {
+                let cond_vid = self.resolve_operand(cond, &mut pre)?;
+                let then_vids = self.resolve_operands(then_args, &mut pre)?;
+                let else_vids = self.resolve_operands(else_args, &mut pre)?;
+                self.translate_condbr(
+                    &cond_vid, then_target, &then_vids, else_target, &else_vids,
+                )?
+            }
+            Instr::Return { values } => {
+                let ret_vids = self.resolve_operands(values, &mut pre)?;
+                self.translate_return(&ret_vids)?
+            }
             Instr::Call {
                 func,
                 args,
                 ret_ty,
-            } => self.translate_call(func, args, ret_ty, &node.results),
-            Instr::Phi { ty, incoming } => self.translate_phi(ty, incoming, &node.results),
-            Instr::Const { ty, value } => self.translate_const(ty, *value, &node.results),
-            Instr::FConst { ty, value } => self.translate_fconst(ty, *value, &node.results),
-            Instr::Nop => Ok(vec![]),
+            } => {
+                let arg_vids = self.resolve_operands(args, &mut pre)?;
+                self.translate_call(func, &arg_vids, ret_ty, &node.results)?
+            }
+            Instr::Phi { ty, incoming } => {
+                // Resolve operands in phi incoming edges.
+                let mut resolved_incoming = Vec::with_capacity(incoming.len());
+                for (block, op) in incoming {
+                    let vid = self.resolve_operand(op, &mut pre)?;
+                    resolved_incoming.push((*block, vid));
+                }
+                self.translate_phi(ty, &resolved_incoming, &node.results)?
+            }
+            Instr::Const { ty, value } => self.translate_const(ty, *value, &node.results)?,
+            Instr::FConst { ty, value } => self.translate_fconst(ty, *value, &node.results)?,
+            Instr::Nop => vec![],
             // Ownership instructions: lower as no-ops or pointer copies for now.
             Instr::Borrow { ty: _, value } | Instr::BorrowMut { ty: _, value } => {
                 // Borrow/BorrowMut: result is a copy of the pointer.
@@ -611,18 +747,18 @@ impl<'a> TmirAdapter<'a> {
                 }
                 let src = self.map_value(*value);
                 let dst = self.map_result(&node.results)?;
-                Ok(vec![Instruction {
+                vec![Instruction {
                     opcode: Opcode::Iadd, // Copy via add-zero pattern (no dedicated Copy opcode yet)
                     args: vec![src],
                     results: vec![dst],
-                }])
+                }]
             }
             Instr::EndBorrow { .. }
             | Instr::Retain { .. }
             | Instr::Release { .. }
             | Instr::Dealloc { .. } => {
                 // Void ownership ops: no-op in the LIR for now.
-                Ok(vec![])
+                vec![]
             }
             Instr::IsUnique { value } => {
                 // Lower as a constant true for now (no ARC runtime).
@@ -631,67 +767,95 @@ impl<'a> TmirAdapter<'a> {
                 }
                 let _ = value;
                 let dst = self.map_result(&node.results)?;
-                Ok(vec![Instruction {
+                vec![Instruction {
                     opcode: Opcode::Iconst {
                         ty: Type::B1,
                         imm: 1,
                     },
                     args: vec![],
                     results: vec![dst],
-                }])
+                }]
             }
             // Aggregate operations: lowered to stack allocation + loads/stores.
             Instr::Struct { ty, fields } => {
-                self.translate_struct_construct(ty, fields, &node.results)
+                let field_vids = self.resolve_operands(fields, &mut pre)?;
+                self.translate_struct_construct(ty, &field_vids, &node.results)?
             }
             Instr::Field { ty, value, index } => {
-                self.translate_field_extract(ty, value, *index, &node.results)
+                self.translate_field_extract(ty, value, *index, &node.results)?
             }
             Instr::Index { ty, base, index } => {
-                self.translate_array_index(ty, base, index, &node.results)
+                let idx_vid = self.resolve_operand(index, &mut pre)?;
+                self.translate_array_index(ty, base, &idx_vid, &node.results)?
             }
             // Atomic operations: translate to LIR atomic opcodes.
             Instr::AtomicLoad { ty, ptr, ordering } => {
-                self.translate_atomic_load(ty, ptr, ordering, &node.results)
+                self.translate_atomic_load(ty, ptr, ordering, &node.results)?
             }
             Instr::AtomicStore { ty: _, ptr, value, ordering } => {
-                self.translate_atomic_store(ptr, value, ordering)
+                let val_vid = self.resolve_operand(value, &mut pre)?;
+                self.translate_atomic_store(ptr, &val_vid, ordering)?
             }
             Instr::AtomicRmw { op, ty, ptr, value, ordering } => {
-                self.translate_atomic_rmw(op, ty, ptr, value, ordering, &node.results)
+                let val_vid = self.resolve_operand(value, &mut pre)?;
+                self.translate_atomic_rmw(op, ty, ptr, &val_vid, ordering, &node.results)?
             }
             Instr::CmpXchg { ty, ptr, expected, desired, success_ordering, .. } => {
-                self.translate_cmpxchg(ty, ptr, expected, desired, success_ordering, &node.results)
+                let exp_vid = self.resolve_operand(expected, &mut pre)?;
+                let des_vid = self.resolve_operand(desired, &mut pre)?;
+                self.translate_cmpxchg(ty, ptr, &exp_vid, &des_vid, success_ordering, &node.results)?
             }
             Instr::Fence { ordering } => {
-                self.translate_fence(ordering)
+                self.translate_fence(ordering)?
             }
             // Switch: multi-way branch.
             Instr::Switch {
                 value,
                 cases,
                 default,
-            } => self.translate_switch(value, cases, default),
+            } => {
+                let val_vid = self.resolve_operand(value, &mut pre)?;
+                self.translate_switch(&val_vid, cases, default)?
+            }
             // CallIndirect: call through pointer.
             Instr::CallIndirect {
                 callee,
                 args,
                 ret_ty,
-            } => self.translate_call_indirect(callee, args, ret_ty, &node.results),
+            } => {
+                let arg_vids = self.resolve_operands(args, &mut pre)?;
+                self.translate_call_indirect(callee, &arg_vids, ret_ty, &node.results)?
+            }
             // Select: conditional value (branchless).
             Instr::Select {
                 ty: _,
                 cond,
                 true_val,
                 false_val,
-            } => self.translate_select(cond, true_val, false_val, &node.results),
+            } => {
+                let cond_vid = self.resolve_operand(cond, &mut pre)?;
+                let tv_vid = self.resolve_operand(true_val, &mut pre)?;
+                let fv_vid = self.resolve_operand(false_val, &mut pre)?;
+                self.translate_select(&cond_vid, &tv_vid, &fv_vid, &node.results)?
+            }
             // GetElementPtr: typed pointer arithmetic.
             Instr::GetElementPtr {
                 elem_ty,
                 base,
                 index,
                 offset,
-            } => self.translate_gep(elem_ty, base, index, *offset, &node.results),
+            } => {
+                let idx_vid = self.resolve_operand(index, &mut pre)?;
+                self.translate_gep(elem_ty, base, &idx_vid, *offset, &node.results)?
+            }
+        };
+
+        // Prepend any constant materialization instructions before the main instruction(s).
+        if !pre.is_empty() {
+            pre.extend(instrs);
+            Ok(pre)
+        } else {
+            Ok(instrs)
         }
     }
 
@@ -1814,15 +1978,15 @@ mod tests {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
                             ty: Ty::Int(32),
-                            lhs: ValueId(0),
-                            rhs: ValueId(1),
+                            lhs: Operand::Value(ValueId(0)),
+                            rhs: Operand::Value(ValueId(1)),
                         },
                         results: vec![ValueId(2)],
                         proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(2)],
+                            values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -1938,7 +2102,7 @@ mod tests {
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(0)],
+                            values: vec![Operand::Value(ValueId(0))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -1985,7 +2149,7 @@ mod tests {
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(0)],
+                            values: vec![Operand::Value(ValueId(0))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -2028,15 +2192,15 @@ mod tests {
                         instr: Instr::Cmp {
                             op: CmpOp::Slt,
                             ty: Ty::Int(32),
-                            lhs: ValueId(0),
-                            rhs: ValueId(1),
+                            lhs: Operand::Value(ValueId(0)),
+                            rhs: Operand::Value(ValueId(1)),
                         },
                         results: vec![ValueId(2)],
                         proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(2)],
+                            values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -2078,15 +2242,15 @@ mod tests {
                         instr: Instr::Cmp {
                             op: CmpOp::FOeq,
                             ty: Ty::Float(64),
-                            lhs: ValueId(0),
-                            rhs: ValueId(1),
+                            lhs: Operand::Value(ValueId(0)),
+                            rhs: Operand::Value(ValueId(1)),
                         },
                         results: vec![ValueId(2)],
                         proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(2)],
+                            values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -2126,14 +2290,14 @@ mod tests {
                             op: CastOp::SExt,
                             src_ty: Ty::Int(32),
                             dst_ty: Ty::Int(64),
-                            operand: ValueId(0),
+                            operand: Operand::Value(ValueId(0)),
                         },
                         results: vec![ValueId(1)],
                         proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(1)],
+                            values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -2181,7 +2345,7 @@ mod tests {
                         instr: Instr::Store {
                             ty: Ty::Int(32),
                             ptr: ValueId(0),
-                            value: ValueId(1),
+                            value: Operand::Value(ValueId(1)),
                         },
                         results: vec![],
                         proofs: vec![],
@@ -2227,14 +2391,14 @@ mod tests {
                         instr: Instr::UnOp {
                             op: UnOp::Neg,
                             ty: Ty::Int(32),
-                            operand: ValueId(0),
+                            operand: Operand::Value(ValueId(0)),
                         },
                         results: vec![ValueId(1)],
                         proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(1)],
+                            values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -2271,14 +2435,14 @@ mod tests {
                         instr: Instr::UnOp {
                             op: UnOp::Not,
                             ty: Ty::Int(32),
-                            operand: ValueId(0),
+                            operand: Operand::Value(ValueId(0)),
                         },
                         results: vec![ValueId(1)],
                         proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(1)],
+                            values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -2318,15 +2482,15 @@ mod tests {
                         instr: Instr::BinOp {
                             op: BinOp::SRem,
                             ty: Ty::Int(32),
-                            lhs: ValueId(0),
-                            rhs: ValueId(1),
+                            lhs: Operand::Value(ValueId(0)),
+                            rhs: Operand::Value(ValueId(1)),
                         },
                         results: vec![ValueId(2)],
                         proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(2)],
+                            values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -2363,7 +2527,7 @@ mod tests {
                     body: vec![InstrNode {
                         instr: Instr::Br {
                             target: BlockId(1),
-                            args: vec![ValueId(0)],
+                            args: vec![Operand::Value(ValueId(0))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -2374,7 +2538,7 @@ mod tests {
                     params: vec![(ValueId(1), Ty::Int(32))],
                     body: vec![InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(1)],
+                            values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -2418,7 +2582,7 @@ mod tests {
                     ],
                     body: vec![InstrNode {
                         instr: Instr::CondBr {
-                            cond: ValueId(0),
+                            cond: Operand::Value(ValueId(0)),
                             then_target: BlockId(1),
                             then_args: vec![],
                             else_target: BlockId(2),
@@ -2433,7 +2597,7 @@ mod tests {
                     params: vec![],
                     body: vec![InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(1)],
+                            values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -2444,7 +2608,7 @@ mod tests {
                     params: vec![],
                     body: vec![InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(2)],
+                            values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -2506,15 +2670,15 @@ mod tests {
                             instr: Instr::BinOp {
                                 op,
                                 ty: ty.clone(),
-                                lhs: ValueId(0),
-                                rhs: ValueId(1),
+                                lhs: Operand::Value(ValueId(0)),
+                                rhs: Operand::Value(ValueId(1)),
                             },
                             results: vec![ValueId(2)],
                             proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
-                                values: vec![ValueId(2)],
+                                values: vec![Operand::Value(ValueId(2))],
                             },
                             results: vec![],
                             proofs: vec![],
@@ -2569,15 +2733,15 @@ mod tests {
                             instr: Instr::Cmp {
                                 op,
                                 ty: Ty::Int(32),
-                                lhs: ValueId(0),
-                                rhs: ValueId(1),
+                                lhs: Operand::Value(ValueId(0)),
+                                rhs: Operand::Value(ValueId(1)),
                             },
                             results: vec![ValueId(2)],
                             proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
-                                values: vec![ValueId(2)],
+                                values: vec![Operand::Value(ValueId(2))],
                             },
                             results: vec![],
                             proofs: vec![],
@@ -2634,15 +2798,15 @@ mod tests {
                             instr: Instr::Cmp {
                                 op,
                                 ty: Ty::Float(64),
-                                lhs: ValueId(0),
-                                rhs: ValueId(1),
+                                lhs: Operand::Value(ValueId(0)),
+                                rhs: Operand::Value(ValueId(1)),
                             },
                             results: vec![ValueId(2)],
                             proofs: vec![],
                         },
                         InstrNode {
                             instr: Instr::Return {
-                                values: vec![ValueId(2)],
+                                values: vec![Operand::Value(ValueId(2))],
                             },
                             results: vec![],
                             proofs: vec![],
@@ -2733,8 +2897,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::Add,
                 ty: Ty::Int(32),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![],
@@ -2750,8 +2914,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::Add,
                 ty: Ty::Int(32),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![TmirProof::NoOverflow { signed: true }],
@@ -2768,7 +2932,7 @@ mod tests {
             instr: Instr::Index {
                 ty: Ty::Array(Box::new(Ty::Int(32)), 10),
                 base: ValueId(0),
-                index: ValueId(1),
+                index: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![TmirProof::InBounds {
@@ -2833,8 +2997,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::Add,
                 ty: Ty::Int(32),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![
@@ -2857,8 +3021,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::Add,
                 ty: Ty::Int(32),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![
@@ -2886,8 +3050,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::SDiv,
                 ty: Ty::Int(32),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![TmirProof::NonZeroDivisor {
@@ -2911,8 +3075,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::Shl,
                 ty: Ty::Int(64),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![TmirProof::ValidShift {
@@ -2956,15 +3120,15 @@ mod tests {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
                             ty: Ty::Int(32),
-                            lhs: ValueId(0),
-                            rhs: ValueId(1),
+                            lhs: Operand::Value(ValueId(0)),
+                            rhs: Operand::Value(ValueId(1)),
                         },
                         results: vec![ValueId(2)],
                         proofs: vec![TmirProof::NoOverflow { signed: true }],
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(2)],
+                            values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -3036,7 +3200,7 @@ mod tests {
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(1)],
+                            values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -3119,8 +3283,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::Add,
                 ty: Ty::Int(32),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![
@@ -3246,7 +3410,7 @@ mod tests {
                         params: vec![(ValueId(0), Ty::Int(32))],
                         body: vec![InstrNode {
                             instr: Instr::Return {
-                                values: vec![ValueId(0)],
+                                values: vec![Operand::Value(ValueId(0))],
                             },
                             results: vec![],
                             proofs: vec![],
@@ -3267,7 +3431,7 @@ mod tests {
                         params: vec![(ValueId(0), Ty::Float(64))],
                         body: vec![InstrNode {
                             instr: Instr::Return {
-                                values: vec![ValueId(0)],
+                                values: vec![Operand::Value(ValueId(0))],
                             },
                             results: vec![],
                             proofs: vec![],
@@ -3304,7 +3468,7 @@ mod tests {
                         params: vec![(ValueId(0), Ty::Int(32))],
                         body: vec![InstrNode {
                             instr: Instr::Return {
-                                values: vec![ValueId(0)],
+                                values: vec![Operand::Value(ValueId(0))],
                             },
                             results: vec![],
                             proofs: vec![],
@@ -3327,7 +3491,7 @@ mod tests {
                             InstrNode {
                                 instr: Instr::Call {
                                     func: FuncId(0), // calls "callee"
-                                    args: vec![ValueId(0)],
+                                    args: vec![Operand::Value(ValueId(0))],
                                     ret_ty: vec![Ty::Int(32)],
                                 },
                                 results: vec![ValueId(1)],
@@ -3335,7 +3499,7 @@ mod tests {
                             },
                             InstrNode {
                                 instr: Instr::Return {
-                                    values: vec![ValueId(1)],
+                                    values: vec![Operand::Value(ValueId(1))],
                                 },
                                 results: vec![],
                                 proofs: vec![],
@@ -3396,7 +3560,7 @@ mod tests {
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(0)],
+                            values: vec![Operand::Value(ValueId(0))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -3443,8 +3607,8 @@ mod tests {
                             instr: Instr::Cmp {
                                 op: CmpOp::Slt,
                                 ty: Ty::Int(32),
-                                lhs: ValueId(0),
-                                rhs: ValueId(1),
+                                lhs: Operand::Value(ValueId(0)),
+                                rhs: Operand::Value(ValueId(1)),
                             },
                             results: vec![ValueId(2)],
                             proofs: vec![],
@@ -3452,7 +3616,7 @@ mod tests {
                         // CondBr: branch on comparison result
                         InstrNode {
                             instr: Instr::CondBr {
-                                cond: ValueId(2),
+                                cond: Operand::Value(ValueId(2)),
                                 then_target: BlockId(1),
                                 then_args: vec![],
                                 else_target: BlockId(2),
@@ -3468,7 +3632,7 @@ mod tests {
                     params: vec![],
                     body: vec![InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(0)],
+                            values: vec![Operand::Value(ValueId(0))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -3479,7 +3643,7 @@ mod tests {
                     params: vec![],
                     body: vec![InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(1)],
+                            values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -3540,7 +3704,7 @@ mod tests {
                                 proofs: vec![],
                             },
                             InstrNode {
-                                instr: Instr::Return { values: vec![ValueId(0)] },
+                                instr: Instr::Return { values: vec![Operand::Value(ValueId(0))] },
                                 results: vec![],
                                 proofs: vec![],
                             },
@@ -3566,7 +3730,7 @@ mod tests {
                                 proofs: vec![],
                             },
                             InstrNode {
-                                instr: Instr::Return { values: vec![ValueId(0)] },
+                                instr: Instr::Return { values: vec![Operand::Value(ValueId(0))] },
                                 results: vec![],
                                 proofs: vec![],
                             },
@@ -3605,7 +3769,7 @@ mod tests {
                                 proofs: vec![],
                             },
                             InstrNode {
-                                instr: Instr::Return { values: vec![ValueId(1)] },
+                                instr: Instr::Return { values: vec![Operand::Value(ValueId(1))] },
                                 results: vec![],
                                 proofs: vec![],
                             },
@@ -3824,15 +3988,15 @@ mod tests {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
                             ty: Ty::Int(32),
-                            lhs: ValueId(0),
-                            rhs: ValueId(1),
+                            lhs: Operand::Value(ValueId(0)),
+                            rhs: Operand::Value(ValueId(1)),
                         },
                         results: vec![ValueId(2)],
                         proofs: vec![TmirProof::NoOverflow { signed: true }],
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(2)],
+                            values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -3873,14 +4037,14 @@ mod tests {
                         instr: Instr::UnOp {
                             op: UnOp::FNeg,
                             ty: Ty::Float(64),
-                            operand: ValueId(0),
+                            operand: Operand::Value(ValueId(0)),
                         },
                         results: vec![ValueId(1)],
                         proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(1)],
+                            values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -3925,7 +4089,7 @@ mod tests {
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(1)],
+                            values: vec![Operand::Value(ValueId(1))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -4015,7 +4179,7 @@ mod tests {
                         },
                         InstrNode {
                             instr: Instr::CondBr {
-                                cond: ValueId(0),
+                                cond: Operand::Value(ValueId(0)),
                                 then_target: BlockId(1),
                                 then_args: vec![],
                                 else_target: BlockId(2),
@@ -4030,7 +4194,7 @@ mod tests {
                     id: BlockId(1),
                     params: vec![],
                     body: vec![InstrNode {
-                        instr: Instr::Return { values: vec![ValueId(1)] },
+                        instr: Instr::Return { values: vec![Operand::Value(ValueId(1))] },
                         results: vec![],
                         proofs: vec![],
                     }],
@@ -4039,7 +4203,7 @@ mod tests {
                     id: BlockId(2),
                     params: vec![],
                     body: vec![InstrNode {
-                        instr: Instr::Return { values: vec![ValueId(2)] },
+                        instr: Instr::Return { values: vec![Operand::Value(ValueId(2))] },
                         results: vec![],
                         proofs: vec![],
                     }],
@@ -4085,7 +4249,7 @@ mod tests {
                                 proofs: vec![],
                             },
                             InstrNode {
-                                instr: Instr::Return { values: vec![ValueId(0)] },
+                                instr: Instr::Return { values: vec![Operand::Value(ValueId(0))] },
                                 results: vec![],
                                 proofs: vec![],
                             },
@@ -4105,7 +4269,7 @@ mod tests {
                         id: BlockId(0),
                         params: vec![(ValueId(0), Ty::Float(64))],
                         body: vec![InstrNode {
-                            instr: Instr::Return { values: vec![ValueId(0)] },
+                            instr: Instr::Return { values: vec![Operand::Value(ValueId(0))] },
                             results: vec![],
                             proofs: vec![],
                         }],
@@ -4154,7 +4318,7 @@ mod tests {
                         proofs: vec![],
                     },
                     InstrNode {
-                        instr: Instr::Return { values: vec![ValueId(1)] },
+                        instr: Instr::Return { values: vec![Operand::Value(ValueId(1))] },
                         results: vec![],
                         proofs: vec![],
                     },
@@ -4219,14 +4383,14 @@ mod tests {
                             instr: Instr::Cmp {
                                 op: tmir_op,
                                 ty: Ty::Float(64),
-                                lhs: ValueId(0),
-                                rhs: ValueId(1),
+                                lhs: Operand::Value(ValueId(0)),
+                                rhs: Operand::Value(ValueId(1)),
                             },
                             results: vec![ValueId(2)],
                             proofs: vec![],
                         },
                         InstrNode {
-                            instr: Instr::Return { values: vec![ValueId(2)] },
+                            instr: Instr::Return { values: vec![Operand::Value(ValueId(2))] },
                             results: vec![],
                             proofs: vec![],
                         },
@@ -4269,7 +4433,7 @@ mod tests {
                 params: vec![(ValueId(0), Ty::Int(32))],
                 body: vec![InstrNode {
                     instr: Instr::Return {
-                        values: vec![ValueId(0)],
+                        values: vec![Operand::Value(ValueId(0))],
                     },
                     results: vec![],
                     proofs: vec![],
@@ -4306,15 +4470,15 @@ mod tests {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
                             ty: Ty::Int(32),
-                            lhs: ValueId(0),
-                            rhs: ValueId(1),
+                            lhs: Operand::Value(ValueId(0)),
+                            rhs: Operand::Value(ValueId(1)),
                         },
                         results: vec![ValueId(2)],
                         proofs: vec![],
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(2)],
+                            values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -4352,7 +4516,7 @@ mod tests {
                 params: vec![(ValueId(0), Ty::Int(32))],
                 body: vec![InstrNode {
                     instr: Instr::Return {
-                        values: vec![ValueId(0)],
+                        values: vec![Operand::Value(ValueId(0))],
                     },
                     results: vec![],
                     proofs: vec![],
@@ -4424,15 +4588,15 @@ mod tests {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
                             ty: Ty::Int(32),
-                            lhs: ValueId(0),
-                            rhs: ValueId(1),
+                            lhs: Operand::Value(ValueId(0)),
+                            rhs: Operand::Value(ValueId(1)),
                         },
                         results: vec![ValueId(2)],
                         proofs: vec![TmirProof::Pure],
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(2)],
+                            values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -4479,8 +4643,8 @@ mod tests {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
                             ty: Ty::Int(32),
-                            lhs: ValueId(0),
-                            rhs: ValueId(1),
+                            lhs: Operand::Value(ValueId(0)),
+                            rhs: Operand::Value(ValueId(1)),
                         },
                         results: vec![ValueId(2)],
                         proofs: vec![
@@ -4490,7 +4654,7 @@ mod tests {
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(2)],
+                            values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -4535,8 +4699,8 @@ mod tests {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
                             ty: Ty::Int(32),
-                            lhs: ValueId(0),
-                            rhs: ValueId(1),
+                            lhs: Operand::Value(ValueId(0)),
+                            rhs: Operand::Value(ValueId(1)),
                         },
                         results: vec![ValueId(2)],
                         proofs: vec![
@@ -4547,7 +4711,7 @@ mod tests {
                     },
                     InstrNode {
                         instr: Instr::Return {
-                            values: vec![ValueId(2)],
+                            values: vec![Operand::Value(ValueId(2))],
                         },
                         results: vec![],
                         proofs: vec![],
@@ -4673,8 +4837,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::Add,
                 ty: Ty::Int(32),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![TmirProof::Associative],
@@ -4691,8 +4855,8 @@ mod tests {
             instr: Instr::BinOp {
                 op: BinOp::Mul,
                 ty: Ty::Int(32),
-                lhs: ValueId(0),
-                rhs: ValueId(1),
+                lhs: Operand::Value(ValueId(0)),
+                rhs: Operand::Value(ValueId(1)),
             },
             results: vec![ValueId(2)],
             proofs: vec![TmirProof::Commutative],
@@ -4709,7 +4873,7 @@ mod tests {
             instr: Instr::UnOp {
                 op: UnOp::Not,
                 ty: Ty::Int(32),
-                operand: ValueId(0),
+                operand: Operand::Value(ValueId(0)),
             },
             results: vec![ValueId(1)],
             proofs: vec![TmirProof::Idempotent],
