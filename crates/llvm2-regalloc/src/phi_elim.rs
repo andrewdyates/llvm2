@@ -1503,4 +1503,256 @@ mod tests {
         assert_eq!(regs[&2], 400, "v2 should have old v3 (FPR swap)");
         assert_eq!(regs[&3], 300, "v3 should have old v2 (FPR swap)");
     }
+
+    // -----------------------------------------------------------------------
+    // Regression test for issue #279: phi must use ALL incoming values
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_eliminate_phis_diamond_correct_source_per_predecessor() {
+        // Regression test for #279: verify that each predecessor block gets
+        // a copy with the CORRECT source value (not just the first incoming
+        // value for all predecessors).
+        //
+        // Diamond CFG:
+        //   Block 0 (entry): def v0=10, def v1=20, branch -> b1 or b2
+        //   Block 1 (then):  branch -> b3
+        //   Block 2 (else):  branch -> b3
+        //   Block 3 (merge): phi v2 = [v0 from b1, v1 from b2]
+        //
+        // After phi elimination:
+        //   Block 1 must contain: v2 <- v0 (NOT v2 <- v1)
+        //   Block 2 must contain: v2 <- v1 (NOT v2 <- v0)
+        let mut func = make_diamond_with_phi();
+        eliminate_phis(&mut func);
+
+        let v0 = VReg { id: 0, class: RegClass::Gpr64 };
+        let v1 = VReg { id: 1, class: RegClass::Gpr64 };
+        let v2 = VReg { id: 2, class: RegClass::Gpr64 };
+
+        // Block 1 (then-branch, pred index 0): should copy v0 -> v2.
+        let block1_copies: Vec<_> = func.blocks[1].insts.iter()
+            .filter_map(|&id| {
+                let inst = &func.insts[id.0 as usize];
+                if inst.opcode == PSEUDO_COPY {
+                    let dst = inst.defs.first().and_then(|op| op.as_vreg());
+                    let src = inst.uses.first().and_then(|op| op.as_vreg());
+                    Some((dst, src))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(block1_copies.len(), 1, "block 1 should have exactly 1 copy");
+        assert_eq!(block1_copies[0], (Some(v2), Some(v0)),
+            "block 1 copy should be v2 <- v0 (from then-branch), got {:?}", block1_copies[0]);
+
+        // Block 2 (else-branch, pred index 1): should copy v1 -> v2.
+        let block2_copies: Vec<_> = func.blocks[2].insts.iter()
+            .filter_map(|&id| {
+                let inst = &func.insts[id.0 as usize];
+                if inst.opcode == PSEUDO_COPY {
+                    let dst = inst.defs.first().and_then(|op| op.as_vreg());
+                    let src = inst.uses.first().and_then(|op| op.as_vreg());
+                    Some((dst, src))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(block2_copies.len(), 1, "block 2 should have exactly 1 copy");
+        assert_eq!(block2_copies[0], (Some(v2), Some(v1)),
+            "block 2 copy should be v2 <- v1 (from else-branch), got {:?}", block2_copies[0]);
+    }
+
+    #[test]
+    fn test_eliminate_phis_three_predecessors() {
+        // Test phi with three incoming edges (switch-like CFG).
+        //
+        //   Block 0 (entry): def v0=10, branch -> b1
+        //   Block 1: def v1=20, branch -> b3
+        //   Block 2: def v2=30, branch -> b3
+        //   Block 3: branch -> b4
+        //   Block 4 (merge): phi v3 = [v0 from b1, v1 from b2, v2 from b3]
+        //
+        // After phi elimination, each predecessor should have a copy with
+        // the correct source value.
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        // Block 0: def v0, branch -> b1
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(10)],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i0_br = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![], uses: vec![MachOperand::Block(BlockId(4))],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 1: def v1, branch -> b4
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(20)],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1_br = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![], uses: vec![MachOperand::Block(BlockId(4))],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 2: def v2, branch -> b4
+        let i2 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(30)],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i2_br = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![], uses: vec![MachOperand::Block(BlockId(4))],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 3: just a branch to b4
+        let i3_br = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA,
+            defs: vec![], uses: vec![MachOperand::Block(BlockId(4))],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 4 (merge): phi v3 = [v0 from b1, v1 from b2, v2 from b3]
+        let phi_inst = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0x00,
+            defs: vec![MachOperand::VReg(VReg { id: 3, class: RegClass::Gpr64 })],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 }),
+                MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 }),
+                MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 }),
+            ],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::IS_PHI,
+        });
+        let use_inst = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 3,
+            defs: vec![],
+            uses: vec![MachOperand::VReg(VReg { id: 3, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(), implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let mut func = MachFunction {
+            name: "three_pred_phi".into(),
+            insts,
+            blocks: vec![
+                MachBlock { // Block 0
+                    insts: vec![i0, i0_br],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(4)],
+                    loop_depth: 0,
+                },
+                MachBlock { // Block 1
+                    insts: vec![i1, i1_br],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(4)],
+                    loop_depth: 0,
+                },
+                MachBlock { // Block 2
+                    insts: vec![i2, i2_br],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(4)],
+                    loop_depth: 0,
+                },
+                MachBlock { // Block 3
+                    insts: vec![i3_br],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(4)],
+                    loop_depth: 0,
+                },
+                MachBlock { // Block 4 (merge)
+                    insts: vec![phi_inst, use_inst],
+                    preds: vec![BlockId(0), BlockId(1), BlockId(2)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+            ],
+            block_order: vec![BlockId(0), BlockId(1), BlockId(2), BlockId(3), BlockId(4)],
+            entry_block: BlockId(0),
+            next_vreg: 4,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        };
+
+        eliminate_phis(&mut func);
+
+        // No phi instructions should remain.
+        for &block_id in &func.block_order {
+            let block = &func.blocks[block_id.0 as usize];
+            for &inst_id in &block.insts {
+                let inst = &func.insts[inst_id.0 as usize];
+                assert!(!inst.flags.is_phi(), "phi should be eliminated");
+            }
+        }
+
+        let v3 = VReg { id: 3, class: RegClass::Gpr64 };
+
+        // Helper: extract copy (dst, src) pairs from a block.
+        let get_copies = |block_idx: usize| -> Vec<(VReg, VReg)> {
+            func.blocks[block_idx].insts.iter()
+                .filter_map(|&id| {
+                    let inst = &func.insts[id.0 as usize];
+                    if inst.opcode == PSEUDO_COPY {
+                        let dst = inst.defs.first().and_then(|op| op.as_vreg())?;
+                        let src = inst.uses.first().and_then(|op| op.as_vreg())?;
+                        Some((dst, src))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        // Block 0 (pred index 0): v3 <- v0
+        let copies0 = get_copies(0);
+        assert_eq!(copies0.len(), 1, "block 0 should have 1 copy");
+        assert_eq!(copies0[0].0, v3, "block 0 copy dst should be v3");
+        assert_eq!(copies0[0].1.id, 0, "block 0 copy src should be v0");
+
+        // Block 1 (pred index 1): v3 <- v1
+        let copies1 = get_copies(1);
+        assert_eq!(copies1.len(), 1, "block 1 should have 1 copy");
+        assert_eq!(copies1[0].0, v3, "block 1 copy dst should be v3");
+        assert_eq!(copies1[0].1.id, 1, "block 1 copy src should be v1");
+
+        // Block 2 (pred index 2): v3 <- v2
+        let copies2 = get_copies(2);
+        assert_eq!(copies2.len(), 1, "block 2 should have 1 copy");
+        assert_eq!(copies2[0].0, v3, "block 2 copy dst should be v3");
+        assert_eq!(copies2[0].1.id, 2, "block 2 copy src should be v2");
+
+        // Block 3 has no incoming edge to the phi, so no copy.
+        let copies3 = get_copies(3);
+        assert_eq!(copies3.len(), 0, "block 3 should have no copies (not a phi predecessor)");
+    }
 }
