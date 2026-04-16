@@ -22,6 +22,7 @@ tmir = { workspace = true }
 tmir-build = { workspace = true }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
+rmp-serde = { workspace = true }
 
 [dev-dependencies]
 
