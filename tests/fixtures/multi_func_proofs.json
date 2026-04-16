@@ -6,11 +6,32 @@
       "name": "pure_add",
       "ty": {
         "params": [
-          { "Int": 32 },
-          { "Int": 32 }
+          {
+            "Primitive": {
+              "Int": {
+                "width": "I32",
+                "signed": true
+              }
+            }
+          },
+          {
+            "Primitive": {
+              "Int": {
+                "width": "I32",
+                "signed": true
+              }
+            }
+          }
         ],
         "returns": [
-          { "Int": 32 }
+          {
+            "Primitive": {
+              "Int": {
+                "width": "I32",
+                "signed": true
+              }
+            }
+          }
         ]
       },
       "entry": 0,
@@ -18,22 +39,59 @@
         {
           "id": 0,
           "params": [
-            [0, { "Int": 32 }],
-            [1, { "Int": 32 }]
+            [
+              0,
+              {
+                "Primitive": {
+                  "Int": {
+                    "width": "I32",
+                    "signed": true
+                  }
+                }
+              }
+            ],
+            [
+              1,
+              {
+                "Primitive": {
+                  "Int": {
+                    "width": "I32",
+                    "signed": true
+                  }
+                }
+              }
+            ]
           ],
           "body": [
             {
               "instr": {
                 "BinOp": {
                   "op": "Add",
-                  "ty": { "Int": 32 },
-                  "lhs": 0,
-                  "rhs": 1
+                  "ty": {
+                    "Primitive": {
+                      "Int": {
+                        "width": "I32",
+                        "signed": true
+                      }
+                    }
+                  },
+                  "lhs": {
+                    "Value": 0
+                  },
+                  "rhs": {
+                    "Value": 1
+                  }
                 }
               },
-              "results": [2],
+              "results": [
+                2
+              ],
               "proofs": [
-                { "NoOverflow": { "signed": true } },
+                {
+                  "NoOverflow": {
+                    "signed": true
+                  }
+                },
                 "Commutative",
                 "Associative"
               ]
@@ -41,7 +99,11 @@
             {
               "instr": {
                 "Return": {
-                  "values": [2]
+                  "values": [
+                    {
+                      "Value": 2
+                    }
+                  ]
                 }
               },
               "results": [],
@@ -50,17 +112,27 @@
           ]
         }
       ],
-      "proofs": ["Pure"]
+      "proofs": [
+        "Pure"
+      ]
     },
     {
       "id": 1,
       "name": "negate_f64",
       "ty": {
         "params": [
-          { "Float": 64 }
+          {
+            "Primitive": {
+              "Float": "F64"
+            }
+          }
         ],
         "returns": [
-          { "Float": 64 }
+          {
+            "Primitive": {
+              "Float": "F64"
+            }
+          }
         ]
       },
       "entry": 0,
@@ -68,24 +140,43 @@
         {
           "id": 0,
           "params": [
-            [0, { "Float": 64 }]
+            [
+              0,
+              {
+                "Primitive": {
+                  "Float": "F64"
+                }
+              }
+            ]
           ],
           "body": [
             {
               "instr": {
                 "UnOp": {
                   "op": "FNeg",
-                  "ty": { "Float": 64 },
-                  "operand": 0
+                  "ty": {
+                    "Primitive": {
+                      "Float": "F64"
+                    }
+                  },
+                  "operand": {
+                    "Value": 0
+                  }
                 }
               },
-              "results": [1],
+              "results": [
+                1
+              ],
               "proofs": []
             },
             {
               "instr": {
                 "Return": {
-                  "values": [1]
+                  "values": [
+                    {
+                      "Value": 1
+                    }
+                  ]
                 }
               },
               "results": [],
@@ -94,15 +185,45 @@
           ]
         }
       ],
-      "proofs": ["Pure"]
+      "proofs": [
+        "Pure"
+      ]
     },
     {
       "id": 2,
       "name": "load_and_store",
       "ty": {
         "params": [
-          { "Ptr": { "Int": 64 } },
-          { "Ptr": { "Int": 64 } }
+          {
+            "Ref": {
+              "kind": {
+                "Raw": "Immutable"
+              },
+              "pointee": {
+                "Primitive": {
+                  "Int": {
+                    "width": "I64",
+                    "signed": true
+                  }
+                }
+              }
+            }
+          },
+          {
+            "Ref": {
+              "kind": {
+                "Raw": "Immutable"
+              },
+              "pointee": {
+                "Primitive": {
+                  "Int": {
+                    "width": "I64",
+                    "signed": true
+                  }
+                }
+              }
+            }
+          }
         ],
         "returns": []
       },
@@ -111,33 +232,93 @@
         {
           "id": 0,
           "params": [
-            [0, { "Ptr": { "Int": 64 } }],
-            [1, { "Ptr": { "Int": 64 } }]
+            [
+              0,
+              {
+                "Ref": {
+                  "kind": {
+                    "Raw": "Immutable"
+                  },
+                  "pointee": {
+                    "Primitive": {
+                      "Int": {
+                        "width": "I64",
+                        "signed": true
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            [
+              1,
+              {
+                "Ref": {
+                  "kind": {
+                    "Raw": "Immutable"
+                  },
+                  "pointee": {
+                    "Primitive": {
+                      "Int": {
+                        "width": "I64",
+                        "signed": true
+                      }
+                    }
+                  }
+                }
+              }
+            ]
           ],
           "body": [
             {
               "instr": {
                 "Load": {
-                  "ty": { "Int": 64 },
+                  "ty": {
+                    "Primitive": {
+                      "Int": {
+                        "width": "I64",
+                        "signed": true
+                      }
+                    }
+                  },
                   "ptr": 0
                 }
               },
-              "results": [2],
+              "results": [
+                2
+              ],
               "proofs": [
-                { "NotNull": { "ptr": 0 } }
+                {
+                  "NotNull": {
+                    "ptr": 0
+                  }
+                }
               ]
             },
             {
               "instr": {
                 "Store": {
-                  "ty": { "Int": 64 },
+                  "ty": {
+                    "Primitive": {
+                      "Int": {
+                        "width": "I64",
+                        "signed": true
+                      }
+                    }
+                  },
                   "ptr": 1,
-                  "value": 2
+                  "value": {
+                    "Value": 2
+                  }
                 }
               },
               "results": [],
               "proofs": [
-                { "NotNull": { "ptr": 1 } }
+                {
+                  "NotNull": {
+                    "ptr": 1
+                  }
+                }
               ]
             },
             {

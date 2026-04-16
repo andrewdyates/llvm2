@@ -89,7 +89,7 @@ fn build_empty_function() -> TmirFunction {
         name: "empty".to_string(),
         ty: FuncTy {
             params: vec![],
-            returns: vec![Ty::Int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![TmirBlock {
@@ -98,7 +98,7 @@ fn build_empty_function() -> TmirFunction {
             body: vec![
                 InstrNode {
                     instr: Instr::Const {
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         value: 0,
                     },
                     results: vec![ValueId(0)],
@@ -125,21 +125,21 @@ fn build_add_i32() -> TmirFunction {
         id: FuncId(0),
         name: "add32".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(32), Ty::Int(32)],
-            returns: vec![Ty::Int(32)],
+            params: vec![Ty::int(32), Ty::int(32)],
+            returns: vec![Ty::int(32)],
         },
         entry: BlockId(0),
         blocks: vec![TmirBlock {
             id: BlockId(0),
             params: vec![
-                (ValueId(0), Ty::Int(32)),
-                (ValueId(1), Ty::Int(32)),
+                (ValueId(0), Ty::int(32)),
+                (ValueId(1), Ty::int(32)),
             ],
             body: vec![
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::Int(32),
+                        ty: Ty::int(32),
                         lhs: Operand::Value(ValueId(0)),
                         rhs: Operand::Value(ValueId(1)),
                     },
@@ -167,19 +167,19 @@ fn build_branch_function() -> TmirFunction {
         id: FuncId(0),
         name: "abs_val".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![
             // bb0 (entry): cmp x >= 0, condbr
             TmirBlock {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::Int(64))], // x
+                params: vec![(ValueId(0), Ty::int(64))], // x
                 body: vec![
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: 0,
                         },
                         results: vec![ValueId(1)], // const_0
@@ -188,7 +188,7 @@ fn build_branch_function() -> TmirFunction {
                     InstrNode {
                         instr: Instr::Cmp {
                             op: CmpOp::Sge,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(0)), // x
                             rhs: Operand::Value(ValueId(1)), // 0
                         },
@@ -227,7 +227,7 @@ fn build_branch_function() -> TmirFunction {
                 body: vec![
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: 0,
                         },
                         results: vec![ValueId(3)], // const_0
@@ -236,7 +236,7 @@ fn build_branch_function() -> TmirFunction {
                     InstrNode {
                         instr: Instr::BinOp {
                             op: BinOp::Sub,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(3)), // 0
                             rhs: Operand::Value(ValueId(0)), // x
                         },
@@ -270,19 +270,19 @@ fn build_loop_function() -> TmirFunction {
         id: FuncId(0),
         name: "sum_to_n".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![
             // bb0 (entry): init
             TmirBlock {
                 id: BlockId(0),
-                params: vec![(ValueId(0), Ty::Int(64))], // n
+                params: vec![(ValueId(0), Ty::int(64))], // n
                 body: vec![
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: 0,
                         },
                         results: vec![ValueId(1)], // sum_init = 0
@@ -290,7 +290,7 @@ fn build_loop_function() -> TmirFunction {
                     },
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: 1,
                         },
                         results: vec![ValueId(2)], // i_init = 1
@@ -310,14 +310,14 @@ fn build_loop_function() -> TmirFunction {
             TmirBlock {
                 id: BlockId(1),
                 params: vec![
-                    (ValueId(10), Ty::Int(64)), // sum
-                    (ValueId(11), Ty::Int(64)), // i
+                    (ValueId(10), Ty::int(64)), // sum
+                    (ValueId(11), Ty::int(64)), // i
                 ],
                 body: vec![
                     InstrNode {
                         instr: Instr::Cmp {
                             op: CmpOp::Sle,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(11)), // i
                             rhs: Operand::Value(ValueId(0)),  // n
                         },
@@ -345,7 +345,7 @@ fn build_loop_function() -> TmirFunction {
                     InstrNode {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(10)), // sum
                             rhs: Operand::Value(ValueId(11)), // i
                         },
@@ -354,7 +354,7 @@ fn build_loop_function() -> TmirFunction {
                     },
                     InstrNode {
                         instr: Instr::Const {
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             value: 1,
                         },
                         results: vec![ValueId(14)], // const_1
@@ -363,7 +363,7 @@ fn build_loop_function() -> TmirFunction {
                     InstrNode {
                         instr: Instr::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::Int(64),
+                            ty: Ty::int(64),
                             lhs: Operand::Value(ValueId(11)), // i
                             rhs: Operand::Value(ValueId(14)), // 1
                         },
@@ -383,7 +383,7 @@ fn build_loop_function() -> TmirFunction {
             // bb3 (exit): return sum
             TmirBlock {
                 id: BlockId(3),
-                params: vec![(ValueId(20), Ty::Int(64))],
+                params: vec![(ValueId(20), Ty::int(64))],
                 body: vec![InstrNode {
                     instr: Instr::Return {
                         values: vec![Operand::Value(ValueId(20))],
@@ -405,24 +405,24 @@ fn build_multi_arg_function() -> TmirFunction {
         id: FuncId(0),
         name: "add4".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64), Ty::Int(64), Ty::Int(64), Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64), Ty::int(64), Ty::int(64), Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![TmirBlock {
             id: BlockId(0),
             params: vec![
-                (ValueId(0), Ty::Int(64)), // a
-                (ValueId(1), Ty::Int(64)), // b
-                (ValueId(2), Ty::Int(64)), // c
-                (ValueId(3), Ty::Int(64)), // d
+                (ValueId(0), Ty::int(64)), // a
+                (ValueId(1), Ty::int(64)), // b
+                (ValueId(2), Ty::int(64)), // c
+                (ValueId(3), Ty::int(64)), // d
             ],
             body: vec![
                 // t1 = a + b
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(0)),
                         rhs: Operand::Value(ValueId(1)),
                     },
@@ -433,7 +433,7 @@ fn build_multi_arg_function() -> TmirFunction {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(4)),
                         rhs: Operand::Value(ValueId(2)),
                     },
@@ -444,7 +444,7 @@ fn build_multi_arg_function() -> TmirFunction {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(5)),
                         rhs: Operand::Value(ValueId(3)),
                     },
@@ -472,19 +472,19 @@ fn build_call_function() -> TmirFunction {
         id: FuncId(0),
         name: "call_test".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![TmirBlock {
             id: BlockId(0),
-            params: vec![(ValueId(0), Ty::Int(64))], // a
+            params: vec![(ValueId(0), Ty::int(64))], // a
             body: vec![
                 InstrNode {
                     instr: Instr::Call {
                         func: FuncId(1), // add_one
                         args: vec![Operand::Value(ValueId(0))],
-                        ret_ty: vec![Ty::Int(64)],
+                        ret_ty: vec![Ty::int(64)],
                     },
                     results: vec![ValueId(1)],
                     proofs: vec![],
@@ -510,21 +510,21 @@ fn build_simple_add() -> TmirFunction {
         id: FuncId(0),
         name: "simple_add".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64), Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64), Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![TmirBlock {
             id: BlockId(0),
             params: vec![
-                (ValueId(0), Ty::Int(64)),
-                (ValueId(1), Ty::Int(64)),
+                (ValueId(0), Ty::int(64)),
+                (ValueId(1), Ty::int(64)),
             ],
             body: vec![
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(0)),
                         rhs: Operand::Value(ValueId(1)),
                     },
@@ -550,22 +550,22 @@ fn build_bitwise_function() -> TmirFunction {
         id: FuncId(0),
         name: "bitwise".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64), Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64), Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![TmirBlock {
             id: BlockId(0),
             params: vec![
-                (ValueId(0), Ty::Int(64)), // a
-                (ValueId(1), Ty::Int(64)), // b
+                (ValueId(0), Ty::int(64)), // a
+                (ValueId(1), Ty::int(64)), // b
             ],
             body: vec![
                 // and_result = a & b
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::And,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(0)),
                         rhs: Operand::Value(ValueId(1)),
                     },
@@ -576,7 +576,7 @@ fn build_bitwise_function() -> TmirFunction {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Xor,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(0)),
                         rhs: Operand::Value(ValueId(1)),
                     },
@@ -587,7 +587,7 @@ fn build_bitwise_function() -> TmirFunction {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Or,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(2)),
                         rhs: Operand::Value(ValueId(3)),
                     },
@@ -613,21 +613,21 @@ fn build_sub_function() -> TmirFunction {
         id: FuncId(0),
         name: "sub_vals".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64), Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64), Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![TmirBlock {
             id: BlockId(0),
             params: vec![
-                (ValueId(0), Ty::Int(64)),
-                (ValueId(1), Ty::Int(64)),
+                (ValueId(0), Ty::int(64)),
+                (ValueId(1), Ty::int(64)),
             ],
             body: vec![
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Sub,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(0)),
                         rhs: Operand::Value(ValueId(1)),
                     },
@@ -653,17 +653,17 @@ fn build_negation_function() -> TmirFunction {
         id: FuncId(0),
         name: "negate".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![TmirBlock {
             id: BlockId(0),
-            params: vec![(ValueId(0), Ty::Int(64))], // x
+            params: vec![(ValueId(0), Ty::int(64))], // x
             body: vec![
                 InstrNode {
                     instr: Instr::Const {
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         value: 0,
                     },
                     results: vec![ValueId(1)], // const_0
@@ -672,7 +672,7 @@ fn build_negation_function() -> TmirFunction {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Sub,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(1)), // 0
                         rhs: Operand::Value(ValueId(0)), // x
                     },
@@ -698,17 +698,17 @@ fn build_shift_function() -> TmirFunction {
         id: FuncId(0),
         name: "shift_test".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![TmirBlock {
             id: BlockId(0),
-            params: vec![(ValueId(0), Ty::Int(64))], // x
+            params: vec![(ValueId(0), Ty::int(64))], // x
             body: vec![
                 InstrNode {
                     instr: Instr::Const {
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         value: 2,
                     },
                     results: vec![ValueId(1)], // const_2
@@ -718,7 +718,7 @@ fn build_shift_function() -> TmirFunction {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Shl,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(0)),
                         rhs: Operand::Value(ValueId(1)),
                     },
@@ -727,7 +727,7 @@ fn build_shift_function() -> TmirFunction {
                 },
                 InstrNode {
                     instr: Instr::Const {
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         value: 1,
                     },
                     results: vec![ValueId(3)], // const_1
@@ -737,7 +737,7 @@ fn build_shift_function() -> TmirFunction {
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::AShr,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(2)),
                         rhs: Operand::Value(ValueId(3)),
                     },
@@ -763,21 +763,21 @@ fn build_unsigned_div_function() -> TmirFunction {
         id: FuncId(0),
         name: "udiv_test".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64), Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64), Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![TmirBlock {
             id: BlockId(0),
             params: vec![
-                (ValueId(0), Ty::Int(64)), // a
-                (ValueId(1), Ty::Int(64)), // b
+                (ValueId(0), Ty::int(64)), // a
+                (ValueId(1), Ty::int(64)), // b
             ],
             body: vec![
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::UDiv,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(0)),
                         rhs: Operand::Value(ValueId(1)),
                     },
@@ -803,21 +803,21 @@ fn build_mul_function() -> TmirFunction {
         id: FuncId(0),
         name: "mul_vals".to_string(),
         ty: FuncTy {
-            params: vec![Ty::Int(64), Ty::Int(64)],
-            returns: vec![Ty::Int(64)],
+            params: vec![Ty::int(64), Ty::int(64)],
+            returns: vec![Ty::int(64)],
         },
         entry: BlockId(0),
         blocks: vec![TmirBlock {
             id: BlockId(0),
             params: vec![
-                (ValueId(0), Ty::Int(64)),
-                (ValueId(1), Ty::Int(64)),
+                (ValueId(0), Ty::int(64)),
+                (ValueId(1), Ty::int(64)),
             ],
             body: vec![
                 InstrNode {
                     instr: Instr::BinOp {
                         op: BinOp::Mul,
-                        ty: Ty::Int(64),
+                        ty: Ty::int(64),
                         lhs: Operand::Value(ValueId(0)),
                         rhs: Operand::Value(ValueId(1)),
                     },
