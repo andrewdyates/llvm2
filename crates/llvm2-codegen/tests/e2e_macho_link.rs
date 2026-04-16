@@ -20,11 +20,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use llvm2_codegen::macho::constants::*;
-use llvm2_codegen::pipeline::{Pipeline, PipelineConfig, OptLevel};
+use llvm2_codegen::pipeline::{OptLevel, Pipeline, PipelineConfig};
 
-use tmir_func::{Block as TmirBlock, Function as TmirFunction};
-use tmir_instrs::{BinOp, CmpOp, Instr, InstrNode, Operand};
-use tmir_types::{BlockId, FuncId, FuncTy, Ty, ValueId};
+use tmir::{Block as TmirBlock, BlockId, FuncId, FuncTyId, Function as TmirFunction, Module, Ty, ValueId};
+use tmir::constant::Constant;
+use tmir::inst::{BinOp, ICmpOp, Inst};
+use tmir::node::InstrNode;
+use tmir::ty::FuncTy;
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -156,13 +158,16 @@ fn find_section(bytes: &[u8], target_sectname: &[u8]) -> Option<(u32, u64)> {
     let lc_end = MACH_HEADER_64_SIZE as usize + sizeofcmds as usize;
 
     while offset < lc_end && offset + 8 <= bytes.len() {
-        let cmd = u32::from_le_bytes([bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]]);
-        let cmdsize = u32::from_le_bytes([bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7]]) as usize;
+        let cmd = u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]);
+        let cmdsize =
+            u32::from_le_bytes([bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]]) as usize;
 
         if cmd == LC_SEGMENT_64 {
             let nsects = u32::from_le_bytes([
-                bytes[offset + 64], bytes[offset + 65],
-                bytes[offset + 66], bytes[offset + 67],
+                bytes[offset + 64],
+                bytes[offset + 65],
+                bytes[offset + 66],
+                bytes[offset + 67],
             ]);
             let mut sec_offset = offset + SEGMENT_COMMAND_64_SIZE as usize;
 
@@ -173,14 +178,20 @@ fn find_section(bytes: &[u8], target_sectname: &[u8]) -> Option<(u32, u64)> {
 
                 if name == target_sectname {
                     let sec_size = u64::from_le_bytes([
-                        bytes[sec_offset + 40], bytes[sec_offset + 41],
-                        bytes[sec_offset + 42], bytes[sec_offset + 43],
-                        bytes[sec_offset + 44], bytes[sec_offset + 45],
-                        bytes[sec_offset + 46], bytes[sec_offset + 47],
+                        bytes[sec_offset + 40],
+                        bytes[sec_offset + 41],
+                        bytes[sec_offset + 42],
+                        bytes[sec_offset + 43],
+                        bytes[sec_offset + 44],
+                        bytes[sec_offset + 45],
+                        bytes[sec_offset + 46],
+                        bytes[sec_offset + 47],
                     ]);
                     let sec_file_offset = u32::from_le_bytes([
-                        bytes[sec_offset + 48], bytes[sec_offset + 49],
-                        bytes[sec_offset + 50], bytes[sec_offset + 51],
+                        bytes[sec_offset + 48],
+                        bytes[sec_offset + 49],
+                        bytes[sec_offset + 50],
+                        bytes[sec_offset + 51],
                     ]);
                     return Some((sec_file_offset, sec_size));
                 }
@@ -250,7 +261,10 @@ fn link_with_cc(dir: &Path, driver_c: &Path, obj: &Path, output_name: &str) -> P
         let stdout = String::from_utf8_lossy(&result.stdout);
         panic!(
             "Linking failed!\ncc stdout: {}\ncc stderr: {}\nDriver: {}\nObject: {}",
-            stdout, stderr, driver_c.display(), obj.display()
+            stdout,
+            stderr,
+            driver_c.display(),
+            obj.display()
         );
     }
 
@@ -261,16 +275,23 @@ fn link_with_cc(dir: &Path, driver_c: &Path, obj: &Path, output_name: &str) -> P
 // Helper: compile a tMIR function through the full pipeline
 // ---------------------------------------------------------------------------
 
+fn wrap_function_in_module(mut func: TmirFunction, func_ty: FuncTy) -> Module {
+    let mut module = Module::new("test");
+    let ft_id = module.add_func_type(func_ty);
+    func.ty = ft_id;
+    module.add_function(func);
+    module
+}
+
 fn compile_tmir_function(
     tmir_func: &TmirFunction,
+    module: &Module,
     opt_level: OptLevel,
 ) -> Result<Vec<u8>, String> {
-    // Phase 0: Translate tMIR -> LIR (adapter)
     let (lir_func, _proof_ctx) =
-        llvm2_lower::translate_function(tmir_func, &[])
+        llvm2_lower::translate_function(tmir_func, module)
             .map_err(|e| format!("adapter error: {}", e))?;
 
-    // Phase 1-9: Compile LIR through full pipeline
     let config = PipelineConfig {
         opt_level,
         emit_debug: false,
@@ -292,232 +313,202 @@ fn compile_tmir_function(
 ///
 /// This is the simplest possible two-argument function: adds two i32 values
 /// and returns the result. Tests the full pipeline for 32-bit integer types.
-fn build_add_i32_tmir() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(0),
+fn build_add_i32_tmir() -> Module {
+    let func_ty = FuncTy {
+        params: vec![Ty::I32, Ty::I32],
+        returns: vec![Ty::I32],
+        is_vararg: false,
+    };
+
+    let func = TmirFunction {
+        id: FuncId::new(0),
         name: "add_i32".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(32), Ty::int(32)],
-            returns: vec![Ty::int(32)],
-        },
-        entry: BlockId(0),
+        ty: FuncTyId::new(0),
+        entry: BlockId::new(0),
         blocks: vec![TmirBlock {
-            id: BlockId(0),
+            id: BlockId::new(0),
             params: vec![
-                (ValueId(0), Ty::int(32)),
-                (ValueId(1), Ty::int(32)),
+                (ValueId::new(0), Ty::I32),
+                (ValueId::new(1), Ty::I32),
             ],
             body: vec![
-                InstrNode {
-                    instr: Instr::BinOp {
-                        op: BinOp::Add,
-                        ty: Ty::int(32),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(1)),
-                    },
-                    results: vec![ValueId(2)],
-                    proofs: vec![],
-                },
-                InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(2))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                },
+                InstrNode::new(Inst::BinOp {
+                    op: BinOp::Add,
+                    ty: Ty::I32,
+                    lhs: ValueId::new(0),
+                    rhs: ValueId::new(1),
+                })
+                .with_result(ValueId::new(2)),
+                InstrNode::new(Inst::Return {
+                    values: vec![ValueId::new(2)],
+                }),
             ],
         }],
         proofs: vec![],
-    }
+    };
+
+    wrap_function_in_module(func, func_ty)
 }
 
 /// Build tMIR for: fn add_i64(a: i64, b: i64) -> i64 { a + b }
 ///
 /// 64-bit variant of the add function.
-fn build_add_i64_tmir() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(0),
+fn build_add_i64_tmir() -> Module {
+    let func_ty = FuncTy {
+        params: vec![Ty::I64, Ty::I64],
+        returns: vec![Ty::I64],
+        is_vararg: false,
+    };
+
+    let func = TmirFunction {
+        id: FuncId::new(0),
         name: "add_i64".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64), Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
+        ty: FuncTyId::new(0),
+        entry: BlockId::new(0),
         blocks: vec![TmirBlock {
-            id: BlockId(0),
+            id: BlockId::new(0),
             params: vec![
-                (ValueId(0), Ty::int(64)),
-                (ValueId(1), Ty::int(64)),
+                (ValueId::new(0), Ty::I64),
+                (ValueId::new(1), Ty::I64),
             ],
             body: vec![
-                InstrNode {
-                    instr: Instr::BinOp {
-                        op: BinOp::Add,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(1)),
-                    },
-                    results: vec![ValueId(2)],
-                    proofs: vec![],
-                },
-                InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(2))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                },
+                InstrNode::new(Inst::BinOp {
+                    op: BinOp::Add,
+                    ty: Ty::I64,
+                    lhs: ValueId::new(0),
+                    rhs: ValueId::new(1),
+                })
+                .with_result(ValueId::new(2)),
+                InstrNode::new(Inst::Return {
+                    values: vec![ValueId::new(2)],
+                }),
             ],
         }],
         proofs: vec![],
-    }
+    };
+
+    wrap_function_in_module(func, func_ty)
 }
 
 /// Build tMIR for: fn sub_mul(a: i64, b: i64, c: i64) -> i64 { (a - b) * c }
 ///
 /// Multi-operation function: tests that chained operations produce correct
 /// Mach-O output that links and executes correctly.
-fn build_sub_mul_tmir() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(0),
+fn build_sub_mul_tmir() -> Module {
+    let func_ty = FuncTy {
+        params: vec![Ty::I64, Ty::I64, Ty::I64],
+        returns: vec![Ty::I64],
+        is_vararg: false,
+    };
+
+    let func = TmirFunction {
+        id: FuncId::new(0),
         name: "sub_mul".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64), Ty::int(64), Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
+        ty: FuncTyId::new(0),
+        entry: BlockId::new(0),
         blocks: vec![TmirBlock {
-            id: BlockId(0),
+            id: BlockId::new(0),
             params: vec![
-                (ValueId(0), Ty::int(64)), // a
-                (ValueId(1), Ty::int(64)), // b
-                (ValueId(2), Ty::int(64)), // c
+                (ValueId::new(0), Ty::I64),
+                (ValueId::new(1), Ty::I64),
+                (ValueId::new(2), Ty::I64),
             ],
             body: vec![
-                // tmp = a - b
-                InstrNode {
-                    instr: Instr::BinOp {
-                        op: BinOp::Sub,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(1)),
-                    },
-                    results: vec![ValueId(3)],
-                    proofs: vec![],
-                },
-                // result = tmp * c
-                InstrNode {
-                    instr: Instr::BinOp {
-                        op: BinOp::Mul,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(3)),
-                        rhs: Operand::Value(ValueId(2)),
-                    },
-                    results: vec![ValueId(4)],
-                    proofs: vec![],
-                },
-                InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(4))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                },
+                InstrNode::new(Inst::BinOp {
+                    op: BinOp::Sub,
+                    ty: Ty::I64,
+                    lhs: ValueId::new(0),
+                    rhs: ValueId::new(1),
+                })
+                .with_result(ValueId::new(3)),
+                InstrNode::new(Inst::BinOp {
+                    op: BinOp::Mul,
+                    ty: Ty::I64,
+                    lhs: ValueId::new(3),
+                    rhs: ValueId::new(2),
+                })
+                .with_result(ValueId::new(4)),
+                InstrNode::new(Inst::Return {
+                    values: vec![ValueId::new(4)],
+                }),
             ],
         }],
         proofs: vec![],
-    }
+    };
+
+    wrap_function_in_module(func, func_ty)
 }
 
 /// Build tMIR for: fn abs_val(n: i64) -> i64 { if n < 0 { -n } else { n } }
 ///
 /// Tests conditional branching + negation, producing a function with multiple
 /// basic blocks that must link correctly (branch offsets must be valid).
-fn build_abs_val_tmir() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(0),
+fn build_abs_val_tmir() -> Module {
+    let func_ty = FuncTy {
+        params: vec![Ty::I64],
+        returns: vec![Ty::I64],
+        is_vararg: false,
+    };
+
+    let func = TmirFunction {
+        id: FuncId::new(0),
         name: "abs_val".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
+        ty: FuncTyId::new(0),
+        entry: BlockId::new(0),
         blocks: vec![
-            // bb0 (entry): cmp n < 0, branch
             TmirBlock {
-                id: BlockId(0),
-                params: vec![(ValueId(0), Ty::int(64))], // n
+                id: BlockId::new(0),
+                params: vec![(ValueId::new(0), Ty::I64)],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Const {
-                            ty: Ty::int(64),
-                            value: 0,
-                        },
-                        results: vec![ValueId(1)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Cmp {
-                            op: CmpOp::Slt,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(0)), // n
-                            rhs: Operand::Value(ValueId(1)), // 0
-                        },
-                        results: vec![ValueId(2)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::CondBr {
-                            cond: Operand::Value(ValueId(2)),
-                            then_target: BlockId(1), // negate
-                            then_args: vec![],
-                            else_target: BlockId(2), // return n
-                            else_args: vec![],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(0),
+                    })
+                    .with_result(ValueId::new(1)),
+                    InstrNode::new(Inst::ICmp {
+                        op: ICmpOp::Slt,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(1),
+                    })
+                    .with_result(ValueId::new(2)),
+                    InstrNode::new(Inst::CondBr {
+                        cond: ValueId::new(2),
+                        then_target: BlockId::new(1),
+                        then_args: vec![],
+                        else_target: BlockId::new(2),
+                        else_args: vec![],
+                    }),
                 ],
             },
-            // bb1: return -n (via 0 - n)
             TmirBlock {
-                id: BlockId(1),
+                id: BlockId::new(1),
                 params: vec![],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::BinOp {
-                            op: BinOp::Sub,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(1)), // 0
-                            rhs: Operand::Value(ValueId(0)), // n
-                        },
-                        results: vec![ValueId(3)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Return {
-                            values: vec![Operand::Value(ValueId(3))],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::BinOp {
+                        op: BinOp::Sub,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(1),
+                        rhs: ValueId::new(0),
+                    })
+                    .with_result(ValueId::new(3)),
+                    InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(3)],
+                    }),
                 ],
             },
-            // bb2: return n
             TmirBlock {
-                id: BlockId(2),
+                id: BlockId::new(2),
                 params: vec![],
-                body: vec![InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(0))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                }],
+                body: vec![InstrNode::new(Inst::Return {
+                    values: vec![ValueId::new(0)],
+                })],
             },
         ],
         proofs: vec![],
-    }
+    };
+
+    wrap_function_in_module(func, func_ty)
 }
 
 // ===========================================================================
@@ -528,18 +519,19 @@ fn build_abs_val_tmir() -> TmirFunction {
 /// validates the resulting Mach-O object file structure in-process.
 #[test]
 fn test_e2e_link_add_i32_macho_structure() {
-    let tmir_func = build_add_i32_tmir();
+    let module = build_add_i32_tmir();
 
-    let obj_bytes = compile_tmir_function(&tmir_func, OptLevel::O0)
+    let obj_bytes = compile_tmir_function(&module.functions[0], &module, OptLevel::O0)
         .expect("full pipeline should compile add_i32");
 
-    // -- Mach-O header validation --
     verify_macho_magic(&obj_bytes);
     assert_eq!(macho_filetype(&obj_bytes), MH_OBJECT, "must be MH_OBJECT");
     assert_eq!(macho_cputype(&obj_bytes), CPU_TYPE_ARM64, "must be ARM64");
-    assert!(macho_ncmds(&obj_bytes) >= 3, "need LC_SEGMENT_64 + LC_SYMTAB + LC_DYSYMTAB at minimum");
+    assert!(
+        macho_ncmds(&obj_bytes) >= 3,
+        "need LC_SEGMENT_64 + LC_SYMTAB + LC_DYSYMTAB at minimum"
+    );
 
-    // -- __text section --
     let text = find_section(&obj_bytes, b"__text");
     assert!(text.is_some(), "__text section must be present");
     let (text_offset, text_size) = text.unwrap();
@@ -547,25 +539,19 @@ fn test_e2e_link_add_i32_macho_structure() {
     assert!(text_size > 0, "__text must have code");
     assert_eq!(text_size % 4, 0, "code size must be 4-byte aligned (AArch64)");
 
-    // -- __compact_unwind section --
     let cu = find_section(&obj_bytes, b"__compact_unwind");
     assert!(cu.is_some(), "__compact_unwind section must be present");
     let (_, cu_size) = cu.unwrap();
     assert_eq!(cu_size, 32, "single function = one 32-byte compact unwind entry");
 
-    // -- Verify code contains ADD and RET instructions --
     let code = &obj_bytes[text_offset as usize..(text_offset as usize + text_size as usize)];
     let mut found_add = false;
     let mut found_ret = false;
     for i in (0..code.len()).step_by(4) {
-        let word = u32::from_le_bytes([code[i], code[i+1], code[i+2], code[i+3]]);
-        // ADD (register, 64-bit): bits [31:21] = 10001011000
-        // ADD (register, 32-bit): bits [31:21] = 00001011000
+        let word = u32::from_le_bytes([code[i], code[i + 1], code[i + 2], code[i + 3]]);
         if (word >> 21) == 0b10001011000 || (word >> 21) == 0b00001011000 {
             found_add = true;
         }
-        // ADD (immediate, 64-bit): bits [31:22] = 1001000100
-        // ADD (immediate, 32-bit): bits [31:22] = 0001000100
         if (word >> 22) == 0b1001000100 || (word >> 22) == 0b0001000100 {
             found_add = true;
         }
@@ -586,12 +572,11 @@ fn test_e2e_link_add_i32_otool_validation() {
     }
 
     let dir = make_test_dir("link_add_i32_otool");
-    let tmir_func = build_add_i32_tmir();
-    let obj_bytes = compile_tmir_function(&tmir_func, OptLevel::O0)
+    let module = build_add_i32_tmir();
+    let obj_bytes = compile_tmir_function(&module.functions[0], &module, OptLevel::O0)
         .expect("full pipeline should compile add_i32");
     let obj_path = write_object_file(&dir, "add_i32.o", &obj_bytes);
 
-    // -- otool -l: load commands --
     if let Some(lc_out) = run_otool_l(&obj_path) {
         assert!(lc_out.contains("LC_SEGMENT_64"), "must have LC_SEGMENT_64");
         assert!(lc_out.contains("LC_SYMTAB"), "must have LC_SYMTAB");
@@ -601,45 +586,50 @@ fn test_e2e_link_add_i32_otool_validation() {
         assert!(lc_out.contains("__compact_unwind"), "must have __compact_unwind");
     }
 
-    // -- otool -tv: disassembly --
     if let Some(disasm) = run_otool_tv(&obj_path) {
         eprintln!("add_i32 disassembly:\n{}", disasm);
 
         assert!(
             disasm.contains("add") || disasm.contains("ADD"),
-            "disassembly must contain 'add'.\n{}", disasm
+            "disassembly must contain 'add'.\n{}",
+            disasm
         );
         assert!(
             disasm.contains("ret"),
-            "disassembly must contain 'ret'.\n{}", disasm
+            "disassembly must contain 'ret'.\n{}",
+            disasm
         );
         assert!(
             disasm.contains("add_i32"),
-            "disassembly must reference function name.\n{}", disasm
+            "disassembly must reference function name.\n{}",
+            disasm
         );
-        // Frame lowering should produce STP/LDP (prologue/epilogue)
         assert!(
             disasm.contains("stp") || disasm.contains("STP"),
-            "disassembly must contain STP (frame prologue).\n{}", disasm
+            "disassembly must contain STP (frame prologue).\n{}",
+            disasm
         );
         assert!(
             disasm.contains("ldp") || disasm.contains("LDP"),
-            "disassembly must contain LDP (frame epilogue).\n{}", disasm
+            "disassembly must contain LDP (frame epilogue).\n{}",
+            disasm
         );
     }
 
-    // -- nm: symbol table --
     if has_nm()
-        && let Some(nm_out) = run_nm(&obj_path) {
-            assert!(
-                nm_out.contains("_add_i32"),
-                "nm must show _add_i32 symbol.\n{}", nm_out
-            );
-            assert!(
-                nm_out.contains(" T "),
-                "add_i32 must be a global text symbol (T).\n{}", nm_out
-            );
-        }
+        && let Some(nm_out) = run_nm(&obj_path)
+    {
+        assert!(
+            nm_out.contains("_add_i32"),
+            "nm must show _add_i32 symbol.\n{}",
+            nm_out
+        );
+        assert!(
+            nm_out.contains(" T "),
+            "add_i32 must be a global text symbol (T).\n{}",
+            nm_out
+        );
+    }
 
     cleanup(&dir);
 }
@@ -660,16 +650,12 @@ fn test_e2e_link_add_i32_link_and_run() {
 
     let dir = make_test_dir("link_add_i32_run");
 
-    let tmir_func = build_add_i32_tmir();
-    let obj_bytes = compile_tmir_function(&tmir_func, OptLevel::O0)
+    let module = build_add_i32_tmir();
+    let obj_bytes = compile_tmir_function(&module.functions[0], &module, OptLevel::O0)
         .expect("full pipeline should compile add_i32");
 
     let obj_path = write_object_file(&dir, "add_i32.o", &obj_bytes);
 
-    // C driver that calls our compiled function and validates results.
-    // Note: add_i32 compiles as i32 operations. On AArch64, i32 values live
-    // in the lower 32 bits of X registers. We use int (32-bit) in the C
-    // prototype to match, and cast to long for printf to avoid sign issues.
     let driver_src = r#"
 #include <stdio.h>
 extern int add_i32(int a, int b);
@@ -695,10 +681,12 @@ int main(void) {
     let (exit_code, stdout) = run_binary_with_output(&binary);
     eprintln!("add_i32 link+run stdout: {}", stdout);
     assert_eq!(
-        exit_code, 0,
+        exit_code,
+        0,
         "add_i32 link+run failed with exit code {} \
          (1=add(3,4)!=7, 2=add(0,0)!=0, 3=add(-5,10)!=5, 4=add(1M,2M)!=3M, 5=add(-100,-200)!=-300). stdout: {}",
-        exit_code, stdout
+        exit_code,
+        stdout
     );
 
     cleanup(&dir);
@@ -718,8 +706,8 @@ fn test_e2e_link_add_i64_link_and_run() {
 
     let dir = make_test_dir("link_add_i64_run");
 
-    let tmir_func = build_add_i64_tmir();
-    let obj_bytes = compile_tmir_function(&tmir_func, OptLevel::O0)
+    let module = build_add_i64_tmir();
+    let obj_bytes = compile_tmir_function(&module.functions[0], &module, OptLevel::O0)
         .expect("full pipeline should compile add_i64");
 
     let obj_path = write_object_file(&dir, "add_i64.o", &obj_bytes);
@@ -747,9 +735,11 @@ int main(void) {
     let (exit_code, stdout) = run_binary_with_output(&binary);
     eprintln!("add_i64 link+run stdout: {}", stdout);
     assert_eq!(
-        exit_code, 0,
+        exit_code,
+        0,
         "add_i64 link+run failed with exit code {}. stdout: {}",
-        exit_code, stdout
+        exit_code,
+        stdout
     );
 
     cleanup(&dir);
@@ -770,8 +760,8 @@ fn test_e2e_link_sub_mul_link_and_run() {
 
     let dir = make_test_dir("link_sub_mul_run");
 
-    let tmir_func = build_sub_mul_tmir();
-    let obj_bytes = compile_tmir_function(&tmir_func, OptLevel::O0)
+    let module = build_sub_mul_tmir();
+    let obj_bytes = compile_tmir_function(&module.functions[0], &module, OptLevel::O0)
         .expect("full pipeline should compile sub_mul");
 
     let obj_path = write_object_file(&dir, "sub_mul.o", &obj_bytes);
@@ -799,9 +789,11 @@ int main(void) {
     let (exit_code, stdout) = run_binary_with_output(&binary);
     eprintln!("sub_mul link+run stdout: {}", stdout);
     assert_eq!(
-        exit_code, 0,
+        exit_code,
+        0,
         "sub_mul link+run failed with exit code {}. stdout: {}",
-        exit_code, stdout
+        exit_code,
+        stdout
     );
 
     cleanup(&dir);
@@ -822,8 +814,8 @@ fn test_e2e_link_abs_val_link_and_run() {
 
     let dir = make_test_dir("link_abs_val_run");
 
-    let tmir_func = build_abs_val_tmir();
-    let obj_bytes = compile_tmir_function(&tmir_func, OptLevel::O0)
+    let module = build_abs_val_tmir();
+    let obj_bytes = compile_tmir_function(&module.functions[0], &module, OptLevel::O0)
         .expect("full pipeline should compile abs_val");
 
     let obj_path = write_object_file(&dir, "abs_val.o", &obj_bytes);
@@ -853,10 +845,12 @@ int main(void) {
     let (exit_code, stdout) = run_binary_with_output(&binary);
     eprintln!("abs_val link+run stdout: {}", stdout);
     assert_eq!(
-        exit_code, 0,
+        exit_code,
+        0,
         "abs_val link+run failed with exit code {} \
          (1=abs(42)!=42, 2=abs(-42)!=42, 3=abs(0)!=0, 4=abs(-1)!=1, 5=abs(1)!=1). stdout: {}",
-        exit_code, stdout
+        exit_code,
+        stdout
     );
 
     cleanup(&dir);
@@ -876,7 +870,7 @@ fn test_e2e_link_opt_levels_all_link_and_run() {
     }
 
     let dir = make_test_dir("link_opt_levels");
-    let tmir_func = build_add_i64_tmir();
+    let module = build_add_i64_tmir();
 
     let driver_src = r#"
 #include <stdio.h>
@@ -890,10 +884,9 @@ int main(void) {
     let driver_path = write_c_driver(&dir, "driver.c", driver_src);
 
     for (i, opt_level) in [OptLevel::O0, OptLevel::O1, OptLevel::O2].iter().enumerate() {
-        let obj_bytes = compile_tmir_function(&tmir_func, *opt_level)
+        let obj_bytes = compile_tmir_function(&module.functions[0], &module, *opt_level)
             .unwrap_or_else(|e| panic!("pipeline at {:?} failed: {}", opt_level, e));
 
-        // Verify Mach-O structure
         verify_macho_magic(&obj_bytes);
         assert_eq!(macho_filetype(&obj_bytes), MH_OBJECT);
 
@@ -905,9 +898,12 @@ int main(void) {
 
         let (exit_code, stdout) = run_binary_with_output(&binary);
         assert_eq!(
-            exit_code, 0,
+            exit_code,
+            0,
             "add_i64 at {:?} failed with exit code {}. stdout: {}",
-            opt_level, exit_code, stdout
+            opt_level,
+            exit_code,
+            stdout
         );
     }
 
@@ -922,22 +918,20 @@ int main(void) {
 /// regardless of whether otool/cc are available (pure in-process checks).
 #[test]
 fn test_e2e_link_all_functions_produce_valid_macho() {
-    let functions: Vec<(&str, TmirFunction)> = vec![
+    let functions: Vec<(&str, Module)> = vec![
         ("add_i32", build_add_i32_tmir()),
         ("add_i64", build_add_i64_tmir()),
         ("sub_mul", build_sub_mul_tmir()),
         ("abs_val", build_abs_val_tmir()),
     ];
 
-    for (name, tmir_func) in &functions {
-        let obj_bytes = compile_tmir_function(tmir_func, OptLevel::O0)
+    for (name, module) in &functions {
+        let obj_bytes = compile_tmir_function(&module.functions[0], module, OptLevel::O0)
             .unwrap_or_else(|e| panic!("pipeline failed for {}: {}", name, e));
 
         verify_macho_magic(&obj_bytes);
-        assert_eq!(macho_filetype(&obj_bytes), MH_OBJECT,
-            "{}: must be MH_OBJECT", name);
-        assert_eq!(macho_cputype(&obj_bytes), CPU_TYPE_ARM64,
-            "{}: must be ARM64", name);
+        assert_eq!(macho_filetype(&obj_bytes), MH_OBJECT, "{}: must be MH_OBJECT", name);
+        assert_eq!(macho_cputype(&obj_bytes), CPU_TYPE_ARM64, "{}: must be ARM64", name);
 
         let text = find_section(&obj_bytes, b"__text");
         assert!(text.is_some(), "{}: __text section must exist", name);
@@ -948,11 +942,11 @@ fn test_e2e_link_all_functions_produce_valid_macho() {
         let cu = find_section(&obj_bytes, b"__compact_unwind");
         assert!(cu.is_some(), "{}: __compact_unwind must exist", name);
 
-        // Verify object file size is reasonable (not bloated, not empty)
         assert!(
             obj_bytes.len() >= 100 && obj_bytes.len() <= 10_000,
             "{}: object file size {} is out of range [100, 10000]",
-            name, obj_bytes.len()
+            name,
+            obj_bytes.len()
         );
     }
 }
@@ -970,36 +964,48 @@ fn test_e2e_link_all_functions_otool_validates() {
 
     let dir = make_test_dir("link_all_otool");
 
-    let functions: Vec<(&str, TmirFunction)> = vec![
+    let functions: Vec<(&str, Module)> = vec![
         ("add_i32", build_add_i32_tmir()),
         ("add_i64", build_add_i64_tmir()),
         ("sub_mul", build_sub_mul_tmir()),
         ("abs_val", build_abs_val_tmir()),
     ];
 
-    for (name, tmir_func) in &functions {
-        let obj_bytes = compile_tmir_function(tmir_func, OptLevel::O0)
+    for (name, module) in &functions {
+        let obj_bytes = compile_tmir_function(&module.functions[0], module, OptLevel::O0)
             .unwrap_or_else(|e| panic!("pipeline failed for {}: {}", name, e));
 
         let filename = format!("{}.o", name);
         let obj_path = write_object_file(&dir, &filename, &obj_bytes);
 
-        // otool -tv must succeed and show function name + ret
         let disasm = run_otool_tv(&obj_path);
         assert!(disasm.is_some(), "otool -tv must succeed for {}", name);
         let disasm = disasm.unwrap();
-        assert!(disasm.contains("ret"),
-            "{}: disassembly must contain 'ret'.\n{}", name, disasm);
-        assert!(disasm.contains(name),
-            "{}: disassembly must reference function name.\n{}", name, disasm);
+        assert!(
+            disasm.contains("ret"),
+            "{}: disassembly must contain 'ret'.\n{}",
+            name,
+            disasm
+        );
+        assert!(
+            disasm.contains(name),
+            "{}: disassembly must reference function name.\n{}",
+            name,
+            disasm
+        );
 
-        // nm must show the symbol
         if has_nm()
-            && let Some(nm_out) = run_nm(&obj_path) {
-                let symbol = format!("_{}", name);
-                assert!(nm_out.contains(&symbol),
-                    "{}: nm must show {} symbol.\n{}", name, symbol, nm_out);
-            }
+            && let Some(nm_out) = run_nm(&obj_path)
+        {
+            let symbol = format!("_{}", name);
+            assert!(
+                nm_out.contains(&symbol),
+                "{}: nm must show {} symbol.\n{}",
+                name,
+                symbol,
+                nm_out
+            );
+        }
     }
 
     cleanup(&dir);

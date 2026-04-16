@@ -18,11 +18,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use llvm2_codegen::pipeline::{Pipeline, PipelineConfig, OptLevel};
+use llvm2_codegen::pipeline::{OptLevel, Pipeline, PipelineConfig};
 
-use tmir_func::{Block as TmirBlock, Function as TmirFunction};
-use tmir_instrs::{BinOp, CmpOp, Instr, InstrNode, Operand};
-use tmir_types::{BlockId, FuncId, FuncTy, Ty, ValueId};
+use tmir::{Block as TmirBlock, BlockId, FuncId, FuncTyId, Function as TmirFunction, Module, Ty, ValueId};
+use tmir::constant::Constant;
+use tmir::inst::{BinOp, CastOp, ICmpOp, Inst};
+use tmir::node::InstrNode;
+use tmir::ty::FuncTy;
 
 // ---------------------------------------------------------------------------
 // Test infrastructure (shared with e2e_run.rs patterns)
@@ -132,6 +134,21 @@ fn cleanup(dir: &Path) {
     let _ = fs::remove_dir_all(dir);
 }
 
+fn wrap_function_in_module(mut func: TmirFunction, func_ty: FuncTy) -> Module {
+    let mut module = Module::new("test");
+    let ft_id = module.add_func_type(func_ty);
+    func.ty = ft_id;
+    module.add_function(func);
+    module
+}
+
+fn test_function(module: &Module) -> &TmirFunction {
+    module
+        .functions
+        .first()
+        .expect("test module should contain one function")
+}
+
 // ---------------------------------------------------------------------------
 // Helper: compile a tMIR function through the full pipeline
 // ---------------------------------------------------------------------------
@@ -140,14 +157,12 @@ fn cleanup(dir: &Path) {
 /// full pipeline (ISel -> opt -> regalloc -> frame -> encode -> Mach-O).
 ///
 /// Returns the Mach-O .o file bytes.
-fn compile_tmir_function(
-    tmir_func: &TmirFunction,
-    opt_level: OptLevel,
-) -> Result<Vec<u8>, String> {
+fn compile_tmir_function(module: &Module, opt_level: OptLevel) -> Result<Vec<u8>, String> {
+    let tmir_func = test_function(module);
+
     // Phase 0: Translate tMIR -> LIR (adapter)
     let (lir_func, _proof_ctx) =
-        llvm2_lower::translate_function(tmir_func, &[])
-            .map_err(|e| format!("adapter error: {}", e))?;
+        llvm2_lower::translate_function(tmir_func, module).map_err(|e| format!("adapter error: {}", e))?;
 
     // Phase 1-9: Compile LIR through full pipeline
     let config = PipelineConfig {
@@ -182,182 +197,131 @@ fn compile_tmir_function(
 ///   bb3 (loop): params(a, b, i), tmp = a+b, new_a = b, new_b = tmp,
 ///               new_i = i+1, cmp new_i <= n, condbr -> bb_loop(new_a, new_b, new_i), bb_ret_b
 ///   bb4 (ret_b): params(result), return result
-fn build_fibonacci_tmir() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(0),
+fn build_fibonacci_tmir() -> Module {
+    let func_ty = FuncTy {
+        params: vec![Ty::I64],
+        returns: vec![Ty::I64],
+        is_vararg: false,
+    };
+
+    let func = TmirFunction {
+        id: FuncId::new(0),
         name: "fibonacci".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
+        ty: FuncTyId::new(0),
+        entry: BlockId::new(0),
         blocks: vec![
-            // bb0 (entry): check if n <= 1
             TmirBlock {
-                id: BlockId(0),
-                params: vec![(ValueId(0), Ty::int(64))], // n
+                id: BlockId::new(0),
+                params: vec![(ValueId::new(0), Ty::I64)],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Const {
-                            ty: Ty::int(64),
-                            value: 1,
-                        },
-                        results: vec![ValueId(1)], // const_1
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Cmp {
-                            op: CmpOp::Sle,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(0)), // n
-                            rhs: Operand::Value(ValueId(1)), // 1
-                        },
-                        results: vec![ValueId(2)], // cmp_result
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::CondBr {
-                            cond: Operand::Value(ValueId(2)),
-                            then_target: BlockId(1),  // ret_n
-                            then_args: vec![],
-                            else_target: BlockId(2),  // loop_init
-                            else_args: vec![],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(1),
+                    })
+                    .with_result(ValueId::new(1)),
+                    InstrNode::new(Inst::ICmp {
+                        op: ICmpOp::Sle,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(1),
+                    })
+                    .with_result(ValueId::new(2)),
+                    InstrNode::new(Inst::CondBr {
+                        cond: ValueId::new(2),
+                        then_target: BlockId::new(1),
+                        then_args: vec![],
+                        else_target: BlockId::new(2),
+                        else_args: vec![],
+                    }),
                 ],
             },
-            // bb1 (ret_n): return n directly
             TmirBlock {
-                id: BlockId(1),
+                id: BlockId::new(1),
                 params: vec![],
-                body: vec![InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(0))], // n from bb0
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                }],
+                body: vec![InstrNode::new(Inst::Return {
+                    values: vec![ValueId::new(0)],
+                })],
             },
-            // bb2 (loop_init): setup a=0, b=1, i=2, jump to loop
             TmirBlock {
-                id: BlockId(2),
+                id: BlockId::new(2),
                 params: vec![],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Const {
-                            ty: Ty::int(64),
-                            value: 0,
-                        },
-                        results: vec![ValueId(10)], // a_init = 0
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Const {
-                            ty: Ty::int(64),
-                            value: 1,
-                        },
-                        results: vec![ValueId(11)], // b_init = 1
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Const {
-                            ty: Ty::int(64),
-                            value: 2,
-                        },
-                        results: vec![ValueId(12)], // i_init = 2
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Br {
-                            target: BlockId(3),
-                            args: vec![Operand::Value(ValueId(10)), Operand::Value(ValueId(11)), Operand::Value(ValueId(12))],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(0),
+                    })
+                    .with_result(ValueId::new(10)),
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(1),
+                    })
+                    .with_result(ValueId::new(11)),
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(2),
+                    })
+                    .with_result(ValueId::new(12)),
+                    InstrNode::new(Inst::Br {
+                        target: BlockId::new(3),
+                        args: vec![ValueId::new(10), ValueId::new(11), ValueId::new(12)],
+                    }),
                 ],
             },
-            // bb3 (loop): loop body with block parameters
             TmirBlock {
-                id: BlockId(3),
+                id: BlockId::new(3),
                 params: vec![
-                    (ValueId(20), Ty::int(64)), // a
-                    (ValueId(21), Ty::int(64)), // b
-                    (ValueId(22), Ty::int(64)), // i
+                    (ValueId::new(20), Ty::I64),
+                    (ValueId::new(21), Ty::I64),
+                    (ValueId::new(22), Ty::I64),
                 ],
                 body: vec![
-                    // tmp = a + b
-                    InstrNode {
-                        instr: Instr::BinOp {
-                            op: BinOp::Add,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(20)), // a
-                            rhs: Operand::Value(ValueId(21)), // b
-                        },
-                        results: vec![ValueId(23)], // tmp
-                        proofs: vec![],
-                    },
-                    // new_i = i + 1
-                    InstrNode {
-                        instr: Instr::Const {
-                            ty: Ty::int(64),
-                            value: 1,
-                        },
-                        results: vec![ValueId(24)], // const_1
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::BinOp {
-                            op: BinOp::Add,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(22)), // i
-                            rhs: Operand::Value(ValueId(24)), // 1
-                        },
-                        results: vec![ValueId(25)], // new_i
-                        proofs: vec![],
-                    },
-                    // cmp new_i <= n
-                    InstrNode {
-                        instr: Instr::Cmp {
-                            op: CmpOp::Sle,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(25)), // new_i
-                            rhs: Operand::Value(ValueId(0)),  // n (from entry)
-                        },
-                        results: vec![ValueId(26)], // loop_cond
-                        proofs: vec![],
-                    },
-                    // condbr: loop back or exit
-                    InstrNode {
-                        instr: Instr::CondBr {
-                            cond: Operand::Value(ValueId(26)),
-                            then_target: BlockId(3), // loop back
-                            then_args: vec![Operand::Value(ValueId(21)), Operand::Value(ValueId(23)), Operand::Value(ValueId(25))], // new_a=b, new_b=tmp, new_i
-                            else_target: BlockId(4), // exit
-                            else_args: vec![Operand::Value(ValueId(23))], // result = tmp (= a+b = new b)
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(20),
+                        rhs: ValueId::new(21),
+                    })
+                    .with_result(ValueId::new(23)),
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(1),
+                    })
+                    .with_result(ValueId::new(24)),
+                    InstrNode::new(Inst::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(22),
+                        rhs: ValueId::new(24),
+                    })
+                    .with_result(ValueId::new(25)),
+                    InstrNode::new(Inst::ICmp {
+                        op: ICmpOp::Sle,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(25),
+                        rhs: ValueId::new(0),
+                    })
+                    .with_result(ValueId::new(26)),
+                    InstrNode::new(Inst::CondBr {
+                        cond: ValueId::new(26),
+                        then_target: BlockId::new(3),
+                        then_args: vec![ValueId::new(21), ValueId::new(23), ValueId::new(25)],
+                        else_target: BlockId::new(4),
+                        else_args: vec![ValueId::new(23)],
+                    }),
                 ],
             },
-            // bb4 (ret_b): return the result
             TmirBlock {
-                id: BlockId(4),
-                params: vec![(ValueId(30), Ty::int(64))], // result
-                body: vec![InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(30))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                }],
+                id: BlockId::new(4),
+                params: vec![(ValueId::new(30), Ty::I64)],
+                body: vec![InstrNode::new(Inst::Return {
+                    values: vec![ValueId::new(30)],
+                })],
             },
         ],
         proofs: vec![],
-    }
+    };
+
+    wrap_function_in_module(func, func_ty)
 }
 
 /// Build tMIR for: fn is_prime(n: i64) -> i64
@@ -376,276 +340,212 @@ fn build_fibonacci_tmir() -> TmirFunction {
 ///     goto loop
 ///
 /// Returns 1 for prime, 0 for not prime (used as exit code offset).
-fn build_is_prime_tmir() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(0),
+fn build_is_prime_tmir() -> Module {
+    let func_ty = FuncTy {
+        params: vec![Ty::I64],
+        returns: vec![Ty::I64],
+        is_vararg: false,
+    };
+
+    let func = TmirFunction {
+        id: FuncId::new(0),
         name: "is_prime".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
+        ty: FuncTyId::new(0),
+        entry: BlockId::new(0),
         blocks: vec![
-            // bb0 (entry): check n <= 1
             TmirBlock {
-                id: BlockId(0),
-                params: vec![(ValueId(0), Ty::int(64))], // n
+                id: BlockId::new(0),
+                params: vec![(ValueId::new(0), Ty::I64)],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Const { ty: Ty::int(64), value: 1 },
-                        results: vec![ValueId(1)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Cmp {
-                            op: CmpOp::Sle,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(0)),
-                            rhs: Operand::Value(ValueId(1)),
-                        },
-                        results: vec![ValueId(2)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::CondBr {
-                            cond: Operand::Value(ValueId(2)),
-                            then_target: BlockId(1), // return 0
-                            then_args: vec![],
-                            else_target: BlockId(2), // check n <= 3
-                            else_args: vec![],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(1),
+                    })
+                    .with_result(ValueId::new(1)),
+                    InstrNode::new(Inst::ICmp {
+                        op: ICmpOp::Sle,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(1),
+                    })
+                    .with_result(ValueId::new(2)),
+                    InstrNode::new(Inst::CondBr {
+                        cond: ValueId::new(2),
+                        then_target: BlockId::new(1),
+                        then_args: vec![],
+                        else_target: BlockId::new(2),
+                        else_args: vec![],
+                    }),
                 ],
             },
-            // bb1: return 0 (not prime)
             TmirBlock {
-                id: BlockId(1),
+                id: BlockId::new(1),
                 params: vec![],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Const { ty: Ty::int(64), value: 0 },
-                        results: vec![ValueId(3)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Return { values: vec![Operand::Value(ValueId(3))] },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(0),
+                    })
+                    .with_result(ValueId::new(3)),
+                    InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(3)],
+                    }),
                 ],
             },
-            // bb2: check n <= 3
             TmirBlock {
-                id: BlockId(2),
+                id: BlockId::new(2),
                 params: vec![],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Const { ty: Ty::int(64), value: 3 },
-                        results: vec![ValueId(4)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Cmp {
-                            op: CmpOp::Sle,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(0)),
-                            rhs: Operand::Value(ValueId(4)),
-                        },
-                        results: vec![ValueId(5)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::CondBr {
-                            cond: Operand::Value(ValueId(5)),
-                            then_target: BlockId(3), // return 1 (2 and 3 are prime)
-                            then_args: vec![],
-                            else_target: BlockId(4), // loop init
-                            else_args: vec![],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(3),
+                    })
+                    .with_result(ValueId::new(4)),
+                    InstrNode::new(Inst::ICmp {
+                        op: ICmpOp::Sle,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(4),
+                    })
+                    .with_result(ValueId::new(5)),
+                    InstrNode::new(Inst::CondBr {
+                        cond: ValueId::new(5),
+                        then_target: BlockId::new(3),
+                        then_args: vec![],
+                        else_target: BlockId::new(4),
+                        else_args: vec![],
+                    }),
                 ],
             },
-            // bb3: return 1 (prime)
             TmirBlock {
-                id: BlockId(3),
+                id: BlockId::new(3),
                 params: vec![],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Const { ty: Ty::int(64), value: 1 },
-                        results: vec![ValueId(6)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Return { values: vec![Operand::Value(ValueId(6))] },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(1),
+                    })
+                    .with_result(ValueId::new(6)),
+                    InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(6)],
+                    }),
                 ],
             },
-            // bb4: loop init (i = 2)
             TmirBlock {
-                id: BlockId(4),
+                id: BlockId::new(4),
                 params: vec![],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Const { ty: Ty::int(64), value: 2 },
-                        results: vec![ValueId(7)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Br {
-                            target: BlockId(5),
-                            args: vec![Operand::Value(ValueId(7))],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(2),
+                    })
+                    .with_result(ValueId::new(7)),
+                    InstrNode::new(Inst::Br {
+                        target: BlockId::new(5),
+                        args: vec![ValueId::new(7)],
+                    }),
                 ],
             },
-            // bb5: loop header (with param i)
             TmirBlock {
-                id: BlockId(5),
-                params: vec![(ValueId(10), Ty::int(64))], // i
+                id: BlockId::new(5),
+                params: vec![(ValueId::new(10), Ty::I64)],
                 body: vec![
-                    // i_sq = i * i
-                    InstrNode {
-                        instr: Instr::BinOp {
-                            op: BinOp::Mul,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(10)),
-                            rhs: Operand::Value(ValueId(10)),
-                        },
-                        results: vec![ValueId(11)],
-                        proofs: vec![],
-                    },
-                    // cmp i_sq > n
-                    InstrNode {
-                        instr: Instr::Cmp {
-                            op: CmpOp::Sgt,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(11)),
-                            rhs: Operand::Value(ValueId(0)),
-                        },
-                        results: vec![ValueId(12)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::CondBr {
-                            cond: Operand::Value(ValueId(12)),
-                            then_target: BlockId(3), // return 1 (prime)
-                            then_args: vec![],
-                            else_target: BlockId(6), // check divisibility
-                            else_args: vec![],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::BinOp {
+                        op: BinOp::Mul,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(10),
+                        rhs: ValueId::new(10),
+                    })
+                    .with_result(ValueId::new(11)),
+                    InstrNode::new(Inst::ICmp {
+                        op: ICmpOp::Sgt,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(11),
+                        rhs: ValueId::new(0),
+                    })
+                    .with_result(ValueId::new(12)),
+                    InstrNode::new(Inst::CondBr {
+                        cond: ValueId::new(12),
+                        then_target: BlockId::new(3),
+                        then_args: vec![],
+                        else_target: BlockId::new(6),
+                        else_args: vec![],
+                    }),
                 ],
             },
-            // bb6: check n % i == 0 using div+mul+sub
             TmirBlock {
-                id: BlockId(6),
+                id: BlockId::new(6),
                 params: vec![],
                 body: vec![
-                    // q = n / i (signed div)
-                    InstrNode {
-                        instr: Instr::BinOp {
-                            op: BinOp::SDiv,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(0)),
-                            rhs: Operand::Value(ValueId(10)),
-                        },
-                        results: vec![ValueId(13)],
-                        proofs: vec![],
-                    },
-                    // qi = q * i
-                    InstrNode {
-                        instr: Instr::BinOp {
-                            op: BinOp::Mul,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(13)),
-                            rhs: Operand::Value(ValueId(10)),
-                        },
-                        results: vec![ValueId(14)],
-                        proofs: vec![],
-                    },
-                    // r = n - qi
-                    InstrNode {
-                        instr: Instr::BinOp {
-                            op: BinOp::Sub,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(0)),
-                            rhs: Operand::Value(ValueId(14)),
-                        },
-                        results: vec![ValueId(15)],
-                        proofs: vec![],
-                    },
-                    // cmp r == 0
-                    InstrNode {
-                        instr: Instr::Const { ty: Ty::int(64), value: 0 },
-                        results: vec![ValueId(16)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Cmp {
-                            op: CmpOp::Eq,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(15)),
-                            rhs: Operand::Value(ValueId(16)),
-                        },
-                        results: vec![ValueId(17)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::CondBr {
-                            cond: Operand::Value(ValueId(17)),
-                            then_target: BlockId(1), // return 0 (not prime)
-                            then_args: vec![],
-                            else_target: BlockId(7), // increment i
-                            else_args: vec![],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::BinOp {
+                        op: BinOp::SDiv,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(10),
+                    })
+                    .with_result(ValueId::new(13)),
+                    InstrNode::new(Inst::BinOp {
+                        op: BinOp::Mul,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(13),
+                        rhs: ValueId::new(10),
+                    })
+                    .with_result(ValueId::new(14)),
+                    InstrNode::new(Inst::BinOp {
+                        op: BinOp::Sub,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(14),
+                    })
+                    .with_result(ValueId::new(15)),
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(0),
+                    })
+                    .with_result(ValueId::new(16)),
+                    InstrNode::new(Inst::ICmp {
+                        op: ICmpOp::Eq,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(15),
+                        rhs: ValueId::new(16),
+                    })
+                    .with_result(ValueId::new(17)),
+                    InstrNode::new(Inst::CondBr {
+                        cond: ValueId::new(17),
+                        then_target: BlockId::new(1),
+                        then_args: vec![],
+                        else_target: BlockId::new(7),
+                        else_args: vec![],
+                    }),
                 ],
             },
-            // bb7: increment i, loop back
             TmirBlock {
-                id: BlockId(7),
+                id: BlockId::new(7),
                 params: vec![],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Const { ty: Ty::int(64), value: 1 },
-                        results: vec![ValueId(18)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::BinOp {
-                            op: BinOp::Add,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(10)),
-                            rhs: Operand::Value(ValueId(18)),
-                        },
-                        results: vec![ValueId(19)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Br {
-                            target: BlockId(5),
-                            args: vec![Operand::Value(ValueId(19))],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(1),
+                    })
+                    .with_result(ValueId::new(18)),
+                    InstrNode::new(Inst::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(10),
+                        rhs: ValueId::new(18),
+                    })
+                    .with_result(ValueId::new(19)),
+                    InstrNode::new(Inst::Br {
+                        target: BlockId::new(5),
+                        args: vec![ValueId::new(19)],
+                    }),
                 ],
             },
         ],
         proofs: vec![],
-    }
+    };
+
+    wrap_function_in_module(func, func_ty)
 }
 
 /// Build tMIR for: fn sum_array(arr: *i64, len: i64) -> i64
@@ -662,234 +562,175 @@ fn build_is_prime_tmir() -> TmirFunction {
 ///     sum = sum + val
 ///     i = i + 1
 ///     goto loop
-fn build_sum_array_tmir() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(0),
+fn build_sum_array_tmir() -> Module {
+    let func_ty = FuncTy {
+        params: vec![Ty::Ptr, Ty::I64],
+        returns: vec![Ty::I64],
+        is_vararg: false,
+    };
+
+    let func = TmirFunction {
+        id: FuncId::new(0),
         name: "sum_array".to_string(),
-        ty: FuncTy {
-            params: vec![
-                Ty::ptr(Ty::int(64)),  // arr
-                Ty::int(64),                       // len
-            ],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
+        ty: FuncTyId::new(0),
+        entry: BlockId::new(0),
         blocks: vec![
-            // bb0 (entry): init sum=0, i=0, jump to loop
             TmirBlock {
-                id: BlockId(0),
-                params: vec![
-                    (ValueId(0), Ty::ptr(Ty::int(64))), // arr
-                    (ValueId(1), Ty::int(64)),                     // len
-                ],
+                id: BlockId::new(0),
+                params: vec![(ValueId::new(0), Ty::Ptr), (ValueId::new(1), Ty::I64)],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Const { ty: Ty::int(64), value: 0 },
-                        results: vec![ValueId(2)], // sum_init = 0
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Const { ty: Ty::int(64), value: 0 },
-                        results: vec![ValueId(3)], // i_init = 0
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Br {
-                            target: BlockId(1),
-                            args: vec![Operand::Value(ValueId(2)), Operand::Value(ValueId(3))],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(0),
+                    })
+                    .with_result(ValueId::new(2)),
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(0),
+                    })
+                    .with_result(ValueId::new(3)),
+                    InstrNode::new(Inst::Br {
+                        target: BlockId::new(1),
+                        args: vec![ValueId::new(2), ValueId::new(3)],
+                    }),
                 ],
             },
-            // bb1 (loop header): params(sum, i)
             TmirBlock {
-                id: BlockId(1),
-                params: vec![
-                    (ValueId(10), Ty::int(64)), // sum
-                    (ValueId(11), Ty::int(64)), // i
-                ],
+                id: BlockId::new(1),
+                params: vec![(ValueId::new(10), Ty::I64), (ValueId::new(11), Ty::I64)],
                 body: vec![
-                    // cmp i >= len
-                    InstrNode {
-                        instr: Instr::Cmp {
-                            op: CmpOp::Sge,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(11)), // i
-                            rhs: Operand::Value(ValueId(1)),  // len
-                        },
-                        results: vec![ValueId(12)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::CondBr {
-                            cond: Operand::Value(ValueId(12)),
-                            then_target: BlockId(2), // return sum
-                            then_args: vec![Operand::Value(ValueId(10))],
-                            else_target: BlockId(3), // loop body
-                            else_args: vec![],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::ICmp {
+                        op: ICmpOp::Sge,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(11),
+                        rhs: ValueId::new(1),
+                    })
+                    .with_result(ValueId::new(12)),
+                    InstrNode::new(Inst::CondBr {
+                        cond: ValueId::new(12),
+                        then_target: BlockId::new(2),
+                        then_args: vec![ValueId::new(10)],
+                        else_target: BlockId::new(3),
+                        else_args: vec![],
+                    }),
                 ],
             },
-            // bb2 (exit): return sum
             TmirBlock {
-                id: BlockId(2),
-                params: vec![(ValueId(20), Ty::int(64))],
-                body: vec![InstrNode {
-                    instr: Instr::Return { values: vec![Operand::Value(ValueId(20))] },
-                    results: vec![],
-                    proofs: vec![],
-                }],
+                id: BlockId::new(2),
+                params: vec![(ValueId::new(20), Ty::I64)],
+                body: vec![InstrNode::new(Inst::Return {
+                    values: vec![ValueId::new(20)],
+                })],
             },
-            // bb3 (loop body): load arr[i], accumulate, increment
             TmirBlock {
-                id: BlockId(3),
+                id: BlockId::new(3),
                 params: vec![],
                 body: vec![
-                    // offset = i * 8
-                    InstrNode {
-                        instr: Instr::Const { ty: Ty::int(64), value: 8 },
-                        results: vec![ValueId(13)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::BinOp {
-                            op: BinOp::Mul,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(11)), // i
-                            rhs: Operand::Value(ValueId(13)), // 8
-                        },
-                        results: vec![ValueId(14)], // offset
-                        proofs: vec![],
-                    },
-                    // ptr = arr + offset (pointer arithmetic as integer add on I64)
-                    // We cast arr (Ptr) to I64 first, then add, then cast back
-                    InstrNode {
-                        instr: Instr::Cast {
-                            op: tmir_instrs::CastOp::PtrToInt,
-                            src_ty: Ty::ptr(Ty::int(64)),
-                            dst_ty: Ty::int(64),
-                            operand: Operand::Value(ValueId(0)), // arr
-                        },
-                        results: vec![ValueId(15)], // arr_int
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::BinOp {
-                            op: BinOp::Add,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(15)), // arr_int
-                            rhs: Operand::Value(ValueId(14)), // offset
-                        },
-                        results: vec![ValueId(16)], // elem_ptr_int
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Cast {
-                            op: tmir_instrs::CastOp::IntToPtr,
-                            src_ty: Ty::int(64),
-                            dst_ty: Ty::ptr(Ty::int(64)),
-                            operand: Operand::Value(ValueId(16)),
-                        },
-                        results: vec![ValueId(17)], // elem_ptr
-                        proofs: vec![],
-                    },
-                    // val = load(elem_ptr)
-                    InstrNode {
-                        instr: Instr::Load {
-                            ty: Ty::int(64),
-                            ptr: ValueId(17),
-                        },
-                        results: vec![ValueId(18)], // val
-                        proofs: vec![],
-                    },
-                    // new_sum = sum + val
-                    InstrNode {
-                        instr: Instr::BinOp {
-                            op: BinOp::Add,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(10)), // sum
-                            rhs: Operand::Value(ValueId(18)), // val
-                        },
-                        results: vec![ValueId(19)], // new_sum
-                        proofs: vec![],
-                    },
-                    // new_i = i + 1
-                    InstrNode {
-                        instr: Instr::Const { ty: Ty::int(64), value: 1 },
-                        results: vec![ValueId(21)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::BinOp {
-                            op: BinOp::Add,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(11)),
-                            rhs: Operand::Value(ValueId(21)),
-                        },
-                        results: vec![ValueId(22)], // new_i
-                        proofs: vec![],
-                    },
-                    // loop back
-                    InstrNode {
-                        instr: Instr::Br {
-                            target: BlockId(1),
-                            args: vec![Operand::Value(ValueId(19)), Operand::Value(ValueId(22))],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(8),
+                    })
+                    .with_result(ValueId::new(13)),
+                    InstrNode::new(Inst::BinOp {
+                        op: BinOp::Mul,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(11),
+                        rhs: ValueId::new(13),
+                    })
+                    .with_result(ValueId::new(14)),
+                    InstrNode::new(Inst::Cast {
+                        op: CastOp::PtrToInt,
+                        src_ty: Ty::Ptr,
+                        dst_ty: Ty::I64,
+                        operand: ValueId::new(0),
+                    })
+                    .with_result(ValueId::new(15)),
+                    InstrNode::new(Inst::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(15),
+                        rhs: ValueId::new(14),
+                    })
+                    .with_result(ValueId::new(16)),
+                    InstrNode::new(Inst::Cast {
+                        op: CastOp::IntToPtr,
+                        src_ty: Ty::I64,
+                        dst_ty: Ty::Ptr,
+                        operand: ValueId::new(16),
+                    })
+                    .with_result(ValueId::new(17)),
+                    InstrNode::new(Inst::Load {
+                        ty: Ty::I64,
+                        ptr: ValueId::new(17),
+                    })
+                    .with_result(ValueId::new(18)),
+                    InstrNode::new(Inst::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(10),
+                        rhs: ValueId::new(18),
+                    })
+                    .with_result(ValueId::new(19)),
+                    InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(1),
+                    })
+                    .with_result(ValueId::new(21)),
+                    InstrNode::new(Inst::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(11),
+                        rhs: ValueId::new(21),
+                    })
+                    .with_result(ValueId::new(22)),
+                    InstrNode::new(Inst::Br {
+                        target: BlockId::new(1),
+                        args: vec![ValueId::new(19), ValueId::new(22)],
+                    }),
                 ],
             },
         ],
         proofs: vec![],
-    }
+    };
+
+    wrap_function_in_module(func, func_ty)
 }
 
 /// Build tMIR for: fn simple_add(a: i64, b: i64) -> i64 { a + b }
 ///
 /// Minimal full-pipeline test: just add two arguments and return.
-fn build_simple_add_tmir() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(0),
+fn build_simple_add_tmir() -> Module {
+    let func_ty = FuncTy {
+        params: vec![Ty::I64, Ty::I64],
+        returns: vec![Ty::I64],
+        is_vararg: false,
+    };
+
+    let func = TmirFunction {
+        id: FuncId::new(0),
         name: "simple_add".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64), Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
+        ty: FuncTyId::new(0),
+        entry: BlockId::new(0),
         blocks: vec![TmirBlock {
-            id: BlockId(0),
-            params: vec![
-                (ValueId(0), Ty::int(64)),
-                (ValueId(1), Ty::int(64)),
-            ],
+            id: BlockId::new(0),
+            params: vec![(ValueId::new(0), Ty::I64), (ValueId::new(1), Ty::I64)],
             body: vec![
-                InstrNode {
-                    instr: Instr::BinOp {
-                        op: BinOp::Add,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(1)),
-                    },
-                    results: vec![ValueId(2)],
-                    proofs: vec![],
-                },
-                InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(2))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                },
+                InstrNode::new(Inst::BinOp {
+                    op: BinOp::Add,
+                    ty: Ty::I64,
+                    lhs: ValueId::new(0),
+                    rhs: ValueId::new(1),
+                })
+                .with_result(ValueId::new(2)),
+                InstrNode::new(Inst::Return {
+                    values: vec![ValueId::new(2)],
+                }),
             ],
         }],
         proofs: vec![],
-    }
+    };
+
+    wrap_function_in_module(func, func_ty)
 }
 
 // ---------------------------------------------------------------------------
@@ -900,10 +741,9 @@ fn build_simple_add_tmir() -> TmirFunction {
 /// tMIR -> adapter -> ISel -> opt -> regalloc -> frame -> encode -> Mach-O.
 #[test]
 fn test_full_pipeline_simple_add_encoding() {
-    let tmir_func = build_simple_add_tmir();
+    let module = build_simple_add_tmir();
 
-    let obj_bytes = compile_tmir_function(&tmir_func, OptLevel::O0)
-        .expect("full pipeline should compile simple_add");
+    let obj_bytes = compile_tmir_function(&module, OptLevel::O0).expect("full pipeline should compile simple_add");
 
     // Verify it produced a valid Mach-O file.
     assert!(obj_bytes.len() >= 4, "object file should not be empty");
@@ -924,9 +764,8 @@ fn test_full_pipeline_simple_add_run() {
 
     let dir = make_test_dir("full_simple_add");
 
-    let tmir_func = build_simple_add_tmir();
-    let obj_bytes = compile_tmir_function(&tmir_func, OptLevel::O0)
-        .expect("full pipeline should compile simple_add");
+    let module = build_simple_add_tmir();
+    let obj_bytes = compile_tmir_function(&module, OptLevel::O0).expect("full pipeline should compile simple_add");
 
     let obj_path = write_object_file(&dir, "simple_add.o", &obj_bytes);
 
@@ -966,10 +805,9 @@ int main(void) {
 /// without errors (encoding check only, no linking).
 #[test]
 fn test_full_pipeline_fibonacci_encoding() {
-    let tmir_func = build_fibonacci_tmir();
+    let module = build_fibonacci_tmir();
 
-    let obj_bytes = compile_tmir_function(&tmir_func, OptLevel::O0)
-        .expect("full pipeline should compile fibonacci");
+    let obj_bytes = compile_tmir_function(&module, OptLevel::O0).expect("full pipeline should compile fibonacci");
 
     assert!(obj_bytes.len() >= 4, "object file should not be empty");
     assert_eq!(
@@ -989,9 +827,8 @@ fn test_full_pipeline_fibonacci_run() {
 
     let dir = make_test_dir("full_fibonacci");
 
-    let tmir_func = build_fibonacci_tmir();
-    let obj_bytes = compile_tmir_function(&tmir_func, OptLevel::O0)
-        .expect("full pipeline should compile fibonacci");
+    let module = build_fibonacci_tmir();
+    let obj_bytes = compile_tmir_function(&module, OptLevel::O0).expect("full pipeline should compile fibonacci");
 
     let obj_path = write_object_file(&dir, "fibonacci.o", &obj_bytes);
 
@@ -1033,10 +870,9 @@ int main(void) {
 /// Verifies that is_prime compiles through the full pipeline (encoding check).
 #[test]
 fn test_full_pipeline_is_prime_encoding() {
-    let tmir_func = build_is_prime_tmir();
+    let module = build_is_prime_tmir();
 
-    let obj_bytes = compile_tmir_function(&tmir_func, OptLevel::O0)
-        .expect("full pipeline should compile is_prime");
+    let obj_bytes = compile_tmir_function(&module, OptLevel::O0).expect("full pipeline should compile is_prime");
 
     assert!(obj_bytes.len() >= 4, "object file should not be empty");
     assert_eq!(
@@ -1056,9 +892,8 @@ fn test_full_pipeline_is_prime_run() {
 
     let dir = make_test_dir("full_is_prime");
 
-    let tmir_func = build_is_prime_tmir();
-    let obj_bytes = compile_tmir_function(&tmir_func, OptLevel::O0)
-        .expect("full pipeline should compile is_prime");
+    let module = build_is_prime_tmir();
+    let obj_bytes = compile_tmir_function(&module, OptLevel::O0).expect("full pipeline should compile is_prime");
 
     let obj_path = write_object_file(&dir, "is_prime.o", &obj_bytes);
 
@@ -1113,10 +948,9 @@ int main(void) {
 /// Verifies that sum_array compiles through the full pipeline (encoding check).
 #[test]
 fn test_full_pipeline_sum_array_encoding() {
-    let tmir_func = build_sum_array_tmir();
+    let module = build_sum_array_tmir();
 
-    let obj_bytes = compile_tmir_function(&tmir_func, OptLevel::O0)
-        .expect("full pipeline should compile sum_array");
+    let obj_bytes = compile_tmir_function(&module, OptLevel::O0).expect("full pipeline should compile sum_array");
 
     assert!(obj_bytes.len() >= 4, "object file should not be empty");
     assert_eq!(
@@ -1136,9 +970,8 @@ fn test_full_pipeline_sum_array_run() {
 
     let dir = make_test_dir("full_sum_array");
 
-    let tmir_func = build_sum_array_tmir();
-    let obj_bytes = compile_tmir_function(&tmir_func, OptLevel::O0)
-        .expect("full pipeline should compile sum_array");
+    let module = build_sum_array_tmir();
+    let obj_bytes = compile_tmir_function(&module, OptLevel::O0).expect("full pipeline should compile sum_array");
 
     let obj_path = write_object_file(&dir, "sum_array.o", &obj_bytes);
 
@@ -1187,10 +1020,10 @@ int main(void) {
 /// Verify that the simple_add function compiles at all optimization levels.
 #[test]
 fn test_full_pipeline_opt_levels() {
-    let tmir_func = build_simple_add_tmir();
+    let module = build_simple_add_tmir();
 
     for opt_level in &[OptLevel::O0, OptLevel::O1, OptLevel::O2] {
-        let obj_bytes = compile_tmir_function(&tmir_func, *opt_level)
+        let obj_bytes = compile_tmir_function(&module, *opt_level)
             .unwrap_or_else(|e| panic!("full pipeline at {:?} failed: {}", opt_level, e));
 
         assert!(
@@ -1215,11 +1048,10 @@ fn test_full_pipeline_opt_levels() {
 /// block count and instruction types.
 #[test]
 fn test_adapter_fibonacci_structure() {
-    let tmir_func = build_fibonacci_tmir();
+    let module = build_fibonacci_tmir();
 
     let (lir_func, _proof_ctx) =
-        llvm2_lower::translate_function(&tmir_func, &[])
-            .expect("adapter should translate fibonacci");
+        llvm2_lower::translate_function(test_function(&module), &module).expect("adapter should translate fibonacci");
 
     assert_eq!(lir_func.name, "fibonacci");
     assert_eq!(
@@ -1242,11 +1074,10 @@ fn test_adapter_fibonacci_structure() {
 /// Verify the adapter correctly translates is_prime to LIR.
 #[test]
 fn test_adapter_is_prime_structure() {
-    let tmir_func = build_is_prime_tmir();
+    let module = build_is_prime_tmir();
 
     let (lir_func, _proof_ctx) =
-        llvm2_lower::translate_function(&tmir_func, &[])
-            .expect("adapter should translate is_prime");
+        llvm2_lower::translate_function(test_function(&module), &module).expect("adapter should translate is_prime");
 
     assert_eq!(lir_func.name, "is_prime");
     // Should have 8 blocks.

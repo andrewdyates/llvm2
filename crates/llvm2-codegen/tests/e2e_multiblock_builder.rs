@@ -10,7 +10,7 @@
 //   ModuleBuilder -> Compiler::compile() -> Mach-O .o -> cc link -> run
 //
 // Unlike e2e_aarch64_link.rs which constructs tMIR with raw struct literals,
-// these tests use the ergonomic builder API from tmir_func::builder, proving
+// these tests use the ergonomic builder API from tmir_build::builder, proving
 // that the builder correctly produces multi-block programs that compile and
 // run correctly end-to-end.
 //
@@ -23,9 +23,9 @@ use std::process::Command;
 use llvm2_codegen::compiler::{Compiler, CompilerConfig, CompilerTraceLevel};
 use llvm2_codegen::pipeline::OptLevel;
 
-use tmir_func::builder::{self, ModuleBuilder};
-use tmir_instrs::{BinOp, CmpOp};
-use tmir_types::Ty;
+use tmir::Ty;
+use tmir::inst::ICmpOp;
+use tmir_build::builder::ModuleBuilder;
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -55,7 +55,7 @@ fn cleanup(dir: &Path) {
 }
 
 /// Compile a tMIR module through the full Compiler::compile() pipeline.
-fn compile_module(module: &tmir_func::Module) -> Vec<u8> {
+fn compile_module(module: &tmir::Module) -> Vec<u8> {
     let compiler = Compiler::new(CompilerConfig {
         opt_level: OptLevel::O0,
         trace_level: CompilerTraceLevel::Full,
@@ -149,42 +149,31 @@ fn link_and_run(dir: &Path, obj_bytes: &[u8], obj_name: &str, driver_src: &str) 
 // bb2: return b
 // ---------------------------------------------------------------------------
 
-fn build_max_module() -> tmir_func::Module {
+fn build_max_module() -> tmir::Module {
     let mut mb = ModuleBuilder::new("e2e_max_builder_test");
-    let mut fb = mb.function(
-        "_max_builder",
-        vec![Ty::int(64), Ty::int(64)],
-        vec![Ty::int(64)],
-    );
+    let ft = mb.add_func_type(vec![Ty::I64, Ty::I64], vec![Ty::I64]);
+    let mut fb = mb.function("_max_builder", ft);
 
-    let (entry_id, params) = fb.entry_block();
-    let a = params[0];
-    let b = params[1];
+    let entry = fb.create_block();
+    let bb_then = fb.create_block();
+    let bb_else = fb.create_block();
 
-    let bb_then = fb.fresh_block();
-    let bb_else = fb.fresh_block();
+    let a = fb.add_block_param(entry, Ty::I64);
+    let b = fb.add_block_param(entry, Ty::I64);
 
-    // Compare a > b
-    let cmp_result = fb.fresh_value();
+    fb.set_entry(entry);
 
-    // Entry block: compare and branch
-    fb.add_block(
-        entry_id,
-        vec![(a, Ty::int(64)), (b, Ty::int(64))],
-        vec![
-            builder::cmp(CmpOp::Sgt, Ty::int(64), a, b, cmp_result),
-            builder::condbr(cmp_result, bb_then, vec![], bb_else, vec![]),
-        ],
-    );
+    fb.switch_to_block(entry);
+    let cmp_result = fb.icmp(ICmpOp::Sgt, Ty::I64, a, b);
+    fb.condbr(cmp_result, bb_then, vec![], bb_else, vec![]);
 
-    // Then block: return a
-    fb.add_block(bb_then, vec![], vec![builder::ret(vec![a])]);
+    fb.switch_to_block(bb_then);
+    fb.ret(vec![a]);
 
-    // Else block: return b
-    fb.add_block(bb_else, vec![], vec![builder::ret(vec![b])]);
+    fb.switch_to_block(bb_else);
+    fb.ret(vec![b]);
 
-    let func = fb.build();
-    mb.add_function(func);
+    fb.build();
     mb.build()
 }
 
@@ -261,73 +250,41 @@ int main(void) {
 // bb3 (exit): return sum
 // ---------------------------------------------------------------------------
 
-fn build_sum_to_module() -> tmir_func::Module {
+fn build_sum_to_module() -> tmir::Module {
     let mut mb = ModuleBuilder::new("e2e_sum_to_builder_test");
-    let mut fb = mb.function(
-        "_sum_to_builder",
-        vec![Ty::int(64)],
-        vec![Ty::int(64)],
-    );
+    let ft = mb.add_func_type(vec![Ty::I64], vec![Ty::I64]);
+    let mut fb = mb.function("_sum_to_builder", ft);
 
-    let (entry_id, params) = fb.entry_block();
-    let n = params[0];
+    let entry = fb.create_block();
+    let bb_loop = fb.create_block();
+    let bb_body = fb.create_block();
+    let bb_exit = fb.create_block();
 
-    let bb_loop = fb.fresh_block();
-    let bb_body = fb.fresh_block();
-    let bb_exit = fb.fresh_block();
+    let n = fb.add_block_param(entry, Ty::I64);
+    let loop_sum = fb.add_block_param(bb_loop, Ty::I64);
+    let loop_i = fb.add_block_param(bb_loop, Ty::I64);
 
-    // Entry block values
-    let sum_init = fb.fresh_value();
-    let i_init = fb.fresh_value();
+    fb.set_entry(entry);
 
-    // Loop header block params
-    let loop_sum = fb.fresh_value();
-    let loop_i = fb.fresh_value();
-    let cmp_val = fb.fresh_value();
+    fb.switch_to_block(entry);
+    let sum_init = fb.iconst(Ty::I64, 0);
+    let i_init = fb.iconst(Ty::I64, 1);
+    fb.br(bb_loop, vec![sum_init, i_init]);
 
-    // Loop body values
-    let new_sum = fb.fresh_value();
-    let one_val = fb.fresh_value();
-    let new_i = fb.fresh_value();
+    fb.switch_to_block(bb_loop);
+    let cmp_val = fb.icmp(ICmpOp::Sle, Ty::I64, loop_i, n);
+    fb.condbr(cmp_val, bb_body, vec![], bb_exit, vec![]);
 
-    // bb0 (entry): init sum=0, i=1, jump to loop header
-    fb.add_block(
-        entry_id,
-        vec![(n, Ty::int(64))],
-        vec![
-            builder::iconst(Ty::int(64), 0, sum_init),
-            builder::iconst(Ty::int(64), 1, i_init),
-            builder::br(bb_loop, vec![sum_init, i_init]),
-        ],
-    );
+    fb.switch_to_block(bb_body);
+    let new_sum = fb.add(Ty::I64, loop_sum, loop_i);
+    let one_val = fb.iconst(Ty::I64, 1);
+    let new_i = fb.add(Ty::I64, loop_i, one_val);
+    fb.br(bb_loop, vec![new_sum, new_i]);
 
-    // bb1 (loop header): check i <= n
-    fb.add_block(
-        bb_loop,
-        vec![(loop_sum, Ty::int(64)), (loop_i, Ty::int(64))],
-        vec![
-            builder::cmp(CmpOp::Sle, Ty::int(64), loop_i, n, cmp_val),
-            builder::condbr(cmp_val, bb_body, vec![], bb_exit, vec![]),
-        ],
-    );
+    fb.switch_to_block(bb_exit);
+    fb.ret(vec![loop_sum]);
 
-    // bb2 (body): sum += i, i += 1, back to loop
-    fb.add_block(
-        bb_body,
-        vec![],
-        vec![
-            builder::binop(BinOp::Add, Ty::int(64), loop_sum, loop_i, new_sum),
-            builder::iconst(Ty::int(64), 1, one_val),
-            builder::binop(BinOp::Add, Ty::int(64), loop_i, one_val, new_i),
-            builder::br(bb_loop, vec![new_sum, new_i]),
-        ],
-    );
-
-    // bb3 (exit): return sum
-    fb.add_block(bb_exit, vec![], vec![builder::ret(vec![loop_sum])]);
-
-    let func = fb.build();
-    mb.add_function(func);
+    fb.build();
     mb.build()
 }
 
@@ -405,62 +362,41 @@ int main(void) {
 // bb4: return x
 // ---------------------------------------------------------------------------
 
-fn build_clamp_module() -> tmir_func::Module {
+fn build_clamp_module() -> tmir::Module {
     let mut mb = ModuleBuilder::new("e2e_clamp_builder_test");
-    let mut fb = mb.function(
-        "_clamp_builder",
-        vec![Ty::int(64), Ty::int(64), Ty::int(64)],
-        vec![Ty::int(64)],
-    );
+    let ft = mb.add_func_type(vec![Ty::I64, Ty::I64, Ty::I64], vec![Ty::I64]);
+    let mut fb = mb.function("_clamp_builder", ft);
 
-    let (entry_id, params) = fb.entry_block();
-    let x = params[0];
-    let lo = params[1];
-    let hi = params[2];
+    let entry = fb.create_block();
+    let bb_ret_lo = fb.create_block();
+    let bb_check_hi = fb.create_block();
+    let bb_ret_hi = fb.create_block();
+    let bb_ret_x = fb.create_block();
 
-    let bb_ret_lo = fb.fresh_block();
-    let bb_check_hi = fb.fresh_block();
-    let bb_ret_hi = fb.fresh_block();
-    let bb_ret_x = fb.fresh_block();
+    let x = fb.add_block_param(entry, Ty::I64);
+    let lo = fb.add_block_param(entry, Ty::I64);
+    let hi = fb.add_block_param(entry, Ty::I64);
 
-    let cmp_lo = fb.fresh_value();
-    let cmp_hi = fb.fresh_value();
+    fb.set_entry(entry);
 
-    // bb0 (entry): check x < lo
-    fb.add_block(
-        entry_id,
-        vec![
-            (x, Ty::int(64)),
-            (lo, Ty::int(64)),
-            (hi, Ty::int(64)),
-        ],
-        vec![
-            builder::cmp(CmpOp::Slt, Ty::int(64), x, lo, cmp_lo),
-            builder::condbr(cmp_lo, bb_ret_lo, vec![], bb_check_hi, vec![]),
-        ],
-    );
+    fb.switch_to_block(entry);
+    let cmp_lo = fb.icmp(ICmpOp::Slt, Ty::I64, x, lo);
+    fb.condbr(cmp_lo, bb_ret_lo, vec![], bb_check_hi, vec![]);
 
-    // bb1: return lo
-    fb.add_block(bb_ret_lo, vec![], vec![builder::ret(vec![lo])]);
+    fb.switch_to_block(bb_ret_lo);
+    fb.ret(vec![lo]);
 
-    // bb2: check x > hi
-    fb.add_block(
-        bb_check_hi,
-        vec![],
-        vec![
-            builder::cmp(CmpOp::Sgt, Ty::int(64), x, hi, cmp_hi),
-            builder::condbr(cmp_hi, bb_ret_hi, vec![], bb_ret_x, vec![]),
-        ],
-    );
+    fb.switch_to_block(bb_check_hi);
+    let cmp_hi = fb.icmp(ICmpOp::Sgt, Ty::I64, x, hi);
+    fb.condbr(cmp_hi, bb_ret_hi, vec![], bb_ret_x, vec![]);
 
-    // bb3: return hi
-    fb.add_block(bb_ret_hi, vec![], vec![builder::ret(vec![hi])]);
+    fb.switch_to_block(bb_ret_hi);
+    fb.ret(vec![hi]);
 
-    // bb4: return x
-    fb.add_block(bb_ret_x, vec![], vec![builder::ret(vec![x])]);
+    fb.switch_to_block(bb_ret_x);
+    fb.ret(vec![x]);
 
-    let func = fb.build();
-    mb.add_function(func);
+    fb.build();
     mb.build()
 }
 
@@ -533,13 +469,13 @@ int main(void) {
 
 #[test]
 fn e2e_multiblock_builder_all_opt_levels() {
-    let modules: &[(&str, tmir_func::Module)] = &[
+    let modules: Vec<(&str, tmir::Module)> = vec![
         ("max_builder", build_max_module()),
         ("sum_to_builder", build_sum_to_module()),
         ("clamp_builder", build_clamp_module()),
     ];
 
-    for (name, module) in modules {
+    for (name, module) in &modules {
         for opt in &[OptLevel::O0, OptLevel::O1, OptLevel::O2, OptLevel::O3] {
             let compiler = Compiler::new(CompilerConfig {
                 opt_level: *opt,
