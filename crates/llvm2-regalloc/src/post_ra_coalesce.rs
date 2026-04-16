@@ -229,7 +229,10 @@ fn try_rename_coalesce(
         return false;
     }
 
-    let last_use = last_dst_use_pos.unwrap();
+    // last_dst_use_pos is guaranteed Some here (None case returns early above).
+    let Some(last_use) = last_dst_use_pos else {
+        return false;
+    };
 
     // src must not be redefined before the last use of dst.
     if let Some(src_redef) = src_redef_pos

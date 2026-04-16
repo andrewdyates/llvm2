@@ -99,10 +99,10 @@ fn rebuild_cfg_edges(func: &mut MachFunction) {
     let order = func.block_order.clone();
     for (layout_idx, &block_id) in order.iter().enumerate() {
         let block = &func.blocks[block_id.0 as usize];
-        if block.insts.is_empty() {
+        let Some(&last_inst_id) = block.insts.last() else {
             continue;
-        }
-        let last_inst = &func.insts[block.insts.last().unwrap().0 as usize];
+        };
+        let last_inst = &func.insts[last_inst_id.0 as usize];
 
         // Collect explicit Block targets from terminators.
         let mut has_explicit_target = false;
@@ -347,12 +347,11 @@ fn fold_unconditional_branches(func: &mut MachFunction) -> bool {
         }
 
         let block = func.block(block_a);
-        if block.insts.is_empty() {
+        let Some(&last_inst_id) = block.insts.last() else {
             continue;
-        }
+        };
 
         // Check if last instruction is unconditional B.
-        let last_inst_id = *block.insts.last().unwrap();
         let last_inst = func.inst(last_inst_id);
         if !last_inst.is_unconditional_branch() {
             continue;
@@ -434,10 +433,9 @@ fn fold_constant_branches(func: &mut MachFunction) -> bool {
     // Scan for Cbz/Cbnz with constant conditions.
     for &bid in &func.block_order.clone() {
         let block = func.block(bid);
-        if block.insts.is_empty() {
+        let Some(&last_inst_id) = block.insts.last() else {
             continue;
-        }
-        let last_inst_id = *block.insts.last().unwrap();
+        };
         let inst = func.inst(last_inst_id);
 
         // Use generic opcode queries for dispatch; AArch64Opcode::B is
@@ -506,10 +504,9 @@ fn eliminate_duplicate_branches(func: &mut MachFunction) -> bool {
 
     for &bid in &func.block_order.clone() {
         let block = func.block(bid);
-        if block.insts.is_empty() {
+        let Some(&last_inst_id) = block.insts.last() else {
             continue;
-        }
-        let last_inst_id = *block.insts.last().unwrap();
+        };
         let inst = func.inst(last_inst_id);
 
         // Only applies to conditional branches.

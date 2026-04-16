@@ -249,12 +249,12 @@ pub fn compute_live_intervals(func: &MachFunction) -> LivenessResult {
         let bi = block_id.0 as usize;
         let block = &func.blocks[bi];
 
-        if block.insts.is_empty() {
+        let Some(&last_inst_id) = block.insts.last() else {
             continue;
-        }
+        };
 
         let block_start = inst_numbering[&block.insts[0]];
-        let block_end = inst_numbering[block.insts.last().unwrap()] + 1;
+        let block_end = inst_numbering[&last_inst_id] + 1;
 
         // For VRegs that are live-out of this block, they're live throughout
         // the entire block (conservatively).

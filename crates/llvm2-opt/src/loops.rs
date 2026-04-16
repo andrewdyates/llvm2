@@ -240,7 +240,9 @@ fn compute_nesting(loops: &mut HashMap<BlockId, NaturalLoop>) {
         }
 
         if let Some(parent_header) = best_parent {
-            loops.get_mut(&h1).unwrap().parent = Some(parent_header);
+            if let Some(lp) = loops.get_mut(&h1) {
+                lp.parent = Some(parent_header);
+            }
         }
     }
 
@@ -252,7 +254,9 @@ fn compute_nesting(loops: &mut HashMap<BlockId, NaturalLoop>) {
             depth += 1;
             current = loops[&parent].parent;
         }
-        loops.get_mut(&h).unwrap().depth = depth;
+        if let Some(lp) = loops.get_mut(&h) {
+            lp.depth = depth;
+        }
     }
 }
 
