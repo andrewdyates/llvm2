@@ -1383,9 +1383,7 @@ impl ComputeGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tmir_func::{Block as TmirBlock, Function as TmirFunction, Module};
-    use tmir_instrs::{BinOp, Instr, InstrNode, Operand};
-    use tmir_types::{BlockId, FuncId, FuncTy, Ty, ValueId};
+    use tmir::{Block as TmirBlock, Function as TmirFunction, Module, BlockId, FuncId, FuncTy, FuncTyId, Ty, TyId, ValueId, Constant, InstrNode, Inst, BinOp, ProofAnnotation};
 
     // -------------------------------------------------------------------
     // Test helpers
@@ -1396,36 +1394,35 @@ mod tests {
         Module {
             name: "scalar_add".to_string(),
             functions: vec![TmirFunction {
-                id: FuncId(0),
+                id: FuncId::new(0),
                 name: "add".to_string(),
-                ty: FuncTy {
-                    params: vec![Ty::I32, Ty::I32],
-                    returns: vec![Ty::I32],
-                },
-                entry: BlockId(0),
+                ty: FuncTyId::new(0),
+                entry: BlockId::new(0),
                 blocks: vec![TmirBlock {
-                    id: BlockId(0),
+                    id: BlockId::new(0),
                     params: vec![
-                        (ValueId(0), Ty::I32),
-                        (ValueId(1), Ty::I32),
+                        (ValueId::new(0), Ty::I32),
+                        (ValueId::new(1), Ty::I32),
                     ],
                     body: vec![
                         InstrNode {
-                            instr: Inst::BinOp {
+                            inst: Inst::BinOp {
                                 op: BinOp::Add,
                                 ty: Ty::I32,
-                                lhs: Operand::Value(ValueId(0)),
-                                rhs: Operand::Value(ValueId(1)),
+                                lhs: ValueId::new(0),
+                                rhs: ValueId::new(1),
                             },
-                            results: vec![ValueId(2)],
+                            results: vec![ValueId::new(2)],
                             proofs: vec![],
+                            span: None,
                         },
                         InstrNode {
-                            instr: Inst::Return {
-                                values: vec![Operand::Value(ValueId(2))],
+                            inst: Inst::Return {
+                                values: vec![ValueId::new(2)],
                             },
                             results: vec![],
                             proofs: vec![],
+                            span: None,
                         },
                     ],
                 }],
@@ -1433,7 +1430,10 @@ mod tests {
             }],
             structs: vec![],
             globals: vec![],
-            data_layout: None,
+            func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
         }
     }
 
@@ -1442,39 +1442,35 @@ mod tests {
         Module {
             name: "data_parallel".to_string(),
             functions: vec![TmirFunction {
-                id: FuncId(0),
+                id: FuncId::new(0),
                 name: "vec_add".to_string(),
-                ty: FuncTy {
-                    params: vec![
-                        Ty::array(Ty::float(64), 1000),
-                        Ty::array(Ty::float(64), 1000),
-                    ],
-                    returns: vec![Ty::float(64)],
-                },
-                entry: BlockId(0),
+                ty: FuncTyId::new(0),
+                entry: BlockId::new(0),
                 blocks: vec![TmirBlock {
-                    id: BlockId(0),
+                    id: BlockId::new(0),
                     params: vec![
-                        (ValueId(0), Ty::array(Ty::float(64), 1000)),
-                        (ValueId(1), Ty::array(Ty::float(64), 1000)),
+                        (ValueId::new(0), Ty::Array(TyId::new(0), 1000)),
+                        (ValueId::new(1), Ty::Array(TyId::new(0), 1000)),
                     ],
                     body: vec![
                         InstrNode {
-                            instr: Inst::BinOp {
+                            inst: Inst::BinOp {
                                 op: BinOp::FAdd,
-                                ty: Ty::array(Ty::float(64), 1000),
-                                lhs: Operand::Value(ValueId(0)),
-                                rhs: Operand::Value(ValueId(1)),
+                                ty: Ty::Array(TyId::new(0), 1000),
+                                lhs: ValueId::new(0),
+                                rhs: ValueId::new(1),
                             },
-                            results: vec![ValueId(2)],
+                            results: vec![ValueId::new(2)],
                             proofs: vec![],
+                            span: None,
                         },
                         InstrNode {
-                            instr: Inst::Return {
-                                values: vec![Operand::Value(ValueId(2))],
+                            inst: Inst::Return {
+                                values: vec![ValueId::new(2)],
                             },
                             results: vec![],
                             proofs: vec![],
+                            span: None,
                         },
                     ],
                 }],
@@ -1482,7 +1478,10 @@ mod tests {
             }],
             structs: vec![],
             globals: vec![],
-            data_layout: None,
+            func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
         }
     }
 
@@ -1491,51 +1490,48 @@ mod tests {
         Module {
             name: "matrix_heavy".to_string(),
             functions: vec![TmirFunction {
-                id: FuncId(0),
+                id: FuncId::new(0),
                 name: "dot_product".to_string(),
-                ty: FuncTy {
-                    params: vec![
-                        Ty::array(Ty::float(64), 1000),
-                        Ty::array(Ty::float(64), 1000),
-                    ],
-                    returns: vec![Ty::float(64)],
-                },
-                entry: BlockId(0),
+                ty: FuncTyId::new(0),
+                entry: BlockId::new(0),
                 blocks: vec![TmirBlock {
-                    id: BlockId(0),
+                    id: BlockId::new(0),
                     params: vec![
-                        (ValueId(0), Ty::array(Ty::float(64), 1000)),
-                        (ValueId(1), Ty::array(Ty::float(64), 1000)),
+                        (ValueId::new(0), Ty::Array(TyId::new(0), 1000)),
+                        (ValueId::new(1), Ty::Array(TyId::new(0), 1000)),
                     ],
                     body: vec![
                         // FMul: multiply elements
                         InstrNode {
-                            instr: Inst::BinOp {
+                            inst: Inst::BinOp {
                                 op: BinOp::FMul,
-                                ty: Ty::array(Ty::float(64), 1000),
-                                lhs: Operand::Value(ValueId(0)),
-                                rhs: Operand::Value(ValueId(1)),
+                                ty: Ty::Array(TyId::new(0), 1000),
+                                lhs: ValueId::new(0),
+                                rhs: ValueId::new(1),
                             },
-                            results: vec![ValueId(2)],
+                            results: vec![ValueId::new(2)],
                             proofs: vec![],
+                            span: None,
                         },
                         // FAdd: accumulate (MAC pattern)
                         InstrNode {
-                            instr: Inst::BinOp {
+                            inst: Inst::BinOp {
                                 op: BinOp::FAdd,
-                                ty: Ty::float(64),
-                                lhs: Operand::Value(ValueId(2)),
-                                rhs: Operand::Value(ValueId(2)),
+                                ty: Ty::F64,
+                                lhs: ValueId::new(2),
+                                rhs: ValueId::new(2),
                             },
-                            results: vec![ValueId(3)],
+                            results: vec![ValueId::new(3)],
                             proofs: vec![],
+                            span: None,
                         },
                         InstrNode {
-                            instr: Inst::Return {
-                                values: vec![Operand::Value(ValueId(3))],
+                            inst: Inst::Return {
+                                values: vec![ValueId::new(3)],
                             },
                             results: vec![],
                             proofs: vec![],
+                            span: None,
                         },
                     ],
                 }],
@@ -1543,7 +1539,10 @@ mod tests {
             }],
             structs: vec![],
             globals: vec![],
-            data_layout: None,
+            func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
         }
     }
 
@@ -1553,39 +1552,35 @@ mod tests {
         Module {
             name: "large_data_parallel".to_string(),
             functions: vec![TmirFunction {
-                id: FuncId(0),
+                id: FuncId::new(0),
                 name: "large_vec_add".to_string(),
-                ty: FuncTy {
-                    params: vec![
-                        Ty::array(Ty::float(64), 100_000),
-                        Ty::array(Ty::float(64), 100_000),
-                    ],
-                    returns: vec![Ty::float(64)],
-                },
-                entry: BlockId(0),
+                ty: FuncTyId::new(0),
+                entry: BlockId::new(0),
                 blocks: vec![TmirBlock {
-                    id: BlockId(0),
+                    id: BlockId::new(0),
                     params: vec![
-                        (ValueId(0), Ty::array(Ty::float(64), 100_000)),
-                        (ValueId(1), Ty::array(Ty::float(64), 100_000)),
+                        (ValueId::new(0), Ty::Array(TyId::new(0), 100_000)),
+                        (ValueId::new(1), Ty::Array(TyId::new(0), 100_000)),
                     ],
                     body: vec![
                         InstrNode {
-                            instr: Inst::BinOp {
+                            inst: Inst::BinOp {
                                 op: BinOp::FAdd,
-                                ty: Ty::array(Ty::float(64), 100_000),
-                                lhs: Operand::Value(ValueId(0)),
-                                rhs: Operand::Value(ValueId(1)),
+                                ty: Ty::Array(TyId::new(0), 100_000),
+                                lhs: ValueId::new(0),
+                                rhs: ValueId::new(1),
                             },
-                            results: vec![ValueId(2)],
+                            results: vec![ValueId::new(2)],
                             proofs: vec![],
+                            span: None,
                         },
                         InstrNode {
-                            instr: Inst::Return {
-                                values: vec![Operand::Value(ValueId(2))],
+                            inst: Inst::Return {
+                                values: vec![ValueId::new(2)],
                             },
                             results: vec![],
                             proofs: vec![],
+                            span: None,
                         },
                     ],
                 }],
@@ -1593,7 +1588,10 @@ mod tests {
             }],
             structs: vec![],
             globals: vec![],
-            data_layout: None,
+            func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
         }
     }
 
@@ -1603,51 +1601,48 @@ mod tests {
         Module {
             name: "large_matrix_heavy".to_string(),
             functions: vec![TmirFunction {
-                id: FuncId(0),
+                id: FuncId::new(0),
                 name: "large_dot_product".to_string(),
-                ty: FuncTy {
-                    params: vec![
-                        Ty::array(Ty::float(64), 100_000),
-                        Ty::array(Ty::float(64), 100_000),
-                    ],
-                    returns: vec![Ty::float(64)],
-                },
-                entry: BlockId(0),
+                ty: FuncTyId::new(0),
+                entry: BlockId::new(0),
                 blocks: vec![TmirBlock {
-                    id: BlockId(0),
+                    id: BlockId::new(0),
                     params: vec![
-                        (ValueId(0), Ty::array(Ty::float(64), 100_000)),
-                        (ValueId(1), Ty::array(Ty::float(64), 100_000)),
+                        (ValueId::new(0), Ty::Array(TyId::new(0), 100_000)),
+                        (ValueId::new(1), Ty::Array(TyId::new(0), 100_000)),
                     ],
                     body: vec![
                         // FMul: multiply elements
                         InstrNode {
-                            instr: Inst::BinOp {
+                            inst: Inst::BinOp {
                                 op: BinOp::FMul,
-                                ty: Ty::array(Ty::float(64), 100_000),
-                                lhs: Operand::Value(ValueId(0)),
-                                rhs: Operand::Value(ValueId(1)),
+                                ty: Ty::Array(TyId::new(0), 100_000),
+                                lhs: ValueId::new(0),
+                                rhs: ValueId::new(1),
                             },
-                            results: vec![ValueId(2)],
+                            results: vec![ValueId::new(2)],
                             proofs: vec![],
+                            span: None,
                         },
                         // FAdd: accumulate (MAC pattern)
                         InstrNode {
-                            instr: Inst::BinOp {
+                            inst: Inst::BinOp {
                                 op: BinOp::FAdd,
-                                ty: Ty::float(64),
-                                lhs: Operand::Value(ValueId(2)),
-                                rhs: Operand::Value(ValueId(2)),
+                                ty: Ty::F64,
+                                lhs: ValueId::new(2),
+                                rhs: ValueId::new(2),
                             },
-                            results: vec![ValueId(3)],
+                            results: vec![ValueId::new(3)],
                             proofs: vec![],
+                            span: None,
                         },
                         InstrNode {
-                            instr: Inst::Return {
-                                values: vec![Operand::Value(ValueId(3))],
+                            inst: Inst::Return {
+                                values: vec![ValueId::new(3)],
                             },
                             results: vec![],
                             proofs: vec![],
+                            span: None,
                         },
                     ],
                 }],
@@ -1655,7 +1650,10 @@ mod tests {
             }],
             structs: vec![],
             globals: vec![],
-            data_layout: None,
+            func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
         }
     }
 
@@ -1665,61 +1663,62 @@ mod tests {
         Module {
             name: "two_block".to_string(),
             functions: vec![TmirFunction {
-                id: FuncId(0),
+                id: FuncId::new(0),
                 name: "two_blocks".to_string(),
-                ty: FuncTy {
-                    params: vec![Ty::I32, Ty::I32],
-                    returns: vec![Ty::I32],
-                },
-                entry: BlockId(0),
+                ty: FuncTyId::new(0),
+                entry: BlockId::new(0),
                 blocks: vec![
                     TmirBlock {
-                        id: BlockId(0),
+                        id: BlockId::new(0),
                         params: vec![
-                            (ValueId(0), Ty::I32),
-                            (ValueId(1), Ty::I32),
+                            (ValueId::new(0), Ty::I32),
+                            (ValueId::new(1), Ty::I32),
                         ],
                         body: vec![
                             InstrNode {
-                                instr: Inst::BinOp {
+                                inst: Inst::BinOp {
                                     op: BinOp::Add,
                                     ty: Ty::I32,
-                                    lhs: Operand::Value(ValueId(0)),
-                                    rhs: Operand::Value(ValueId(1)),
+                                    lhs: ValueId::new(0),
+                                    rhs: ValueId::new(1),
                                 },
-                                results: vec![ValueId(2)],
+                                results: vec![ValueId::new(2)],
                                 proofs: vec![],
+                                span: None,
                             },
                             InstrNode {
-                                instr: Inst::Br {
-                                    target: BlockId(1),
-                                    args: vec![Operand::Value(ValueId(2))],
+                                inst: Inst::Br {
+                                    target: BlockId::new(1),
+                                    args: vec![ValueId::new(2)],
                                 },
                                 results: vec![],
                                 proofs: vec![],
+                                span: None,
                             },
                         ],
                     },
                     TmirBlock {
-                        id: BlockId(1),
-                        params: vec![(ValueId(3), Ty::I32)],
+                        id: BlockId::new(1),
+                        params: vec![(ValueId::new(3), Ty::I32)],
                         body: vec![
                             InstrNode {
-                                instr: Inst::BinOp {
+                                inst: Inst::BinOp {
                                     op: BinOp::Mul,
                                     ty: Ty::I32,
-                                    lhs: Operand::Value(ValueId(3)),
-                                    rhs: Operand::Value(ValueId(3)),
+                                    lhs: ValueId::new(3),
+                                    rhs: ValueId::new(3),
                                 },
-                                results: vec![ValueId(4)],
+                                results: vec![ValueId::new(4)],
                                 proofs: vec![],
+                                span: None,
                             },
                             InstrNode {
-                                instr: Inst::Return {
-                                    values: vec![Operand::Value(ValueId(4))],
+                                inst: Inst::Return {
+                                    values: vec![ValueId::new(4)],
                                 },
                                 results: vec![],
                                 proofs: vec![],
+                                span: None,
                             },
                         ],
                     },
@@ -1728,7 +1727,10 @@ mod tests {
             }],
             structs: vec![],
             globals: vec![],
-            data_layout: None,
+            func_types: vec![FuncTy { params: vec![Ty::I32, Ty::I32], returns: vec![Ty::I32], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
         }
     }
 
@@ -1784,7 +1786,7 @@ mod tests {
         // Two blocks -> two nodes
         assert_eq!(graph.num_nodes(), 2);
 
-        // Block 1 consumes ValueId(2) produced by block 0 (via branch args)
+        // Block 1 consumes ValueId::new(2) produced by block 0 (via branch args)
         // So there should be an edge from node 0 to node 1
         assert!(graph.num_edges() >= 1, "Expected at least 1 edge, got {}", graph.num_edges());
 
@@ -2031,20 +2033,21 @@ mod tests {
     #[test]
     fn test_detect_data_parallel_requires_arrays() {
         let instrs = [InstrNode {
-            instr: Inst::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::Add,
                 ty: Ty::I32,
-                lhs: Operand::Value(ValueId(0)),
-                rhs: Operand::Value(ValueId(1)),
+                lhs: ValueId::new(0),
+                rhs: ValueId::new(1),
             },
-            results: vec![ValueId(2)],
+            results: vec![ValueId::new(2)],
             proofs: vec![],
+            span: None,
         }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::I32);
-        types.insert(ValueId(1), Ty::I32);
+        types.insert(ValueId::new(0), Ty::I32);
+        types.insert(ValueId::new(1), Ty::I32);
 
         assert!(!detect_data_parallel(&refs, &types));
     }
@@ -2056,20 +2059,21 @@ mod tests {
     #[test]
     fn test_detect_data_parallel_with_arrays() {
         let instrs = [InstrNode {
-            instr: Inst::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::FAdd,
-                ty: Ty::array(Ty::float(64), 100),
-                lhs: Operand::Value(ValueId(0)),
-                rhs: Operand::Value(ValueId(1)),
+                ty: Ty::Array(TyId::new(0), 100),
+                lhs: ValueId::new(0),
+                rhs: ValueId::new(1),
             },
-            results: vec![ValueId(2)],
+            results: vec![ValueId::new(2)],
             proofs: vec![],
+            span: None,
         }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 100));
-        types.insert(ValueId(1), Ty::array(Ty::float(64), 100));
+        types.insert(ValueId::new(0), Ty::Array(TyId::new(0), 100));
+        types.insert(ValueId::new(1), Ty::Array(TyId::new(0), 100));
 
         assert!(detect_data_parallel(&refs, &types));
     }
@@ -2082,19 +2086,20 @@ mod tests {
     fn test_detect_matrix_heavy_requires_mac() {
         // FMul alone is not matrix-heavy
         let instrs = [InstrNode {
-            instr: Inst::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::FMul,
-                ty: Ty::array(Ty::float(64), 100),
-                lhs: Operand::Value(ValueId(0)),
-                rhs: Operand::Value(ValueId(1)),
+                ty: Ty::Array(TyId::new(0), 100),
+                lhs: ValueId::new(0),
+                rhs: ValueId::new(1),
             },
-            results: vec![ValueId(2)],
+            results: vec![ValueId::new(2)],
             proofs: vec![],
+            span: None,
         }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 100));
+        types.insert(ValueId::new(0), Ty::Array(TyId::new(0), 100));
 
         assert!(!detect_matrix_heavy(&refs, &types));
     }
@@ -2106,30 +2111,32 @@ mod tests {
     #[test]
     fn test_classify_node_matrix_over_parallel() {
         let instrs = [InstrNode {
-                instr: Inst::BinOp {
+                inst: Inst::BinOp {
                     op: BinOp::FMul,
-                    ty: Ty::array(Ty::float(64), 100),
-                    lhs: Operand::Value(ValueId(0)),
-                    rhs: Operand::Value(ValueId(1)),
+                    ty: Ty::Array(TyId::new(0), 100),
+                    lhs: ValueId::new(0),
+                    rhs: ValueId::new(1),
                 },
-                results: vec![ValueId(2)],
+                results: vec![ValueId::new(2)],
                 proofs: vec![],
+                span: None,
             },
             InstrNode {
-                instr: Inst::BinOp {
+                inst: Inst::BinOp {
                     op: BinOp::FAdd,
-                    ty: Ty::float(64),
-                    lhs: Operand::Value(ValueId(2)),
-                    rhs: Operand::Value(ValueId(2)),
+                    ty: Ty::F64,
+                    lhs: ValueId::new(2),
+                    rhs: ValueId::new(2),
                 },
-                results: vec![ValueId(3)],
+                results: vec![ValueId::new(3)],
                 proofs: vec![],
+                span: None,
             }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 100));
-        types.insert(ValueId(1), Ty::array(Ty::float(64), 100));
+        types.insert(ValueId::new(0), Ty::Array(TyId::new(0), 100));
+        types.insert(ValueId::new(1), Ty::Array(TyId::new(0), 100));
 
         // MAC pattern on arrays -> MatrixHeavy takes priority
         assert_eq!(classify_node(&refs, &types), NodeKind::MatrixHeavy);
@@ -2142,17 +2149,17 @@ mod tests {
     #[test]
     fn test_estimate_type_bytes() {
         assert_eq!(estimate_type_bytes(&Ty::Bool), 1);
-        assert_eq!(estimate_type_bytes(&Ty::int(8)), 1);
-        assert_eq!(estimate_type_bytes(&Ty::int(16)), 2);
+        assert_eq!(estimate_type_bytes(&Ty::I8), 1);
+        assert_eq!(estimate_type_bytes(&Ty::I16), 2);
         assert_eq!(estimate_type_bytes(&Ty::I32), 4);
         assert_eq!(estimate_type_bytes(&Ty::I64), 8);
-        assert_eq!(estimate_type_bytes(&Ty::float(32)), 4);
-        assert_eq!(estimate_type_bytes(&Ty::float(64)), 8);
+        assert_eq!(estimate_type_bytes(&Ty::F32), 4);
+        assert_eq!(estimate_type_bytes(&Ty::F64), 8);
         assert_eq!(
-            estimate_type_bytes(&Ty::array(Ty::float(64), 100)),
+            estimate_type_bytes(&Ty::Array(TyId::new(0), 100)),
             800
         );
-        assert_eq!(estimate_type_bytes(&Ty::ptr(Ty::I32)), 8);
+        assert_eq!(estimate_type_bytes(&Ty::Ptr), 8);
     }
 
     // -------------------------------------------------------------------
@@ -2323,39 +2330,35 @@ mod tests {
             name: "multi".to_string(),
             functions: vec![
                 TmirFunction {
-                    id: FuncId(0),
+                    id: FuncId::new(0),
                     name: "foo".to_string(),
-                    ty: FuncTy {
-                        params: vec![Ty::I32],
-                        returns: vec![Ty::I32],
-                    },
-                    entry: BlockId(0),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
                     blocks: vec![TmirBlock {
-                        id: BlockId(0),
-                        params: vec![(ValueId(0), Ty::I32)],
+                        id: BlockId::new(0),
+                        params: vec![(ValueId::new(0), Ty::I32)],
                         body: vec![InstrNode {
-                            instr: Inst::Return { values: vec![Operand::Value(ValueId(0))] },
+                            inst: Inst::Return { values: vec![ValueId::new(0)] },
                             results: vec![],
                             proofs: vec![],
+                            span: None,
                         }],
                     }],
                     proofs: vec![],
                 },
                 TmirFunction {
-                    id: FuncId(1),
+                    id: FuncId::new(1),
                     name: "bar".to_string(),
-                    ty: FuncTy {
-                        params: vec![Ty::I64],
-                        returns: vec![Ty::I64],
-                    },
-                    entry: BlockId(0),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
                     blocks: vec![TmirBlock {
-                        id: BlockId(0),
-                        params: vec![(ValueId(10), Ty::I64)],
+                        id: BlockId::new(0),
+                        params: vec![(ValueId::new(10), Ty::I64)],
                         body: vec![InstrNode {
-                            instr: Inst::Return { values: vec![Operand::Value(ValueId(10))] },
+                            inst: Inst::Return { values: vec![ValueId::new(10)] },
                             results: vec![],
                             proofs: vec![],
+                            span: None,
                         }],
                     }],
                     proofs: vec![],
@@ -2363,7 +2366,10 @@ mod tests {
             ],
             structs: vec![],
             globals: vec![],
-            data_layout: None,
+            func_types: vec![FuncTy { params: vec![Ty::I64], returns: vec![Ty::I64], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
         };
 
         let graph = ComputeGraph::from_module(&module);
@@ -2396,11 +2402,11 @@ mod tests {
                 Value(i),
                 vec![
                     Proof::InBounds {
-                        base: tmir_types::ValueId(i),
-                        index: tmir_types::ValueId(i + 100),
+                        base: ValueId::new(i),
+                        index: ValueId::new(i + 100),
                     },
                     Proof::ValidBorrow {
-                        borrow: tmir_types::ValueId(i),
+                        borrow: ValueId::new(i),
                     },
                 ],
             );
@@ -2643,11 +2649,11 @@ mod tests {
                 Value(i),
                 vec![
                     Proof::InBounds {
-                        base: tmir_types::ValueId(i),
-                        index: tmir_types::ValueId(i + 100),
+                        base: ValueId::new(i),
+                        index: ValueId::new(i + 100),
                     },
                     Proof::ValidBorrow {
-                        borrow: tmir_types::ValueId(i),
+                        borrow: ValueId::new(i),
                     },
                 ],
             );
@@ -2758,20 +2764,21 @@ mod tests {
     fn test_small_array_not_data_parallel() {
         // An array of 2 elements is too small to justify vectorization
         let instrs = [InstrNode {
-            instr: Inst::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::FAdd,
-                ty: Ty::array(Ty::float(64), 2),
-                lhs: Operand::Value(ValueId(0)),
-                rhs: Operand::Value(ValueId(1)),
+                ty: Ty::Array(TyId::new(0), 2),
+                lhs: ValueId::new(0),
+                rhs: ValueId::new(1),
             },
-            results: vec![ValueId(2)],
+            results: vec![ValueId::new(2)],
             proofs: vec![],
+            span: None,
         }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 2));
-        types.insert(ValueId(1), Ty::array(Ty::float(64), 2));
+        types.insert(ValueId::new(0), Ty::Array(TyId::new(0), 2));
+        types.insert(ValueId::new(1), Ty::Array(TyId::new(0), 2));
 
         assert!(
             !detect_data_parallel(&refs, &types),
@@ -2788,22 +2795,23 @@ mod tests {
         // The binary op operates on scalar i32 values, even though an array
         // parameter exists in the value types. This should NOT match.
         let instrs = [InstrNode {
-            instr: Inst::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::Add,
                 ty: Ty::I32,
-                lhs: Operand::Value(ValueId(0)),
-                rhs: Operand::Value(ValueId(1)),
+                lhs: ValueId::new(0),
+                rhs: ValueId::new(1),
             },
-            results: vec![ValueId(2)],
+            results: vec![ValueId::new(2)],
             proofs: vec![],
+            span: None,
         }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::I32); // operand is scalar
-        types.insert(ValueId(1), Ty::I32); // operand is scalar
+        types.insert(ValueId::new(0), Ty::I32); // operand is scalar
+        types.insert(ValueId::new(1), Ty::I32); // operand is scalar
         // Some other value is array-typed but not an operand of the Add
-        types.insert(ValueId(10), Ty::array(Ty::float(64), 1000));
+        types.insert(ValueId::new(10), Ty::Array(TyId::new(0), 1000));
 
         assert!(
             !detect_data_parallel(&refs, &types),
@@ -2819,20 +2827,21 @@ mod tests {
     #[test]
     fn test_fmul_only_with_array_not_matrix_heavy() {
         let instrs = [InstrNode {
-            instr: Inst::BinOp {
+            inst: Inst::BinOp {
                 op: BinOp::FMul,
-                ty: Ty::array(Ty::float(64), 100),
-                lhs: Operand::Value(ValueId(0)),
-                rhs: Operand::Value(ValueId(1)),
+                ty: Ty::Array(TyId::new(0), 100),
+                lhs: ValueId::new(0),
+                rhs: ValueId::new(1),
             },
-            results: vec![ValueId(2)],
+            results: vec![ValueId::new(2)],
             proofs: vec![],
+            span: None,
         }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 100));
-        types.insert(ValueId(1), Ty::array(Ty::float(64), 100));
+        types.insert(ValueId::new(0), Ty::Array(TyId::new(0), 100));
+        types.insert(ValueId::new(1), Ty::Array(TyId::new(0), 100));
 
         assert!(
             !detect_matrix_heavy(&refs, &types),
@@ -2846,37 +2855,39 @@ mod tests {
 
     #[test]
     fn test_independent_fmul_fadd_not_matrix_heavy() {
-        // FMul produces ValueId(2), but FAdd does NOT consume it --
-        // it consumes ValueId(3) and ValueId(4) instead.
+        // FMul produces ValueId::new(2), but FAdd does NOT consume it --
+        // it consumes ValueId::new(3) and ValueId::new(4) instead.
         let instrs = vec![
             InstrNode {
-                instr: Inst::BinOp {
+                inst: Inst::BinOp {
                     op: BinOp::FMul,
-                    ty: Ty::array(Ty::float(64), 100),
-                    lhs: Operand::Value(ValueId(0)),
-                    rhs: Operand::Value(ValueId(1)),
+                    ty: Ty::Array(TyId::new(0), 100),
+                    lhs: ValueId::new(0),
+                    rhs: ValueId::new(1),
                 },
-                results: vec![ValueId(2)],
+                results: vec![ValueId::new(2)],
                 proofs: vec![],
+                span: None,
             },
             InstrNode {
-                instr: Inst::BinOp {
+                inst: Inst::BinOp {
                     op: BinOp::FAdd,
-                    ty: Ty::float(64),
-                    lhs: Operand::Value(ValueId(3)), // NOT ValueId(2)
-                    rhs: Operand::Value(ValueId(4)), // NOT ValueId(2)
+                    ty: Ty::F64,
+                    lhs: ValueId::new(3), // NOT ValueId::new(2)
+                    rhs: ValueId::new(4), // NOT ValueId::new(2)
                 },
-                results: vec![ValueId(5)],
+                results: vec![ValueId::new(5)],
                 proofs: vec![],
+                span: None,
             },
         ];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 100));
-        types.insert(ValueId(1), Ty::array(Ty::float(64), 100));
-        types.insert(ValueId(3), Ty::float(64));
-        types.insert(ValueId(4), Ty::float(64));
+        types.insert(ValueId::new(0), Ty::Array(TyId::new(0), 100));
+        types.insert(ValueId::new(1), Ty::Array(TyId::new(0), 100));
+        types.insert(ValueId::new(3), Ty::F64);
+        types.insert(ValueId::new(4), Ty::F64);
 
         assert!(
             !detect_matrix_heavy(&refs, &types),
@@ -2892,32 +2903,34 @@ mod tests {
     #[test]
     fn test_scalar_fmul_fadd_not_matrix_heavy() {
         let instrs = [InstrNode {
-                instr: Inst::BinOp {
+                inst: Inst::BinOp {
                     op: BinOp::FMul,
-                    ty: Ty::float(64),
-                    lhs: Operand::Value(ValueId(0)),
-                    rhs: Operand::Value(ValueId(1)),
+                    ty: Ty::F64,
+                    lhs: ValueId::new(0),
+                    rhs: ValueId::new(1),
                 },
-                results: vec![ValueId(2)],
+                results: vec![ValueId::new(2)],
                 proofs: vec![],
+                span: None,
             },
             InstrNode {
-                instr: Inst::BinOp {
+                inst: Inst::BinOp {
                     op: BinOp::FAdd,
-                    ty: Ty::float(64),
-                    lhs: Operand::Value(ValueId(2)),
-                    rhs: Operand::Value(ValueId(2)),
+                    ty: Ty::F64,
+                    lhs: ValueId::new(2),
+                    rhs: ValueId::new(2),
                 },
-                results: vec![ValueId(3)],
+                results: vec![ValueId::new(3)],
                 proofs: vec![],
+                span: None,
             }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::float(64)); // scalar
-        types.insert(ValueId(1), Ty::float(64)); // scalar
+        types.insert(ValueId::new(0), Ty::F64); // scalar
+        types.insert(ValueId::new(1), Ty::F64); // scalar
         // There IS an array in scope, but the FMul operands are not array-typed
-        types.insert(ValueId(10), Ty::array(Ty::float(64), 1000));
+        types.insert(ValueId::new(10), Ty::Array(TyId::new(0), 1000));
 
         assert!(
             !detect_matrix_heavy(&refs, &types),
@@ -2933,30 +2946,32 @@ mod tests {
     fn test_small_array_mac_not_matrix_heavy() {
         // Array has only 2 elements -- below MIN_VECTORIZABLE_ELEMENTS
         let instrs = [InstrNode {
-                instr: Inst::BinOp {
+                inst: Inst::BinOp {
                     op: BinOp::FMul,
-                    ty: Ty::array(Ty::float(64), 2),
-                    lhs: Operand::Value(ValueId(0)),
-                    rhs: Operand::Value(ValueId(1)),
+                    ty: Ty::Array(TyId::new(0), 2),
+                    lhs: ValueId::new(0),
+                    rhs: ValueId::new(1),
                 },
-                results: vec![ValueId(2)],
+                results: vec![ValueId::new(2)],
                 proofs: vec![],
+                span: None,
             },
             InstrNode {
-                instr: Inst::BinOp {
+                inst: Inst::BinOp {
                     op: BinOp::FAdd,
-                    ty: Ty::float(64),
-                    lhs: Operand::Value(ValueId(2)),
-                    rhs: Operand::Value(ValueId(2)),
+                    ty: Ty::F64,
+                    lhs: ValueId::new(2),
+                    rhs: ValueId::new(2),
                 },
-                results: vec![ValueId(3)],
+                results: vec![ValueId::new(3)],
                 proofs: vec![],
+                span: None,
             }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 2));
-        types.insert(ValueId(1), Ty::array(Ty::float(64), 2));
+        types.insert(ValueId::new(0), Ty::Array(TyId::new(0), 2));
+        types.insert(ValueId::new(1), Ty::Array(TyId::new(0), 2));
 
         assert!(
             !detect_matrix_heavy(&refs, &types),
@@ -2970,32 +2985,34 @@ mod tests {
 
     #[test]
     fn test_valid_mac_with_dependency_matches() {
-        // FMul produces ValueId(2), FAdd consumes ValueId(2) -- valid MAC
+        // FMul produces ValueId::new(2), FAdd consumes ValueId::new(2) -- valid MAC
         let instrs = [InstrNode {
-                instr: Inst::BinOp {
+                inst: Inst::BinOp {
                     op: BinOp::FMul,
-                    ty: Ty::array(Ty::float(64), 100),
-                    lhs: Operand::Value(ValueId(0)),
-                    rhs: Operand::Value(ValueId(1)),
+                    ty: Ty::Array(TyId::new(0), 100),
+                    lhs: ValueId::new(0),
+                    rhs: ValueId::new(1),
                 },
-                results: vec![ValueId(2)],
+                results: vec![ValueId::new(2)],
                 proofs: vec![],
+                span: None,
             },
             InstrNode {
-                instr: Inst::BinOp {
+                inst: Inst::BinOp {
                     op: BinOp::FAdd,
-                    ty: Ty::float(64),
-                    lhs: Operand::Value(ValueId(2)),
-                    rhs: Operand::Value(ValueId(2)),
+                    ty: Ty::F64,
+                    lhs: ValueId::new(2),
+                    rhs: ValueId::new(2),
                 },
-                results: vec![ValueId(3)],
+                results: vec![ValueId::new(3)],
                 proofs: vec![],
+                span: None,
             }];
         let refs: Vec<&InstrNode> = instrs.iter().collect();
 
         let mut types = HashMap::new();
-        types.insert(ValueId(0), Ty::array(Ty::float(64), 100));
-        types.insert(ValueId(1), Ty::array(Ty::float(64), 100));
+        types.insert(ValueId::new(0), Ty::Array(TyId::new(0), 100));
+        types.insert(ValueId::new(1), Ty::Array(TyId::new(0), 100));
 
         assert!(
             detect_matrix_heavy(&refs, &types),
@@ -3014,39 +3031,35 @@ mod tests {
         let module = Module {
             name: "small_array".to_string(),
             functions: vec![TmirFunction {
-                id: FuncId(0),
+                id: FuncId::new(0),
                 name: "tiny_add".to_string(),
-                ty: FuncTy {
-                    params: vec![
-                        Ty::array(Ty::float(64), 2),
-                        Ty::array(Ty::float(64), 2),
-                    ],
-                    returns: vec![Ty::float(64)],
-                },
-                entry: BlockId(0),
+                ty: FuncTyId::new(0),
+                entry: BlockId::new(0),
                 blocks: vec![TmirBlock {
-                    id: BlockId(0),
+                    id: BlockId::new(0),
                     params: vec![
-                        (ValueId(0), Ty::array(Ty::float(64), 2)),
-                        (ValueId(1), Ty::array(Ty::float(64), 2)),
+                        (ValueId::new(0), Ty::Array(TyId::new(0), 2)),
+                        (ValueId::new(1), Ty::Array(TyId::new(0), 2)),
                     ],
                     body: vec![
                         InstrNode {
-                            instr: Inst::BinOp {
+                            inst: Inst::BinOp {
                                 op: BinOp::FAdd,
-                                ty: Ty::array(Ty::float(64), 2),
-                                lhs: Operand::Value(ValueId(0)),
-                                rhs: Operand::Value(ValueId(1)),
+                                ty: Ty::Array(TyId::new(0), 2),
+                                lhs: ValueId::new(0),
+                                rhs: ValueId::new(1),
                             },
-                            results: vec![ValueId(2)],
+                            results: vec![ValueId::new(2)],
                             proofs: vec![],
+                            span: None,
                         },
                         InstrNode {
-                            instr: Inst::Return {
-                                values: vec![Operand::Value(ValueId(2))],
+                            inst: Inst::Return {
+                                values: vec![ValueId::new(2)],
                             },
                             results: vec![],
                             proofs: vec![],
+                            span: None,
                         },
                     ],
                 }],
@@ -3054,7 +3067,10 @@ mod tests {
             }],
             structs: vec![],
             globals: vec![],
-            data_layout: None,
+            func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
         };
 
         let graph = ComputeGraph::from_module(&module);
@@ -3132,39 +3148,35 @@ mod tests {
         let module = Module {
             name: "bitwise".to_string(),
             functions: vec![TmirFunction {
-                id: FuncId(0),
+                id: FuncId::new(0),
                 name: "bitwise_and".to_string(),
-                ty: FuncTy {
-                    params: vec![
-                        Ty::array(Ty::I32, 100_000),
-                        Ty::array(Ty::I32, 100_000),
-                    ],
-                    returns: vec![Ty::I32],
-                },
-                entry: BlockId(0),
+                ty: FuncTyId::new(0),
+                entry: BlockId::new(0),
                 blocks: vec![TmirBlock {
-                    id: BlockId(0),
+                    id: BlockId::new(0),
                     params: vec![
-                        (ValueId(0), Ty::array(Ty::I32, 100_000)),
-                        (ValueId(1), Ty::array(Ty::I32, 100_000)),
+                        (ValueId::new(0), Ty::Array(TyId::new(0), 100_000)),
+                        (ValueId::new(1), Ty::Array(TyId::new(0), 100_000)),
                     ],
                     body: vec![
                         InstrNode {
-                            instr: Inst::BinOp {
+                            inst: Inst::BinOp {
                                 op: BinOp::And,
-                                ty: Ty::array(Ty::I32, 100_000),
-                                lhs: Operand::Value(ValueId(0)),
-                                rhs: Operand::Value(ValueId(1)),
+                                ty: Ty::Array(TyId::new(0), 100_000),
+                                lhs: ValueId::new(0),
+                                rhs: ValueId::new(1),
                             },
-                            results: vec![ValueId(2)],
+                            results: vec![ValueId::new(2)],
                             proofs: vec![],
+                            span: None,
                         },
                         InstrNode {
-                            instr: Inst::Return {
-                                values: vec![Operand::Value(ValueId(2))],
+                            inst: Inst::Return {
+                                values: vec![ValueId::new(2)],
                             },
                             results: vec![],
                             proofs: vec![],
+                            span: None,
                         },
                     ],
                 }],
@@ -3172,7 +3184,10 @@ mod tests {
             }],
             structs: vec![],
             globals: vec![],
-            data_layout: None,
+            func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
         };
 
         // Give full proofs so GPU/ANE are at least proof-legal.
