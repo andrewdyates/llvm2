@@ -56,6 +56,10 @@ pub enum X86Opcode {
     Inc,
     /// DEC r64
     Dec,
+    /// CDQ — sign-extend EAX into EDX:EAX (32-bit, opcode 99)
+    Cdq,
+    /// CQO — sign-extend RAX into RDX:RAX (64-bit, REX.W + 99)
+    Cqo,
 
     // =====================================================================
     // Logical / bitwise
@@ -139,6 +143,8 @@ pub enum X86Opcode {
     CmpRR,
     /// CMP r64, imm32 (sets RFLAGS)
     CmpRI,
+    /// CMP r/m64, imm8 (sign-extended, sets RFLAGS) — short immediate form
+    CmpRI8,
     /// CMP r64, [mem] (sets RFLAGS)
     CmpRM,
     /// TEST r64, r64 (AND without storing result, sets RFLAGS)
@@ -267,6 +273,13 @@ pub enum X86Opcode {
     StackAlloc,
     /// No-op.
     Nop,
+
+    // =====================================================================
+    // Hardware NOP (real encoding)
+    // =====================================================================
+
+    /// Multi-byte NOP (0F 1F /0) — for alignment padding (2-9 bytes).
+    NopMulti,
 }
 
 impl X86Opcode {
@@ -294,7 +307,7 @@ impl X86Opcode {
             MovMR | MovsdMR | MovssMR | MovMRSib => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Compare/test (set RFLAGS = side effect)
-            CmpRR | CmpRI | TestRR | TestRI | Ucomisd | Ucomiss => InstFlags::HAS_SIDE_EFFECTS,
+            CmpRR | CmpRI | CmpRI8 | TestRR | TestRI | Ucomisd | Ucomiss => InstFlags::HAS_SIDE_EFFECTS,
 
             // Compare/test with memory operand (side effect + memory read)
             TestRM => InstFlags::HAS_SIDE_EFFECTS.union(InstFlags::READS_MEMORY),
@@ -304,6 +317,9 @@ impl X86Opcode {
 
             // IDIV/DIV have implicit operands (RDX:RAX) and can trap on division by zero
             Idiv | Div => InstFlags::HAS_SIDE_EFFECTS,
+
+            // CDQ/CQO write implicit RDX register
+            Cdq | Cqo => InstFlags::HAS_SIDE_EFFECTS,
 
             // Stack manipulation (modifies RSP)
             Push => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
@@ -492,7 +508,7 @@ mod tests {
 
     #[test]
     fn compare_opcodes_have_side_effects() {
-        for op in &[X86Opcode::CmpRR, X86Opcode::CmpRI, X86Opcode::TestRR, X86Opcode::TestRI, X86Opcode::TestRM, X86Opcode::Ucomisd, X86Opcode::Ucomiss] {
+        for op in &[X86Opcode::CmpRR, X86Opcode::CmpRI, X86Opcode::CmpRI8, X86Opcode::TestRR, X86Opcode::TestRI, X86Opcode::TestRM, X86Opcode::Ucomisd, X86Opcode::Ucomiss] {
             let flags = op.default_flags();
             assert!(flags.contains(InstFlags::HAS_SIDE_EFFECTS), "{:?}", op);
         }
@@ -533,10 +549,28 @@ mod tests {
             X86Opcode::Cmovcc, X86Opcode::Setcc,
             X86Opcode::Bsf, X86Opcode::Bsr,
             X86Opcode::Tzcnt, X86Opcode::Lzcnt, X86Opcode::Popcnt,
+            // Hardware NOP
+            X86Opcode::NopMulti,
         ];
         for op in &pure_ops {
             assert!(op.default_flags().is_empty(), "{:?} should have EMPTY flags", op);
         }
+    }
+
+    #[test]
+    fn cdq_cqo_have_side_effects() {
+        let flags = X86Opcode::Cdq.default_flags();
+        assert!(flags.contains(InstFlags::HAS_SIDE_EFFECTS));
+        let flags = X86Opcode::Cqo.default_flags();
+        assert!(flags.contains(InstFlags::HAS_SIDE_EFFECTS));
+    }
+
+    #[test]
+    fn nopmulti_has_empty_flags() {
+        let flags = X86Opcode::NopMulti.default_flags();
+        assert!(flags.is_empty());
+        // NopMulti is NOT pseudo (it has a real hardware encoding)
+        assert!(!X86Opcode::NopMulti.is_pseudo());
     }
 
     #[test]
@@ -545,6 +579,7 @@ mod tests {
         assert!(X86Opcode::StackAlloc.is_pseudo());
         assert!(X86Opcode::Nop.is_pseudo());
         assert!(!X86Opcode::AddRR.is_pseudo());
+        assert!(!X86Opcode::NopMulti.is_pseudo());
     }
 
     #[test]

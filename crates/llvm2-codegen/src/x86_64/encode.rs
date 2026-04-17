@@ -745,6 +745,16 @@ impl X86Encoder {
             }
 
             // =================================================================
+            // Multi-byte NOP (hardware encoding for alignment padding)
+            // =================================================================
+            // NopMulti: 0F 1F /0 variants (2-9 bytes)
+            // Reference: Intel SDM Vol 2B, NOP instruction, Table 4-12
+            X86Opcode::NopMulti => {
+                let size = if ops.imm > 0 { ops.imm as usize } else { 3 };
+                self.encode_multibyte_nop(size);
+            }
+
+            // =================================================================
             // Arithmetic: reg-reg
             // =================================================================
             // ADD r/m64, r64: REX.W + 01 /r
@@ -820,6 +830,16 @@ impl X86Encoder {
             X86Opcode::CmpRI => {
                 let (dst, imm) = self.require_ri(ops, opcode)?;
                 self.encode_alu_ri(7, dst, imm);
+            }
+            // CMP r/m64, imm8 (sign-extended): REX.W + 83 /7 ib
+            X86Opcode::CmpRI8 => {
+                let dst = self.require_dst(ops, opcode)?;
+                let imm = ops.imm as i8;
+                let rex = Self::rex_m64(dst);
+                self.emit_rex(rex);
+                self.emit_byte(0x83);
+                self.emit_modrm(ModRM::ext_reg(7, dst.hw_enc()));
+                self.emit_imm8(imm);
             }
             // TEST r/m64, imm32: REX.W + F7 /0 id
             X86Opcode::TestRI => {
@@ -923,6 +943,15 @@ impl X86Encoder {
             X86Opcode::Div => {
                 let dst = self.require_dst(ops, opcode)?;
                 self.encode_unary(0xF7, 6, dst);
+            }
+            // CDQ: 99 — sign-extend EAX into EDX:EAX (32-bit, no REX.W)
+            X86Opcode::Cdq => {
+                self.emit_byte(0x99);
+            }
+            // CQO: REX.W + 99 — sign-extend RAX into RDX:RAX (64-bit)
+            X86Opcode::Cqo => {
+                self.emit_byte(0x48); // REX.W
+                self.emit_byte(0x99);
             }
 
             // =================================================================
@@ -1567,6 +1596,101 @@ impl X86Encoder {
     /// directly when you need a real 1-byte NOP in the output stream.
     pub fn encode_nop(&mut self) {
         self.emit_byte(0x90);
+    }
+
+    /// Encode a multi-byte NOP of the given size (0-9 bytes).
+    ///
+    /// Reference: Intel SDM Vol 2B, NOP instruction, Table 4-12.
+    /// Recommended multi-byte NOP sequences for each length:
+    /// - 1 byte: 90
+    /// - 2 bytes: 66 90
+    /// - 3 bytes: 0F 1F 00
+    /// - 4 bytes: 0F 1F 40 00
+    /// - 5 bytes: 0F 1F 44 00 00
+    /// - 6 bytes: 66 0F 1F 44 00 00
+    /// - 7 bytes: 0F 1F 80 00 00 00 00
+    /// - 8 bytes: 0F 1F 84 00 00 00 00 00
+    /// - 9 bytes: 66 0F 1F 84 00 00 00 00 00
+    ///
+    /// For sizes > 9, emits multiple NOP sequences.
+    pub fn encode_multibyte_nop(&mut self, size: usize) {
+        match size {
+            0 => {}
+            1 => {
+                self.emit_byte(0x90);
+            }
+            2 => {
+                self.emit_byte(0x66);
+                self.emit_byte(0x90);
+            }
+            3 => {
+                // NOP DWORD ptr [RAX]
+                self.emit_byte(0x0F);
+                self.emit_byte(0x1F);
+                self.emit_byte(0x00);
+            }
+            4 => {
+                // NOP DWORD ptr [RAX + 00]
+                self.emit_byte(0x0F);
+                self.emit_byte(0x1F);
+                self.emit_byte(0x40);
+                self.emit_byte(0x00);
+            }
+            5 => {
+                // NOP DWORD ptr [RAX + RAX*1 + 00]
+                self.emit_byte(0x0F);
+                self.emit_byte(0x1F);
+                self.emit_byte(0x44);
+                self.emit_byte(0x00);
+                self.emit_byte(0x00);
+            }
+            6 => {
+                // 66 NOP DWORD ptr [RAX + RAX*1 + 00]
+                self.emit_byte(0x66);
+                self.emit_byte(0x0F);
+                self.emit_byte(0x1F);
+                self.emit_byte(0x44);
+                self.emit_byte(0x00);
+                self.emit_byte(0x00);
+            }
+            7 => {
+                // NOP DWORD ptr [RAX + 00000000]
+                self.emit_byte(0x0F);
+                self.emit_byte(0x1F);
+                self.emit_byte(0x80);
+                self.emit_byte(0x00);
+                self.emit_byte(0x00);
+                self.emit_byte(0x00);
+                self.emit_byte(0x00);
+            }
+            8 => {
+                // NOP DWORD ptr [RAX + RAX*1 + 00000000]
+                self.emit_byte(0x0F);
+                self.emit_byte(0x1F);
+                self.emit_byte(0x84);
+                self.emit_byte(0x00);
+                self.emit_byte(0x00);
+                self.emit_byte(0x00);
+                self.emit_byte(0x00);
+                self.emit_byte(0x00);
+            }
+            _ => {
+                // 9 bytes: 66 NOP DWORD ptr [RAX + RAX*1 + 00000000]
+                self.emit_byte(0x66);
+                self.emit_byte(0x0F);
+                self.emit_byte(0x1F);
+                self.emit_byte(0x84);
+                self.emit_byte(0x00);
+                self.emit_byte(0x00);
+                self.emit_byte(0x00);
+                self.emit_byte(0x00);
+                self.emit_byte(0x00);
+                // For sizes > 9, emit additional NOP sequences
+                if size > 9 {
+                    self.encode_multibyte_nop(size - 9);
+                }
+            }
+        }
     }
 }
 
@@ -3828,5 +3952,268 @@ mod tests {
             },
         );
         assert_eq!(bytes, vec![0xFF, 0x14, 0x24]);
+    }
+
+    // -----------------------------------------------------------------------
+    // CMP r/m64, imm8 (CmpRI8) tests
+    // Intel SDM Vol 2: CMP r/m64, imm8: REX.W + 83 /7 ib
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cmp_rax_imm8() {
+        // CMP RAX, 1: REX.W(48) + 83 + ModRM(11 111 000) + imm8(01)
+        let bytes = encode(X86Opcode::CmpRI8, &X86InstOperands::ri(RAX, 1));
+        assert_eq!(bytes, vec![0x48, 0x83, 0xF8, 0x01]);
+    }
+
+    #[test]
+    fn test_cmp_rcx_imm8_negative() {
+        // CMP RCX, -1: REX.W(48) + 83 + ModRM(11 111 001) + imm8(FF)
+        let bytes = encode(X86Opcode::CmpRI8, &X86InstOperands::ri(RCX, -1));
+        assert_eq!(bytes, vec![0x48, 0x83, 0xF9, 0xFF]);
+    }
+
+    #[test]
+    fn test_cmp_r15_imm8() {
+        // CMP R15, 42: REX.WB(49) + 83 + ModRM(11 111 111) + imm8(2A)
+        let bytes = encode(X86Opcode::CmpRI8, &X86InstOperands::ri(R15, 42));
+        assert_eq!(bytes, vec![0x49, 0x83, 0xFF, 0x2A]);
+    }
+
+    #[test]
+    fn test_cmp_r8_imm8_zero() {
+        // CMP R8, 0: REX.WB(49) + 83 + ModRM(11 111 000) + imm8(00)
+        let bytes = encode(X86Opcode::CmpRI8, &X86InstOperands::ri(R8, 0));
+        assert_eq!(bytes, vec![0x49, 0x83, 0xF8, 0x00]);
+    }
+
+    #[test]
+    fn test_cmpri8_vs_cmpri_size() {
+        // CmpRI8 (short form) should be 4 bytes vs CmpRI's 7 bytes
+        let mut enc = X86Encoder::new();
+        let n8 = enc.encode_instruction(X86Opcode::CmpRI8, &X86InstOperands::ri(RAX, 1)).unwrap();
+        assert_eq!(n8, 4); // REX.W + 83 + ModRM + imm8
+        let n32 = enc.encode_instruction(X86Opcode::CmpRI, &X86InstOperands::ri(RAX, 1)).unwrap();
+        assert_eq!(n32, 7); // REX.W + 81 + ModRM + imm32
+    }
+
+    // -----------------------------------------------------------------------
+    // CDQ / CQO tests
+    // Intel SDM Vol 2: CDQ: 99, CQO: REX.W + 99
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cdq() {
+        // CDQ: 99 (sign-extend EAX into EDX:EAX, 32-bit)
+        let bytes = encode(X86Opcode::Cdq, &X86InstOperands::none());
+        assert_eq!(bytes, vec![0x99]);
+    }
+
+    #[test]
+    fn test_cqo() {
+        // CQO: REX.W(48) + 99 (sign-extend RAX into RDX:RAX, 64-bit)
+        let bytes = encode(X86Opcode::Cqo, &X86InstOperands::none());
+        assert_eq!(bytes, vec![0x48, 0x99]);
+    }
+
+    #[test]
+    fn test_cdq_cqo_sizes() {
+        let mut enc = X86Encoder::new();
+        let n = enc.encode_instruction(X86Opcode::Cdq, &X86InstOperands::none()).unwrap();
+        assert_eq!(n, 1);
+        let n = enc.encode_instruction(X86Opcode::Cqo, &X86InstOperands::none()).unwrap();
+        assert_eq!(n, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-byte NOP tests
+    // Intel SDM Vol 2B, NOP instruction, Table 4-12
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_multibyte_nop_0() {
+        let mut enc = X86Encoder::new();
+        enc.encode_multibyte_nop(0);
+        assert_eq!(enc.finish(), vec![] as Vec<u8>);
+    }
+
+    #[test]
+    fn test_multibyte_nop_1() {
+        let mut enc = X86Encoder::new();
+        enc.encode_multibyte_nop(1);
+        assert_eq!(enc.finish(), vec![0x90]);
+    }
+
+    #[test]
+    fn test_multibyte_nop_2() {
+        let mut enc = X86Encoder::new();
+        enc.encode_multibyte_nop(2);
+        assert_eq!(enc.finish(), vec![0x66, 0x90]);
+    }
+
+    #[test]
+    fn test_multibyte_nop_3() {
+        let mut enc = X86Encoder::new();
+        enc.encode_multibyte_nop(3);
+        assert_eq!(enc.finish(), vec![0x0F, 0x1F, 0x00]);
+    }
+
+    #[test]
+    fn test_multibyte_nop_4() {
+        let mut enc = X86Encoder::new();
+        enc.encode_multibyte_nop(4);
+        assert_eq!(enc.finish(), vec![0x0F, 0x1F, 0x40, 0x00]);
+    }
+
+    #[test]
+    fn test_multibyte_nop_5() {
+        let mut enc = X86Encoder::new();
+        enc.encode_multibyte_nop(5);
+        assert_eq!(enc.finish(), vec![0x0F, 0x1F, 0x44, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_multibyte_nop_6() {
+        let mut enc = X86Encoder::new();
+        enc.encode_multibyte_nop(6);
+        assert_eq!(enc.finish(), vec![0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_multibyte_nop_7() {
+        let mut enc = X86Encoder::new();
+        enc.encode_multibyte_nop(7);
+        assert_eq!(enc.finish(), vec![0x0F, 0x1F, 0x80, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_multibyte_nop_8() {
+        let mut enc = X86Encoder::new();
+        enc.encode_multibyte_nop(8);
+        assert_eq!(enc.finish(), vec![0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_multibyte_nop_9() {
+        let mut enc = X86Encoder::new();
+        enc.encode_multibyte_nop(9);
+        assert_eq!(enc.finish(), vec![0x66, 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_multibyte_nop_11_recurse() {
+        // 11 bytes = 9-byte NOP + 2-byte NOP
+        let mut enc = X86Encoder::new();
+        enc.encode_multibyte_nop(11);
+        let bytes = enc.finish();
+        assert_eq!(bytes.len(), 11);
+        // First 9 bytes: 66 0F 1F 84 00 00 00 00 00
+        assert_eq!(&bytes[0..9], &[0x66, 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        // Last 2 bytes: 66 90
+        assert_eq!(&bytes[9..11], &[0x66, 0x90]);
+    }
+
+    #[test]
+    fn test_nopmulti_via_instruction_default() {
+        // NopMulti with imm=0 defaults to 3-byte NOP
+        let bytes = encode(X86Opcode::NopMulti, &X86InstOperands::none());
+        assert_eq!(bytes, vec![0x0F, 0x1F, 0x00]);
+    }
+
+    #[test]
+    fn test_nopmulti_via_instruction_size_5() {
+        // NopMulti with imm=5 produces 5-byte NOP
+        let bytes = encode(
+            X86Opcode::NopMulti,
+            &X86InstOperands { imm: 5, ..X86InstOperands::none() },
+        );
+        assert_eq!(bytes, vec![0x0F, 0x1F, 0x44, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_nopmulti_via_instruction_size_8() {
+        // NopMulti with imm=8 produces 8-byte NOP
+        let bytes = encode(
+            X86Opcode::NopMulti,
+            &X86InstOperands { imm: 8, ..X86InstOperands::none() },
+        );
+        assert_eq!(bytes, vec![0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    // -----------------------------------------------------------------------
+    // New instruction size tests (wave 38)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_new_instruction_sizes_v3() {
+        let mut enc = X86Encoder::new();
+
+        // CDQ = 1 byte (99)
+        let n = enc.encode_instruction(X86Opcode::Cdq, &X86InstOperands::none()).unwrap();
+        assert_eq!(n, 1);
+
+        // CQO = 2 bytes (REX.W + 99)
+        let n = enc.encode_instruction(X86Opcode::Cqo, &X86InstOperands::none()).unwrap();
+        assert_eq!(n, 2);
+
+        // CMP r64, imm8 = 4 bytes (REX.W + 83 + ModRM + imm8)
+        let n = enc.encode_instruction(X86Opcode::CmpRI8, &X86InstOperands::ri(RAX, 1)).unwrap();
+        assert_eq!(n, 4);
+
+        // CMP R15, imm8 = 4 bytes (REX.WB + 83 + ModRM + imm8)
+        let n = enc.encode_instruction(X86Opcode::CmpRI8, &X86InstOperands::ri(R15, 1)).unwrap();
+        assert_eq!(n, 4);
+
+        // NopMulti default = 3 bytes (0F 1F 00)
+        let n = enc.encode_instruction(X86Opcode::NopMulti, &X86InstOperands::none()).unwrap();
+        assert_eq!(n, 3);
+
+        // NopMulti size=9 = 9 bytes
+        let n = enc.encode_instruction(
+            X86Opcode::NopMulti,
+            &X86InstOperands { imm: 9, ..X86InstOperands::none() },
+        ).unwrap();
+        assert_eq!(n, 9);
+    }
+
+    // -----------------------------------------------------------------------
+    // All SETcc condition codes (comprehensive)
+    // Intel SDM Vol 2: SETcc: 0F 90+cc /0
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_setcc_all_conditions() {
+        let all_cc = [
+            (X86CondCode::O,  0x90u8),
+            (X86CondCode::NO, 0x91),
+            (X86CondCode::B,  0x92),
+            (X86CondCode::AE, 0x93),
+            (X86CondCode::E,  0x94),
+            (X86CondCode::NE, 0x95),
+            (X86CondCode::BE, 0x96),
+            (X86CondCode::A,  0x97),
+            (X86CondCode::S,  0x98),
+            (X86CondCode::NS, 0x99),
+            (X86CondCode::P,  0x9A),
+            (X86CondCode::NP, 0x9B),
+            (X86CondCode::L,  0x9C),
+            (X86CondCode::GE, 0x9D),
+            (X86CondCode::LE, 0x9E),
+            (X86CondCode::G,  0x9F),
+        ];
+        for (cc, expected_byte) in &all_cc {
+            let bytes = encode(
+                X86Opcode::Setcc,
+                &X86InstOperands {
+                    dst: Some(AL),
+                    cc: Some(*cc),
+                    ..X86InstOperands::none()
+                },
+            );
+            // 0F + cc_byte + ModRM(11 000 000)
+            assert_eq!(bytes[0], 0x0F, "SETcc {:?} prefix", cc);
+            assert_eq!(bytes[1], *expected_byte, "SETcc {:?} opcode byte", cc);
+            assert_eq!(bytes[2], 0xC0, "SETcc {:?} ModRM", cc);
+        }
     }
 }

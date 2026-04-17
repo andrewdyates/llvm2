@@ -209,6 +209,19 @@ fn resolve_inst_operands(
         // Pseudo-instructions: no operands needed.
         X86Opcode::Nop | X86Opcode::Phi | X86Opcode::StackAlloc => {}
 
+        // CDQ/CQO: no register operands (implicit RAX -> RDX:RAX)
+        X86Opcode::Cdq | X86Opcode::Cqo => {}
+
+        // NopMulti: imm controls NOP size (2-9 bytes)
+        X86Opcode::NopMulti => {
+            for op in &inst.operands {
+                if let X86ISelOperand::Imm(imm) = op {
+                    ops.imm = *imm;
+                    break;
+                }
+            }
+        }
+
         // Register-register: [dst, src] or [dst, lhs, rhs] (three-address -> two-address)
         X86Opcode::AddRR | X86Opcode::SubRR | X86Opcode::AndRR
         | X86Opcode::OrRR | X86Opcode::XorRR => {
@@ -243,8 +256,8 @@ fn resolve_inst_operands(
             }
         }
 
-        // CMP r, imm32
-        X86Opcode::CmpRI | X86Opcode::TestRI => {
+        // CMP r, imm32 / CMP r, imm8
+        X86Opcode::CmpRI | X86Opcode::CmpRI8 | X86Opcode::TestRI => {
             if let Some(reg_op) = inst.operands.first() {
                 ops.dst = resolve_operand(reg_op, alloc);
             }
