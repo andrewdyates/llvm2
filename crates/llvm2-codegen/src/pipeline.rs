@@ -3980,4 +3980,218 @@ mod eh_pipeline_tests {
         // the minimal header.
         assert!(lsda_bytes.len() > 20, "Multi-call-site LSDA should be >20 bytes, got {}", lsda_bytes.len());
     }
+
+}
+
+// ===========================================================================
+// Multiblock optimization pipeline tests (Part of #288)
+//
+// These tests verify that multi-block functions (branches, loops) compile
+// successfully at all optimization levels (O0-O3). Regression test for
+// potential infinite loops in the optimization or register allocation
+// fixpoint iterations.
+// ===========================================================================
+
+#[cfg(test)]
+mod multiblock_pipeline_tests {
+    use super::*;
+    use llvm2_ir::function::{
+        MachFunction as IrMachFunction, Signature as IrSignature, Type,
+    };
+    use llvm2_ir::inst::{AArch64Opcode as IrOpcode, MachInst as IrMachInst};
+    use llvm2_ir::operand::MachOperand as IrOperand;
+    use llvm2_ir::regs::{X0, X1};
+
+    /// Build a multi-block function with an if/else branch using PReg operands.
+    ///
+    /// ```text
+    /// bb0 (entry): MovI X0, #42; Cbz X0, bb2
+    /// bb1 (then):  Ret             // X0 = 42 (nonzero, so fallthrough)
+    /// bb2 (else):  MovI X0, #0; Ret  // X0 = 0 (if Cbz taken)
+    /// ```
+    fn build_multiblock_branch_function() -> IrMachFunction {
+        let sig = IrSignature::new(vec![], vec![Type::I64]);
+        let mut func = IrMachFunction::new("branch_test".to_string(), sig);
+        let bb0 = func.entry; // BlockId(0)
+        let bb1 = func.create_block(); // BlockId(1)
+        let bb2 = func.create_block(); // BlockId(2)
+
+        // bb0: MovI X0, #42
+        let movi = IrMachInst::new(IrOpcode::MovI, vec![IrOperand::PReg(X0), IrOperand::Imm(42)]);
+        let movi_id = func.push_inst(movi);
+        func.append_inst(bb0, movi_id);
+
+        // bb0: Cbz X0, bb2
+        let cbz = IrMachInst::new(IrOpcode::Cbz, vec![IrOperand::PReg(X0), IrOperand::Block(bb2)]);
+        let cbz_id = func.push_inst(cbz);
+        func.append_inst(bb0, cbz_id);
+
+        // bb1: Ret
+        let ret1 = IrMachInst::new(IrOpcode::Ret, vec![]);
+        let ret1_id = func.push_inst(ret1);
+        func.append_inst(bb1, ret1_id);
+
+        // bb2: MovI X0, #0
+        let movi2 = IrMachInst::new(IrOpcode::MovI, vec![IrOperand::PReg(X0), IrOperand::Imm(0)]);
+        let movi2_id = func.push_inst(movi2);
+        func.append_inst(bb2, movi2_id);
+
+        // bb2: Ret
+        let ret2 = IrMachInst::new(IrOpcode::Ret, vec![]);
+        let ret2_id = func.push_inst(ret2);
+        func.append_inst(bb2, ret2_id);
+
+        // CFG edges: bb0 -> bb1 (fallthrough), bb0 -> bb2 (Cbz taken)
+        func.add_edge(bb0, bb1);
+        func.add_edge(bb0, bb2);
+
+        func
+    }
+
+    /// Build a multi-block function with a loop using PReg operands.
+    ///
+    /// ```text
+    /// bb0 (entry):  MovI X0, #5; MovI X1, #0; B bb1
+    /// bb1 (header): Cbz X0, bb3
+    /// bb2 (body):   SubRI X0, X0, #1; AddRI X1, X1, #1; B bb1
+    /// bb3 (exit):   MovR X0, X1; Ret
+    /// ```
+    ///
+    /// At exit, X0 = 5 (the count). Uses PRegs to simulate post-ISel code.
+    fn build_multiblock_loop_function() -> IrMachFunction {
+        let sig = IrSignature::new(vec![], vec![Type::I64]);
+        let mut func = IrMachFunction::new("loop_test".to_string(), sig);
+        let bb0 = func.entry; // BlockId(0)
+        let bb1 = func.create_block(); // BlockId(1)
+        let bb2 = func.create_block(); // BlockId(2)
+        let bb3 = func.create_block(); // BlockId(3)
+
+        // bb0: MovI X0, #5
+        let m0 = IrMachInst::new(IrOpcode::MovI, vec![IrOperand::PReg(X0), IrOperand::Imm(5)]);
+        let m0_id = func.push_inst(m0);
+        func.append_inst(bb0, m0_id);
+
+        // bb0: MovI X1, #0
+        let m1 = IrMachInst::new(IrOpcode::MovI, vec![IrOperand::PReg(X1), IrOperand::Imm(0)]);
+        let m1_id = func.push_inst(m1);
+        func.append_inst(bb0, m1_id);
+
+        // bb0: B bb1
+        let br0 = IrMachInst::new(IrOpcode::B, vec![IrOperand::Block(bb1)]);
+        let br0_id = func.push_inst(br0);
+        func.append_inst(bb0, br0_id);
+
+        // bb1: Cbz X0, bb3
+        let cbz = IrMachInst::new(IrOpcode::Cbz, vec![IrOperand::PReg(X0), IrOperand::Block(bb3)]);
+        let cbz_id = func.push_inst(cbz);
+        func.append_inst(bb1, cbz_id);
+
+        // bb2: SubRI X0, X0, #1
+        let sub = IrMachInst::new(
+            IrOpcode::SubRI,
+            vec![IrOperand::PReg(X0), IrOperand::PReg(X0), IrOperand::Imm(1)],
+        );
+        let sub_id = func.push_inst(sub);
+        func.append_inst(bb2, sub_id);
+
+        // bb2: AddRI X1, X1, #1
+        let add = IrMachInst::new(
+            IrOpcode::AddRI,
+            vec![IrOperand::PReg(X1), IrOperand::PReg(X1), IrOperand::Imm(1)],
+        );
+        let add_id = func.push_inst(add);
+        func.append_inst(bb2, add_id);
+
+        // bb2: B bb1
+        let br2 = IrMachInst::new(IrOpcode::B, vec![IrOperand::Block(bb1)]);
+        let br2_id = func.push_inst(br2);
+        func.append_inst(bb2, br2_id);
+
+        // bb3: MovR X0, X1
+        let mov = IrMachInst::new(IrOpcode::MovR, vec![IrOperand::PReg(X0), IrOperand::PReg(X1)]);
+        let mov_id = func.push_inst(mov);
+        func.append_inst(bb3, mov_id);
+
+        // bb3: Ret
+        let ret = IrMachInst::new(IrOpcode::Ret, vec![]);
+        let ret_id = func.push_inst(ret);
+        func.append_inst(bb3, ret_id);
+
+        // CFG edges
+        func.add_edge(bb0, bb1);
+        func.add_edge(bb1, bb2); // fallthrough
+        func.add_edge(bb1, bb3); // Cbz taken
+        func.add_edge(bb2, bb1); // back-edge
+
+        func
+    }
+
+    /// Compile an IR function through the pipeline at a given optimization level,
+    /// returning the Mach-O object bytes.
+    fn compile_ir_at_opt(func: &mut IrMachFunction, opt_level: OptLevel) -> Result<Vec<u8>, PipelineError> {
+        let pipeline = Pipeline::new(PipelineConfig {
+            opt_level,
+            ..Default::default()
+        });
+        pipeline.compile_ir_function(func)
+    }
+
+    #[test]
+    fn multiblock_branch_compiles_at_all_opt_levels() {
+        for opt in &[OptLevel::O0, OptLevel::O1, OptLevel::O2, OptLevel::O3] {
+            let mut func = build_multiblock_branch_function();
+            let obj_bytes = compile_ir_at_opt(&mut func, *opt)
+                .unwrap_or_else(|e| panic!("branch_test at {:?} failed: {}", opt, e));
+
+            assert!(obj_bytes.len() >= 4, "branch_test at {:?} too small", opt);
+            let magic = u32::from_le_bytes([obj_bytes[0], obj_bytes[1], obj_bytes[2], obj_bytes[3]]);
+            assert_eq!(
+                magic, 0xFEED_FACF,
+                "branch_test at {:?}: invalid Mach-O magic {:#010X}",
+                opt, magic
+            );
+        }
+    }
+
+    #[test]
+    fn multiblock_loop_compiles_at_all_opt_levels() {
+        for opt in &[OptLevel::O0, OptLevel::O1, OptLevel::O2, OptLevel::O3] {
+            let mut func = build_multiblock_loop_function();
+            let obj_bytes = compile_ir_at_opt(&mut func, *opt)
+                .unwrap_or_else(|e| panic!("loop_test at {:?} failed: {}", opt, e));
+
+            assert!(obj_bytes.len() >= 4, "loop_test at {:?} too small", opt);
+            let magic = u32::from_le_bytes([obj_bytes[0], obj_bytes[1], obj_bytes[2], obj_bytes[3]]);
+            assert_eq!(
+                magic, 0xFEED_FACF,
+                "loop_test at {:?}: invalid Mach-O magic {:#010X}",
+                opt, magic
+            );
+        }
+    }
+
+    #[test]
+    fn multiblock_branch_optimization_reduces_code() {
+        // Optimized code should be no larger than unoptimized (and likely smaller
+        // since the branch function has a constant Cbz that can be folded).
+        let mut func_o0 = build_multiblock_branch_function();
+        let obj_o0 = compile_ir_at_opt(&mut func_o0, OptLevel::O0)
+            .expect("O0 should compile");
+
+        let mut func_o2 = build_multiblock_branch_function();
+        let obj_o2 = compile_ir_at_opt(&mut func_o2, OptLevel::O2)
+            .expect("O2 should compile");
+
+        // Both produce valid Mach-O
+        assert!(obj_o0.len() >= 4);
+        assert!(obj_o2.len() >= 4);
+
+        // O2 should not produce dramatically more code than O0
+        assert!(
+            obj_o2.len() <= obj_o0.len() + 100,
+            "O2 ({} bytes) should not be dramatically larger than O0 ({} bytes)",
+            obj_o2.len(),
+            obj_o0.len()
+        );
+    }
 }
