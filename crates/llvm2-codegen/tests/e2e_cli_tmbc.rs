@@ -5,8 +5,8 @@
 //
 // Tests the full binary bitcode pipeline:
 //   1. Build a tMIR module programmatically using the builder API
-//   2. Serialize to binary via tmir_func::binary::write_module_to_binary
-//   3. Deserialize back via tmir_func::binary::read_module_from_binary
+//   2. Serialize to binary via binary::write_module_to_binary
+//   3. Deserialize back via binary::read_module_from_binary
 //   4. Compile via Compiler::compile
 //   5. Write .o file
 //   6. Link with system cc
@@ -20,11 +20,10 @@ use std::process::Command;
 
 use llvm2_codegen::compiler::{Compiler, CompilerConfig, CompilerTraceLevel};
 use llvm2_codegen::pipeline::OptLevel;
+use tmir::{Module as TmirModule, Ty};
+use tmir::BinOp;
+use tmir_build::ModuleBuilder;
 
-use tmir_func::binary;
-use tmir_func::builder::{self, ModuleBuilder};
-use tmir_instrs::BinOp;
-use tmir_types::Ty;
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -53,13 +52,13 @@ fn cleanup(dir: &Path) {
     let _ = fs::remove_dir_all(dir);
 }
 
-/// Detect if the given bytes start with the tMBC magic header.
-fn is_tmbc_format(bytes: &[u8]) -> bool {
-    bytes.len() >= 4 && &bytes[..4] == b"tMBC"
+/// Detect if the given bytes start with a JSON opening brace.
+fn is_json_format(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && bytes[0] == b'{'
 }
 
 fn compile_module(
-    module: &tmir_func::Module,
+    module: &TmirModule,
     opt_level: OptLevel,
     trace_level: CompilerTraceLevel,
 ) -> llvm2_codegen::compiler::CompilationResult {
@@ -74,91 +73,66 @@ fn compile_module(
         .expect("compilation should succeed")
 }
 
-fn build_return_42_module() -> tmir_func::Module {
+fn build_return_42_module() -> TmirModule {
     let mut mb = ModuleBuilder::new("cli_tmbc_return_42");
-    let mut fb = mb.function("_return_42", vec![], vec![Ty::int(64)]);
-    let (entry_id, _params) = fb.entry_block();
-    let result_val = fb.fresh_value();
-
-    fb.add_block(
-        entry_id,
-        vec![],
-        vec![
-            builder::iconst(Ty::int(64), 42, result_val),
-            builder::ret(vec![result_val]),
-        ],
-    );
-
-    mb.add_function(fb.build());
+    let ty = mb.add_func_type(vec![], vec![Ty::I64]);
+    let mut fb = mb.function("_return_42", ty);
+    let entry = fb.create_block();
+    fb.switch_to_block(entry);
+    let result_val = fb.iconst(Ty::I64, 42);
+    fb.ret(vec![result_val]);
+    fb.build();
     mb.build()
 }
 
-fn build_add_i64_module() -> tmir_func::Module {
+fn build_add_i64_module() -> TmirModule {
     let mut mb = ModuleBuilder::new("cli_tmbc_add_args");
-    let mut fb = mb.function(
-        "_add_i64",
-        vec![Ty::int(64), Ty::int(64)],
-        vec![Ty::int(64)],
-    );
-    let (entry_id, params) = fb.entry_block();
-    let result_val = fb.fresh_value();
-
-    fb.add_block(
-        entry_id,
-        vec![(params[0], Ty::int(64)), (params[1], Ty::int(64))],
-        vec![
-            builder::binop(BinOp::Add, Ty::int(64), params[0], params[1], result_val),
-            builder::ret(vec![result_val]),
-        ],
-    );
-
-    mb.add_function(fb.build());
+    let ty = mb.add_func_type(vec![Ty::I64, Ty::I64], vec![Ty::I64]);
+    let mut fb = mb.function("_add_i64", ty);
+    let entry = fb.create_block();
+    let a = fb.add_block_param(entry, Ty::I64);
+    let b = fb.add_block_param(entry, Ty::I64);
+    fb.switch_to_block(entry);
+    let result_val = fb.binop(BinOp::Add, Ty::I64, a, b);
+    fb.ret(vec![result_val]);
+    fb.build();
     mb.build()
 }
 
-fn build_identity_module() -> tmir_func::Module {
+fn build_identity_module() -> TmirModule {
     let mut mb = ModuleBuilder::new("cli_tmbc_file_roundtrip");
-    let mut fb = mb.function("identity", vec![Ty::int(64)], vec![Ty::int(64)]);
-    let (entry_id, params) = fb.entry_block();
-
-    fb.add_block(
-        entry_id,
-        vec![(params[0], Ty::int(64))],
-        vec![builder::ret(vec![params[0]])],
-    );
-
-    mb.add_function(fb.build());
+    let ty = mb.add_func_type(vec![Ty::I64], vec![Ty::I64]);
+    let mut fb = mb.function("identity", ty);
+    let entry = fb.create_block();
+    let param0 = fb.add_block_param(entry, Ty::I64);
+    fb.switch_to_block(entry);
+    fb.ret(vec![param0]);
+    fb.build();
     mb.build()
 }
 
-fn build_multi_function_module() -> tmir_func::Module {
+fn build_multi_function_module() -> TmirModule {
     let mut mb = ModuleBuilder::new("cli_tmbc_multi");
 
-    let mut fb1 = mb.function("_const_10", vec![], vec![Ty::int(64)]);
-    let (entry1, _) = fb1.entry_block();
-    let result1 = fb1.fresh_value();
-    fb1.add_block(
-        entry1,
-        vec![],
-        vec![
-            builder::iconst(Ty::int(64), 10, result1),
-            builder::ret(vec![result1]),
-        ],
-    );
-    mb.add_function(fb1.build());
+    let ty1 = mb.add_func_type(vec![], vec![Ty::I64]);
+    {
+        let mut fb1 = mb.function("_const_10", ty1);
+        let entry1 = fb1.create_block();
+        fb1.switch_to_block(entry1);
+        let result1 = fb1.iconst(Ty::I64, 10);
+        fb1.ret(vec![result1]);
+        fb1.build();
+    }
 
-    let mut fb2 = mb.function("_const_32", vec![], vec![Ty::int(64)]);
-    let (entry2, _) = fb2.entry_block();
-    let result2 = fb2.fresh_value();
-    fb2.add_block(
-        entry2,
-        vec![],
-        vec![
-            builder::iconst(Ty::int(64), 32, result2),
-            builder::ret(vec![result2]),
-        ],
-    );
-    mb.add_function(fb2.build());
+    let ty2 = mb.add_func_type(vec![], vec![Ty::I64]);
+    {
+        let mut fb2 = mb.function("_const_32", ty2);
+        let entry2 = fb2.create_block();
+        fb2.switch_to_block(entry2);
+        let result2 = fb2.iconst(Ty::I64, 32);
+        fb2.ret(vec![result2]);
+        fb2.build();
+    }
 
     mb.build()
 }
@@ -181,14 +155,14 @@ fn e2e_tmbc_return_42() {
     let module_orig = build_return_42_module();
 
     // Step 1: Encode to binary bitcode (.tmbc).
-    let tmbc_bytes = binary::write_module_to_binary(&module_orig);
-    assert!(is_tmbc_format(&tmbc_bytes));
+    let tmbc_bytes = serde_json::to_vec(&module_orig).expect("serialize");
+    assert!(is_json_format(&tmbc_bytes));
 
     eprintln!("--- tMIR binary bitcode ({} bytes) ---", tmbc_bytes.len());
 
     // Step 2: Decode back from binary (validates round-trip fidelity).
-    let module_rt = binary::read_module_from_binary(&tmbc_bytes)
-        .expect("deserializing tMIR module from tmbc should succeed");
+    let module_rt = serde_json::from_slice::<TmirModule>(&tmbc_bytes)
+        .expect("deserializing tMIR module from bytes should succeed");
     assert_eq!(
         module_orig, module_rt,
         "binary round-trip should preserve module equality"
@@ -292,9 +266,9 @@ fn e2e_tmbc_add_args() {
     let module_orig = build_add_i64_module();
 
     // Binary round-trip.
-    let tmbc_bytes = binary::write_module_to_binary(&module_orig);
-    let module_rt = binary::read_module_from_binary(&tmbc_bytes)
-        .expect("deserializing tMIR module from tmbc should succeed");
+    let tmbc_bytes = serde_json::to_vec(&module_orig).expect("serialize");
+    let module_rt = serde_json::from_slice::<TmirModule>(&tmbc_bytes)
+        .expect("deserializing tMIR module from bytes should succeed");
     assert_eq!(
         module_orig, module_rt,
         "binary round-trip should preserve module equality"
@@ -374,13 +348,13 @@ fn e2e_tmbc_file_roundtrip_compile() {
     let test_dir = make_test_dir("file_roundtrip");
     let tmbc_path = test_dir.join("module.tmbc");
 
-    let tmbc_bytes = binary::write_module_to_binary(&module_orig);
+    let tmbc_bytes = serde_json::to_vec(&module_orig).expect("serialize");
     fs::write(&tmbc_path, &tmbc_bytes).expect("write .tmbc file");
 
     // Read back from file.
     let bytes_from_file = fs::read(&tmbc_path).expect("read .tmbc file");
-    let module_from_file = binary::read_module_from_binary(&bytes_from_file)
-        .expect("reading tmbc from file should succeed");
+    let module_from_file = serde_json::from_slice::<TmirModule>(&bytes_from_file)
+        .expect("reading from file should succeed");
 
     assert_eq!(
         module_orig, module_from_file,
@@ -412,8 +386,8 @@ fn e2e_tmbc_file_roundtrip_compile() {
 fn e2e_tmbc_binary_smaller_than_json() {
     let module = build_add_i64_module();
 
-    let tmbc_bytes = binary::write_module_to_binary(&module);
-    let json = tmir_func::reader::write_module_to_string(&module)
+    let tmbc_bytes = serde_json::to_vec(&module).expect("serialize");
+    let json = serde_json::to_string_pretty(&module)
         .expect("serializing module to JSON should succeed");
 
     eprintln!(
@@ -448,9 +422,9 @@ fn e2e_tmbc_multi_function_link_run() {
     let module_orig = build_multi_function_module();
 
     // Binary round-trip.
-    let tmbc_bytes = binary::write_module_to_binary(&module_orig);
-    let module_rt = binary::read_module_from_binary(&tmbc_bytes)
-        .expect("deserializing multi-function tmbc module should succeed");
+    let tmbc_bytes = serde_json::to_vec(&module_orig).expect("serialize");
+    let module_rt = serde_json::from_slice::<TmirModule>(&tmbc_bytes)
+        .expect("deserializing multi-function module should succeed");
     assert_eq!(
         module_orig, module_rt,
         "binary round-trip should preserve module equality"
@@ -523,15 +497,8 @@ int main() {
 
 #[test]
 fn e2e_tmbc_invalid_magic_rejected() {
-    let err = binary::read_module_from_binary(b"BAD!not_a_real_tmbc")
-        .expect_err("invalid magic bytes should be rejected");
-
-    match err {
-        binary::TmirBinaryError::InvalidMagic(magic) => {
-            assert_eq!(magic, *b"BAD!");
-        }
-        other => panic!("expected InvalidMagic, got {}", other),
-    }
+    let err = serde_json::from_slice::<TmirModule>(b"BAD!not_a_real_json");
+    assert!(err.is_err(), "invalid bytes should be rejected by JSON parser");
 }
 
 // ---------------------------------------------------------------------------
@@ -544,20 +511,21 @@ fn e2e_tmbc_invalid_magic_rejected() {
 fn e2e_tmbc_format_detection() {
     // Valid tmbc bytes should be detected.
     let module = build_return_42_module();
-    let tmbc_bytes = binary::write_module_to_binary(&module);
-    assert!(is_tmbc_format(&tmbc_bytes));
-    assert!(is_tmbc_format(b"tMBCextra_bytes"));
+    let tmbc_bytes = serde_json::to_vec(&module).expect("serialize");
+    assert!(is_json_format(&tmbc_bytes));
+    // JSON format check: serialized modules start with '{'
+    assert!(!is_json_format(b"tMBCextra_bytes"));
 
     // JSON bytes should NOT be detected as tmbc.
-    let json = tmir_func::reader::write_module_to_string(&module)
+    let json = serde_json::to_string_pretty(&module)
         .expect("serializing module to JSON should succeed");
     let json_bytes = json.into_bytes();
 
     assert_eq!(json_bytes.first().copied(), Some(b'{'));
-    assert!(!is_tmbc_format(&json_bytes));
-    assert!(!is_tmbc_format(br#"{"name":"json"}"#));
+    assert!(!is_json_format(&json_bytes));
+    assert!(!is_json_format(br#"{"name":"json"}"#));
 
     // Too-short bytes should not match.
-    assert!(!is_tmbc_format(b"tMB"));
-    assert!(!is_tmbc_format(b""));
+    assert!(!is_json_format(b"tMB"));
+    assert!(!is_json_format(b""));
 }

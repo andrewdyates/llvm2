@@ -5334,6 +5334,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let chc = encode_obligation_as_chc(&obligation);
@@ -5370,6 +5371,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![precond],
             fp_inputs: vec![],
+            category: None,
         };
 
         let chc = encode_obligation_as_chc(&obligation);
@@ -5393,6 +5395,7 @@ mod tests {
             inputs: vec![("x".to_string(), 64)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let chc = encode_obligation_as_chc(&obligation);
@@ -5419,6 +5422,7 @@ mod tests {
             inputs: vec![("a".to_string(), 8), ("b".to_string(), 16)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let chc = encode_obligation_as_chc(&obligation);
@@ -5445,6 +5449,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default().with_timeout(10_000);
@@ -5478,6 +5483,7 @@ mod tests {
             inputs: vec![("x".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default().with_timeout(10_000);
@@ -5504,6 +5510,7 @@ mod tests {
             inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let chc_script = encode_obligation_as_chc(&obligation);
@@ -5529,6 +5536,7 @@ mod tests {
             inputs: vec![("x".to_string(), 32)],
             preconditions: vec![],
             fp_inputs: vec![],
+            category: None,
         };
 
         let config = Z4Config::default().with_timeout(10_000);
@@ -5560,6 +5568,7 @@ mod tests {
                     inputs: vec![("x".to_string(), 32)],
                     preconditions: vec![],
                     fp_inputs: vec![],
+                    category: None,
                 },
                 category: ProofCategory::Arithmetic,
             },
@@ -5571,6 +5580,7 @@ mod tests {
                     inputs: vec![("y".to_string(), 64)],
                     preconditions: vec![],
                     fp_inputs: vec![],
+                    category: None,
                 },
                 category: ProofCategory::Arithmetic,
             },
@@ -5582,6 +5592,7 @@ mod tests {
                     inputs: vec![("a".to_string(), 8)],
                     preconditions: vec![],
                     fp_inputs: vec![],
+                    category: None,
                 },
                 category: ProofCategory::Comparison,
             },

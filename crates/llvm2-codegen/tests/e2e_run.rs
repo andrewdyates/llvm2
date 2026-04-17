@@ -26,6 +26,10 @@ use llvm2_ir::inst::{AArch64Opcode, MachInst};
 use llvm2_ir::operand::MachOperand;
 use llvm2_ir::regs::{X0, X1, X8, X9};
 
+use tmir::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule, FuncTy, Ty, Constant};
+use tmir::{Inst, InstrNode, BinOp};
+use tmir::{BlockId, FuncId, ValueId};
+
 // ---------------------------------------------------------------------------
 // Test infrastructure
 // ---------------------------------------------------------------------------
@@ -233,7 +237,7 @@ fn build_max_function() -> MachFunction {
 
     // We need 3 blocks: entry (bb0), move (bb1), done (bb2).
     // MachFunction::new creates bb0 (entry). We need to add bb1 and bb2.
-    let bb0 = func.entry; // BlockId(0)
+    let bb0 = func.entry; // BlockId::new(0)
 
     // Create bb1 and bb2.
     let bb1 = func.create_block();
@@ -1273,153 +1277,115 @@ int main(void) {
 ///     let v10 = v9 + v6;
 ///     return v10;
 /// }
-fn build_tmir_high_pressure_module() -> tmir_func::Module {
-    use tmir_instrs::{BinOp, Instr, InstrNode, Operand};
-    use tmir_types::{BlockId, FuncId, FuncTy, Ty, ValueId};
-
-    let func = tmir_func::Function {
-        id: FuncId(0),
-        name: "_high_pressure".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64), Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
-        blocks: vec![tmir_func::Block {
-            id: BlockId(0),
+fn build_tmir_high_pressure_module() -> TmirModule {
+    let mut module = TmirModule::new("test");
+    let ft_id = module.add_func_type(FuncTy {
+            params: vec![Ty::I64, Ty::I64],
+            returns: vec![Ty::I64], is_vararg: false });
+    let mut func = TmirFunction::new(FuncId::new(0), "_high_pressure", ft_id, BlockId::new(0));
+    func.blocks = vec![TmirBlock {
+            id: BlockId::new(0),
             params: vec![
-                (ValueId(0), Ty::int(64)), // param a
-                (ValueId(1), Ty::int(64)), // param b
+                (ValueId::new(0), Ty::I64), // param a
+                (ValueId::new(1), Ty::I64), // param b
             ],
             body: vec![
                 // v2 = a + b
-                InstrNode {
-                    instr: Instr::BinOp {
+                InstrNode::new(Inst::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(1)),
-                    },
-                    results: vec![ValueId(2)],
-                    proofs: vec![],
-                },
-                // v3 = a * b
-                InstrNode {
-                    instr: Instr::BinOp {
-                        op: BinOp::Mul,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(1)),
-                    },
-                    results: vec![ValueId(3)],
-                    proofs: vec![],
-                },
-                // v4 = a - b
-                InstrNode {
-                    instr: Instr::BinOp {
-                        op: BinOp::Sub,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(1)),
-                    },
-                    results: vec![ValueId(4)],
-                    proofs: vec![],
-                },
-                // const 1
-                InstrNode {
-                    instr: Instr::Const {
-                        ty: Ty::int(64),
-                        value: 1,
-                    },
-                    results: vec![ValueId(10)],
-                    proofs: vec![],
-                },
-                // v5 = a + 1
-                InstrNode {
-                    instr: Instr::BinOp {
-                        op: BinOp::Add,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(10)),
-                    },
-                    results: vec![ValueId(5)],
-                    proofs: vec![],
-                },
-                // v6 = b + 1
-                InstrNode {
-                    instr: Instr::BinOp {
-                        op: BinOp::Add,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(1)),
-                        rhs: Operand::Value(ValueId(10)),
-                    },
-                    results: vec![ValueId(6)],
-                    proofs: vec![],
-                },
-                // v7 = v2 + v3
-                InstrNode {
-                    instr: Instr::BinOp {
-                        op: BinOp::Add,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(2)),
-                        rhs: Operand::Value(ValueId(3)),
-                    },
-                    results: vec![ValueId(7)],
-                    proofs: vec![],
-                },
-                // v8 = v7 + v4
-                InstrNode {
-                    instr: Instr::BinOp {
-                        op: BinOp::Add,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(7)),
-                        rhs: Operand::Value(ValueId(4)),
-                    },
-                    results: vec![ValueId(8)],
-                    proofs: vec![],
-                },
-                // v9 = v8 + v5
-                InstrNode {
-                    instr: Instr::BinOp {
-                        op: BinOp::Add,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(8)),
-                        rhs: Operand::Value(ValueId(5)),
-                    },
-                    results: vec![ValueId(9)],
-                    proofs: vec![],
-                },
-                // v10_result = v9 + v6
-                InstrNode {
-                    instr: Instr::BinOp {
-                        op: BinOp::Add,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(9)),
-                        rhs: Operand::Value(ValueId(6)),
-                    },
-                    results: vec![ValueId(11)],
-                    proofs: vec![],
-                },
-                // return v10_result
-                InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(11))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                },
-            ],
-        }],
-        proofs: vec![],
-    };
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(1),
+                    })
 
-    tmir_func::Module {
-        name: "e2e_high_pressure_test".to_string(),
-        functions: vec![func],
-        structs: vec![],
-        globals: vec![],
-        data_layout: None,
-    }
+                    .with_result(ValueId::new(2)),
+                // v3 = a * b
+                InstrNode::new(Inst::BinOp {
+                        op: BinOp::Mul,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(1),
+                    })
+
+                    .with_result(ValueId::new(3)),
+                // v4 = a - b
+                InstrNode::new(Inst::BinOp {
+                        op: BinOp::Sub,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(1),
+                    })
+
+                    .with_result(ValueId::new(4)),
+                // const 1
+                InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(1),
+                    })
+
+                    .with_result(ValueId::new(10)),
+                // v5 = a + 1
+                InstrNode::new(Inst::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(10),
+                    })
+
+                    .with_result(ValueId::new(5)),
+                // v6 = b + 1
+                InstrNode::new(Inst::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(1),
+                        rhs: ValueId::new(10),
+                    })
+
+                    .with_result(ValueId::new(6)),
+                // v7 = v2 + v3
+                InstrNode::new(Inst::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(2),
+                        rhs: ValueId::new(3),
+                    })
+
+                    .with_result(ValueId::new(7)),
+                // v8 = v7 + v4
+                InstrNode::new(Inst::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(7),
+                        rhs: ValueId::new(4),
+                    })
+
+                    .with_result(ValueId::new(8)),
+                // v9 = v8 + v5
+                InstrNode::new(Inst::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(8),
+                        rhs: ValueId::new(5),
+                    })
+
+                    .with_result(ValueId::new(9)),
+                // v10_result = v9 + v6
+                InstrNode::new(Inst::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::I64,
+                        lhs: ValueId::new(9),
+                        rhs: ValueId::new(6),
+                    })
+
+                    .with_result(ValueId::new(11)),
+                // return v10_result
+                InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(11)],
+                    }),
+            ],
+        }];
+    module.add_function(func);
+    module
 }
 
 // ---------------------------------------------------------------------------
@@ -1435,6 +1401,9 @@ fn build_tmir_high_pressure_module() -> tmir_func::Module {
 #[test]
 fn test_e2e_stack_slots_all_opt_levels() {
     use llvm2_ir::function::StackSlot;
+use tmir::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule, FuncTy, Ty, FuncTyId, Constant};
+use tmir::{Inst, InstrNode, BinOp, ICmpOp, UnOp};
+use tmir::{BlockId, FuncId, ValueId};
 
     for opt in &[OptLevel::O0, OptLevel::O1, OptLevel::O2, OptLevel::O3] {
         let sig = Signature::new(vec![Type::I64], vec![Type::I64]);
