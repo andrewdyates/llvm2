@@ -27,18 +27,21 @@
 //! and a 128-bit vector arrangement.
 //!
 //! Verified operations:
-//! - Arithmetic: vector add, sub, mul, neg
+//! - Arithmetic: vector add, sub, mul, neg, mla (multiply-accumulate)
 //! - Bitwise: and, or (orr), xor (eor), bit clear (bic)
 //! - Shifts: shl, ushr (logical shift right), sshr (arithmetic shift right)
+//! - Min/max: smin, umin, smax, umax
+//! - Comparisons: cmgt (signed greater-than), cmge (signed greater-or-equal)
 
 use crate::lowering_proof::ProofObligation;
 use crate::neon_semantics::{
-    encode_neon_add, encode_neon_and, encode_neon_bic, encode_neon_eor, encode_neon_mul,
-    encode_neon_neg, encode_neon_orr, encode_neon_shl, encode_neon_sshr, encode_neon_sub,
-    encode_neon_ushr,
+    encode_neon_add, encode_neon_and, encode_neon_bic, encode_neon_cmge, encode_neon_cmgt,
+    encode_neon_eor, encode_neon_mla, encode_neon_mul, encode_neon_neg, encode_neon_orr,
+    encode_neon_shl, encode_neon_smax, encode_neon_smin, encode_neon_sshr, encode_neon_sub,
+    encode_neon_umax, encode_neon_umin, encode_neon_ushr,
 };
-use crate::smt::{map_lanes_binary, map_lanes_binary_imm, map_lanes_unary, SmtExpr,
-    VectorArrangement};
+use crate::smt::{concat_lanes, lane_extract, map_lanes_binary, map_lanes_binary_imm,
+    map_lanes_unary, SmtExpr, VectorArrangement};
 
 // ---------------------------------------------------------------------------
 // Helper: build symbolic vector inputs
@@ -498,12 +501,300 @@ pub fn proof_vector_sshr_8h() -> ProofObligation {
 }
 
 // ---------------------------------------------------------------------------
+// Vector MLA proofs
+// ---------------------------------------------------------------------------
+
+/// Proof: tMIR vector_mla -> NEON MLA at the specified arrangement.
+///
+/// tMIR semantics: per-lane `va[i] + vn[i] * vm[i]`, reassembled with `concat_lanes`.
+/// NEON semantics: `encode_neon_mla`.
+fn proof_vector_mla(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let va = symbolic_vector("va", arrangement);
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+
+    let lane_count = arrangement.lane_count();
+    let lanes: Vec<SmtExpr> = (0..lane_count)
+        .map(|i| {
+            let a = lane_extract(&va, arrangement, i);
+            let n = lane_extract(&vn, arrangement, i);
+            let m = lane_extract(&vm, arrangement, i);
+            a.bvadd(n.bvmul(m))
+        })
+        .collect();
+    let tmir_expr = concat_lanes(&lanes, arrangement);
+    let neon_expr = encode_neon_mla(arrangement, &va, &vn, &vm);
+
+    let mut inputs = vector_inputs("va", arrangement);
+    inputs.extend(vector_inputs("vn", arrangement));
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("VectorMla -> NEON MLA.{}", label),
+        tmir_expr,
+        aarch64_expr: neon_expr,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: tMIR vector_mla -> NEON MLA.8B (64-bit, 8x8-bit lanes).
+pub fn proof_vector_mla_8b() -> ProofObligation {
+    proof_vector_mla(VectorArrangement::B8, "8B")
+}
+
+/// Proof: tMIR vector_mla -> NEON MLA.4S (128-bit, 4x32-bit lanes).
+pub fn proof_vector_mla_4s() -> ProofObligation {
+    proof_vector_mla(VectorArrangement::S4, "4S")
+}
+
+// ---------------------------------------------------------------------------
+// Vector SMIN proofs
+// ---------------------------------------------------------------------------
+
+/// Proof: tMIR vector_smin -> NEON SMIN at the specified arrangement.
+fn proof_vector_smin(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+    let tmir_expr = map_lanes_binary(&vn, &vm, arrangement, |a, b| {
+        SmtExpr::ite(a.clone().bvslt(b.clone()), a, b)
+    });
+    let neon_expr = encode_neon_smin(arrangement, &vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("VectorSmin -> NEON SMIN.{}", label),
+        tmir_expr,
+        aarch64_expr: neon_expr,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: tMIR vector_smin -> NEON SMIN.4H (64-bit, 4x16-bit lanes).
+pub fn proof_vector_smin_4h() -> ProofObligation {
+    proof_vector_smin(VectorArrangement::H4, "4H")
+}
+
+/// Proof: tMIR vector_smin -> NEON SMIN.4S (128-bit, 4x32-bit lanes).
+pub fn proof_vector_smin_4s() -> ProofObligation {
+    proof_vector_smin(VectorArrangement::S4, "4S")
+}
+
+// ---------------------------------------------------------------------------
+// Vector UMIN proofs
+// ---------------------------------------------------------------------------
+
+/// Proof: tMIR vector_umin -> NEON UMIN at the specified arrangement.
+fn proof_vector_umin(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+    let tmir_expr = map_lanes_binary(&vn, &vm, arrangement, |a, b| {
+        SmtExpr::ite(a.clone().bvult(b.clone()), a, b)
+    });
+    let neon_expr = encode_neon_umin(arrangement, &vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("VectorUmin -> NEON UMIN.{}", label),
+        tmir_expr,
+        aarch64_expr: neon_expr,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: tMIR vector_umin -> NEON UMIN.8B (64-bit, 8x8-bit lanes).
+pub fn proof_vector_umin_8b() -> ProofObligation {
+    proof_vector_umin(VectorArrangement::B8, "8B")
+}
+
+/// Proof: tMIR vector_umin -> NEON UMIN.8H (128-bit, 8x16-bit lanes).
+pub fn proof_vector_umin_8h() -> ProofObligation {
+    proof_vector_umin(VectorArrangement::H8, "8H")
+}
+
+// ---------------------------------------------------------------------------
+// Vector SMAX proofs
+// ---------------------------------------------------------------------------
+
+/// Proof: tMIR vector_smax -> NEON SMAX at the specified arrangement.
+fn proof_vector_smax(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+    let tmir_expr = map_lanes_binary(&vn, &vm, arrangement, |a, b| {
+        SmtExpr::ite(a.clone().bvsgt(b.clone()), a, b)
+    });
+    let neon_expr = encode_neon_smax(arrangement, &vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("VectorSmax -> NEON SMAX.{}", label),
+        tmir_expr,
+        aarch64_expr: neon_expr,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: tMIR vector_smax -> NEON SMAX.2S (64-bit, 2x32-bit lanes).
+pub fn proof_vector_smax_2s() -> ProofObligation {
+    proof_vector_smax(VectorArrangement::S2, "2S")
+}
+
+/// Proof: tMIR vector_smax -> NEON SMAX.16B (128-bit, 16x8-bit lanes).
+pub fn proof_vector_smax_16b() -> ProofObligation {
+    proof_vector_smax(VectorArrangement::B16, "16B")
+}
+
+// ---------------------------------------------------------------------------
+// Vector UMAX proofs
+// ---------------------------------------------------------------------------
+
+/// Proof: tMIR vector_umax -> NEON UMAX at the specified arrangement.
+fn proof_vector_umax(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+    let tmir_expr = map_lanes_binary(&vn, &vm, arrangement, |a, b| {
+        SmtExpr::ite(a.clone().bvugt(b.clone()), a, b)
+    });
+    let neon_expr = encode_neon_umax(arrangement, &vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("VectorUmax -> NEON UMAX.{}", label),
+        tmir_expr,
+        aarch64_expr: neon_expr,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: tMIR vector_umax -> NEON UMAX.4H (64-bit, 4x16-bit lanes).
+pub fn proof_vector_umax_4h() -> ProofObligation {
+    proof_vector_umax(VectorArrangement::H4, "4H")
+}
+
+/// Proof: tMIR vector_umax -> NEON UMAX.4S (128-bit, 4x32-bit lanes).
+pub fn proof_vector_umax_4s() -> ProofObligation {
+    proof_vector_umax(VectorArrangement::S4, "4S")
+}
+
+// ---------------------------------------------------------------------------
+// Vector CMGT proofs
+// ---------------------------------------------------------------------------
+
+/// Proof: tMIR vector_cmgt -> NEON CMGT at the specified arrangement.
+fn proof_vector_cmgt(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+
+    let lane_bits = arrangement.lane_bits();
+    let all_ones_lane = SmtExpr::bv_const(
+        if lane_bits >= 64 { u64::MAX } else { (1u64 << lane_bits) - 1 },
+        lane_bits,
+    );
+    let zero_lane = SmtExpr::bv_const(0, lane_bits);
+
+    let tmir_expr = map_lanes_binary(&vn, &vm, arrangement, |a, b| {
+        SmtExpr::ite(a.bvsgt(b), all_ones_lane.clone(), zero_lane.clone())
+    });
+    let neon_expr = encode_neon_cmgt(arrangement, &vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("VectorCmgt -> NEON CMGT.{}", label),
+        tmir_expr,
+        aarch64_expr: neon_expr,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: tMIR vector_cmgt -> NEON CMGT.2S (64-bit, 2x32-bit lanes).
+pub fn proof_vector_cmgt_2s() -> ProofObligation {
+    proof_vector_cmgt(VectorArrangement::S2, "2S")
+}
+
+/// Proof: tMIR vector_cmgt -> NEON CMGT.4S (128-bit, 4x32-bit lanes).
+pub fn proof_vector_cmgt_4s() -> ProofObligation {
+    proof_vector_cmgt(VectorArrangement::S4, "4S")
+}
+
+// ---------------------------------------------------------------------------
+// Vector CMGE proofs
+// ---------------------------------------------------------------------------
+
+/// Proof: tMIR vector_cmge -> NEON CMGE at the specified arrangement.
+fn proof_vector_cmge(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+
+    let lane_bits = arrangement.lane_bits();
+    let all_ones_lane = SmtExpr::bv_const(
+        if lane_bits >= 64 { u64::MAX } else { (1u64 << lane_bits) - 1 },
+        lane_bits,
+    );
+    let zero_lane = SmtExpr::bv_const(0, lane_bits);
+
+    let tmir_expr = map_lanes_binary(&vn, &vm, arrangement, |a, b| {
+        SmtExpr::ite(a.bvsge(b), all_ones_lane.clone(), zero_lane.clone())
+    });
+    let neon_expr = encode_neon_cmge(arrangement, &vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("VectorCmge -> NEON CMGE.{}", label),
+        tmir_expr,
+        aarch64_expr: neon_expr,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: tMIR vector_cmge -> NEON CMGE.4H (64-bit, 4x16-bit lanes).
+pub fn proof_vector_cmge_4h() -> ProofObligation {
+    proof_vector_cmge(VectorArrangement::H4, "4H")
+}
+
+/// Proof: tMIR vector_cmge -> NEON CMGE.8H (128-bit, 8x16-bit lanes).
+pub fn proof_vector_cmge_8h() -> ProofObligation {
+    proof_vector_cmge(VectorArrangement::H8, "8H")
+}
+
+// ---------------------------------------------------------------------------
 // Aggregate: all NEON lowering proofs
 // ---------------------------------------------------------------------------
 
-/// Return all 22 NEON SIMD lowering proof obligations.
+/// Return all 36 NEON SIMD lowering proof obligations.
 ///
-/// 11 operations x 2 arrangements (one 64-bit, one 128-bit) = 22 proofs.
+/// 18 operations x 2 arrangements (one 64-bit, one 128-bit) = 36 proofs.
 pub fn all_neon_lowering_proofs() -> Vec<ProofObligation> {
     vec![
         // Arithmetic (4 ops x 2 arrangements = 8 proofs)
@@ -531,6 +822,23 @@ pub fn all_neon_lowering_proofs() -> Vec<ProofObligation> {
         proof_vector_ushr_2d(),
         proof_vector_sshr_2s(),
         proof_vector_sshr_8h(),
+        // Multiply-accumulate (1 op x 2 arrangements = 2 proofs)
+        proof_vector_mla_8b(),
+        proof_vector_mla_4s(),
+        // Min/max (4 ops x 2 arrangements = 8 proofs)
+        proof_vector_smin_4h(),
+        proof_vector_smin_4s(),
+        proof_vector_umin_8b(),
+        proof_vector_umin_8h(),
+        proof_vector_smax_2s(),
+        proof_vector_smax_16b(),
+        proof_vector_umax_4h(),
+        proof_vector_umax_4s(),
+        // Comparisons (2 ops x 2 arrangements = 4 proofs)
+        proof_vector_cmgt_2s(),
+        proof_vector_cmgt_4s(),
+        proof_vector_cmge_4h(),
+        proof_vector_cmge_8h(),
     ]
 }
 
@@ -716,13 +1024,111 @@ mod tests {
     }
 
     // =======================================================================
-    // Aggregate test: all 22 proofs
+    // Vector MLA
+    // =======================================================================
+
+    #[test]
+    fn test_proof_vector_mla_8b() {
+        assert_valid(&proof_vector_mla_8b());
+    }
+
+    #[test]
+    fn test_proof_vector_mla_4s() {
+        assert_valid(&proof_vector_mla_4s());
+    }
+
+    // =======================================================================
+    // Vector SMIN
+    // =======================================================================
+
+    #[test]
+    fn test_proof_vector_smin_4h() {
+        assert_valid(&proof_vector_smin_4h());
+    }
+
+    #[test]
+    fn test_proof_vector_smin_4s() {
+        assert_valid(&proof_vector_smin_4s());
+    }
+
+    // =======================================================================
+    // Vector UMIN
+    // =======================================================================
+
+    #[test]
+    fn test_proof_vector_umin_8b() {
+        assert_valid(&proof_vector_umin_8b());
+    }
+
+    #[test]
+    fn test_proof_vector_umin_8h() {
+        assert_valid(&proof_vector_umin_8h());
+    }
+
+    // =======================================================================
+    // Vector SMAX
+    // =======================================================================
+
+    #[test]
+    fn test_proof_vector_smax_2s() {
+        assert_valid(&proof_vector_smax_2s());
+    }
+
+    #[test]
+    fn test_proof_vector_smax_16b() {
+        assert_valid(&proof_vector_smax_16b());
+    }
+
+    // =======================================================================
+    // Vector UMAX
+    // =======================================================================
+
+    #[test]
+    fn test_proof_vector_umax_4h() {
+        assert_valid(&proof_vector_umax_4h());
+    }
+
+    #[test]
+    fn test_proof_vector_umax_4s() {
+        assert_valid(&proof_vector_umax_4s());
+    }
+
+    // =======================================================================
+    // Vector CMGT
+    // =======================================================================
+
+    #[test]
+    fn test_proof_vector_cmgt_2s() {
+        assert_valid(&proof_vector_cmgt_2s());
+    }
+
+    #[test]
+    fn test_proof_vector_cmgt_4s() {
+        assert_valid(&proof_vector_cmgt_4s());
+    }
+
+    // =======================================================================
+    // Vector CMGE
+    // =======================================================================
+
+    #[test]
+    fn test_proof_vector_cmge_4h() {
+        assert_valid(&proof_vector_cmge_4h());
+    }
+
+    #[test]
+    fn test_proof_vector_cmge_8h() {
+        assert_valid(&proof_vector_cmge_8h());
+    }
+
+    // =======================================================================
+    // Aggregate test: all 36 proofs
     // =======================================================================
 
     #[test]
     fn test_all_neon_lowering_proofs() {
         let proofs = all_neon_lowering_proofs();
-        assert_eq!(proofs.len(), 22, "expected 11 ops x 2 arrangements = 22 proofs");
+        assert_eq!(proofs.len(), 36, "expected 18 ops x 2 arrangements = 36 proofs");
         for obligation in &proofs {
             assert_valid(obligation);
         }

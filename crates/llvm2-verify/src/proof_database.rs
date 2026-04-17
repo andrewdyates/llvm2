@@ -799,8 +799,8 @@ mod tests {
     fn test_neon_lowering_proofs_count() {
         let db = ProofDatabase::new();
         let count = db.count_by_category(ProofCategory::NeonLowering);
-        // 11 ops x 2 arrangements = 22
-        assert_eq!(count, 22, "expected 22 NEON lowering proofs, got {}", count);
+        // 18 ops x 2 arrangements = 36
+        assert_eq!(count, 36, "expected 36 NEON lowering proofs, got {}", count);
     }
 
     #[test]
