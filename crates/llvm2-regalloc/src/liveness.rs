@@ -204,8 +204,20 @@ pub fn compute_live_intervals(func: &MachFunction) -> LivenessResult {
     let mut live_out: Vec<HashSet<u32>> = vec![HashSet::new(); num_blocks];
 
     // Iterate to fixed point.
+    // Safety bound: standard dataflow converges in at most N+1 iterations
+    // (N = number of blocks). Use a generous bound to catch bugs.
+    let max_iterations = num_blocks * 2 + 10;
+    let mut iteration = 0;
     let mut changed = true;
     while changed {
+        if iteration >= max_iterations {
+            eprintln!(
+                "llvm2-regalloc: liveness fixpoint did not converge after {} iterations ({} blocks)",
+                iteration, num_blocks
+            );
+            break;
+        }
+        iteration += 1;
         changed = false;
 
         // Process blocks in reverse order for faster convergence.
