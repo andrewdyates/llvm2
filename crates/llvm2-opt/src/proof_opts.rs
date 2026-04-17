@@ -70,6 +70,49 @@ pub struct ProofOptStats {
     pub shift_checks_eliminated: u32,
     /// Number of loads promoted to pure for aggressive CSE (Pure).
     pub pure_cse_enabled: u32,
+    /// Total number of optimization certificates generated.
+    pub total_certificates: u32,
+}
+
+/// A certificate recording a single proof-guided optimization transformation.
+///
+/// These certificates form an audit trail aligned with tRust's translation
+/// validation patterns (trust-transval): each one records that a specific
+/// tMIR proof annotation was consumed to eliminate a specific runtime check.
+/// Downstream verification (llvm2-verify) can independently confirm each
+/// certificate by re-checking the proof obligation.
+#[derive(Debug, Clone)]
+pub struct OptCertificate {
+    /// The proof annotation that justified this optimization.
+    pub annotation: ProofAnnotation,
+    /// Human-readable description of the transformation.
+    pub description: String,
+    /// The instruction ID that was the primary target.
+    pub primary_inst: InstId,
+    /// Additional instruction IDs affected (e.g., deleted trap instructions).
+    pub affected_insts: Vec<InstId>,
+    /// The kind of transformation applied.
+    pub kind: OptCertificateKind,
+}
+
+/// What kind of transformation was applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OptCertificateKind {
+    /// A checked instruction was replaced with an unchecked equivalent.
+    /// E.g., ADDS -> ADD.
+    CheckedToUnchecked,
+    /// One or more guard instructions were deleted.
+    /// E.g., CMP+TrapBoundsCheck removed.
+    GuardEliminated,
+    /// A conditional branch was replaced with an unconditional branch.
+    /// E.g., CBNZ -> B.
+    BranchSimplified,
+    /// Instruction flags were refined to enable downstream optimization.
+    /// E.g., PROOF_REORDERABLE added, or READS_MEMORY removed.
+    FlagsRefined,
+    /// An instruction pair was eliminated.
+    /// E.g., Retain+Release removed.
+    PairEliminated,
 }
 
 /// Proof-consuming optimization pass.
@@ -78,6 +121,7 @@ pub struct ProofOptStats {
 /// that have been formally verified as unnecessary.
 pub struct ProofOptimization {
     stats: ProofOptStats,
+    certificates: Vec<OptCertificate>,
 }
 
 impl ProofOptimization {
@@ -85,12 +129,28 @@ impl ProofOptimization {
     pub fn new() -> Self {
         Self {
             stats: ProofOptStats::default(),
+            certificates: Vec::new(),
         }
     }
 
     /// Returns optimization statistics from the last run.
     pub fn stats(&self) -> &ProofOptStats {
         &self.stats
+    }
+
+    /// Returns the optimization certificates generated during the last run.
+    ///
+    /// Each certificate records a single proof-guided transformation,
+    /// providing an audit trail for translation validation.
+    pub fn certificates(&self) -> &[OptCertificate] {
+        &self.certificates
+    }
+
+    /// Takes ownership of the optimization certificates, leaving the
+    /// internal buffer empty. Useful for passing certificates to
+    /// downstream verification without cloning.
+    pub fn take_certificates(&mut self) -> Vec<OptCertificate> {
+        std::mem::take(&mut self.certificates)
     }
 }
 
@@ -107,6 +167,7 @@ impl MachinePass for ProofOptimization {
 
     fn run(&mut self, func: &mut MachFunction) -> bool {
         self.stats = ProofOptStats::default();
+        self.certificates.clear();
         let mut changed = false;
 
         // Collect instructions to delete across all blocks.
@@ -195,6 +256,8 @@ impl MachinePass for ProofOptimization {
             }
         }
 
+        self.stats.total_certificates = self.certificates.len() as u32;
+
         changed
     }
 }
@@ -244,6 +307,19 @@ impl ProofOptimization {
             }
         }
 
+        self.certificates.push(OptCertificate {
+            annotation: ProofAnnotation::NoOverflow,
+            description: "Converted checked arithmetic to unchecked using NoOverflow proof"
+                .to_string(),
+            primary_inst: inst_id,
+            affected_insts: block_insts
+                .get(pos + 1)
+                .copied()
+                .filter(|next_id| to_delete.contains(next_id))
+                .into_iter()
+                .collect(),
+            kind: OptCertificateKind::CheckedToUnchecked,
+        });
         self.stats.overflow_checks_eliminated += 1;
         true
     }
@@ -279,6 +355,14 @@ impl ProofOptimization {
                 // Remove both the CMP and the TrapBoundsCheck.
                 to_delete.insert(inst_id);
                 to_delete.insert(next_id);
+                self.certificates.push(OptCertificate {
+                    annotation: ProofAnnotation::InBounds,
+                    description: "Eliminated bounds check guard using InBounds proof"
+                        .to_string(),
+                    primary_inst: inst_id,
+                    affected_insts: vec![next_id],
+                    kind: OptCertificateKind::GuardEliminated,
+                });
                 self.stats.bounds_checks_eliminated += 1;
                 return true;
             }
@@ -315,6 +399,14 @@ impl ProofOptimization {
                 // With NotNull proof, ptr is never null, so the branch
                 // never fires. Remove it entirely.
                 to_delete.insert(inst_id);
+                self.certificates.push(OptCertificate {
+                    annotation: ProofAnnotation::NotNull,
+                    description: "Eliminated null check guard using NotNull proof"
+                        .to_string(),
+                    primary_inst: inst_id,
+                    affected_insts: vec![],
+                    kind: OptCertificateKind::GuardEliminated,
+                });
                 self.stats.null_checks_eliminated += 1;
                 true
             }
@@ -329,6 +421,15 @@ impl ProofOptimization {
                     inst.operands = vec![MachOperand::Block(target_block)];
                     inst.flags = AArch64Opcode::B.default_flags();
                     inst.proof = None;
+                    self.certificates.push(OptCertificate {
+                        annotation: ProofAnnotation::NotNull,
+                        description:
+                            "Simplified null-check branch to unconditional branch using NotNull proof"
+                                .to_string(),
+                        primary_inst: inst_id,
+                        affected_insts: vec![],
+                        kind: OptCertificateKind::BranchSimplified,
+                    });
                     self.stats.null_checks_eliminated += 1;
                     true
                 } else {
@@ -338,6 +439,14 @@ impl ProofOptimization {
             AArch64Opcode::TrapNull => {
                 // Pseudo-instruction: trap if null. Remove with proof.
                 to_delete.insert(inst_id);
+                self.certificates.push(OptCertificate {
+                    annotation: ProofAnnotation::NotNull,
+                    description: "Eliminated null check guard using NotNull proof"
+                        .to_string(),
+                    primary_inst: inst_id,
+                    affected_insts: vec![],
+                    kind: OptCertificateKind::GuardEliminated,
+                });
                 self.stats.null_checks_eliminated += 1;
                 true
             }
@@ -363,6 +472,15 @@ impl ProofOptimization {
                         ) {
                             to_delete.insert(inst_id);
                             to_delete.insert(next_id);
+                            self.certificates.push(OptCertificate {
+                                annotation: ProofAnnotation::NotNull,
+                                description:
+                                    "Eliminated null check guard using NotNull proof"
+                                        .to_string(),
+                                primary_inst: inst_id,
+                                affected_insts: vec![next_id],
+                                kind: OptCertificateKind::GuardEliminated,
+                            });
                             self.stats.null_checks_eliminated += 1;
                             return true;
                         }
@@ -404,6 +522,14 @@ impl ProofOptimization {
         let inst = func.inst_mut(inst_id);
         inst.flags.insert(InstFlags::PROOF_REORDERABLE);
 
+        self.certificates.push(OptCertificate {
+            annotation: ProofAnnotation::ValidBorrow,
+            description: "Refined memory-operation flags using ValidBorrow proof"
+                .to_string(),
+            primary_inst: inst_id,
+            affected_insts: vec![],
+            kind: OptCertificateKind::FlagsRefined,
+        });
         self.stats.alias_refinements += 1;
         true
     }
@@ -458,6 +584,15 @@ impl ProofOptimization {
                     // Found matching release. Remove both.
                     to_delete.insert(inst_id);
                     to_delete.insert(later_id);
+                    self.certificates.push(OptCertificate {
+                        annotation: ProofAnnotation::PositiveRefCount,
+                        description:
+                            "Eliminated retain/release pair using PositiveRefCount proof"
+                                .to_string(),
+                        primary_inst: inst_id,
+                        affected_insts: vec![later_id],
+                        kind: OptCertificateKind::PairEliminated,
+                    });
                     self.stats.refcount_pairs_eliminated += 1;
                     return true;
                 }
@@ -497,12 +632,30 @@ impl ProofOptimization {
                 // CBZ branches to trap if divisor == 0.
                 // With NonZeroDivisor proof, divisor is never zero. Remove.
                 to_delete.insert(inst_id);
+                self.certificates.push(OptCertificate {
+                    annotation: ProofAnnotation::NonZeroDivisor,
+                    description:
+                        "Eliminated division-by-zero guard using NonZeroDivisor proof"
+                            .to_string(),
+                    primary_inst: inst_id,
+                    affected_insts: vec![],
+                    kind: OptCertificateKind::GuardEliminated,
+                });
                 self.stats.divzero_checks_eliminated += 1;
                 true
             }
             AArch64Opcode::TrapDivZero => {
                 // Pseudo-instruction: trap if divisor is zero. Remove with proof.
                 to_delete.insert(inst_id);
+                self.certificates.push(OptCertificate {
+                    annotation: ProofAnnotation::NonZeroDivisor,
+                    description:
+                        "Eliminated division-by-zero guard using NonZeroDivisor proof"
+                            .to_string(),
+                    primary_inst: inst_id,
+                    affected_insts: vec![],
+                    kind: OptCertificateKind::GuardEliminated,
+                });
                 self.stats.divzero_checks_eliminated += 1;
                 true
             }
@@ -526,6 +679,15 @@ impl ProofOptimization {
                         ) {
                             to_delete.insert(inst_id);
                             to_delete.insert(next_id);
+                            self.certificates.push(OptCertificate {
+                                annotation: ProofAnnotation::NonZeroDivisor,
+                                description:
+                                    "Eliminated division-by-zero guard using NonZeroDivisor proof"
+                                        .to_string(),
+                                primary_inst: inst_id,
+                                affected_insts: vec![next_id],
+                                kind: OptCertificateKind::GuardEliminated,
+                            });
                             self.stats.divzero_checks_eliminated += 1;
                             return true;
                         }
@@ -584,6 +746,15 @@ impl ProofOptimization {
                         ) {
                             to_delete.insert(inst_id);
                             to_delete.insert(next_id);
+                            self.certificates.push(OptCertificate {
+                                annotation: ProofAnnotation::ValidShift,
+                                description:
+                                    "Eliminated shift-range guard using ValidShift proof"
+                                        .to_string(),
+                                primary_inst: inst_id,
+                                affected_insts: vec![next_id],
+                                kind: OptCertificateKind::GuardEliminated,
+                            });
                             self.stats.shift_checks_eliminated += 1;
                             return true;
                         }
@@ -594,6 +765,14 @@ impl ProofOptimization {
             AArch64Opcode::TrapShiftRange => {
                 // Pseudo-instruction: trap if shift amount out of range. Remove.
                 to_delete.insert(inst_id);
+                self.certificates.push(OptCertificate {
+                    annotation: ProofAnnotation::ValidShift,
+                    description: "Eliminated shift-range guard using ValidShift proof"
+                        .to_string(),
+                    primary_inst: inst_id,
+                    affected_insts: vec![],
+                    kind: OptCertificateKind::GuardEliminated,
+                });
                 self.stats.shift_checks_eliminated += 1;
                 true
             }
@@ -637,6 +816,13 @@ impl ProofOptimization {
         inst.flags.remove(InstFlags::HAS_SIDE_EFFECTS);
         inst.proof = None; // Proof consumed.
 
+        self.certificates.push(OptCertificate {
+            annotation: ProofAnnotation::Pure,
+            description: "Refined instruction flags using Pure proof".to_string(),
+            primary_inst: inst_id,
+            affected_insts: vec![],
+            kind: OptCertificateKind::FlagsRefined,
+        });
         self.stats.pure_cse_enabled += 1;
         true
     }
@@ -2021,5 +2207,365 @@ mod tests {
         assert_eq!(pass.stats().overflow_checks_eliminated, 1);
         assert_eq!(pass.stats().alias_refinements, 1);
         assert_eq!(pass.stats().pure_cse_enabled, 1);
+    }
+
+    // --- Certificate generation tests ---
+
+    #[test]
+    fn test_certificate_generated_on_overflow_elimination() {
+        let adds = MachInst::new(
+            AArch64Opcode::AddsRR,
+            vec![vreg(0), vreg(1), vreg(2)],
+        )
+        .with_proof(ProofAnnotation::NoOverflow);
+
+        let trap = MachInst::new(
+            AArch64Opcode::TrapOverflow,
+            vec![imm(0x06), MachOperand::Block(BlockId(1))],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![adds, trap, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let certs = pass.certificates();
+        assert_eq!(certs.len(), 1);
+        let cert = &certs[0];
+        assert_eq!(cert.annotation, ProofAnnotation::NoOverflow);
+        assert_eq!(cert.primary_inst, InstId(0));
+        assert_eq!(cert.affected_insts, vec![InstId(1)]);
+        assert_eq!(cert.kind, OptCertificateKind::CheckedToUnchecked);
+
+        // Verify take_certificates drains the buffer.
+        let drained = pass.take_certificates();
+        assert_eq!(drained.len(), 1);
+        assert!(pass.certificates().is_empty());
+    }
+
+    #[test]
+    fn test_certificate_generated_on_bounds_check_elimination() {
+        let cmp = MachInst::new(
+            AArch64Opcode::CmpRR,
+            vec![vreg(0), vreg(1)],
+        )
+        .with_proof(ProofAnnotation::InBounds);
+
+        let trap = MachInst::new(
+            AArch64Opcode::TrapBoundsCheck,
+            vec![MachOperand::Block(BlockId(1))],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cmp, trap, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let certs = pass.certificates();
+        assert_eq!(certs.len(), 1);
+        let cert = &certs[0];
+        assert_eq!(cert.annotation, ProofAnnotation::InBounds);
+        assert_eq!(cert.primary_inst, InstId(0));
+        assert_eq!(cert.affected_insts, vec![InstId(1)]);
+        assert_eq!(cert.kind, OptCertificateKind::GuardEliminated);
+    }
+
+    #[test]
+    fn test_certificate_generated_on_null_check_cbz() {
+        let cbz = MachInst::new(
+            AArch64Opcode::Cbz,
+            vec![vreg(0), MachOperand::Block(BlockId(1))],
+        )
+        .with_proof(ProofAnnotation::NotNull);
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cbz, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let certs = pass.certificates();
+        assert_eq!(certs.len(), 1);
+        let cert = &certs[0];
+        assert_eq!(cert.annotation, ProofAnnotation::NotNull);
+        assert_eq!(cert.primary_inst, InstId(0));
+        assert!(cert.affected_insts.is_empty());
+        assert_eq!(cert.kind, OptCertificateKind::GuardEliminated);
+    }
+
+    #[test]
+    fn test_certificate_generated_on_null_check_cbnz() {
+        let cbnz = MachInst::new(
+            AArch64Opcode::Cbnz,
+            vec![vreg(0), MachOperand::Block(BlockId(1))],
+        )
+        .with_proof(ProofAnnotation::NotNull);
+
+        let mut func = make_func_with_insts(vec![cbnz]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let certs = pass.certificates();
+        assert_eq!(certs.len(), 1);
+        let cert = &certs[0];
+        assert_eq!(cert.annotation, ProofAnnotation::NotNull);
+        assert_eq!(cert.primary_inst, InstId(0));
+        assert!(cert.affected_insts.is_empty());
+        assert_eq!(cert.kind, OptCertificateKind::BranchSimplified);
+    }
+
+    #[test]
+    fn test_certificate_generated_on_valid_borrow() {
+        let ldr = MachInst::new(
+            AArch64Opcode::LdrRI,
+            vec![vreg(0), vreg(1), imm(0)],
+        )
+        .with_proof(ProofAnnotation::ValidBorrow);
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![ldr, ret]);
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let certs = pass.certificates();
+        assert_eq!(certs.len(), 1);
+        let cert = &certs[0];
+        assert_eq!(cert.annotation, ProofAnnotation::ValidBorrow);
+        assert_eq!(cert.primary_inst, InstId(0));
+        assert!(cert.affected_insts.is_empty());
+        assert_eq!(cert.kind, OptCertificateKind::FlagsRefined);
+    }
+
+    #[test]
+    fn test_certificate_generated_on_refcount_pair() {
+        let retain = MachInst::new(
+            AArch64Opcode::Retain,
+            vec![vreg(0)],
+        )
+        .with_proof(ProofAnnotation::PositiveRefCount);
+
+        let release = MachInst::new(
+            AArch64Opcode::Release,
+            vec![vreg(0)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![retain, release, ret]);
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let certs = pass.certificates();
+        assert_eq!(certs.len(), 1);
+        let cert = &certs[0];
+        assert_eq!(cert.annotation, ProofAnnotation::PositiveRefCount);
+        assert_eq!(cert.primary_inst, InstId(0));
+        assert_eq!(cert.affected_insts, vec![InstId(1)]);
+        assert_eq!(cert.kind, OptCertificateKind::PairEliminated);
+    }
+
+    #[test]
+    fn test_certificate_generated_on_divzero_elimination() {
+        let cbz = MachInst::new(
+            AArch64Opcode::Cbz,
+            vec![vreg(1), MachOperand::Block(BlockId(1))],
+        )
+        .with_proof(ProofAnnotation::NonZeroDivisor);
+
+        let udiv = MachInst::new(
+            AArch64Opcode::UDiv,
+            vec![vreg(2), vreg(0), vreg(1)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cbz, udiv, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let certs = pass.certificates();
+        assert_eq!(certs.len(), 1);
+        let cert = &certs[0];
+        assert_eq!(cert.annotation, ProofAnnotation::NonZeroDivisor);
+        assert_eq!(cert.primary_inst, InstId(0));
+        assert!(cert.affected_insts.is_empty());
+        assert_eq!(cert.kind, OptCertificateKind::GuardEliminated);
+    }
+
+    #[test]
+    fn test_certificate_generated_on_shift_check_elimination() {
+        let cmp = MachInst::new(
+            AArch64Opcode::CmpRI,
+            vec![vreg(1), imm(64)],
+        )
+        .with_proof(ProofAnnotation::ValidShift);
+
+        let trap = MachInst::new(
+            AArch64Opcode::TrapShiftRange,
+            vec![MachOperand::Block(BlockId(1))],
+        );
+
+        let lsl = MachInst::new(
+            AArch64Opcode::LslRR,
+            vec![vreg(2), vreg(0), vreg(1)],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![cmp, trap, lsl, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let certs = pass.certificates();
+        assert_eq!(certs.len(), 1);
+        let cert = &certs[0];
+        assert_eq!(cert.annotation, ProofAnnotation::ValidShift);
+        assert_eq!(cert.primary_inst, InstId(0));
+        assert_eq!(cert.affected_insts, vec![InstId(1)]);
+        assert_eq!(cert.kind, OptCertificateKind::GuardEliminated);
+    }
+
+    #[test]
+    fn test_certificate_generated_on_pure() {
+        let ldr = MachInst::new(
+            AArch64Opcode::LdrRI,
+            vec![vreg(0), vreg(1), imm(0)],
+        )
+        .with_proof(ProofAnnotation::Pure);
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![ldr, ret]);
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let certs = pass.certificates();
+        assert_eq!(certs.len(), 1);
+        let cert = &certs[0];
+        assert_eq!(cert.annotation, ProofAnnotation::Pure);
+        assert_eq!(cert.primary_inst, InstId(0));
+        assert!(cert.affected_insts.is_empty());
+        assert_eq!(cert.kind, OptCertificateKind::FlagsRefined);
+    }
+
+    #[test]
+    fn test_certificates_cleared_on_rerun() {
+        let adds = MachInst::new(
+            AArch64Opcode::AddsRR,
+            vec![vreg(0), vreg(1), vreg(2)],
+        )
+        .with_proof(ProofAnnotation::NoOverflow);
+
+        let trap = MachInst::new(
+            AArch64Opcode::TrapOverflow,
+            vec![imm(0x06), MachOperand::Block(BlockId(1))],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![adds, trap, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+        assert_eq!(pass.certificates().len(), 1);
+
+        // Second run: no changes, certificates should be cleared.
+        assert!(!pass.run(&mut func));
+        assert!(pass.certificates().is_empty());
+    }
+
+    #[test]
+    fn test_multiple_certificates_in_one_function() {
+        let mut func = MachFunction::new(
+            "test_multiple_certificates".to_string(),
+            Signature::new(vec![], vec![]),
+        );
+
+        let work_block = func.create_block();
+        let panic_block = func.create_block();
+
+        let adds = MachInst::new(
+            AArch64Opcode::AddsRR,
+            vec![vreg(0), vreg(1), vreg(2)],
+        )
+        .with_proof(ProofAnnotation::NoOverflow);
+        let trap = MachInst::new(
+            AArch64Opcode::TrapOverflow,
+            vec![imm(0x06), MachOperand::Block(panic_block)],
+        );
+        let branch = MachInst::new(
+            AArch64Opcode::B,
+            vec![MachOperand::Block(work_block)],
+        );
+
+        let adds_id = func.push_inst(adds);
+        let trap_id = func.push_inst(trap);
+        let branch_id = func.push_inst(branch);
+        func.append_inst(func.entry, adds_id);
+        func.append_inst(func.entry, trap_id);
+        func.append_inst(func.entry, branch_id);
+
+        let ldr = MachInst::new(
+            AArch64Opcode::LdrRI,
+            vec![vreg(3), vreg(0), imm(0)],
+        )
+        .with_proof(ProofAnnotation::Pure);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+
+        let ldr_id = func.push_inst(ldr);
+        let ret_id = func.push_inst(ret);
+        func.append_inst(work_block, ldr_id);
+        func.append_inst(work_block, ret_id);
+
+        let mut pass = ProofOptimization::new();
+        assert!(pass.run(&mut func));
+
+        let certs = pass.certificates();
+        assert_eq!(certs.len(), 2);
+        assert!(certs.iter().any(|cert| {
+            cert.annotation == ProofAnnotation::NoOverflow
+                && cert.primary_inst == adds_id
+                && cert.affected_insts == vec![trap_id]
+                && cert.kind == OptCertificateKind::CheckedToUnchecked
+        }));
+        assert!(certs.iter().any(|cert| {
+            cert.annotation == ProofAnnotation::Pure
+                && cert.primary_inst == ldr_id
+                && cert.affected_insts.is_empty()
+                && cert.kind == OptCertificateKind::FlagsRefined
+        }));
+        assert_eq!(pass.stats().total_certificates, 2);
+    }
+
+    #[test]
+    fn test_no_certificates_without_proofs() {
+        let adds = MachInst::new(
+            AArch64Opcode::AddsRR,
+            vec![vreg(0), vreg(1), vreg(2)],
+        );
+
+        let trap = MachInst::new(
+            AArch64Opcode::TrapOverflow,
+            vec![imm(0x06), MachOperand::Block(BlockId(1))],
+        );
+
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![adds, trap, ret]);
+        func.create_block();
+
+        let mut pass = ProofOptimization::new();
+        assert!(!pass.run(&mut func));
+        assert!(pass.certificates().is_empty());
+        assert_eq!(pass.stats().total_certificates, 0);
     }
 }
