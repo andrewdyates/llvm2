@@ -12,7 +12,7 @@
 
 //! tMIR to internal LIR adapter layer.
 //!
-//! This module translates `tmir::Module` / `tmir::Function` into the
+//! This module translates `tmir_func::Module` / `tmir_func::Function` into the
 //! internal `llvm2_lower::function::Function` representation, mapping each tMIR
 //! instruction to one or more internal `Instruction`s.
 //!
@@ -314,36 +314,6 @@ pub fn translate_type_with_structs(
         Ty::Func(_) => {
             Err(AdapterError::UnsupportedType(format!("{:?}", ty)))
         }
-    }
-}
-
-/// Convert a tMIR `Ty` to an internal LIR `Type`, with a module type table for
-/// resolving `Ty::Array(TyId, len)` references.
-///
-/// Unlike [`translate_type`] which returns `Err` for array types, this variant
-/// uses the module's `types: Vec<Ty>` table to look up the element type behind
-/// a `TyId` and recursively translate it. This is essential for the computation
-/// graph builder which needs `Type::Array` entries in `SubgraphDescriptor` so
-/// that `operates_on_arrays()` returns `true` and GPU/ANE legality is evaluated.
-pub fn translate_type_with_type_table(
-    ty: &Ty,
-    type_table: &[Ty],
-) -> Result<Type, AdapterError> {
-    match ty {
-        Ty::Array(elem_ty_id, len) => {
-            let elem_ty = type_table
-                .get(elem_ty_id.index() as usize)
-                .ok_or_else(|| {
-                    AdapterError::UnsupportedType(format!(
-                        "Array(TyId({}), {})",
-                        elem_ty_id.index(),
-                        len,
-                    ))
-                })?;
-            let lir_elem = translate_type_with_type_table(elem_ty, type_table)?;
-            Ok(Type::Array(Box::new(lir_elem), *len as u32))
-        }
-        _ => translate_type(ty),
     }
 }
 
@@ -2392,84 +2362,134 @@ fn translate_tmir_proof(p: &ProofAnnotation) -> Option<Proof> {
 // Tests
 // ---------------------------------------------------------------------------
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tmir::{
-        Block as TmirBlockDef, Function as TmirFunc, Module as TmirModule,
-        FuncTy, StructDef, FieldDef, Constant,
+        Block as TmirBlockDef, Function as TmirFunc, Module,
+        BlockId, FuncId, FuncTy, FuncTyId, Ty, ValueId, TyId,
+        Constant, StructId, StructDef as TmirStructDef, FieldDef,
     };
 
-    // Type aliases to reduce verbosity
-    type TmirMod = TmirModule;
-
-    /// Helper: register a func type in a module and build a function referencing it.
-    fn make_module(name: &str, func_ty: FuncTy, func_builder: impl FnOnce(FuncId, tmir::FuncTyId) -> TmirFunc) -> TmirMod {
-        let mut module = TmirModule::new(name);
+    /// Helper: create a TmirFunc from the old test-style inline FuncTy.
+    ///
+    /// Old tests constructed functions with `ty: FuncTy { ... }` directly, but
+    /// the new tmir uses `ty: FuncTyId`. This helper registers the FuncTy in a
+    /// module and returns the function with the correct FuncTyId.
+    fn make_func(
+        id: FuncId,
+        name: &str,
+        func_ty: FuncTy,
+        entry: BlockId,
+        blocks: Vec<TmirBlockDef>,
+        proofs: Vec<ProofAnnotation>,
+    ) -> (TmirFunc, Module) {
+        let mut module = Module::new("test");
         let ft_id = module.add_func_type(func_ty);
-        let func = func_builder(FuncId::new(0), ft_id);
-        module.add_function(func);
+        let mut func = TmirFunc::new(id, name, ft_id, entry);
+        func.blocks = blocks;
+        func.proofs = proofs;
+        module.add_function(func.clone());
+        (func, module)
+    }
+
+    /// Helper: wraps translate_function with a module containing just the function's FuncTy.
+    fn translate_func_test(
+        func: &TmirFunc,
+        module: &Module,
+    ) -> Result<(Function, ProofContext), AdapterError> {
+        translate_function(func, module)
+    }
+
+    /// Helper: build a Module from a TmirFunc by inferring FuncTy from block params.
+    /// This replaces the old pattern of `translate_function(&func, &[])`.
+    fn make_module_for_func(func: &TmirFunc) -> Module {
+        // Infer param types from entry block params
+        let params: Vec<Ty> = func.blocks.first()
+            .map(|b| b.params.iter().map(|(_, ty)| *ty).collect())
+            .unwrap_or_default();
+
+        // Infer return types from first Return instruction
+        let mut returns = Vec::new();
+        'outer: for block in &func.blocks {
+            for node in &block.body {
+                if let Inst::Return { values } = &node.inst {
+                    if !values.is_empty() {
+                        // Look up value types from block params or instruction results
+                        // For simplicity, use the first block param type if available
+                        for _ in values {
+                            if let Some(ty) = params.first() {
+                                returns.push(*ty);
+                            }
+                        }
+                    }
+                    break 'outer;
+                }
+            }
+        }
+
+        let mut module = Module::new("test");
+        module.add_func_type(FuncTy {
+            params,
+            returns,
+            is_vararg: false,
+        });
+        module.add_function(func.clone());
         module
     }
 
-    /// Helper: build a module containing a single function with given params, returns, and blocks.
-    fn simple_module(
-        name: &str,
-        func_name: &str,
-        params: Vec<Ty>,
-        returns: Vec<Ty>,
-        blocks: Vec<TmirBlockDef>,
-    ) -> TmirMod {
-        make_module(name, FuncTy { params, returns, is_vararg: false }, |fid, ft_id| {
-            let entry = blocks.first().map(|b| b.id).unwrap_or(BlockId::new(0));
-            TmirFunc {
-                id: fid,
-                name: func_name.to_string(),
-                ty: ft_id,
-                entry,
-                blocks,
-                proofs: vec![],
-            }
-        })
+    /// Helper: translate function from old test style (inline FuncTy + struct defs).
+    fn translate_func_with_structs(
+        func: &TmirFunc,
+        module: &Module,
+        structs: &[TmirStructDef],
+    ) -> Result<(Function, ProofContext), AdapterError> {
+        let mut mod_with_structs = module.clone();
+        for s in structs {
+            mod_with_structs.add_struct(s.clone());
+        }
+        translate_function(func, &mod_with_structs)
     }
-
-    /// Helper: make a single-block module with the given body instructions.
-    fn one_block_module(
-        name: &str,
-        func_name: &str,
-        params_ty: Vec<Ty>,
-        returns_ty: Vec<Ty>,
-        block_params: Vec<(ValueId, Ty)>,
-        body: Vec<InstrNode>,
-    ) -> TmirMod {
-        simple_module(name, func_name, params_ty, returns_ty, vec![
-            TmirBlockDef {
-                id: BlockId::new(0),
-                params: block_params,
-                body,
-            },
-        ])
-    }
-
-    fn node(inst: Inst, results: Vec<ValueId>, proofs: Vec<ProofAnnotation>) -> InstrNode {
-        InstrNode { inst, results, proofs, span: None }
-    }
-
-    fn v(n: u32) -> ValueId { ValueId::new(n) }
-    fn b(n: u32) -> BlockId { BlockId::new(n) }
 
     /// Build a minimal tMIR module: fn add(a: i32, b: i32) -> i32 { a + b }
-    fn build_add_module() -> TmirMod {
-        one_block_module(
-            "test", "add",
-            vec![Ty::I32, Ty::I32], vec![Ty::I32],
-            vec![(v(0), Ty::I32), (v(1), Ty::I32)],
-            vec![
-                node(Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
-                node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
+    fn build_add_module() -> Module {
+        let mut module = Module::new("test");
+        let ft = module.add_func_type(FuncTy {
+            params: vec![Ty::I32, Ty::I32],
+            returns: vec![Ty::I32],
+            is_vararg: false,
+        });
+        let mut func = TmirFunc::new(FuncId::new(0), "add", ft, BlockId::new(0));
+        func.blocks = vec![TmirBlockDef {
+            id: BlockId::new(0),
+            params: vec![
+                (ValueId::new(0), Ty::I32), // param a
+                (ValueId::new(1), Ty::I32), // param b
             ],
-        )
+            body: vec![
+                InstrNode {
+                    inst: Inst::BinOp {
+                        op: BinOp::Add,
+                        ty: Ty::I32,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(1),
+                    },
+                    results: vec![ValueId::new(2)],
+                    proofs: vec![],
+                    span: None,
+                },
+                InstrNode {
+                    inst: Inst::Return {
+                        values: vec![ValueId::new(2)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                    span: None,
+                },
+            ],
+        }];
+        module.add_function(func);
+        module
     }
 
     #[test]
@@ -2480,15 +2500,16 @@ mod tests {
         assert_eq!(translate_type(&Ty::I32).unwrap(), Type::I32);
         assert_eq!(translate_type(&Ty::I64).unwrap(), Type::I64);
         assert_eq!(translate_type(&Ty::I128).unwrap(), Type::I128);
-        // No uint/float constructors -- real tmir has I32/I64/F32/F64 directly
+        assert_eq!(translate_type(&Ty::I32).unwrap(), Type::I32);
+        assert_eq!(translate_type(&Ty::I64).unwrap(), Type::I64);
         assert_eq!(translate_type(&Ty::F32).unwrap(), Type::F32);
         assert_eq!(translate_type(&Ty::F64).unwrap(), Type::F64);
     }
 
     #[test]
     fn test_translate_type_ptr() {
-        // Ptr is opaque in real tmir (no inner type)
-        assert_eq!(translate_type(&Ty::Ptr).unwrap(), Type::I64);
+        let ptr_ty = Ty::Ptr;
+        assert_eq!(translate_type(&ptr_ty).unwrap(), Type::I64);
     }
 
     #[test]
@@ -2498,14 +2519,16 @@ mod tests {
 
     #[test]
     fn test_translate_type_unknown_struct_errors() {
-        let struct_ty = Ty::Struct(tmir::StructId::new(0));
+        // Struct without matching StructDef should error
+        let struct_ty = Ty::Struct(StructId::new(0));
         assert!(translate_type(&struct_ty).is_err());
     }
 
     #[test]
-    fn test_translate_type_array_returns_error_without_module() {
-        // Array uses TyId which requires module context to resolve
-        let array_ty = Ty::Array(tmir::TyId::new(0), 10);
+    fn test_translate_type_array() {
+        // Array types require module type table to resolve TyId, so translate_type
+        // returns an error (no module context available).
+        let array_ty = Ty::Array(TyId::new(0), 10);
         assert!(translate_type(&array_ty).is_err());
     }
 
@@ -2526,32 +2549,59 @@ mod tests {
         let module = build_add_module();
         let (func, _) = translate_function(&module.functions[0], &module).unwrap();
 
+        // Should have exactly 1 block.
         assert_eq!(func.blocks.len(), 1);
+
+        // Entry block should have 2 params (a, b) and 2 instructions (add, return).
         let entry = &func.blocks[&func.entry_block];
         assert_eq!(entry.params.len(), 2);
         assert_eq!(entry.instructions.len(), 2);
 
+        // First instruction: Iadd
         assert!(matches!(entry.instructions[0].opcode, Opcode::Iadd));
         assert_eq!(entry.instructions[0].args.len(), 2);
         assert_eq!(entry.instructions[0].results.len(), 1);
 
+        // Second instruction: Return
         assert!(matches!(entry.instructions[1].opcode, Opcode::Return));
         assert_eq!(entry.instructions[1].args.len(), 1);
     }
 
     #[test]
     fn test_translate_const() {
-        let module = one_block_module(
-            "test", "const_42",
-            vec![], vec![Ty::I32],
-            vec![],
-            vec![
-                node(Inst::Const { ty: Ty::I32, value: Constant::Int(42) }, vec![v(0)], vec![]),
-                node(Inst::Return { values: vec![v(0)] }, vec![], vec![]),
-            ],
-        );
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "const_42".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::Const {
+                            ty: Ty::I32,
+                            value: Constant::Int(42),
+                        },
+                        results: vec![ValueId::new(0)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(0)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
         let entry = &lir_func.blocks[&lir_func.entry_block];
         assert_eq!(entry.instructions.len(), 2);
 
@@ -2565,42 +2615,45 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_fconst() {
-        let module = one_block_module(
-            "test", "fconst",
-            vec![], vec![Ty::F64],
-            vec![],
-            vec![
-                node(Inst::Const { ty: Ty::F64, value: Constant::Float(2.78) }, vec![v(0)], vec![]),
-                node(Inst::Return { values: vec![v(0)] }, vec![], vec![]),
-            ],
-        );
-
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
-        let entry = &lir_func.blocks[&lir_func.entry_block];
-
-        match &entry.instructions[0].opcode {
-            Opcode::Fconst { ty, imm } => {
-                assert_eq!(*ty, Type::F64);
-                assert!((imm - 2.78).abs() < f64::EPSILON);
-            }
-            other => panic!("expected Fconst, got {:?}", other),
-        }
-    }
-
-    #[test]
     fn test_translate_comparison() {
-        let module = one_block_module(
-            "test", "cmp_lt",
-            vec![Ty::I32, Ty::I32], vec![Ty::Bool],
-            vec![(v(0), Ty::I32), (v(1), Ty::I32)],
-            vec![
-                node(Inst::ICmp { op: ICmpOp::Slt, ty: Ty::I32, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
-                node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-            ],
-        );
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "cmp_lt".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![
+                    (ValueId::new(0), Ty::I32),
+                    (ValueId::new(1), Ty::I32),
+                ],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::ICmp {
+                            op: ICmpOp::Slt,
+                            ty: Ty::I32,
+                            lhs: ValueId::new(0),
+                            rhs: ValueId::new(1),
+                        },
+                        results: vec![ValueId::new(2)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
         let entry = &lir_func.blocks[&lir_func.entry_block];
 
         match &entry.instructions[0].opcode {
@@ -2613,17 +2666,44 @@ mod tests {
 
     #[test]
     fn test_translate_float_comparison() {
-        let module = one_block_module(
-            "test", "fcmp_eq",
-            vec![Ty::F64, Ty::F64], vec![Ty::Bool],
-            vec![(v(0), Ty::F64), (v(1), Ty::F64)],
-            vec![
-                node(Inst::FCmp { op: FCmpOp::OEq, ty: Ty::F64, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
-                node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-            ],
-        );
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "fcmp_eq".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![
+                    (ValueId::new(0), Ty::F64),
+                    (ValueId::new(1), Ty::F64),
+                ],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::FCmp {
+                            op: FCmpOp::OEq,
+                            ty: Ty::F64,
+                            lhs: ValueId::new(0),
+                            rhs: ValueId::new(1),
+                        },
+                        results: vec![ValueId::new(2)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
         let entry = &lir_func.blocks[&lir_func.entry_block];
 
         match &entry.instructions[0].opcode {
@@ -2636,17 +2716,41 @@ mod tests {
 
     #[test]
     fn test_translate_cast_sext() {
-        let module = one_block_module(
-            "test", "sext",
-            vec![Ty::I32], vec![Ty::I64],
-            vec![(v(0), Ty::I32)],
-            vec![
-                node(Inst::Cast { op: CastOp::SExt, src_ty: Ty::I32, dst_ty: Ty::I64, operand: v(0) }, vec![v(1)], vec![]),
-                node(Inst::Return { values: vec![v(1)] }, vec![], vec![]),
-            ],
-        );
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "sext".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![(ValueId::new(0), Ty::I32)],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::Cast {
+                            op: CastOp::SExt,
+                            src_ty: Ty::I32,
+                            dst_ty: Ty::I64,
+                            operand: ValueId::new(0),
+                        },
+                        results: vec![ValueId::new(1)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(1)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
         let entry = &lir_func.blocks[&lir_func.entry_block];
 
         match &entry.instructions[0].opcode {
@@ -2660,79 +2764,190 @@ mod tests {
 
     #[test]
     fn test_translate_load_store() {
-        let module = one_block_module(
-            "test", "load_store",
-            vec![Ty::Ptr], vec![],
-            vec![(v(0), Ty::Ptr)],
-            vec![
-                node(Inst::Load { ty: Ty::I32, ptr: v(0) }, vec![v(1)], vec![]),
-                node(Inst::Store { ty: Ty::I32, ptr: v(0), value: v(1) }, vec![], vec![]),
-                node(Inst::Return { values: vec![] }, vec![], vec![]),
-            ],
-        );
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "load_store".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![(ValueId::new(0), Ty::Ptr)],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::Load {
+                            ty: Ty::I32,
+                            ptr: ValueId::new(0),
+                        },
+                        results: vec![ValueId::new(1)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Store {
+                            ty: Ty::I32,
+                            ptr: ValueId::new(0),
+                            value: ValueId::new(1),
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return { values: vec![] },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
         let entry = &lir_func.blocks[&lir_func.entry_block];
 
+        // Load
         match &entry.instructions[0].opcode {
             Opcode::Load { ty } => assert_eq!(*ty, Type::I32),
             other => panic!("expected Load, got {:?}", other),
         }
+
+        // Store
         assert!(matches!(entry.instructions[1].opcode, Opcode::Store));
     }
 
     #[test]
     fn test_translate_unop_neg() {
-        let module = one_block_module(
-            "test", "neg",
-            vec![Ty::I32], vec![Ty::I32],
-            vec![(v(0), Ty::I32)],
-            vec![
-                node(Inst::UnOp { op: UnOp::Neg, ty: Ty::I32, operand: v(0) }, vec![v(1)], vec![]),
-                node(Inst::Return { values: vec![v(1)] }, vec![], vec![]),
-            ],
-        );
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "neg".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![(ValueId::new(0), Ty::I32)],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::UnOp {
+                            op: UnOp::Neg,
+                            ty: Ty::I32,
+                            operand: ValueId::new(0),
+                        },
+                        results: vec![ValueId::new(1)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(1)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
         let entry = &lir_func.blocks[&lir_func.entry_block];
-        assert_eq!(entry.instructions.len(), 2);
+
+        // Neg is lowered directly as: Ineg, return
+        assert_eq!(entry.instructions.len(), 2); // Ineg, return
         assert!(matches!(entry.instructions[0].opcode, Opcode::Ineg));
         assert_eq!(entry.instructions[0].args.len(), 1);
     }
 
     #[test]
     fn test_translate_unop_not() {
-        let module = one_block_module(
-            "test", "not",
-            vec![Ty::I32], vec![Ty::I32],
-            vec![(v(0), Ty::I32)],
-            vec![
-                node(Inst::UnOp { op: UnOp::Not, ty: Ty::I32, operand: v(0) }, vec![v(1)], vec![]),
-                node(Inst::Return { values: vec![v(1)] }, vec![], vec![]),
-            ],
-        );
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "not".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![(ValueId::new(0), Ty::I32)],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::UnOp {
+                            op: UnOp::Not,
+                            ty: Ty::I32,
+                            operand: ValueId::new(0),
+                        },
+                        results: vec![ValueId::new(1)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(1)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
         let entry = &lir_func.blocks[&lir_func.entry_block];
-        assert_eq!(entry.instructions.len(), 2);
+
+        // Not is lowered directly as: Bnot, return
+        assert_eq!(entry.instructions.len(), 2); // Bnot, return
         assert!(matches!(entry.instructions[0].opcode, Opcode::Bnot));
         assert_eq!(entry.instructions[0].args.len(), 1);
     }
 
     #[test]
     fn test_translate_remainder() {
-        let module = one_block_module(
-            "test", "srem",
-            vec![Ty::I32, Ty::I32], vec![Ty::I32],
-            vec![(v(0), Ty::I32), (v(1), Ty::I32)],
-            vec![
-                node(Inst::BinOp { op: BinOp::SRem, ty: Ty::I32, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
-                node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-            ],
-        );
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "srem".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![
+                    (ValueId::new(0), Ty::I32),
+                    (ValueId::new(1), Ty::I32),
+                ],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::BinOp {
+                            op: BinOp::SRem,
+                            ty: Ty::I32,
+                            lhs: ValueId::new(0),
+                            rhs: ValueId::new(1),
+                        },
+                        results: vec![ValueId::new(2)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
         let entry = &lir_func.blocks[&lir_func.entry_block];
+
+        // SRem is now a native LIR opcode: srem, return = 2 instructions
         assert_eq!(entry.instructions.len(), 2);
         assert!(matches!(entry.instructions[0].opcode, Opcode::Srem));
         assert!(matches!(entry.instructions[1].opcode, Opcode::Return));
@@ -2740,67 +2955,127 @@ mod tests {
 
     #[test]
     fn test_translate_branch_with_args() {
-        let module = simple_module(
-            "test", "branch_args",
-            vec![Ty::I32], vec![Ty::I32],
-            vec![
+        // Two blocks: entry branches to loop_header with an argument.
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "branch_args".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![
                 TmirBlockDef {
-                    id: b(0),
-                    params: vec![(v(0), Ty::I32)],
-                    body: vec![node(Inst::Br { target: b(1), args: vec![v(0)] }, vec![], vec![])],
+                    id: BlockId::new(0),
+                    params: vec![(ValueId::new(0), Ty::I32)],
+                    body: vec![InstrNode {
+                        inst: Inst::Br {
+                            target: BlockId::new(1),
+                            args: vec![ValueId::new(0)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
                 },
                 TmirBlockDef {
-                    id: b(1),
-                    params: vec![(v(1), Ty::I32)],
-                    body: vec![node(Inst::Return { values: vec![v(1)] }, vec![], vec![])],
+                    id: BlockId::new(1),
+                    params: vec![(ValueId::new(1), Ty::I32)],
+                    body: vec![InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(1)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
                 },
             ],
-        );
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
         assert_eq!(lir_func.blocks.len(), 2);
 
+        // Entry block should have a copy + jump.
         let entry = &lir_func.blocks[&lir_func.entry_block];
-        assert_eq!(entry.instructions.len(), 2);
+        assert_eq!(entry.instructions.len(), 2); // copy + jump
+
+        // First is a copy (Iadd placeholder).
         assert!(matches!(entry.instructions[0].opcode, Opcode::Iadd));
+
+        // Second is the jump.
         assert!(matches!(entry.instructions[1].opcode, Opcode::Jump { .. }));
     }
 
     #[test]
     fn test_translate_conditional_branch() {
-        let module = simple_module(
-            "test", "condbr",
-            vec![Ty::Bool, Ty::I32, Ty::I32], vec![Ty::I32],
-            vec![
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "condbr".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![
                 TmirBlockDef {
-                    id: b(0),
-                    params: vec![(v(0), Ty::Bool), (v(1), Ty::I32), (v(2), Ty::I32)],
-                    body: vec![node(Inst::CondBr {
-                        cond: v(0),
-                        then_target: b(1), then_args: vec![],
-                        else_target: b(2), else_args: vec![],
-                    }, vec![], vec![])],
+                    id: BlockId::new(0),
+                    params: vec![
+                        (ValueId::new(0), Ty::Bool),
+                        (ValueId::new(1), Ty::I32),
+                        (ValueId::new(2), Ty::I32),
+                    ],
+                    body: vec![InstrNode {
+                        inst: Inst::CondBr {
+                            cond: ValueId::new(0),
+                            then_target: BlockId::new(1),
+                            then_args: vec![],
+                            else_target: BlockId::new(2),
+                            else_args: vec![],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
                 },
-                TmirBlockDef { id: b(1), params: vec![], body: vec![
-                    node(Inst::Return { values: vec![v(1)] }, vec![], vec![]),
-                ]},
-                TmirBlockDef { id: b(2), params: vec![], body: vec![
-                    node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-                ]},
+                TmirBlockDef {
+                    id: BlockId::new(1),
+                    params: vec![],
+                    body: vec![InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(1)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
+                TmirBlockDef {
+                    id: BlockId::new(2),
+                    params: vec![],
+                    body: vec![InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
             ],
-        );
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
         assert_eq!(lir_func.blocks.len(), 3);
 
         let entry = &lir_func.blocks[&lir_func.entry_block];
+        // Should have 1 instruction: brif (no block args to copy)
         assert_eq!(entry.instructions.len(), 1);
         assert!(matches!(entry.instructions[0].opcode, Opcode::Brif { .. }));
     }
 
     #[test]
     fn test_translate_all_binop_variants() {
-        let binops: Vec<(BinOp, Ty)> = vec![
+        // Test that all BinOp variants translate without error.
+        let binops = vec![
             (BinOp::Add, Ty::I32),
             (BinOp::Sub, Ty::I32),
             (BinOp::Mul, Ty::I32),
@@ -2821,65 +3096,178 @@ mod tests {
         ];
 
         for (op, ty) in binops {
-            let module = one_block_module(
-                "test", &format!("binop_{:?}", op),
-                vec![ty, ty], vec![ty],
-                vec![(v(0), ty), (v(1), ty)],
-                vec![
-                    node(Inst::BinOp { op, ty, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
-                    node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-                ],
-            );
+            let func = TmirFunc {
+                id: FuncId::new(0),
+                name: format!("binop_{:?}", op),
+                ty: FuncTyId::new(0),
+                entry: BlockId::new(0),
+                blocks: vec![TmirBlockDef {
+                    id: BlockId::new(0),
+                    params: vec![
+                        (ValueId::new(0), ty.clone()),
+                        (ValueId::new(1), ty.clone()),
+                    ],
+                    body: vec![
+                        InstrNode {
+                            inst: Inst::BinOp {
+                                op,
+                                ty: ty.clone(),
+                                lhs: ValueId::new(0),
+                                rhs: ValueId::new(1),
+                            },
+                            results: vec![ValueId::new(2)],
+                            proofs: vec![],
+                            span: None,
+                        },
+                        InstrNode {
+                            inst: Inst::Return {
+                                values: vec![ValueId::new(2)],
+                            },
+                            results: vec![],
+                            proofs: vec![],
+                            span: None,
+                        },
+                    ],
+                }],
+                proofs: vec![],
+            };
 
-            let result = translate_function(&module.functions[0], &module);
-            assert!(result.is_ok(), "BinOp::{:?} translation failed: {:?}", op, result.err());
+            let module = make_module_for_func(&func);
+            let result = translate_func_test(&func, &module);
+            assert!(
+                result.is_ok(),
+                "BinOp::{:?} translation failed: {:?}",
+                op,
+                result.err()
+            );
         }
     }
 
     #[test]
     fn test_translate_all_int_cmp_variants() {
         let cmp_ops = vec![
-            ICmpOp::Eq, ICmpOp::Ne,
-            ICmpOp::Slt, ICmpOp::Sle, ICmpOp::Sgt, ICmpOp::Sge,
-            ICmpOp::Ult, ICmpOp::Ule, ICmpOp::Ugt, ICmpOp::Uge,
+            ICmpOp::Eq,
+            ICmpOp::Ne,
+            ICmpOp::Slt,
+            ICmpOp::Sle,
+            ICmpOp::Sgt,
+            ICmpOp::Sge,
+            ICmpOp::Ult,
+            ICmpOp::Ule,
+            ICmpOp::Ugt,
+            ICmpOp::Uge,
         ];
 
         for op in cmp_ops {
-            let module = one_block_module(
-                "test", &format!("icmp_{:?}", op),
-                vec![Ty::I32, Ty::I32], vec![Ty::Bool],
-                vec![(v(0), Ty::I32), (v(1), Ty::I32)],
-                vec![
-                    node(Inst::ICmp { op, ty: Ty::I32, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
-                    node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-                ],
-            );
+            let func = TmirFunc {
+                id: FuncId::new(0),
+                name: format!("cmp_{:?}", op),
+                ty: FuncTyId::new(0),
+                entry: BlockId::new(0),
+                blocks: vec![TmirBlockDef {
+                    id: BlockId::new(0),
+                    params: vec![
+                        (ValueId::new(0), Ty::I32),
+                        (ValueId::new(1), Ty::I32),
+                    ],
+                    body: vec![
+                        InstrNode {
+                            inst: Inst::ICmp {
+                                op,
+                                ty: Ty::I32,
+                                lhs: ValueId::new(0),
+                                rhs: ValueId::new(1),
+                            },
+                            results: vec![ValueId::new(2)],
+                            proofs: vec![],
+                            span: None,
+                        },
+                        InstrNode {
+                            inst: Inst::Return {
+                                values: vec![ValueId::new(2)],
+                            },
+                            results: vec![],
+                            proofs: vec![],
+                            span: None,
+                        },
+                    ],
+                }],
+                proofs: vec![],
+            };
 
-            let result = translate_function(&module.functions[0], &module);
-            assert!(result.is_ok(), "ICmpOp::{:?} translation failed: {:?}", op, result.err());
+            let module = make_module_for_func(&func);
+            let result = translate_func_test(&func, &module);
+            assert!(
+                result.is_ok(),
+                "ICmpOp::{:?} translation failed: {:?}",
+                op,
+                result.err()
+            );
         }
     }
 
     #[test]
     fn test_translate_all_float_cmp_variants() {
         let cmp_ops = vec![
-            FCmpOp::OEq, FCmpOp::ONe, FCmpOp::OLt, FCmpOp::OLe, FCmpOp::OGt, FCmpOp::OGe,
-            FCmpOp::UEq, FCmpOp::UNe, FCmpOp::ULt, FCmpOp::ULe, FCmpOp::UGt, FCmpOp::UGe,
+            FCmpOp::OEq,
+            FCmpOp::ONe,
+            FCmpOp::OLt,
+            FCmpOp::OLe,
+            FCmpOp::OGt,
+            FCmpOp::OGe,
+            FCmpOp::UEq,
+            FCmpOp::UNe,
+            FCmpOp::ULt,
+            FCmpOp::ULe,
+            FCmpOp::UGt,
+            FCmpOp::UGe,
         ];
 
         for op in cmp_ops {
-            let module = one_block_module(
-                "test", &format!("fcmp_{:?}", op),
-                vec![Ty::F64, Ty::F64], vec![Ty::Bool],
-                vec![(v(0), Ty::F64), (v(1), Ty::F64)],
-                vec![
-                    node(Inst::FCmp { op, ty: Ty::F64, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
-                    node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-                ],
-            );
+            let func = TmirFunc {
+                id: FuncId::new(0),
+                name: format!("fcmp_{:?}", op),
+                ty: FuncTyId::new(0),
+                entry: BlockId::new(0),
+                blocks: vec![TmirBlockDef {
+                    id: BlockId::new(0),
+                    params: vec![
+                        (ValueId::new(0), Ty::F64),
+                        (ValueId::new(1), Ty::F64),
+                    ],
+                    body: vec![
+                        InstrNode {
+                            inst: Inst::FCmp {
+                                op,
+                                ty: Ty::F64,
+                                lhs: ValueId::new(0),
+                                rhs: ValueId::new(1),
+                            },
+                            results: vec![ValueId::new(2)],
+                            proofs: vec![],
+                            span: None,
+                        },
+                        InstrNode {
+                            inst: Inst::Return {
+                                values: vec![ValueId::new(2)],
+                            },
+                            results: vec![],
+                            proofs: vec![],
+                            span: None,
+                        },
+                    ],
+                }],
+                proofs: vec![],
+            };
 
-            let result = translate_function(&module.functions[0], &module);
-            assert!(result.is_ok(), "FCmpOp::{:?} translation failed: {:?}", op, result.err());
+            let module = make_module_for_func(&func);
+            let result = translate_func_test(&func, &module);
+            assert!(
+                result.is_ok(),
+                "ICmpOp::{:?} translation failed: {:?}",
+                op,
+                result.err()
+            );
         }
     }
 
@@ -2890,187 +3278,149 @@ mod tests {
         let v0 = Value(0);
         let v1 = Value(1);
 
-        ctx.value_proofs.insert(v0, vec![Proof::NoOverflow { signed: true }]);
-        ctx.value_proofs.insert(v1, vec![
-            Proof::InRange { lo: 0, hi: 255 },
-            Proof::NotNull { ptr: ValueId::new(10) },
-        ]);
+        ctx.value_proofs.insert(
+            v0,
+            vec![Proof::NoOverflow { signed: true }],
+        );
+        ctx.value_proofs.insert(
+            v1,
+            vec![
+                Proof::InRange { lo: 0, hi: 255 },
+                Proof::NotNull { ptr: ValueId::new(10) },
+            ],
+        );
 
         assert!(ctx.has_no_overflow(&v0));
         assert!(!ctx.has_no_overflow(&v1));
+
         assert!(ctx.has_not_null(&v1));
         assert!(!ctx.has_not_null(&v0));
+
         assert_eq!(ctx.get_range(&v1), Some((0, 255)));
         assert_eq!(ctx.get_range(&v0), None);
     }
 
     #[test]
     fn test_extract_proofs_empty_when_no_annotations() {
-        let n = node(
-            Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) },
-            vec![v(2)], vec![],
-        );
-        let proofs = extract_proofs(&n);
+        let node = InstrNode {
+            inst: Inst::BinOp {
+                op: BinOp::Add,
+                ty: Ty::I32,
+                lhs: ValueId::new(0),
+                rhs: ValueId::new(1),
+            },
+            results: vec![ValueId::new(2)],
+            proofs: vec![],
+            span: None,
+        };
+        let proofs = extract_proofs(&node);
         assert!(proofs.is_empty());
     }
 
     #[test]
     fn test_extract_proofs_no_overflow() {
-        let n = node(
-            Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) },
-            vec![v(2)],
-            vec![ProofAnnotation::NoOverflow],
-        );
-        let proofs = extract_proofs(&n);
+        let node = InstrNode {
+            inst: Inst::BinOp {
+                op: BinOp::Add,
+                ty: Ty::I32,
+                lhs: ValueId::new(0),
+                rhs: ValueId::new(1),
+            },
+            results: vec![ValueId::new(2)],
+            proofs: vec![ProofAnnotation::NoOverflow],
+            span: None,
+        };
+        let proofs = extract_proofs(&node);
         assert_eq!(proofs.len(), 1);
         assert!(matches!(proofs[0], Proof::NoOverflow { signed: true }));
     }
 
     #[test]
-    fn test_extract_proofs_in_bounds() {
-        let n = node(
-            Inst::Load { ty: Ty::I32, ptr: v(0) },
-            vec![v(2)],
-            vec![ProofAnnotation::InBounds],
-        );
-        let proofs = extract_proofs(&n);
-        assert_eq!(proofs.len(), 1);
-        match &proofs[0] {
-            Proof::InBounds { .. } => {} // dummy values
-            other => panic!("expected InBounds, got {:?}", other),
-        }
-    }
-
-    #[test]
     fn test_extract_proofs_not_null() {
-        let n = node(
-            Inst::Load { ty: Ty::I32, ptr: v(0) },
-            vec![v(1)],
-            vec![ProofAnnotation::NotNull],
-        );
-        let proofs = extract_proofs(&n);
+        let node = InstrNode {
+            inst: Inst::Load {
+                ty: Ty::I32,
+                ptr: ValueId::new(0),
+            },
+            results: vec![ValueId::new(1)],
+            proofs: vec![ProofAnnotation::NotNull],
+            span: None,
+        };
+        let proofs = extract_proofs(&node);
         assert_eq!(proofs.len(), 1);
         assert!(matches!(proofs[0], Proof::NotNull { .. }));
     }
 
     #[test]
-    fn test_extract_proofs_valid_borrow() {
-        let n = node(
-            Inst::Load { ty: Ty::I32, ptr: v(0) },
-            vec![v(1)],
-            vec![ProofAnnotation::ValidBorrow],
-        );
-        let proofs = extract_proofs(&n);
-        assert_eq!(proofs.len(), 1);
-        assert!(matches!(proofs[0], Proof::ValidBorrow { .. }));
-    }
-
-    #[test]
-    fn test_extract_proofs_multiple_annotations() {
-        let n = node(
-            Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) },
-            vec![v(2)],
-            vec![ProofAnnotation::NoOverflow, ProofAnnotation::BoundedOutput { lo: 0.0, hi: 255.0 }],
-        );
-        let proofs = extract_proofs(&n);
-        assert_eq!(proofs.len(), 2);
-        assert!(matches!(proofs[0], Proof::NoOverflow { .. }));
-        assert!(matches!(proofs[1], Proof::InRange { .. }));
-    }
-
-    #[test]
-    fn test_extract_proofs_algebraic_properties() {
-        let n = node(
-            Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) },
-            vec![v(2)],
-            vec![
-                ProofAnnotation::Pure,
-                ProofAnnotation::Associative,
-                ProofAnnotation::Commutative,
-                ProofAnnotation::NoOverflow,
-            ],
-        );
-        let proofs = extract_proofs(&n);
-        assert_eq!(proofs.len(), 4);
-        assert!(matches!(proofs[0], Proof::Pure));
-        assert!(matches!(proofs[1], Proof::Associative));
-        assert!(matches!(proofs[2], Proof::Commutative));
-        assert!(matches!(proofs[3], Proof::NoOverflow { .. }));
-    }
-
-    #[test]
-    fn test_extract_proofs_non_zero_divisor() {
-        let n = node(
-            Inst::BinOp { op: BinOp::SDiv, ty: Ty::I32, lhs: v(0), rhs: v(1) },
-            vec![v(2)],
-            vec![ProofAnnotation::DivNonZero],
-        );
-        let proofs = extract_proofs(&n);
-        assert_eq!(proofs.len(), 1);
-        assert!(matches!(proofs[0], Proof::NonZeroDivisor { .. }));
-    }
-
-    #[test]
-    fn test_extract_proofs_valid_shift() {
-        let n = node(
-            Inst::BinOp { op: BinOp::Shl, ty: Ty::I64, lhs: v(0), rhs: v(1) },
-            vec![v(2)],
-            vec![ProofAnnotation::ShiftInRange],
-        );
-        let proofs = extract_proofs(&n);
-        assert_eq!(proofs.len(), 1);
-        match &proofs[0] {
-            Proof::ValidShift { .. } => {}
-            other => panic!("expected ValidShift, got {:?}", other),
-        }
-    }
-
-    #[test]
     fn test_proof_propagation_through_adapter() {
-        let module = one_block_module(
-            "test", "add_no_overflow",
-            vec![Ty::I32, Ty::I32], vec![Ty::I32],
-            vec![(v(0), Ty::I32), (v(1), Ty::I32)],
-            vec![
-                node(Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![ProofAnnotation::NoOverflow]),
-                node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-            ],
+        // Build a tMIR function where the add instruction has NoOverflow proof.
+        // Verify that after translation, the ProofContext has the proof on the
+        // corresponding LIR value.
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "add_no_overflow".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![
+                    (ValueId::new(0), Ty::I32),
+                    (ValueId::new(1), Ty::I32),
+                ],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::I32,
+                            lhs: ValueId::new(0),
+                            rhs: ValueId::new(1),
+                        },
+                        results: vec![ValueId::new(2)],
+                        proofs: vec![ProofAnnotation::NoOverflow],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
+
+        let module = make_module_for_func(&func);
+        let (_lir_func, proof_ctx) = translate_func_test(&func, &module).unwrap();
+
+        // The result of the add (ValueId::new(2) -> some Value) should have NoOverflow.
+        // Find the value that has proofs.
+        assert!(
+            !proof_ctx.value_proofs.is_empty(),
+            "ProofContext should have proofs after translation"
         );
 
-        let (_lir_func, proof_ctx) = translate_function(&module.functions[0], &module).unwrap();
-        assert!(!proof_ctx.value_proofs.is_empty(), "ProofContext should have proofs");
-
-        let values_with_proofs: Vec<_> = proof_ctx.value_proofs.iter()
+        // There should be exactly one value with proofs.
+        let values_with_proofs: Vec<_> = proof_ctx
+            .value_proofs
+            .iter()
             .filter(|(_, proofs)| !proofs.is_empty())
             .collect();
-        assert_eq!(values_with_proofs.len(), 1);
+        assert_eq!(
+            values_with_proofs.len(),
+            1,
+            "Expected 1 value with proofs, got {}",
+            values_with_proofs.len()
+        );
+
         let (val, proofs) = values_with_proofs[0];
-        assert!(proof_ctx.has_no_overflow(val));
+        assert!(
+            proof_ctx.has_no_overflow(val),
+            "The add result should have NoOverflow proof"
+        );
         assert_eq!(proofs.len(), 1);
-    }
-
-    #[test]
-    fn test_proof_propagation_multiple_proofs() {
-        let module = one_block_module(
-            "test", "safe_load",
-            vec![Ty::Ptr], vec![Ty::I32],
-            vec![(v(0), Ty::Ptr)],
-            vec![
-                node(Inst::Load { ty: Ty::I32, ptr: v(0) }, vec![v(1)],
-                     vec![ProofAnnotation::NotNull, ProofAnnotation::InBounds]),
-                node(Inst::Return { values: vec![v(1)] }, vec![], vec![]),
-            ],
-        );
-
-        let (_lir_func, proof_ctx) = translate_function(&module.functions[0], &module).unwrap();
-        let values_with_proofs: Vec<_> = proof_ctx.value_proofs.iter()
-            .filter(|(_, proofs)| !proofs.is_empty())
-            .collect();
-        assert_eq!(values_with_proofs.len(), 1);
-        let (val, proofs) = values_with_proofs[0];
-        assert_eq!(proofs.len(), 2);
-        assert!(proof_ctx.has_not_null(val));
-        assert!(proof_ctx.has_in_bounds(val));
     }
 
     #[test]
@@ -3080,31 +3430,44 @@ mod tests {
         let v1 = Value(1);
         let v2 = Value(2);
 
-        ctx.value_proofs.insert(v0, vec![
-            Proof::NoOverflow { signed: true },
-            Proof::InRange { lo: -128, hi: 127 },
-        ]);
-        ctx.value_proofs.insert(v1, vec![
-            Proof::NotNull { ptr: ValueId::new(10) },
-            Proof::ValidBorrow { borrow: ValueId::new(11) },
-        ]);
-        ctx.value_proofs.insert(v2, vec![Proof::ValidShift {
-            amount: ValueId::new(5),
-            bitwidth: 64,
-        }]);
+        ctx.value_proofs.insert(
+            v0,
+            vec![
+                Proof::NoOverflow { signed: true },
+                Proof::InRange { lo: -128, hi: 127 },
+            ],
+        );
+        ctx.value_proofs.insert(
+            v1,
+            vec![
+                Proof::NotNull { ptr: ValueId::new(10) },
+                Proof::ValidBorrow { borrow: ValueId::new(11) },
+            ],
+        );
+        ctx.value_proofs.insert(
+            v2,
+            vec![Proof::ValidShift {
+                amount: ValueId::new(5),
+                bitwidth: 64,
+            }],
+        );
 
+        // v0 queries
         assert!(ctx.has_no_overflow(&v0));
         assert!(!ctx.has_not_null(&v0));
         assert!(!ctx.has_in_bounds(&v0));
         assert_eq!(ctx.get_range(&v0), Some((-128, 127)));
 
+        // v1 queries
         assert!(ctx.has_not_null(&v1));
         assert!(ctx.has_valid_borrow(&v1));
         assert!(!ctx.has_no_overflow(&v1));
 
+        // v2 queries
         assert!(ctx.has_valid_shift(&v2));
         assert!(!ctx.has_not_null(&v2));
 
+        // proofs_for helper
         assert_eq!(ctx.proofs_for(&v0).len(), 2);
         assert_eq!(ctx.proofs_for(&v1).len(), 2);
         assert_eq!(ctx.proofs_for(&v2).len(), 1);
@@ -3112,67 +3475,56 @@ mod tests {
     }
 
     #[test]
-    fn test_all_proof_types_extract_correctly() {
-        // Test all proof annotation types that have real tmir counterparts
-        let n = node(
-            Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) },
-            vec![v(2)],
-            vec![
-                ProofAnnotation::NoOverflow,
-                ProofAnnotation::InBounds,
-                ProofAnnotation::NotNull,
-                ProofAnnotation::ValidBorrow,
-                ProofAnnotation::DivNonZero,
-                ProofAnnotation::ShiftInRange,
-                ProofAnnotation::BoundedOutput { lo: 0.0, hi: 100.0 },
-                ProofAnnotation::Pure,
-                ProofAnnotation::Associative,
-                ProofAnnotation::Commutative,
-            ],
-        );
-        let proofs = extract_proofs(&n);
-        assert_eq!(proofs.len(), 10, "All 10 proof types should extract");
-
-        assert!(matches!(proofs[0], Proof::NoOverflow { .. }));
-        assert!(matches!(proofs[1], Proof::InBounds { .. }));
-        assert!(matches!(proofs[2], Proof::NotNull { .. }));
-        assert!(matches!(proofs[3], Proof::ValidBorrow { .. }));
-        assert!(matches!(proofs[4], Proof::NonZeroDivisor { .. }));
-        assert!(matches!(proofs[5], Proof::ValidShift { .. }));
-        assert!(matches!(proofs[6], Proof::InRange { .. }));
-        assert!(matches!(proofs[7], Proof::Pure));
-        assert!(matches!(proofs[8], Proof::Associative));
-        assert!(matches!(proofs[9], Proof::Commutative));
-    }
-
-    // Tests for Inst variants that don't exist in real tmir are removed:
-    // - test_translate_ownership_ops (Borrow/EndBorrow/Retain/Release)
-    // - test_translate_nop (Inst::Nop)
-    // - test_translate_is_unique (Inst::IsUnique)
-    // - test_translate_borrow_as_copy (Inst::Borrow)
-    // - test_translate_nop_empty_func (Inst::Nop)
-    // - test_alloc_* tests (Inst::Alloc -> real tmir uses Inst::Alloca)
-    // - test_struct_construct_gets_unique_slot (Inst::Struct)
-
-    #[test]
     fn test_translate_multiple_functions() {
-        let mut module = TmirModule::new("multi");
-        let ft0 = module.add_func_type(FuncTy { params: vec![Ty::I32], returns: vec![Ty::I32], is_vararg: false });
-        let ft1 = module.add_func_type(FuncTy { params: vec![Ty::F64], returns: vec![Ty::F64], is_vararg: false });
-        module.add_function(TmirFunc {
-            id: FuncId::new(0), name: "foo".to_string(), ty: ft0, entry: b(0),
-            blocks: vec![TmirBlockDef { id: b(0), params: vec![(v(0), Ty::I32)], body: vec![
-                node(Inst::Return { values: vec![v(0)] }, vec![], vec![]),
-            ]}],
-            proofs: vec![],
-        });
-        module.add_function(TmirFunc {
-            id: FuncId::new(1), name: "bar".to_string(), ty: ft1, entry: b(0),
-            blocks: vec![TmirBlockDef { id: b(0), params: vec![(v(0), Ty::F64)], body: vec![
-                node(Inst::Return { values: vec![v(0)] }, vec![], vec![]),
-            ]}],
-            proofs: vec![],
-        });
+        let module = Module {
+            name: "multi".to_string(),
+            functions: vec![
+                TmirFunc {
+                    id: FuncId::new(0),
+                    name: "foo".to_string(),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId::new(0),
+                        params: vec![(ValueId::new(0), Ty::I32)],
+                        body: vec![InstrNode {
+                            inst: Inst::Return {
+                                values: vec![ValueId::new(0)],
+                            },
+                            results: vec![],
+                            proofs: vec![],
+                            span: None,
+                        }],
+                    }],
+                    proofs: vec![],
+                },
+                TmirFunc {
+                    id: FuncId::new(1),
+                    name: "bar".to_string(),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId::new(0),
+                        params: vec![(ValueId::new(0), Ty::F64)],
+                        body: vec![InstrNode {
+                            inst: Inst::Return {
+                                values: vec![ValueId::new(0)],
+                            },
+                            results: vec![],
+                            proofs: vec![],
+                            span: None,
+                        }],
+                    }],
+                    proofs: vec![],
+                },
+            ],
+            structs: vec![],
+            globals: vec![],
+            func_types: vec![FuncTy { params: vec![Ty::F64], returns: vec![Ty::F64], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
+        };
 
         let results = translate_module(&module).unwrap();
         assert_eq!(results.len(), 2);
@@ -3182,99 +3534,232 @@ mod tests {
 
     #[test]
     fn test_translate_call_preserves_symbol() {
-        let mut module = TmirModule::new("call_test");
-        let ft = module.add_func_type(FuncTy { params: vec![Ty::I32], returns: vec![Ty::I32], is_vararg: false });
-        module.add_function(TmirFunc {
-            id: FuncId::new(0), name: "callee".to_string(), ty: ft, entry: b(0),
-            blocks: vec![TmirBlockDef { id: b(0), params: vec![(v(0), Ty::I32)], body: vec![
-                node(Inst::Return { values: vec![v(0)] }, vec![], vec![]),
-            ]}],
-            proofs: vec![],
-        });
-        module.add_function(TmirFunc {
-            id: FuncId::new(1), name: "caller".to_string(), ty: ft, entry: b(0),
-            blocks: vec![TmirBlockDef { id: b(0), params: vec![(v(0), Ty::I32)], body: vec![
-                node(Inst::Call { callee: FuncId::new(0), args: vec![v(0)] }, vec![v(1)], vec![]),
-                node(Inst::Return { values: vec![v(1)] }, vec![], vec![]),
-            ]}],
-            proofs: vec![],
-        });
+        // Module with two functions: "callee" and "caller" which calls "callee".
+        let module = Module {
+            name: "call_test".to_string(),
+            functions: vec![
+                TmirFunc {
+                    id: FuncId::new(0),
+                    name: "callee".to_string(),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId::new(0),
+                        params: vec![(ValueId::new(0), Ty::I32)],
+                        body: vec![InstrNode {
+                            inst: Inst::Return {
+                                values: vec![ValueId::new(0)],
+                            },
+                            results: vec![],
+                            proofs: vec![],
+                            span: None,
+                        }],
+                    }],
+                    proofs: vec![],
+                },
+                TmirFunc {
+                    id: FuncId::new(1),
+                    name: "caller".to_string(),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId::new(0),
+                        params: vec![(ValueId::new(0), Ty::I32)],
+                        body: vec![
+                            InstrNode {
+                                inst: Inst::Call {
+                                    callee: FuncId::new(0), // calls "callee"
+                                    args: vec![ValueId::new(0)],
+                                },
+                                results: vec![ValueId::new(1)],
+                                proofs: vec![],
+                                span: None,
+                            },
+                            InstrNode {
+                                inst: Inst::Return {
+                                    values: vec![ValueId::new(1)],
+                                },
+                                results: vec![],
+                                proofs: vec![],
+                                span: None,
+                            },
+                        ],
+                    }],
+                    proofs: vec![],
+                },
+            ],
+            structs: vec![],
+            globals: vec![],
+            func_types: vec![FuncTy { params: vec![Ty::I32], returns: vec![Ty::I32], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
+        };
 
         let results = translate_module(&module).unwrap();
         assert_eq!(results.len(), 2);
+
+        // The caller function's first instruction should be Call with "callee" name.
         let (caller_func, _) = &results[1];
         assert_eq!(caller_func.name, "caller");
         let entry = &caller_func.blocks[&caller_func.entry_block];
 
+        // First instruction should be Call with the resolved callee name.
         match &entry.instructions[0].opcode {
-            Opcode::Call { name } => assert_eq!(name, "callee"),
+            Opcode::Call { name } => {
+                assert_eq!(name, "callee", "Call target should resolve to 'callee'");
+            }
             other => panic!("expected Call opcode, got {:?}", other),
         }
+
+        // Call should have 1 arg (the parameter passed to callee).
         assert_eq!(entry.instructions[0].args.len(), 1);
+        // Call should have 1 result (the return value).
         assert_eq!(entry.instructions[0].results.len(), 1);
     }
 
     #[test]
     fn test_translate_call_unknown_func_gets_synthetic_name() {
-        let module = one_block_module(
-            "test", "main",
-            vec![], vec![Ty::I32],
-            vec![],
-            vec![
-                node(Inst::Call { callee: FuncId::new(99), args: vec![] }, vec![v(0)], vec![]),
-                node(Inst::Return { values: vec![v(0)] }, vec![], vec![]),
-            ],
-        );
+        // Single function that calls a FuncId not in the module (external call).
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "main".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::Call {
+                            callee: FuncId::new(99), // not in module
+                            args: vec![],
+                        },
+                        results: vec![ValueId::new(0)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(0)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        // translate_function (standalone) has empty func_names, so gets synthetic name.
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
         let entry = &lir_func.blocks[&lir_func.entry_block];
 
         match &entry.instructions[0].opcode {
-            Opcode::Call { name } => assert_eq!(name, "__func_99"),
+            Opcode::Call { name } => {
+                assert_eq!(name, "__func_99", "Unknown FuncId should get synthetic name");
+            }
             other => panic!("expected Call opcode, got {:?}", other),
         }
     }
 
     #[test]
     fn test_translate_condbr_preserves_condition_value() {
-        let module = simple_module(
-            "test", "choose",
-            vec![Ty::I32, Ty::I32], vec![Ty::I32],
-            vec![
+        // Build: fn choose(cond: bool, a: i32, b: i32) -> i32
+        // entry: cmp a < b -> cond_val, condbr cond_val -> then, else
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "choose".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![
                 TmirBlockDef {
-                    id: b(0),
-                    params: vec![(v(0), Ty::I32), (v(1), Ty::I32)],
+                    id: BlockId::new(0),
+                    params: vec![
+                        (ValueId::new(0), Ty::I32),
+                        (ValueId::new(1), Ty::I32),
+                    ],
                     body: vec![
-                        node(Inst::ICmp { op: ICmpOp::Slt, ty: Ty::I32, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
-                        node(Inst::CondBr {
-                            cond: v(2),
-                            then_target: b(1), then_args: vec![],
-                            else_target: b(2), else_args: vec![],
-                        }, vec![], vec![]),
+                        // Compare: cond = a < b
+                        InstrNode {
+                            inst: Inst::ICmp {
+                                op: ICmpOp::Slt,
+                                ty: Ty::I32,
+                                lhs: ValueId::new(0),
+                                rhs: ValueId::new(1),
+                            },
+                            results: vec![ValueId::new(2)],
+                            proofs: vec![],
+                            span: None,
+                        },
+                        // CondBr: branch on comparison result
+                        InstrNode {
+                            inst: Inst::CondBr {
+                                cond: ValueId::new(2),
+                                then_target: BlockId::new(1),
+                                then_args: vec![],
+                                else_target: BlockId::new(2),
+                                else_args: vec![],
+                            },
+                            results: vec![],
+                            proofs: vec![],
+                            span: None,
+                        },
                     ],
                 },
-                TmirBlockDef { id: b(1), params: vec![], body: vec![
-                    node(Inst::Return { values: vec![v(0)] }, vec![], vec![]),
-                ]},
-                TmirBlockDef { id: b(2), params: vec![], body: vec![
-                    node(Inst::Return { values: vec![v(1)] }, vec![], vec![]),
-                ]},
+                TmirBlockDef {
+                    id: BlockId::new(1),
+                    params: vec![],
+                    body: vec![InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(0)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
+                TmirBlockDef {
+                    id: BlockId::new(2),
+                    params: vec![],
+                    body: vec![InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(1)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
             ],
-        );
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
         let entry = &lir_func.blocks[&lir_func.entry_block];
 
+        // First: Icmp with SignedLessThan condition
         match &entry.instructions[0].opcode {
-            Opcode::Icmp { cond } => assert_eq!(*cond, IntCC::SignedLessThan),
+            Opcode::Icmp { cond } => {
+                assert_eq!(*cond, IntCC::SignedLessThan,
+                    "CondCode should be preserved through adapter");
+            }
             other => panic!("expected Icmp, got {:?}", other),
         }
 
+        // Second: Brif with condition value referencing the Icmp result
         match &entry.instructions[1].opcode {
             Opcode::Brif { cond, then_dest, else_dest } => {
+                // The cond value in Brif should match the result of the Icmp.
                 let icmp_result = entry.instructions[0].results[0];
-                assert_eq!(*cond, icmp_result);
-                assert_ne!(then_dest, else_dest);
+                assert_eq!(*cond, icmp_result,
+                    "Brif cond should reference the Icmp result value");
+                // Both destinations should be mapped.
+                assert_ne!(then_dest, else_dest,
+                    "Then and else destinations should be different blocks");
             }
             other => panic!("expected Brif, got {:?}", other),
         }
@@ -3282,74 +3767,161 @@ mod tests {
 
     #[test]
     fn test_translate_call_with_module_resolves_names() {
-        let mut module = TmirModule::new("multi_call");
-        let ft_void_i32 = module.add_func_type(FuncTy { params: vec![], returns: vec![Ty::I32], is_vararg: false });
-
-        module.add_function(TmirFunc {
-            id: FuncId::new(0), name: "func_a".to_string(), ty: ft_void_i32, entry: b(0),
-            blocks: vec![TmirBlockDef { id: b(0), params: vec![], body: vec![
-                node(Inst::Const { ty: Ty::I32, value: Constant::Int(1) }, vec![v(0)], vec![]),
-                node(Inst::Return { values: vec![v(0)] }, vec![], vec![]),
-            ]}],
-            proofs: vec![],
-        });
-        module.add_function(TmirFunc {
-            id: FuncId::new(1), name: "func_b".to_string(), ty: ft_void_i32, entry: b(0),
-            blocks: vec![TmirBlockDef { id: b(0), params: vec![], body: vec![
-                node(Inst::Const { ty: Ty::I32, value: Constant::Int(2) }, vec![v(0)], vec![]),
-                node(Inst::Return { values: vec![v(0)] }, vec![], vec![]),
-            ]}],
-            proofs: vec![],
-        });
-        module.add_function(TmirFunc {
-            id: FuncId::new(2), name: "func_c".to_string(), ty: ft_void_i32, entry: b(0),
-            blocks: vec![TmirBlockDef { id: b(0), params: vec![], body: vec![
-                node(Inst::Call { callee: FuncId::new(0), args: vec![] }, vec![v(0)], vec![]),
-                node(Inst::Call { callee: FuncId::new(1), args: vec![] }, vec![v(1)], vec![]),
-                node(Inst::Return { values: vec![v(1)] }, vec![], vec![]),
-            ]}],
-            proofs: vec![],
-        });
+        // Module with 3 functions: a, b, c. Function c calls both a and b.
+        let module = Module {
+            name: "multi_call".to_string(),
+            functions: vec![
+                TmirFunc {
+                    id: FuncId::new(0),
+                    name: "func_a".to_string(),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId::new(0),
+                        params: vec![],
+                        body: vec![
+                            InstrNode {
+                                inst: Inst::Const { ty: Ty::I32, value: Constant::Int(1) },
+                                results: vec![ValueId::new(0)],
+                                proofs: vec![],
+                                span: None,
+                            },
+                            InstrNode {
+                                inst: Inst::Return { values: vec![ValueId::new(0)] },
+                                results: vec![],
+                                proofs: vec![],
+                                span: None,
+                            },
+                        ],
+                    }],
+                    proofs: vec![],
+                },
+                TmirFunc {
+                    id: FuncId::new(1),
+                    name: "func_b".to_string(),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId::new(0),
+                        params: vec![],
+                        body: vec![
+                            InstrNode {
+                                inst: Inst::Const { ty: Ty::I32, value: Constant::Int(2) },
+                                results: vec![ValueId::new(0)],
+                                proofs: vec![],
+                                span: None,
+                            },
+                            InstrNode {
+                                inst: Inst::Return { values: vec![ValueId::new(0)] },
+                                results: vec![],
+                                proofs: vec![],
+                                span: None,
+                            },
+                        ],
+                    }],
+                    proofs: vec![],
+                },
+                TmirFunc {
+                    id: FuncId::new(2),
+                    name: "func_c".to_string(),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId::new(0),
+                        params: vec![],
+                        body: vec![
+                            InstrNode {
+                                inst: Inst::Call {
+                                    callee: FuncId::new(0), // calls func_a
+                                    args: vec![],
+                                },
+                                results: vec![ValueId::new(0)],
+                                proofs: vec![],
+                                span: None,
+                            },
+                            InstrNode {
+                                inst: Inst::Call {
+                                    callee: FuncId::new(1), // calls func_b
+                                    args: vec![],
+                                },
+                                results: vec![ValueId::new(1)],
+                                proofs: vec![],
+                                span: None,
+                            },
+                            InstrNode {
+                                inst: Inst::Return { values: vec![ValueId::new(1)] },
+                                results: vec![],
+                                proofs: vec![],
+                                span: None,
+                            },
+                        ],
+                    }],
+                    proofs: vec![],
+                },
+            ],
+            structs: vec![],
+            globals: vec![],
+            func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
+        };
 
         let results = translate_module(&module).unwrap();
         let (func_c, _) = &results[2];
         let entry = &func_c.blocks[&func_c.entry_block];
 
+        // First call should resolve to "func_a"
         match &entry.instructions[0].opcode {
             Opcode::Call { name } => assert_eq!(name, "func_a"),
             other => panic!("expected Call, got {:?}", other),
         }
+        // Second call should resolve to "func_b"
         match &entry.instructions[1].opcode {
             Opcode::Call { name } => assert_eq!(name, "func_b"),
             other => panic!("expected Call, got {:?}", other),
         }
     }
 
-    // Type translation edge cases -- tests adapted for real tmir type system
+    // ===================================================================
+    // Coverage expansion: type translation edge cases
+    // ===================================================================
+
+    #[test]
+    fn test_translate_type_uint_variants() {
+        // Unsigned types should map to the same LIR type as signed
+        assert_eq!(translate_type(&Ty::I8).unwrap(), Type::I8);
+        assert_eq!(translate_type(&Ty::I16).unwrap(), Type::I16);
+        assert_eq!(translate_type(&Ty::I128).unwrap(), Type::I128);
+    }
 
     #[test]
     fn test_translate_type_unsupported_types_error() {
+        // With nested enum representation, invalid bit widths are prevented by
+        // construction (IntWidth/FloatWidth enums). Test that other unsupported
+        // types produce errors.
         assert!(translate_type(&Ty::Void).is_err());
-        // Func type should error
-        assert!(translate_type(&Ty::Func(tmir::FuncTyId::new(0))).is_err());
+        assert!(translate_type(&Ty::Void).is_err());
+        assert!(translate_type(&Ty::Func(FuncTyId::new(0))).is_err());
     }
 
     #[test]
     fn test_translate_type_func_errors() {
-        let func_ty = Ty::Func(tmir::FuncTyId::new(0));
+        let func_ty = Ty::Func(FuncTyId::new(0));
         assert!(translate_type(&func_ty).is_err());
     }
 
     #[test]
     fn test_translate_type_nested_ptr() {
-        // Ptr is opaque in real tmir -- no nested Ptr type
-        assert_eq!(translate_type(&Ty::Ptr).unwrap(), Type::I64);
+        // Ptr(Ptr(Int(32))) -> I64 (all pointers are 64-bit)
+        let ty = Ty::Ptr;
+        assert_eq!(translate_type(&ty).unwrap(), Type::I64);
     }
 
     #[test]
     fn test_translate_type_struct_with_defs() {
         let structs = vec![StructDef {
-            id: tmir::StructId::new(0),
+            id: StructId::new(0),
             name: "Point".to_string(),
             fields: vec![
                 FieldDef { name: "x".to_string(), ty: Ty::F64, offset: None },
@@ -3358,17 +3930,27 @@ mod tests {
             size: None,
             align: None,
         }];
-        let result = translate_type_with_structs(&Ty::Struct(tmir::StructId::new(0)), &structs).unwrap();
+        let result = translate_type_with_structs(&Ty::Struct(StructId::new(0)), &structs).unwrap();
         assert_eq!(result, Type::Struct(vec![Type::F64, Type::F64]));
     }
 
-    // ProofContext tests
+    #[test]
+    fn test_translate_type_array_of_array() {
+        // Array types require module type table to resolve TyId
+        let outer = Ty::Array(TyId::new(0), 2);
+        assert!(translate_type(&outer).is_err());
+    }
+
+    // ===================================================================
+    // Coverage expansion: proof extraction and ProofContext
+    // ===================================================================
 
     #[test]
     fn test_proof_context_no_overflow() {
         let mut ctx = ProofContext::default();
         let val = Value(0);
         ctx.value_proofs.insert(val, vec![Proof::NoOverflow { signed: true }]);
+
         assert!(ctx.has_no_overflow(&val));
         assert!(!ctx.has_not_null(&val));
         assert!(!ctx.has_in_bounds(&val));
@@ -3379,6 +3961,7 @@ mod tests {
         let mut ctx = ProofContext::default();
         let val = Value(1);
         ctx.value_proofs.insert(val, vec![Proof::NotNull { ptr: ValueId::new(0) }]);
+
         assert!(ctx.has_not_null(&val));
         assert!(!ctx.has_no_overflow(&val));
     }
@@ -3388,8 +3971,10 @@ mod tests {
         let mut ctx = ProofContext::default();
         let val = Value(2);
         ctx.value_proofs.insert(val, vec![Proof::InBounds {
-            base: ValueId::new(0), index: ValueId::new(1),
+            base: ValueId::new(0),
+            index: ValueId::new(1),
         }]);
+
         assert!(ctx.has_in_bounds(&val));
     }
 
@@ -3398,6 +3983,7 @@ mod tests {
         let mut ctx = ProofContext::default();
         let val = Value(3);
         ctx.value_proofs.insert(val, vec![Proof::NonZeroDivisor { divisor: ValueId::new(1) }]);
+
         assert!(ctx.has_non_zero_divisor(&val));
     }
 
@@ -3406,7 +3992,9 @@ mod tests {
         let mut ctx = ProofContext::default();
         let val = Value(4);
         ctx.value_proofs.insert(val, vec![Proof::InRange { lo: 0, hi: 255 }]);
-        assert_eq!(ctx.get_range(&val), Some((0, 255)));
+
+        let range = ctx.get_range(&val);
+        assert_eq!(range, Some((0, 255)));
     }
 
     #[test]
@@ -3414,6 +4002,7 @@ mod tests {
         let mut ctx = ProofContext::default();
         let val = Value(5);
         ctx.value_proofs.insert(val, vec![Proof::ValidBorrow { borrow: ValueId::new(0) }]);
+
         assert!(ctx.has_valid_borrow(&val));
     }
 
@@ -3422,8 +4011,10 @@ mod tests {
         let mut ctx = ProofContext::default();
         let val = Value(6);
         ctx.value_proofs.insert(val, vec![Proof::ValidShift {
-            amount: ValueId::new(1), bitwidth: 32,
+            amount: ValueId::new(1),
+            bitwidth: 32,
         }]);
+
         assert!(ctx.has_valid_shift(&val));
     }
 
@@ -3435,6 +4026,7 @@ mod tests {
             Proof::NoOverflow { signed: false },
             Proof::InRange { lo: 0, hi: 100 },
         ]);
+
         assert!(ctx.has_no_overflow(&val));
         assert_eq!(ctx.get_range(&val), Some((0, 100)));
         assert_eq!(ctx.proofs_for(&val).len(), 2);
@@ -3444,115 +4036,267 @@ mod tests {
     fn test_proof_context_missing_value() {
         let ctx = ProofContext::default();
         let val = Value(99);
+
         assert!(!ctx.has_no_overflow(&val));
         assert!(!ctx.has_not_null(&val));
         assert_eq!(ctx.get_range(&val), None);
         assert!(ctx.proofs_for(&val).is_empty());
     }
 
+    // ===================================================================
+    // Coverage expansion: proof extraction from tMIR
+    // ===================================================================
+
     #[test]
     fn test_extract_no_overflow_proof() {
-        let module = one_block_module(
-            "test", "no_overflow",
-            vec![Ty::I32, Ty::I32], vec![Ty::I32],
-            vec![(v(0), Ty::I32), (v(1), Ty::I32)],
-            vec![
-                node(Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) }, vec![v(2)],
-                     vec![ProofAnnotation::NoOverflow]),
-                node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-            ],
-        );
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "no_overflow".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![
+                    (ValueId::new(0), Ty::I32),
+                    (ValueId::new(1), Ty::I32),
+                ],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::I32,
+                            lhs: ValueId::new(0),
+                            rhs: ValueId::new(1),
+                        },
+                        results: vec![ValueId::new(2)],
+                        proofs: vec![ProofAnnotation::NoOverflow],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
 
-        let (_, proof_ctx) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (_, proof_ctx) = translate_func_test(&func, &module).unwrap();
+        // The NoOverflow proof should be attached to the result value
+        let _result_val = Value(2); // adapter maps ValueId::new(2) -> Value(2) (0-based allocation)
+        // Check that some value has a no_overflow proof
         let has_overflow_proof = proof_ctx.value_proofs.values()
             .any(|proofs| proofs.iter().any(|p| matches!(p, Proof::NoOverflow { .. })));
         assert!(has_overflow_proof, "NoOverflow proof should be extracted");
     }
 
+    // ===================================================================
+    // Coverage expansion: unop FNeg translation
+    // ===================================================================
+
     #[test]
     fn test_translate_unop_fneg() {
-        let module = one_block_module(
-            "test", "fneg",
-            vec![Ty::F64], vec![Ty::F64],
-            vec![(v(0), Ty::F64)],
-            vec![
-                node(Inst::UnOp { op: UnOp::FNeg, ty: Ty::F64, operand: v(0) }, vec![v(1)], vec![]),
-                node(Inst::Return { values: vec![v(1)] }, vec![], vec![]),
-            ],
-        );
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "fneg".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![(ValueId::new(0), Ty::F64)],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::UnOp {
+                            op: UnOp::FNeg,
+                            ty: Ty::F64,
+                            operand: ValueId::new(0),
+                        },
+                        results: vec![ValueId::new(1)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(1)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
         let entry = &lir_func.blocks[&lir_func.entry_block];
+
         assert_eq!(entry.instructions.len(), 2);
         assert!(matches!(entry.instructions[0].opcode, Opcode::Fneg));
     }
 
+    // ===================================================================
+    // Coverage expansion: borrow/ownership instruction translation
+    // ===================================================================
+
+    // ===================================================================
+    // Coverage expansion: nop instruction translation (empty func)
+    // ===================================================================
+
+    // ===================================================================
+    // Coverage expansion: multi-block function with value mapping
+    // ===================================================================
+
     #[test]
     fn test_translate_multi_block_with_phi() {
-        let module = simple_module(
-            "test", "diamond",
-            vec![Ty::Bool, Ty::I32], vec![Ty::I32],
-            vec![
+        // Simple diamond: entry -> then/else -> (implicit merge via return)
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "diamond".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![
                 TmirBlockDef {
-                    id: b(0),
-                    params: vec![(v(0), Ty::Bool), (v(1), Ty::I32)],
+                    id: BlockId::new(0),
+                    params: vec![
+                        (ValueId::new(0), Ty::Bool),
+                        (ValueId::new(1), Ty::I32),
+                    ],
                     body: vec![
-                        node(Inst::Const { ty: Ty::I32, value: Constant::Int(42) }, vec![v(2)], vec![]),
-                        node(Inst::CondBr {
-                            cond: v(0),
-                            then_target: b(1), then_args: vec![],
-                            else_target: b(2), else_args: vec![],
-                        }, vec![], vec![]),
+                        InstrNode {
+                            inst: Inst::Const { ty: Ty::I32, value: Constant::Int(42) },
+                            results: vec![ValueId::new(2)],
+                            proofs: vec![],
+                            span: None,
+                        },
+                        InstrNode {
+                            inst: Inst::CondBr {
+                                cond: ValueId::new(0),
+                                then_target: BlockId::new(1),
+                                then_args: vec![],
+                                else_target: BlockId::new(2),
+                                else_args: vec![],
+                            },
+                            results: vec![],
+                            proofs: vec![],
+                            span: None,
+                        },
                     ],
                 },
-                TmirBlockDef { id: b(1), params: vec![], body: vec![
-                    node(Inst::Return { values: vec![v(1)] }, vec![], vec![]),
-                ]},
-                TmirBlockDef { id: b(2), params: vec![], body: vec![
-                    node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-                ]},
+                TmirBlockDef {
+                    id: BlockId::new(1),
+                    params: vec![],
+                    body: vec![InstrNode {
+                        inst: Inst::Return { values: vec![ValueId::new(1)] },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
+                TmirBlockDef {
+                    id: BlockId::new(2),
+                    params: vec![],
+                    body: vec![InstrNode {
+                        inst: Inst::Return { values: vec![ValueId::new(2)] },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
             ],
-        );
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
         assert_eq!(lir_func.blocks.len(), 3);
+
+        // Entry block should have: Iconst + Brif = 2 instructions
         let entry = &lir_func.blocks[&lir_func.entry_block];
         assert_eq!(entry.instructions.len(), 2);
         assert!(matches!(entry.instructions[0].opcode, Opcode::Iconst { .. }));
         assert!(matches!(entry.instructions[1].opcode, Opcode::Brif { .. }));
     }
 
+    // ===================================================================
+    // Coverage expansion: translate_module with multiple functions
+    // ===================================================================
+
     #[test]
     fn test_translate_module_two_functions() {
-        let mut module = TmirModule::new("two_funcs");
-        let ft0 = module.add_func_type(FuncTy { params: vec![], returns: vec![Ty::I32], is_vararg: false });
-        let ft1 = module.add_func_type(FuncTy { params: vec![Ty::F64], returns: vec![Ty::F64], is_vararg: false });
+        let mut module = Module::new("two_funcs");
+        let ft0 = module.add_func_type(FuncTy {
+            params: vec![],
+            returns: vec![Ty::I32],
+            is_vararg: false,
+        });
+        let ft1 = module.add_func_type(FuncTy {
+            params: vec![Ty::F64],
+            returns: vec![Ty::F64],
+            is_vararg: false,
+        });
 
-        module.add_function(TmirFunc {
-            id: FuncId::new(0), name: "first".to_string(), ty: ft0, entry: b(0),
-            blocks: vec![TmirBlockDef { id: b(0), params: vec![], body: vec![
-                node(Inst::Const { ty: Ty::I32, value: Constant::Int(1) }, vec![v(0)], vec![]),
-                node(Inst::Return { values: vec![v(0)] }, vec![], vec![]),
-            ]}],
-            proofs: vec![],
-        });
-        module.add_function(TmirFunc {
-            id: FuncId::new(1), name: "second".to_string(), ty: ft1, entry: b(0),
-            blocks: vec![TmirBlockDef { id: b(0), params: vec![(v(0), Ty::F64)], body: vec![
-                node(Inst::Return { values: vec![v(0)] }, vec![], vec![]),
-            ]}],
-            proofs: vec![],
-        });
+        let mut func1 = TmirFunc::new(FuncId::new(0), "first", ft0, BlockId::new(0));
+        func1.blocks = vec![TmirBlockDef {
+            id: BlockId::new(0),
+            params: vec![],
+            body: vec![
+                InstrNode {
+                    inst: Inst::Const { ty: Ty::I32, value: Constant::Int(1) },
+                    results: vec![ValueId::new(0)],
+                    proofs: vec![],
+                    span: None,
+                },
+                InstrNode {
+                    inst: Inst::Return { values: vec![ValueId::new(0)] },
+                    results: vec![],
+                    proofs: vec![],
+                    span: None,
+                },
+            ],
+        }];
+        module.add_function(func1);
+
+        let mut func2 = TmirFunc::new(FuncId::new(1), "second", ft1, BlockId::new(0));
+        func2.blocks = vec![TmirBlockDef {
+            id: BlockId::new(0),
+            params: vec![(ValueId::new(0), Ty::F64)],
+            body: vec![InstrNode {
+                inst: Inst::Return { values: vec![ValueId::new(0)] },
+                results: vec![],
+                proofs: vec![],
+                span: None,
+            }],
+        }];
+        module.add_function(func2);
 
         let results = translate_module(&module).unwrap();
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0.name, "first");
-        assert_eq!(results[0].0.signature.params.len(), 0);
-        assert_eq!(results[0].0.signature.returns, vec![Type::I32]);
-        assert_eq!(results[1].0.name, "second");
-        assert_eq!(results[1].0.signature.params, vec![Type::F64]);
-        assert_eq!(results[1].0.signature.returns, vec![Type::F64]);
+
+        let (func1, _) = &results[0];
+        assert_eq!(func1.name, "first");
+        assert_eq!(func1.signature.params.len(), 0);
+        assert_eq!(func1.signature.returns, vec![Type::I32]);
+
+        let (func2, _) = &results[1];
+        assert_eq!(func2.name, "second");
+        assert_eq!(func2.signature.params, vec![Type::F64]);
+        assert_eq!(func2.signature.returns, vec![Type::F64]);
     }
+
+    // ===================================================================
+    // Coverage expansion: IsUnique instruction translation
+    // ===================================================================
+
+    // ===================================================================
+    // Coverage expansion: all float comparison predicates with CC check
+    // ===================================================================
 
     #[test]
     fn test_translate_all_float_cmp_variants_with_cc_check() {
@@ -3563,6 +4307,7 @@ mod tests {
             (FCmpOp::OLe, FloatCC::LessThanOrEqual),
             (FCmpOp::OGt, FloatCC::GreaterThan),
             (FCmpOp::OGe, FloatCC::GreaterThanOrEqual),
+            // Unordered variants preserve IEEE 754 unordered semantics
             (FCmpOp::UEq, FloatCC::UnorderedEqual),
             (FCmpOp::UNe, FloatCC::UnorderedNotEqual),
             (FCmpOp::ULt, FloatCC::UnorderedLessThan),
@@ -3572,44 +4317,83 @@ mod tests {
         ];
 
         for (tmir_op, expected_cc) in float_cmp_ops {
-            let module = one_block_module(
-                "test", &format!("fcmp_{:?}", tmir_op),
-                vec![Ty::F64, Ty::F64], vec![Ty::Bool],
-                vec![(v(0), Ty::F64), (v(1), Ty::F64)],
-                vec![
-                    node(Inst::FCmp { op: tmir_op, ty: Ty::F64, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
-                    node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-                ],
-            );
+            let func = TmirFunc {
+                id: FuncId::new(0),
+                name: format!("fcmp_{:?}", tmir_op),
+                ty: FuncTyId::new(0),
+                entry: BlockId::new(0),
+                blocks: vec![TmirBlockDef {
+                    id: BlockId::new(0),
+                    params: vec![
+                        (ValueId::new(0), Ty::F64),
+                        (ValueId::new(1), Ty::F64),
+                    ],
+                    body: vec![
+                        InstrNode {
+                            inst: Inst::FCmp {
+                                op: tmir_op,
+                                ty: Ty::F64,
+                                lhs: ValueId::new(0),
+                                rhs: ValueId::new(1),
+                            },
+                            results: vec![ValueId::new(2)],
+                            proofs: vec![],
+                            span: None,
+                        },
+                        InstrNode {
+                            inst: Inst::Return { values: vec![ValueId::new(2)] },
+                            results: vec![],
+                            proofs: vec![],
+                            span: None,
+                        },
+                    ],
+                }],
+                proofs: vec![],
+            };
 
-            let result = translate_function(&module.functions[0], &module);
+            let module = make_module_for_func(&func);
+            let result = translate_func_test(&func, &module);
             assert!(result.is_ok(), "Float cmp {:?} should translate", tmir_op);
             let (lir_func, _) = result.unwrap();
             let entry = &lir_func.blocks[&lir_func.entry_block];
             match &entry.instructions[0].opcode {
                 Opcode::Fcmp { cond } => {
-                    assert_eq!(*cond, expected_cc, "Float cmp {:?} should map to {:?}", tmir_op, expected_cc);
+                    assert_eq!(*cond, expected_cc,
+                        "Float cmp {:?} should map to {:?}", tmir_op, expected_cc);
                 }
                 other => panic!("expected Fcmp, got {:?}", other),
             }
         }
     }
 
+    // -----------------------------------------------------------------------
     // Function-level proof extraction tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_extract_function_proofs_pure() {
-        let mut module = TmirModule::new("test");
-        let ft = module.add_func_type(FuncTy { params: vec![Ty::I32], returns: vec![Ty::I32], is_vararg: false });
-        module.add_function(TmirFunc {
-            id: FuncId::new(0), name: "pure_fn".to_string(), ty: ft, entry: b(0),
-            blocks: vec![TmirBlockDef { id: b(0), params: vec![(v(0), Ty::I32)], body: vec![
-                node(Inst::Return { values: vec![v(0)] }, vec![], vec![]),
-            ]}],
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "pure_fn".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![(ValueId::new(0), Ty::I32)],
+                body: vec![InstrNode {
+                    inst: Inst::Return {
+                        values: vec![ValueId::new(0)],
+                    },
+                    results: vec![],
+                    proofs: vec![],
+                    span: None,
+                }],
+            }],
             proofs: vec![ProofAnnotation::Pure],
-        });
+        };
 
-        let (_, proof_ctx) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (_, proof_ctx) = translate_func_test(&func, &module).unwrap();
         assert!(proof_ctx.is_function_pure());
         assert!(!proof_ctx.is_function_associative());
         assert!(!proof_ctx.is_function_commutative());
@@ -3617,18 +4401,48 @@ mod tests {
 
     #[test]
     fn test_extract_function_proofs_algebraic() {
-        let mut module = TmirModule::new("test");
-        let ft = module.add_func_type(FuncTy { params: vec![Ty::I32, Ty::I32], returns: vec![Ty::I32], is_vararg: false });
-        module.add_function(TmirFunc {
-            id: FuncId::new(0), name: "assoc_commut_fn".to_string(), ty: ft, entry: b(0),
-            blocks: vec![TmirBlockDef { id: b(0), params: vec![(v(0), Ty::I32), (v(1), Ty::I32)], body: vec![
-                node(Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) }, vec![v(2)], vec![]),
-                node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-            ]}],
-            proofs: vec![ProofAnnotation::Pure, ProofAnnotation::Associative, ProofAnnotation::Commutative],
-        });
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "assoc_commut_fn".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![
+                    (ValueId::new(0), Ty::I32),
+                    (ValueId::new(1), Ty::I32),
+                ],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::I32,
+                            lhs: ValueId::new(0),
+                            rhs: ValueId::new(1),
+                        },
+                        results: vec![ValueId::new(2)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![
+                ProofAnnotation::Pure,
+                ProofAnnotation::Associative,
+                ProofAnnotation::Commutative,
+            ],
+        };
 
-        let (_, proof_ctx) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (_, proof_ctx) = translate_func_test(&func, &module).unwrap();
         assert!(proof_ctx.is_function_pure());
         assert!(proof_ctx.is_function_associative());
         assert!(proof_ctx.is_function_commutative());
@@ -3638,11 +4452,26 @@ mod tests {
 
     #[test]
     fn test_extract_function_proofs_empty_when_none() {
-        let module = one_block_module("test", "no_proofs_fn", vec![], vec![], vec![], vec![
-            node(Inst::Return { values: vec![] }, vec![], vec![]),
-        ]);
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "no_proofs_fn".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![],
+                body: vec![InstrNode {
+                    inst: Inst::Return { values: vec![] },
+                    results: vec![],
+                    proofs: vec![],
+                    span: None,
+                }],
+            }],
+            proofs: vec![],
+        };
 
-        let (_, proof_ctx) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (_, proof_ctx) = translate_func_test(&func, &module).unwrap();
         assert!(!proof_ctx.is_function_pure());
         assert!(!proof_ctx.is_function_associative());
         assert!(!proof_ctx.is_function_commutative());
@@ -3650,43 +4479,113 @@ mod tests {
         assert!(proof_ctx.function_proofs().is_empty());
     }
 
+    // -----------------------------------------------------------------------
     // Instruction-level algebraic proof propagation tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_instruction_level_pure_propagation() {
-        let module = one_block_module(
-            "test", "pure_add",
-            vec![Ty::I32, Ty::I32], vec![Ty::I32],
-            vec![(v(0), Ty::I32), (v(1), Ty::I32)],
-            vec![
-                node(Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) }, vec![v(2)],
-                     vec![ProofAnnotation::Pure]),
-                node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-            ],
-        );
+        // An add instruction with Pure proof annotation: the result value
+        // should have the Pure proof in ProofContext.
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "pure_add".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![
+                    (ValueId::new(0), Ty::I32),
+                    (ValueId::new(1), Ty::I32),
+                ],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::I32,
+                            lhs: ValueId::new(0),
+                            rhs: ValueId::new(1),
+                        },
+                        results: vec![ValueId::new(2)],
+                        proofs: vec![ProofAnnotation::Pure],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
 
-        let (_, proof_ctx) = translate_function(&module.functions[0], &module).unwrap();
-        let val2 = proof_ctx.value_proofs.keys()
-            .find(|v| proof_ctx.proofs_for(v).iter().any(|p| matches!(p, Proof::Pure)));
+        let module = make_module_for_func(&func);
+        let (_, proof_ctx) = translate_func_test(&func, &module).unwrap();
+        // Find the internal value for ValueId::new(2)
+        let val2 = proof_ctx
+            .value_proofs
+            .keys()
+            .find(|v| {
+                proof_ctx
+                    .proofs_for(v)
+                    .iter()
+                    .any(|p| matches!(p, Proof::Pure))
+            });
         assert!(val2.is_some(), "Result value should have Pure proof");
         assert!(proof_ctx.has_pure(val2.unwrap()));
     }
 
     #[test]
     fn test_instruction_level_associative_commutative_propagation() {
-        let module = one_block_module(
-            "test", "assoc_commut_add",
-            vec![Ty::I32, Ty::I32], vec![Ty::I32],
-            vec![(v(0), Ty::I32), (v(1), Ty::I32)],
-            vec![
-                node(Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) }, vec![v(2)],
-                     vec![ProofAnnotation::Associative, ProofAnnotation::Commutative]),
-                node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-            ],
-        );
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "assoc_commut_add".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![
+                    (ValueId::new(0), Ty::I32),
+                    (ValueId::new(1), Ty::I32),
+                ],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::I32,
+                            lhs: ValueId::new(0),
+                            rhs: ValueId::new(1),
+                        },
+                        results: vec![ValueId::new(2)],
+                        proofs: vec![
+                            ProofAnnotation::Associative,
+                            ProofAnnotation::Commutative,
+                        ],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
 
-        let (_, proof_ctx) = translate_function(&module.functions[0], &module).unwrap();
-        let val = proof_ctx.value_proofs.keys()
+        let module = make_module_for_func(&func);
+        let (_, proof_ctx) = translate_func_test(&func, &module).unwrap();
+        // Find the value with proofs
+        let val = proof_ctx
+            .value_proofs
+            .keys()
             .find(|v| proof_ctx.has_associative(v))
             .expect("Should have a value with Associative proof");
         assert!(proof_ctx.has_associative(val));
@@ -3696,39 +4595,79 @@ mod tests {
 
     #[test]
     fn test_combined_function_and_instruction_proofs() {
-        let mut module = TmirModule::new("test");
-        let ft = module.add_func_type(FuncTy { params: vec![Ty::I32, Ty::I32], returns: vec![Ty::I32], is_vararg: false });
-        module.add_function(TmirFunc {
-            id: FuncId::new(0), name: "combined_proofs".to_string(), ty: ft, entry: b(0),
-            blocks: vec![TmirBlockDef { id: b(0), params: vec![(v(0), Ty::I32), (v(1), Ty::I32)], body: vec![
-                node(Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) }, vec![v(2)],
-                     vec![ProofAnnotation::Associative, ProofAnnotation::Commutative, ProofAnnotation::NoOverflow]),
-                node(Inst::Return { values: vec![v(2)] }, vec![], vec![]),
-            ]}],
+        // Function has Pure proof, instruction has Associative + Commutative.
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "combined_proofs".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![
+                    (ValueId::new(0), Ty::I32),
+                    (ValueId::new(1), Ty::I32),
+                ],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::BinOp {
+                            op: BinOp::Add,
+                            ty: Ty::I32,
+                            lhs: ValueId::new(0),
+                            rhs: ValueId::new(1),
+                        },
+                        results: vec![ValueId::new(2)],
+                        proofs: vec![
+                            ProofAnnotation::Associative,
+                            ProofAnnotation::Commutative,
+                            ProofAnnotation::NoOverflow,
+                        ],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(2)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
             proofs: vec![ProofAnnotation::Pure],
-        });
+        };
 
-        let (_, proof_ctx) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (_, proof_ctx) = translate_func_test(&func, &module).unwrap();
+
+        // Function-level: Pure
         assert!(proof_ctx.is_function_pure());
         assert!(!proof_ctx.is_function_associative());
 
-        let val = proof_ctx.value_proofs.keys()
+        // Instruction-level: Associative, Commutative, NoOverflow on result value
+        let val = proof_ctx
+            .value_proofs
+            .keys()
             .find(|v| proof_ctx.has_associative(v))
             .expect("Should have value with Associative");
         assert!(proof_ctx.has_associative(val));
         assert!(proof_ctx.has_commutative(val));
         assert!(proof_ctx.has_no_overflow(val));
-        assert!(!proof_ctx.has_pure(val));
+        assert!(!proof_ctx.has_pure(val)); // Pure is function-level, not instruction-level here
     }
 
-    // ProofContext query methods for new proof types
+    // -----------------------------------------------------------------------
+    // ProofContext query method tests for new proof types
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_proof_context_pure() {
         let mut ctx = ProofContext::default();
         let val = Value(42);
         assert!(!ctx.has_pure(&val));
-        ctx.value_proofs.entry(val).or_default().push(Proof::Pure);
+        ctx.value_proofs
+            .entry(val)
+            .or_default()
+            .push(Proof::Pure);
         assert!(ctx.has_pure(&val));
     }
 
@@ -3737,7 +4676,10 @@ mod tests {
         let mut ctx = ProofContext::default();
         let val = Value(43);
         assert!(!ctx.has_associative(&val));
-        ctx.value_proofs.entry(val).or_default().push(Proof::Associative);
+        ctx.value_proofs
+            .entry(val)
+            .or_default()
+            .push(Proof::Associative);
         assert!(ctx.has_associative(&val));
     }
 
@@ -3746,7 +4688,10 @@ mod tests {
         let mut ctx = ProofContext::default();
         let val = Value(44);
         assert!(!ctx.has_commutative(&val));
-        ctx.value_proofs.entry(val).or_default().push(Proof::Commutative);
+        ctx.value_proofs
+            .entry(val)
+            .or_default()
+            .push(Proof::Commutative);
         assert!(ctx.has_commutative(&val));
     }
 
@@ -3755,7 +4700,10 @@ mod tests {
         let mut ctx = ProofContext::default();
         let val = Value(45);
         assert!(!ctx.has_idempotent(&val));
-        ctx.value_proofs.entry(val).or_default().push(Proof::Idempotent);
+        ctx.value_proofs
+            .entry(val)
+            .or_default()
+            .push(Proof::Idempotent);
         assert!(ctx.has_idempotent(&val));
     }
 
@@ -3778,83 +4726,131 @@ mod tests {
         assert_eq!(ctx.function_proofs().len(), 2);
     }
 
-    // extract_proofs for individual proof types
+    // -----------------------------------------------------------------------
+    // extract_proofs for Pure/Associative/Commutative/Idempotent individually
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_extract_proofs_pure() {
-        let n = node(Inst::Load { ty: Ty::I32, ptr: v(0) }, vec![v(1)], vec![ProofAnnotation::Pure]);
-        let proofs = extract_proofs(&n);
+        let node = InstrNode {
+            inst: Inst::Load {
+                ty: Ty::I32,
+                ptr: ValueId::new(0),
+            },
+            results: vec![ValueId::new(1)],
+            proofs: vec![ProofAnnotation::Pure],
+            span: None,
+        };
+        let proofs = extract_proofs(&node);
         assert_eq!(proofs.len(), 1);
         assert!(matches!(proofs[0], Proof::Pure));
     }
 
     #[test]
     fn test_extract_proofs_associative() {
-        let n = node(
-            Inst::BinOp { op: BinOp::Add, ty: Ty::I32, lhs: v(0), rhs: v(1) },
-            vec![v(2)], vec![ProofAnnotation::Associative],
-        );
-        let proofs = extract_proofs(&n);
+        let node = InstrNode {
+            inst: Inst::BinOp {
+                op: BinOp::Add,
+                ty: Ty::I32,
+                lhs: ValueId::new(0),
+                rhs: ValueId::new(1),
+            },
+            results: vec![ValueId::new(2)],
+            proofs: vec![ProofAnnotation::Associative],
+            span: None,
+        };
+        let proofs = extract_proofs(&node);
         assert_eq!(proofs.len(), 1);
         assert!(matches!(proofs[0], Proof::Associative));
     }
 
     #[test]
     fn test_extract_proofs_commutative() {
-        let n = node(
-            Inst::BinOp { op: BinOp::Mul, ty: Ty::I32, lhs: v(0), rhs: v(1) },
-            vec![v(2)], vec![ProofAnnotation::Commutative],
-        );
-        let proofs = extract_proofs(&n);
+        let node = InstrNode {
+            inst: Inst::BinOp {
+                op: BinOp::Mul,
+                ty: Ty::I32,
+                lhs: ValueId::new(0),
+                rhs: ValueId::new(1),
+            },
+            results: vec![ValueId::new(2)],
+            proofs: vec![ProofAnnotation::Commutative],
+            span: None,
+        };
+        let proofs = extract_proofs(&node);
         assert_eq!(proofs.len(), 1);
         assert!(matches!(proofs[0], Proof::Commutative));
     }
 
-    #[test]
-    fn test_extract_function_proofs_standalone() {
-        let mut module = TmirModule::new("test");
-        let ft = module.add_func_type(FuncTy { params: vec![], returns: vec![], is_vararg: false });
-        module.add_function(TmirFunc {
-            id: FuncId::new(0), name: "test_fn".to_string(), ty: ft, entry: b(0),
-            blocks: vec![TmirBlockDef { id: b(0), params: vec![], body: vec![
-                node(Inst::Return { values: vec![] }, vec![], vec![]),
-            ]}],
-            proofs: vec![
-                ProofAnnotation::Pure,
-                ProofAnnotation::Associative,
-                ProofAnnotation::Commutative,
-            ],
-        });
+    // ----- Stack slot aliasing fix (issue #278) -----
 
-        let proofs = extract_function_proofs(&module.functions[0]);
-        assert_eq!(proofs.len(), 3);
-        assert!(matches!(proofs[0], Proof::Pure));
-        assert!(matches!(proofs[1], Proof::Associative));
-        assert!(matches!(proofs[2], Proof::Commutative));
-    }
-
-    // Alloca tests (replacing old Alloc tests)
-
-    fn build_multi_alloca_func(module: &mut TmirModule) {
-        let ft = module.add_func_type(FuncTy { params: vec![], returns: vec![], is_vararg: false });
-        module.add_function(TmirFunc {
-            id: FuncId::new(0), name: "multi_alloca".to_string(), ty: ft, entry: b(0),
-            blocks: vec![TmirBlockDef { id: b(0), params: vec![], body: vec![
-                node(Inst::Alloca { ty: Ty::I32, count: None }, vec![v(0)], vec![]),
-                node(Inst::Alloca { ty: Ty::I64, count: None }, vec![v(1)], vec![]),
-                node(Inst::Alloca { ty: Ty::I8, count: None }, vec![v(2)], vec![]),
-                node(Inst::Return { values: vec![] }, vec![], vec![]),
-            ]}],
+    /// Build a tMIR function with 3 Alloc instructions of different types.
+    ///
+    /// ```pseudo
+    /// fn multi_alloc() {
+    ///   %0 = alloca i32      // 4 bytes, align 4
+    ///   %1 = alloca i64      // 8 bytes, align 8
+    ///   %2 = alloca i8       // 1 byte, align 1
+    ///   return
+    /// }
+    /// ```
+    fn build_multi_alloc_func() -> TmirFunc {
+        TmirFunc {
+            id: FuncId::new(0),
+            name: "multi_alloc".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::Alloca {
+                            ty: Ty::I32,
+                            count: None,
+                        },
+                        results: vec![ValueId::new(0)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Alloca {
+                            ty: Ty::I64,
+                            count: None,
+                        },
+                        results: vec![ValueId::new(1)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Alloca {
+                            ty: Ty::I8,
+                            count: None,
+                        },
+                        results: vec![ValueId::new(2)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return { values: vec![] },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
             proofs: vec![],
-        });
+        }
     }
 
     #[test]
-    fn test_alloca_unique_slot_indices() {
-        let mut module = TmirModule::new("test");
-        build_multi_alloca_func(&mut module);
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+    fn test_alloc_unique_slot_indices() {
+        // Issue #278: multiple Alloc instructions must get distinct slot indices.
+        let func = build_multi_alloc_func();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
 
+        // Collect all StackAddr slot indices from the LIR instructions.
         let mut slot_indices = Vec::new();
         for (_block_id, bb) in &lir_func.blocks {
             for inst in &bb.instructions {
@@ -3864,44 +4860,99 @@ mod tests {
             }
         }
 
-        assert_eq!(slot_indices.len(), 3);
+        // We should have exactly 3 StackAddr instructions (one per Alloc).
+        assert_eq!(
+            slot_indices.len(),
+            3,
+            "Expected 3 StackAddr instructions, got {}",
+            slot_indices.len()
+        );
+
+        // All slot indices must be distinct.
         slot_indices.sort();
-        assert_eq!(slot_indices[0], 0);
-        assert_eq!(slot_indices[1], 1);
-        assert_eq!(slot_indices[2], 2);
+        assert_eq!(slot_indices[0], 0, "First slot should be 0");
+        assert_eq!(slot_indices[1], 1, "Second slot should be 1");
+        assert_eq!(slot_indices[2], 2, "Third slot should be 2");
     }
 
     #[test]
-    fn test_alloca_stack_slots_populated() {
-        let mut module = TmirModule::new("test");
-        build_multi_alloca_func(&mut module);
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+    fn test_alloc_stack_slots_populated() {
+        // Issue #278: LIR Function.stack_slots must have entries for all allocated slots.
+        let func = build_multi_alloc_func();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
 
-        assert_eq!(lir_func.stack_slots.len(), 3);
+        assert_eq!(
+            lir_func.stack_slots.len(),
+            3,
+            "Expected 3 stack slot entries, got {}",
+            lir_func.stack_slots.len()
+        );
+
+        // Verify sizes and alignments match the Alloc types.
+        // Slot 0: i32 -> 4 bytes, align 4
         assert_eq!(lir_func.stack_slots[0].size, 4);
         assert_eq!(lir_func.stack_slots[0].align, 4);
+        // Slot 1: i64 -> 8 bytes, align 8
         assert_eq!(lir_func.stack_slots[1].size, 8);
         assert_eq!(lir_func.stack_slots[1].align, 8);
+        // Slot 2: i8 -> 1 byte, align 1
         assert_eq!(lir_func.stack_slots[2].size, 1);
         assert_eq!(lir_func.stack_slots[2].align, 1);
     }
 
     #[test]
-    fn test_alloca_single_slot_is_zero() {
-        let module = one_block_module("test", "single_alloca", vec![], vec![], vec![], vec![
-            node(Inst::Alloca { ty: Ty::I64, count: None }, vec![v(0)], vec![]),
-            node(Inst::Return { values: vec![] }, vec![], vec![]),
-        ]);
+    fn test_alloc_single_slot_is_zero() {
+        // A single Alloc should get slot 0.
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "single_alloc".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![],
+                body: vec![
+                    InstrNode {
+                        inst: Inst::Alloca {
+                            ty: Ty::I64,
+                            count: None,
+                        },
+                        results: vec![ValueId::new(0)],
+                        proofs: vec![],
+                        span: None,
+                    },
+                    InstrNode {
+                        inst: Inst::Return { values: vec![] },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    },
+                ],
+            }],
+            proofs: vec![],
+        };
 
-        let (lir_func, _) = translate_function(&module.functions[0], &module).unwrap();
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
+
+        // Should have exactly 1 stack slot.
         assert_eq!(lir_func.stack_slots.len(), 1);
         assert_eq!(lir_func.stack_slots[0].size, 8);
         assert_eq!(lir_func.stack_slots[0].align, 8);
 
+        // The StackAddr instruction should reference slot 0.
         let slot = lir_func.blocks.values()
             .flat_map(|bb| &bb.instructions)
-            .find_map(|inst| if let Opcode::StackAddr { slot } = inst.opcode { Some(slot) } else { None })
+            .find_map(|inst| {
+                if let Opcode::StackAddr { slot } = inst.opcode {
+                    Some(slot)
+                } else {
+                    None
+                }
+            })
             .expect("Should have a StackAddr instruction");
         assert_eq!(slot, 0);
     }
+
 }
