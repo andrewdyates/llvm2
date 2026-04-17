@@ -63,12 +63,13 @@
 
 use crate::lowering_proof::ProofObligation;
 use crate::neon_semantics::{
-    encode_neon_add, encode_neon_and, encode_neon_bic, encode_neon_eor, encode_neon_mul,
-    encode_neon_neg, encode_neon_orr, encode_neon_shl, encode_neon_sshr, encode_neon_sub,
-    encode_neon_ushr,
+    encode_neon_add, encode_neon_and, encode_neon_bic, encode_neon_cmge, encode_neon_cmgt,
+    encode_neon_eor, encode_neon_mla, encode_neon_mul, encode_neon_neg, encode_neon_orr,
+    encode_neon_shl, encode_neon_smax, encode_neon_smin, encode_neon_sshr, encode_neon_sub,
+    encode_neon_umax, encode_neon_umin, encode_neon_ushr,
 };
-use crate::smt::{map_lanes_binary, map_lanes_binary_imm, map_lanes_unary, SmtExpr,
-    VectorArrangement};
+use crate::smt::{concat_lanes, lane_extract, map_lanes_binary, map_lanes_binary_imm,
+    map_lanes_unary, SmtExpr, VectorArrangement};
 
 // ---------------------------------------------------------------------------
 // Helper: build symbolic vector inputs (same as neon_lowering_proofs)
@@ -652,21 +653,310 @@ pub fn proof_vectorize_sshr_8h() -> ProofObligation {
 }
 
 // ---------------------------------------------------------------------------
+// Vectorization proof: scalar MLA -> NEON MLA
+// ---------------------------------------------------------------------------
+
+/// Proof: scalar per-lane multiply-accumulate -> NEON MLA at the specified arrangement.
+///
+/// The vectorization pass maps fused `add(va, mul(vn, vm))` to `NeonOp::Mla`.
+/// tMIR semantics: per-lane `va[i] + vn[i] * vm[i]` (wrapping).
+/// NEON semantics: `encode_neon_mla`.
+fn proof_vectorize_mla(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let va = symbolic_vector("va", arrangement);
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+
+    let lane_count = arrangement.lane_count();
+    let lanes: Vec<SmtExpr> = (0..lane_count)
+        .map(|i| {
+            let a = lane_extract(&va, arrangement, i);
+            let n = lane_extract(&vn, arrangement, i);
+            let m = lane_extract(&vm, arrangement, i);
+            a.bvadd(n.bvmul(m))
+        })
+        .collect();
+    let scalar_per_lane = concat_lanes(&lanes, arrangement);
+    let neon_result = encode_neon_mla(arrangement, &va, &vn, &vm);
+
+    let mut inputs = vector_inputs("va", arrangement);
+    inputs.extend(vector_inputs("vn", arrangement));
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("Vectorize: ScalarMla -> NEON MLA.{}", label),
+        tmir_expr: scalar_per_lane,
+        aarch64_expr: neon_result,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: scalar mla -> NEON MLA.4S (128-bit, 4x32-bit).
+pub fn proof_vectorize_mla_4s() -> ProofObligation {
+    proof_vectorize_mla(VectorArrangement::S4, "4S")
+}
+
+/// Proof: scalar mla -> NEON MLA.8H (128-bit, 8x16-bit).
+pub fn proof_vectorize_mla_8h() -> ProofObligation {
+    proof_vectorize_mla(VectorArrangement::H8, "8H")
+}
+
+// ---------------------------------------------------------------------------
+// Vectorization proof: scalar SMIN -> NEON SMIN
+// ---------------------------------------------------------------------------
+
+/// Proof: scalar per-lane signed minimum -> NEON SMIN at the specified arrangement.
+fn proof_vectorize_smin(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+    let scalar_per_lane = map_lanes_binary(&vn, &vm, arrangement, |a, b| {
+        SmtExpr::ite(a.clone().bvslt(b.clone()), a, b)
+    });
+    let neon_result = encode_neon_smin(arrangement, &vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("Vectorize: ScalarSmin -> NEON SMIN.{}", label),
+        tmir_expr: scalar_per_lane,
+        aarch64_expr: neon_result,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: scalar smin -> NEON SMIN.4S (128-bit, 4x32-bit).
+pub fn proof_vectorize_smin_4s() -> ProofObligation {
+    proof_vectorize_smin(VectorArrangement::S4, "4S")
+}
+
+/// Proof: scalar smin -> NEON SMIN.8H (128-bit, 8x16-bit).
+pub fn proof_vectorize_smin_8h() -> ProofObligation {
+    proof_vectorize_smin(VectorArrangement::H8, "8H")
+}
+
+// ---------------------------------------------------------------------------
+// Vectorization proof: scalar UMIN -> NEON UMIN
+// ---------------------------------------------------------------------------
+
+/// Proof: scalar per-lane unsigned minimum -> NEON UMIN at the specified arrangement.
+fn proof_vectorize_umin(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+    let scalar_per_lane = map_lanes_binary(&vn, &vm, arrangement, |a, b| {
+        SmtExpr::ite(a.clone().bvult(b.clone()), a, b)
+    });
+    let neon_result = encode_neon_umin(arrangement, &vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("Vectorize: ScalarUmin -> NEON UMIN.{}", label),
+        tmir_expr: scalar_per_lane,
+        aarch64_expr: neon_result,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: scalar umin -> NEON UMIN.4S (128-bit, 4x32-bit).
+pub fn proof_vectorize_umin_4s() -> ProofObligation {
+    proof_vectorize_umin(VectorArrangement::S4, "4S")
+}
+
+/// Proof: scalar umin -> NEON UMIN.16B (128-bit, 16x8-bit).
+pub fn proof_vectorize_umin_16b() -> ProofObligation {
+    proof_vectorize_umin(VectorArrangement::B16, "16B")
+}
+
+// ---------------------------------------------------------------------------
+// Vectorization proof: scalar SMAX -> NEON SMAX
+// ---------------------------------------------------------------------------
+
+/// Proof: scalar per-lane signed maximum -> NEON SMAX at the specified arrangement.
+fn proof_vectorize_smax(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+    let scalar_per_lane = map_lanes_binary(&vn, &vm, arrangement, |a, b| {
+        SmtExpr::ite(a.clone().bvsgt(b.clone()), a, b)
+    });
+    let neon_result = encode_neon_smax(arrangement, &vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("Vectorize: ScalarSmax -> NEON SMAX.{}", label),
+        tmir_expr: scalar_per_lane,
+        aarch64_expr: neon_result,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: scalar smax -> NEON SMAX.4S (128-bit, 4x32-bit).
+pub fn proof_vectorize_smax_4s() -> ProofObligation {
+    proof_vectorize_smax(VectorArrangement::S4, "4S")
+}
+
+/// Proof: scalar smax -> NEON SMAX.8H (128-bit, 8x16-bit).
+pub fn proof_vectorize_smax_8h() -> ProofObligation {
+    proof_vectorize_smax(VectorArrangement::H8, "8H")
+}
+
+// ---------------------------------------------------------------------------
+// Vectorization proof: scalar UMAX -> NEON UMAX
+// ---------------------------------------------------------------------------
+
+/// Proof: scalar per-lane unsigned maximum -> NEON UMAX at the specified arrangement.
+fn proof_vectorize_umax(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+    let scalar_per_lane = map_lanes_binary(&vn, &vm, arrangement, |a, b| {
+        SmtExpr::ite(a.clone().bvugt(b.clone()), a, b)
+    });
+    let neon_result = encode_neon_umax(arrangement, &vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("Vectorize: ScalarUmax -> NEON UMAX.{}", label),
+        tmir_expr: scalar_per_lane,
+        aarch64_expr: neon_result,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: scalar umax -> NEON UMAX.4S (128-bit, 4x32-bit).
+pub fn proof_vectorize_umax_4s() -> ProofObligation {
+    proof_vectorize_umax(VectorArrangement::S4, "4S")
+}
+
+/// Proof: scalar umax -> NEON UMAX.16B (128-bit, 16x8-bit).
+pub fn proof_vectorize_umax_16b() -> ProofObligation {
+    proof_vectorize_umax(VectorArrangement::B16, "16B")
+}
+
+// ---------------------------------------------------------------------------
+// Vectorization proof: scalar CMGT -> NEON CMGT
+// ---------------------------------------------------------------------------
+
+/// Proof: scalar per-lane signed greater-than compare -> NEON CMGT.
+fn proof_vectorize_cmgt(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+
+    let lane_bits = arrangement.lane_bits();
+    let all_ones_lane = SmtExpr::bv_const(
+        if lane_bits >= 64 { u64::MAX } else { (1u64 << lane_bits) - 1 },
+        lane_bits,
+    );
+    let zero_lane = SmtExpr::bv_const(0, lane_bits);
+
+    let scalar_per_lane = map_lanes_binary(&vn, &vm, arrangement, |a, b| {
+        SmtExpr::ite(a.bvsgt(b), all_ones_lane.clone(), zero_lane.clone())
+    });
+    let neon_result = encode_neon_cmgt(arrangement, &vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("Vectorize: ScalarCmgt -> NEON CMGT.{}", label),
+        tmir_expr: scalar_per_lane,
+        aarch64_expr: neon_result,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: scalar cmgt -> NEON CMGT.4S (128-bit, 4x32-bit).
+pub fn proof_vectorize_cmgt_4s() -> ProofObligation {
+    proof_vectorize_cmgt(VectorArrangement::S4, "4S")
+}
+
+/// Proof: scalar cmgt -> NEON CMGT.2D (128-bit, 2x64-bit).
+pub fn proof_vectorize_cmgt_2d() -> ProofObligation {
+    proof_vectorize_cmgt(VectorArrangement::D2, "2D")
+}
+
+// ---------------------------------------------------------------------------
+// Vectorization proof: scalar CMGE -> NEON CMGE
+// ---------------------------------------------------------------------------
+
+/// Proof: scalar per-lane signed greater-or-equal compare -> NEON CMGE.
+fn proof_vectorize_cmge(arrangement: VectorArrangement, label: &str) -> ProofObligation {
+    let vn = symbolic_vector("vn", arrangement);
+    let vm = symbolic_vector("vm", arrangement);
+
+    let lane_bits = arrangement.lane_bits();
+    let all_ones_lane = SmtExpr::bv_const(
+        if lane_bits >= 64 { u64::MAX } else { (1u64 << lane_bits) - 1 },
+        lane_bits,
+    );
+    let zero_lane = SmtExpr::bv_const(0, lane_bits);
+
+    let scalar_per_lane = map_lanes_binary(&vn, &vm, arrangement, |a, b| {
+        SmtExpr::ite(a.bvsge(b), all_ones_lane.clone(), zero_lane.clone())
+    });
+    let neon_result = encode_neon_cmge(arrangement, &vn, &vm);
+
+    let mut inputs = vector_inputs("vn", arrangement);
+    inputs.extend(vector_inputs("vm", arrangement));
+
+    ProofObligation {
+        name: format!("Vectorize: ScalarCmge -> NEON CMGE.{}", label),
+        tmir_expr: scalar_per_lane,
+        aarch64_expr: neon_result,
+        inputs,
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Proof: scalar cmge -> NEON CMGE.4S (128-bit, 4x32-bit).
+pub fn proof_vectorize_cmge_4s() -> ProofObligation {
+    proof_vectorize_cmge(VectorArrangement::S4, "4S")
+}
+
+/// Proof: scalar cmge -> NEON CMGE.8H (128-bit, 8x16-bit).
+pub fn proof_vectorize_cmge_8h() -> ProofObligation {
+    proof_vectorize_cmge(VectorArrangement::H8, "8H")
+}
+
+// ---------------------------------------------------------------------------
 // Aggregate: all vectorization lowering proofs
 // ---------------------------------------------------------------------------
 
-/// Return all 31 vectorization lowering proof obligations.
+/// Return all 45 vectorization lowering proof obligations.
 ///
-/// 11 operations across multiple arrangements:
-/// - Arithmetic: ADD (4S/8H/2D), SUB (4S/8H/2D), MUL (4S/8H/16B), NEG (4S/2D) = 12
+/// 18 operations across multiple arrangements:
+/// - Arithmetic: ADD (4S/8H/2D), SUB (4S/8H/2D), MUL (4S/8H/16B), NEG (4S/2D) = 11
 /// - Bitwise: AND (8B/16B/8H/2D), ORR (8B/16B/8H/2D), EOR (8B/16B/8H/2D),
 ///   BIC (8B/16B) = 14
 /// - Shifts: SHL (4S/8H), USHR (4S/2D), SSHR (4S/8H) = 6
+/// - MLA (4S/8H) = 2
+/// - Min/max: SMIN (4S/8H), UMIN (4S/16B), SMAX (4S/8H), UMAX (4S/16B) = 8
+/// - Compares: CMGT (4S/2D), CMGE (4S/8H) = 4
 ///
-/// Total: 12 + 14 - 1 (BIC only 2) + 6 = 31 (adjusted: 12 + 14 + 6 - 1 = 31)
-///
-/// These validate every integer/bitwise mapping in `scalar_to_neon_op()`.
-/// FADD and FMUL are deferred pending FP semantic encoders in `neon_semantics.rs`.
+/// Total: 11 + 14 + 6 + 2 + 8 + 4 = 45
 pub fn all_vectorization_proofs() -> Vec<ProofObligation> {
     vec![
         // Arithmetic: ADD (3), SUB (3), MUL (3), NEG (2) = 11 proofs
@@ -703,6 +993,23 @@ pub fn all_vectorization_proofs() -> Vec<ProofObligation> {
         proof_vectorize_ushr_2d(),
         proof_vectorize_sshr_4s(),
         proof_vectorize_sshr_8h(),
+        // Multiply-accumulate: MLA (2) = 2 proofs
+        proof_vectorize_mla_4s(),
+        proof_vectorize_mla_8h(),
+        // Min/max: SMIN (2), UMIN (2), SMAX (2), UMAX (2) = 8 proofs
+        proof_vectorize_smin_4s(),
+        proof_vectorize_smin_8h(),
+        proof_vectorize_umin_4s(),
+        proof_vectorize_umin_16b(),
+        proof_vectorize_smax_4s(),
+        proof_vectorize_smax_8h(),
+        proof_vectorize_umax_4s(),
+        proof_vectorize_umax_16b(),
+        // Comparisons: CMGT (2), CMGE (2) = 4 proofs
+        proof_vectorize_cmgt_4s(),
+        proof_vectorize_cmgt_2d(),
+        proof_vectorize_cmge_4s(),
+        proof_vectorize_cmge_8h(),
     ]
 }
 
@@ -933,13 +1240,111 @@ mod tests {
     }
 
     // =======================================================================
-    // Aggregate test: all 31 vectorization proofs
+    // Vectorization MLA proofs
+    // =======================================================================
+
+    #[test]
+    fn test_vectorize_mla_4s() {
+        assert_valid(&proof_vectorize_mla_4s());
+    }
+
+    #[test]
+    fn test_vectorize_mla_8h() {
+        assert_valid(&proof_vectorize_mla_8h());
+    }
+
+    // =======================================================================
+    // Vectorization SMIN proofs
+    // =======================================================================
+
+    #[test]
+    fn test_vectorize_smin_4s() {
+        assert_valid(&proof_vectorize_smin_4s());
+    }
+
+    #[test]
+    fn test_vectorize_smin_8h() {
+        assert_valid(&proof_vectorize_smin_8h());
+    }
+
+    // =======================================================================
+    // Vectorization UMIN proofs
+    // =======================================================================
+
+    #[test]
+    fn test_vectorize_umin_4s() {
+        assert_valid(&proof_vectorize_umin_4s());
+    }
+
+    #[test]
+    fn test_vectorize_umin_16b() {
+        assert_valid(&proof_vectorize_umin_16b());
+    }
+
+    // =======================================================================
+    // Vectorization SMAX proofs
+    // =======================================================================
+
+    #[test]
+    fn test_vectorize_smax_4s() {
+        assert_valid(&proof_vectorize_smax_4s());
+    }
+
+    #[test]
+    fn test_vectorize_smax_8h() {
+        assert_valid(&proof_vectorize_smax_8h());
+    }
+
+    // =======================================================================
+    // Vectorization UMAX proofs
+    // =======================================================================
+
+    #[test]
+    fn test_vectorize_umax_4s() {
+        assert_valid(&proof_vectorize_umax_4s());
+    }
+
+    #[test]
+    fn test_vectorize_umax_16b() {
+        assert_valid(&proof_vectorize_umax_16b());
+    }
+
+    // =======================================================================
+    // Vectorization CMGT proofs
+    // =======================================================================
+
+    #[test]
+    fn test_vectorize_cmgt_4s() {
+        assert_valid(&proof_vectorize_cmgt_4s());
+    }
+
+    #[test]
+    fn test_vectorize_cmgt_2d() {
+        assert_valid(&proof_vectorize_cmgt_2d());
+    }
+
+    // =======================================================================
+    // Vectorization CMGE proofs
+    // =======================================================================
+
+    #[test]
+    fn test_vectorize_cmge_4s() {
+        assert_valid(&proof_vectorize_cmge_4s());
+    }
+
+    #[test]
+    fn test_vectorize_cmge_8h() {
+        assert_valid(&proof_vectorize_cmge_8h());
+    }
+
+    // =======================================================================
+    // Aggregate test: all 45 vectorization proofs
     // =======================================================================
 
     #[test]
     fn test_all_vectorization_proofs() {
         let proofs = all_vectorization_proofs();
-        assert_eq!(proofs.len(), 31, "expected 31 proofs across all arrangements");
+        assert_eq!(proofs.len(), 45, "expected 45 proofs across all arrangements");
         for obligation in &proofs {
             assert_valid(obligation);
         }

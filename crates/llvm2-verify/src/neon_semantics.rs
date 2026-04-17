@@ -31,7 +31,7 @@
 use crate::smt::{
     SmtExpr, VectorArrangement,
     map_lanes_binary, map_lanes_binary_imm, map_lanes_unary,
-    concat_lanes, lane_insert,
+    concat_lanes, lane_extract, lane_insert,
 };
 
 // ---------------------------------------------------------------------------
@@ -239,6 +239,177 @@ pub fn encode_neon_cmeq(
     map_lanes_binary(vn, vm, arrangement, |a, b| {
         SmtExpr::ite(a.eq_expr(b), all_ones_lane.clone(), zero_lane.clone())
     })
+}
+
+/// Encode `CMGT.<T> Vd, Vn, Vm` -- NEON per-lane signed greater-than comparison.
+///
+/// Semantics: for each lane `i`:
+///   `Vd[i] = if Vn[i] >s Vm[i] then all_ones else 0`
+///
+/// The result mask is all-ones (0xFF...F) for matching lanes and all-zeros
+/// for non-matching lanes. This is the standard NEON compare behavior.
+///
+/// Reference: ARM DDI 0487, C7.2.31 CMGT (register).
+pub fn encode_neon_cmgt(
+    arrangement: VectorArrangement,
+    vn: &SmtExpr,
+    vm: &SmtExpr,
+) -> SmtExpr {
+    let lane_bits = arrangement.lane_bits();
+    let all_ones_lane = SmtExpr::bv_const(
+        if lane_bits >= 64 { u64::MAX } else { (1u64 << lane_bits) - 1 },
+        lane_bits,
+    );
+    let zero_lane = SmtExpr::bv_const(0, lane_bits);
+    map_lanes_binary(vn, vm, arrangement, |a, b| {
+        SmtExpr::ite(a.bvsgt(b), all_ones_lane.clone(), zero_lane.clone())
+    })
+}
+
+/// Encode `CMGE.<T> Vd, Vn, Vm` -- NEON per-lane signed greater-or-equal comparison.
+///
+/// Semantics: for each lane `i`:
+///   `Vd[i] = if Vn[i] >=s Vm[i] then all_ones else 0`
+///
+/// The result mask is all-ones (0xFF...F) for matching lanes and all-zeros
+/// for non-matching lanes. This is the standard NEON compare behavior.
+///
+/// Reference: ARM DDI 0487, C7.2.30 CMGE (register).
+pub fn encode_neon_cmge(
+    arrangement: VectorArrangement,
+    vn: &SmtExpr,
+    vm: &SmtExpr,
+) -> SmtExpr {
+    let lane_bits = arrangement.lane_bits();
+    let all_ones_lane = SmtExpr::bv_const(
+        if lane_bits >= 64 { u64::MAX } else { (1u64 << lane_bits) - 1 },
+        lane_bits,
+    );
+    let zero_lane = SmtExpr::bv_const(0, lane_bits);
+    map_lanes_binary(vn, vm, arrangement, |a, b| {
+        SmtExpr::ite(a.bvsge(b), all_ones_lane.clone(), zero_lane.clone())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NEON integer min/max operations
+// ---------------------------------------------------------------------------
+
+/// Encode `SMIN.<T> Vd, Vn, Vm` -- NEON vector signed minimum.
+///
+/// Semantics: for each lane `i`: `Vd[i] = if Vn[i] <s Vm[i] then Vn[i] else Vm[i]`.
+///
+/// Valid arrangements: 8B, 16B, 4H, 8H, 2S, 4S.
+/// Note: no 2D (64-bit lane) signed integer minimum in AArch64 NEON.
+/// Reference: ARM DDI 0487, C7.2.277 SMIN (vector).
+pub fn encode_neon_smin(
+    arrangement: VectorArrangement,
+    vn: &SmtExpr,
+    vm: &SmtExpr,
+) -> SmtExpr {
+    debug_assert!(
+        arrangement != VectorArrangement::D2,
+        "NEON SMIN does not support 2D arrangement"
+    );
+    map_lanes_binary(vn, vm, arrangement, |a, b| {
+        SmtExpr::ite(a.clone().bvslt(b.clone()), a, b)
+    })
+}
+
+/// Encode `UMIN.<T> Vd, Vn, Vm` -- NEON vector unsigned minimum.
+///
+/// Semantics: for each lane `i`: `Vd[i] = if Vn[i] <u Vm[i] then Vn[i] else Vm[i]`.
+///
+/// Valid arrangements: 8B, 16B, 4H, 8H, 2S, 4S.
+/// Note: no 2D (64-bit lane) unsigned integer minimum in AArch64 NEON.
+/// Reference: ARM DDI 0487, C7.2.378 UMIN (vector).
+pub fn encode_neon_umin(
+    arrangement: VectorArrangement,
+    vn: &SmtExpr,
+    vm: &SmtExpr,
+) -> SmtExpr {
+    debug_assert!(
+        arrangement != VectorArrangement::D2,
+        "NEON UMIN does not support 2D arrangement"
+    );
+    map_lanes_binary(vn, vm, arrangement, |a, b| {
+        SmtExpr::ite(a.clone().bvult(b.clone()), a, b)
+    })
+}
+
+/// Encode `SMAX.<T> Vd, Vn, Vm` -- NEON vector signed maximum.
+///
+/// Semantics: for each lane `i`: `Vd[i] = if Vn[i] >s Vm[i] then Vn[i] else Vm[i]`.
+///
+/// Valid arrangements: 8B, 16B, 4H, 8H, 2S, 4S.
+/// Note: no 2D (64-bit lane) signed integer maximum in AArch64 NEON.
+/// Reference: ARM DDI 0487, C7.2.274 SMAX (vector).
+pub fn encode_neon_smax(
+    arrangement: VectorArrangement,
+    vn: &SmtExpr,
+    vm: &SmtExpr,
+) -> SmtExpr {
+    debug_assert!(
+        arrangement != VectorArrangement::D2,
+        "NEON SMAX does not support 2D arrangement"
+    );
+    map_lanes_binary(vn, vm, arrangement, |a, b| {
+        SmtExpr::ite(a.clone().bvsgt(b.clone()), a, b)
+    })
+}
+
+/// Encode `UMAX.<T> Vd, Vn, Vm` -- NEON vector unsigned maximum.
+///
+/// Semantics: for each lane `i`: `Vd[i] = if Vn[i] >u Vm[i] then Vn[i] else Vm[i]`.
+///
+/// Valid arrangements: 8B, 16B, 4H, 8H, 2S, 4S.
+/// Note: no 2D (64-bit lane) unsigned integer maximum in AArch64 NEON.
+/// Reference: ARM DDI 0487, C7.2.375 UMAX (vector).
+pub fn encode_neon_umax(
+    arrangement: VectorArrangement,
+    vn: &SmtExpr,
+    vm: &SmtExpr,
+) -> SmtExpr {
+    debug_assert!(
+        arrangement != VectorArrangement::D2,
+        "NEON UMAX does not support 2D arrangement"
+    );
+    map_lanes_binary(vn, vm, arrangement, |a, b| {
+        SmtExpr::ite(a.clone().bvugt(b.clone()), a, b)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NEON multiply-accumulate
+// ---------------------------------------------------------------------------
+
+/// Encode `MLA.<T> Vd, Vn, Vm` -- NEON vector multiply-accumulate.
+///
+/// Semantics: for each lane `i`: `Vd[i] = Va[i] + Vn[i] * Vm[i]` (wrapping).
+///
+/// Valid arrangements: 8B, 16B, 4H, 8H, 2S, 4S.
+/// Note: no 2D (64-bit lane) integer multiply-accumulate in AArch64 NEON.
+/// Reference: ARM DDI 0487, C7.2.200 MLA (vector).
+pub fn encode_neon_mla(
+    arrangement: VectorArrangement,
+    va: &SmtExpr,
+    vn: &SmtExpr,
+    vm: &SmtExpr,
+) -> SmtExpr {
+    debug_assert!(
+        arrangement != VectorArrangement::D2,
+        "NEON MLA does not support 2D arrangement"
+    );
+    let lane_count = arrangement.lane_count();
+    let lanes: Vec<SmtExpr> = (0..lane_count)
+        .map(|i| {
+            let a = lane_extract(va, arrangement, i);
+            let n = lane_extract(vn, arrangement, i);
+            let m = lane_extract(vm, arrangement, i);
+            a.bvadd(n.bvmul(m))
+        })
+        .collect();
+    concat_lanes(&lanes, arrangement)
 }
 
 /// Encode `MOVI Vd.16B, #imm` -- NEON move immediate (byte broadcast).
