@@ -191,6 +191,81 @@ pub fn encode_mov_rr(_size: X86OperandSize, src: SmtExpr) -> SmtExpr {
 }
 
 // ---------------------------------------------------------------------------
+// Extension instruction semantics (MOVZX, MOVSX)
+// ---------------------------------------------------------------------------
+
+/// Encode `MOVZX r64, r/m32` or `MOVZX r32, r/m16` -- zero-extension move.
+///
+/// Semantics: extract the low `from_width` bits from `src`, then zero-extend
+/// to `to_width` bits.
+/// Reference: Intel SDM Vol 2B, MOVZX instruction.
+pub fn encode_movzx(from_width: u32, to_width: u32, src: SmtExpr) -> SmtExpr {
+    src.extract(from_width - 1, 0)
+        .zero_ext(to_width - from_width)
+}
+
+/// Encode `MOVSX r64, r/m32` or `MOVSXD r64, r/m32` -- sign-extension move.
+///
+/// Semantics: extract the low `from_width` bits from `src`, then sign-extend
+/// to `to_width` bits.
+/// Reference: Intel SDM Vol 2B, MOVSX/MOVSXD instructions.
+pub fn encode_movsx(from_width: u32, to_width: u32, src: SmtExpr) -> SmtExpr {
+    src.extract(from_width - 1, 0)
+        .sign_ext(to_width - from_width)
+}
+
+// ---------------------------------------------------------------------------
+// LEA (Load Effective Address)
+// ---------------------------------------------------------------------------
+
+/// Encode `LEA dst, [base + index*scale]` -- compute effective address.
+///
+/// Semantics: `dst = base + (index * scale)`.
+/// Reference: Intel SDM Vol 2A, LEA instruction.
+pub fn encode_lea_base_index_scale(base: SmtExpr, index: SmtExpr, scale: u32) -> SmtExpr {
+    let width = base.bv_width();
+    base.bvadd(index.bvmul(SmtExpr::bv_const(scale as u64, width)))
+}
+
+/// Encode `LEA dst, [base + disp]` -- compute effective address with displacement.
+///
+/// Semantics: `dst = base + displacement`.
+/// Reference: Intel SDM Vol 2A, LEA instruction.
+pub fn encode_lea_base_disp(base: SmtExpr, disp: i64, width: u32) -> SmtExpr {
+    base.bvadd(SmtExpr::bv_const(disp as u64, width))
+}
+
+/// Encode `LEA dst, [base + index*scale + disp]` -- compute effective address.
+///
+/// Semantics: `dst = base + index*scale + displacement`.
+/// Reference: Intel SDM Vol 2A, LEA instruction.
+pub fn encode_lea_base_index_scale_disp(
+    base: SmtExpr,
+    index: SmtExpr,
+    scale: u32,
+    disp: i64,
+) -> SmtExpr {
+    let width = base.bv_width();
+    base.bvadd(index.bvmul(SmtExpr::bv_const(scale as u64, width)))
+        .bvadd(SmtExpr::bv_const(disp as u64, width))
+}
+
+// ---------------------------------------------------------------------------
+// Three-operand IMUL
+// ---------------------------------------------------------------------------
+
+/// Encode `IMUL r64, r/m64, imm` or `IMUL r32, r/m32, imm` -- signed multiply.
+///
+/// Semantics: `dst = src * sign_extend(imm)` (wrapping, lower bits).
+/// The three-operand IMUL form stores the lower half of the product in dst,
+/// which is equivalent to wrapping multiplication.
+/// Reference: Intel SDM Vol 2A, IMUL instruction (three-operand form).
+pub fn encode_imul_rri(size: X86OperandSize, src: SmtExpr, imm: i64) -> SmtExpr {
+    let width = x86_operand_size_bits(size);
+    src.bvmul(SmtExpr::bv_const(imm as u64, width))
+}
+
+// ---------------------------------------------------------------------------
 // Floating-point instruction semantics (SSE)
 // ---------------------------------------------------------------------------
 

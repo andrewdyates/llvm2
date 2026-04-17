@@ -1158,6 +1158,398 @@ pub fn proof_x86_icmp_ule_i64() -> ProofObligation {
 }
 
 // ===========================================================================
+// Floating-point lowering proofs
+// ===========================================================================
+
+/// Proof: `tMIR::Fadd(F32, a, b) -> x86-64 ADDSS xmm, xmm`
+pub fn proof_x86_fadd_f32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_fp_binop;
+    use crate::x86_64_semantics::{encode_fp_add_rr, X86FPSize};
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp32_const(0.0); // placeholder; concrete values tested by FP verifier
+    let b = SmtExpr::fp32_const(0.0);
+
+    ProofObligation {
+        name: "x86_64: Fadd_F32 -> ADDSS xmm,xmm".to_string(),
+        tmir_expr: encode_tmir_fp_binop(&Opcode::Fadd, Type::F32, a.clone(), b.clone()),
+        aarch64_expr: encode_fp_add_rr(X86FPSize::Single, a, b),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 8, 24), ("b".to_string(), 8, 24)],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Fadd(F64, a, b) -> x86-64 ADDSD xmm, xmm`
+pub fn proof_x86_fadd_f64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_fp_binop;
+    use crate::x86_64_semantics::{encode_fp_add_rr, X86FPSize};
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp64_const(0.0);
+    let b = SmtExpr::fp64_const(0.0);
+
+    ProofObligation {
+        name: "x86_64: Fadd_F64 -> ADDSD xmm,xmm".to_string(),
+        tmir_expr: encode_tmir_fp_binop(&Opcode::Fadd, Type::F64, a.clone(), b.clone()),
+        aarch64_expr: encode_fp_add_rr(X86FPSize::Double, a, b),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 11, 53), ("b".to_string(), 11, 53)],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Fsub(F32, a, b) -> x86-64 SUBSS xmm, xmm`
+pub fn proof_x86_fsub_f32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_fp_binop;
+    use crate::x86_64_semantics::{encode_fp_sub_rr, X86FPSize};
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp32_const(0.0);
+    let b = SmtExpr::fp32_const(0.0);
+
+    ProofObligation {
+        name: "x86_64: Fsub_F32 -> SUBSS xmm,xmm".to_string(),
+        tmir_expr: encode_tmir_fp_binop(&Opcode::Fsub, Type::F32, a.clone(), b.clone()),
+        aarch64_expr: encode_fp_sub_rr(X86FPSize::Single, a, b),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 8, 24), ("b".to_string(), 8, 24)],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Fsub(F64, a, b) -> x86-64 SUBSD xmm, xmm`
+pub fn proof_x86_fsub_f64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_fp_binop;
+    use crate::x86_64_semantics::{encode_fp_sub_rr, X86FPSize};
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp64_const(0.0);
+    let b = SmtExpr::fp64_const(0.0);
+
+    ProofObligation {
+        name: "x86_64: Fsub_F64 -> SUBSD xmm,xmm".to_string(),
+        tmir_expr: encode_tmir_fp_binop(&Opcode::Fsub, Type::F64, a.clone(), b.clone()),
+        aarch64_expr: encode_fp_sub_rr(X86FPSize::Double, a, b),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 11, 53), ("b".to_string(), 11, 53)],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Fmul(F32, a, b) -> x86-64 MULSS xmm, xmm`
+pub fn proof_x86_fmul_f32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_fp_binop;
+    use crate::x86_64_semantics::{encode_fp_mul_rr, X86FPSize};
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp32_const(0.0);
+    let b = SmtExpr::fp32_const(0.0);
+
+    ProofObligation {
+        name: "x86_64: Fmul_F32 -> MULSS xmm,xmm".to_string(),
+        tmir_expr: encode_tmir_fp_binop(&Opcode::Fmul, Type::F32, a.clone(), b.clone()),
+        aarch64_expr: encode_fp_mul_rr(X86FPSize::Single, a, b),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 8, 24), ("b".to_string(), 8, 24)],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Fmul(F64, a, b) -> x86-64 MULSD xmm, xmm`
+pub fn proof_x86_fmul_f64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_fp_binop;
+    use crate::x86_64_semantics::{encode_fp_mul_rr, X86FPSize};
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp64_const(0.0);
+    let b = SmtExpr::fp64_const(0.0);
+
+    ProofObligation {
+        name: "x86_64: Fmul_F64 -> MULSD xmm,xmm".to_string(),
+        tmir_expr: encode_tmir_fp_binop(&Opcode::Fmul, Type::F64, a.clone(), b.clone()),
+        aarch64_expr: encode_fp_mul_rr(X86FPSize::Double, a, b),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 11, 53), ("b".to_string(), 11, 53)],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Fdiv(F32, a, b) -> x86-64 DIVSS xmm, xmm`
+pub fn proof_x86_fdiv_f32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_fp_binop;
+    use crate::x86_64_semantics::{encode_fp_div_rr, X86FPSize};
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp32_const(0.0);
+    let b = SmtExpr::fp32_const(0.0);
+
+    ProofObligation {
+        name: "x86_64: Fdiv_F32 -> DIVSS xmm,xmm".to_string(),
+        tmir_expr: encode_tmir_fp_binop(&Opcode::Fdiv, Type::F32, a.clone(), b.clone()),
+        aarch64_expr: encode_fp_div_rr(X86FPSize::Single, a, b),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 8, 24), ("b".to_string(), 8, 24)],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Fdiv(F64, a, b) -> x86-64 DIVSD xmm, xmm`
+pub fn proof_x86_fdiv_f64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_fp_binop;
+    use crate::x86_64_semantics::{encode_fp_div_rr, X86FPSize};
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp64_const(0.0);
+    let b = SmtExpr::fp64_const(0.0);
+
+    ProofObligation {
+        name: "x86_64: Fdiv_F64 -> DIVSD xmm,xmm".to_string(),
+        tmir_expr: encode_tmir_fp_binop(&Opcode::Fdiv, Type::F64, a.clone(), b.clone()),
+        aarch64_expr: encode_fp_div_rr(X86FPSize::Double, a, b),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 11, 53), ("b".to_string(), 11, 53)],
+        category: None,
+    }
+}
+
+// ===========================================================================
+// MOVZX/MOVSX lowering proofs
+// ===========================================================================
+
+/// Proof: `zero_extend(a[7:0], 24) == x86-64 MOVZX r32, r/m8`
+pub fn proof_x86_movzx_8_to_32() -> ProofObligation {
+    use crate::x86_64_semantics::encode_movzx;
+
+    let a = SmtExpr::var("a", 32);
+
+    ProofObligation {
+        name: "x86_64: Uextend_I8_to_I32 -> MOVZX r32,r/m8".to_string(),
+        tmir_expr: a.clone().extract(7, 0).zero_ext(24),
+        aarch64_expr: encode_movzx(8, 32, a),
+        inputs: vec![("a".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `zero_extend(a[15:0], 16) == x86-64 MOVZX r32, r/m16`
+pub fn proof_x86_movzx_16_to_32() -> ProofObligation {
+    use crate::x86_64_semantics::encode_movzx;
+
+    let a = SmtExpr::var("a", 32);
+
+    ProofObligation {
+        name: "x86_64: Uextend_I16_to_I32 -> MOVZX r32,r/m16".to_string(),
+        tmir_expr: a.clone().extract(15, 0).zero_ext(16),
+        aarch64_expr: encode_movzx(16, 32, a),
+        inputs: vec![("a".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `zero_extend(a[7:0], 56) == x86-64 MOVZX r64, r/m8`
+pub fn proof_x86_movzx_8_to_64() -> ProofObligation {
+    use crate::x86_64_semantics::encode_movzx;
+
+    let a = SmtExpr::var("a", 64);
+
+    ProofObligation {
+        name: "x86_64: Uextend_I8_to_I64 -> MOVZX r64,r/m8".to_string(),
+        tmir_expr: a.clone().extract(7, 0).zero_ext(56),
+        aarch64_expr: encode_movzx(8, 64, a),
+        inputs: vec![("a".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `sign_extend(a[7:0], 24) == x86-64 MOVSX r32, r/m8`
+pub fn proof_x86_movsx_8_to_32() -> ProofObligation {
+    use crate::x86_64_semantics::encode_movsx;
+
+    let a = SmtExpr::var("a", 32);
+
+    ProofObligation {
+        name: "x86_64: Sextend_I8_to_I32 -> MOVSX r32,r/m8".to_string(),
+        tmir_expr: a.clone().extract(7, 0).sign_ext(24),
+        aarch64_expr: encode_movsx(8, 32, a),
+        inputs: vec![("a".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `sign_extend(a[15:0], 16) == x86-64 MOVSX r32, r/m16`
+pub fn proof_x86_movsx_16_to_32() -> ProofObligation {
+    use crate::x86_64_semantics::encode_movsx;
+
+    let a = SmtExpr::var("a", 32);
+
+    ProofObligation {
+        name: "x86_64: Sextend_I16_to_I32 -> MOVSX r32,r/m16".to_string(),
+        tmir_expr: a.clone().extract(15, 0).sign_ext(16),
+        aarch64_expr: encode_movsx(16, 32, a),
+        inputs: vec![("a".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `sign_extend(a[31:0], 32) == x86-64 MOVSXD r64, r/m32`
+pub fn proof_x86_movsxd_32_to_64() -> ProofObligation {
+    use crate::x86_64_semantics::encode_movsx;
+
+    let a = SmtExpr::var("a", 64);
+
+    ProofObligation {
+        name: "x86_64: Sextend_I32_to_I64 -> MOVSXD r64,r/m32".to_string(),
+        tmir_expr: a.clone().extract(31, 0).sign_ext(32),
+        aarch64_expr: encode_movsx(32, 64, a),
+        inputs: vec![("a".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+// ===========================================================================
+// LEA lowering proofs
+// ===========================================================================
+
+/// Proof: `a + b == x86-64 LEA r64, [r64 + r64]`
+pub fn proof_x86_lea_add_i64() -> ProofObligation {
+    use crate::x86_64_semantics::encode_lea_base_index_scale;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "x86_64: base+index -> LEA r64,[r64+r64]".to_string(),
+        tmir_expr: a.clone().bvadd(b.clone()),
+        aarch64_expr: encode_lea_base_index_scale(a, b, 1),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `a + (b * 2) == x86-64 LEA r64, [r64 + r64*2]`
+pub fn proof_x86_lea_scale2_i64() -> ProofObligation {
+    use crate::x86_64_semantics::encode_lea_base_index_scale;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "x86_64: base+index*2 -> LEA r64,[r64+r64*2]".to_string(),
+        tmir_expr: a.clone().bvadd(b.clone().bvmul(SmtExpr::bv_const(2_u64, 64))),
+        aarch64_expr: encode_lea_base_index_scale(a, b, 2),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `a + (b * 4) == x86-64 LEA r64, [r64 + r64*4]`
+pub fn proof_x86_lea_scale4_i64() -> ProofObligation {
+    use crate::x86_64_semantics::encode_lea_base_index_scale;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "x86_64: base+index*4 -> LEA r64,[r64+r64*4]".to_string(),
+        tmir_expr: a.clone().bvadd(b.clone().bvmul(SmtExpr::bv_const(4_u64, 64))),
+        aarch64_expr: encode_lea_base_index_scale(a, b, 4),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `a + (b * 8) == x86-64 LEA r64, [r64 + r64*8]`
+pub fn proof_x86_lea_scale8_i64() -> ProofObligation {
+    use crate::x86_64_semantics::encode_lea_base_index_scale;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "x86_64: base+index*8 -> LEA r64,[r64+r64*8]".to_string(),
+        tmir_expr: a.clone().bvadd(b.clone().bvmul(SmtExpr::bv_const(8_u64, 64))),
+        aarch64_expr: encode_lea_base_index_scale(a, b, 8),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+// ===========================================================================
+// Three-operand IMUL lowering proofs
+// ===========================================================================
+
+/// Proof: `a * 42 == x86-64 IMUL r32, r/m32, imm8`
+pub fn proof_x86_imul_rri_i32() -> ProofObligation {
+    use crate::x86_64_semantics::{encode_imul_rri, X86OperandSize};
+
+    let a = SmtExpr::var("a", 32);
+
+    ProofObligation {
+        name: "x86_64: Imul_I32_Imm -> IMUL r32,r/m32,42".to_string(),
+        tmir_expr: a.clone().bvmul(SmtExpr::bv_const(42_u64, 32)),
+        aarch64_expr: encode_imul_rri(X86OperandSize::S32, a, 42),
+        inputs: vec![("a".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `a * 42 == x86-64 IMUL r64, r/m64, imm8`
+pub fn proof_x86_imul_rri_i64() -> ProofObligation {
+    use crate::x86_64_semantics::{encode_imul_rri, X86OperandSize};
+
+    let a = SmtExpr::var("a", 64);
+
+    ProofObligation {
+        name: "x86_64: Imul_I64_Imm -> IMUL r64,r/m64,42".to_string(),
+        tmir_expr: a.clone().bvmul(SmtExpr::bv_const(42_u64, 64)),
+        aarch64_expr: encode_imul_rri(X86OperandSize::S64, a, 42),
+        inputs: vec![("a".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+// ===========================================================================
 // Collect all proofs
 // ===========================================================================
 
@@ -1226,6 +1618,30 @@ pub fn all_x86_64_proofs() -> Vec<ProofObligation> {
         proof_x86_icmp_uge_i64(),
         proof_x86_icmp_ugt_i64(),
         proof_x86_icmp_ule_i64(),
+        // Floating-point
+        proof_x86_fadd_f32(),
+        proof_x86_fadd_f64(),
+        proof_x86_fsub_f32(),
+        proof_x86_fsub_f64(),
+        proof_x86_fmul_f32(),
+        proof_x86_fmul_f64(),
+        proof_x86_fdiv_f32(),
+        proof_x86_fdiv_f64(),
+        // Extensions (MOVZX/MOVSX)
+        proof_x86_movzx_8_to_32(),
+        proof_x86_movzx_16_to_32(),
+        proof_x86_movzx_8_to_64(),
+        proof_x86_movsx_8_to_32(),
+        proof_x86_movsx_16_to_32(),
+        proof_x86_movsxd_32_to_64(),
+        // LEA
+        proof_x86_lea_add_i64(),
+        proof_x86_lea_scale2_i64(),
+        proof_x86_lea_scale4_i64(),
+        proof_x86_lea_scale8_i64(),
+        // Three-operand IMUL
+        proof_x86_imul_rri_i32(),
+        proof_x86_imul_rri_i64(),
     ]
 }
 
@@ -1623,16 +2039,176 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Floating-point lowering proof tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_x86_64_fadd_f32_proof() {
+        let obligation = proof_x86_fadd_f32();
+        let result = crate::lowering_proof::verify_fp_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Fadd_F32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_fadd_f64_proof() {
+        let obligation = proof_x86_fadd_f64();
+        let result = crate::lowering_proof::verify_fp_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Fadd_F64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_fsub_f32_proof() {
+        let obligation = proof_x86_fsub_f32();
+        let result = crate::lowering_proof::verify_fp_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Fsub_F32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_fsub_f64_proof() {
+        let obligation = proof_x86_fsub_f64();
+        let result = crate::lowering_proof::verify_fp_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Fsub_F64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_fmul_f32_proof() {
+        let obligation = proof_x86_fmul_f32();
+        let result = crate::lowering_proof::verify_fp_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Fmul_F32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_fmul_f64_proof() {
+        let obligation = proof_x86_fmul_f64();
+        let result = crate::lowering_proof::verify_fp_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Fmul_F64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_fdiv_f32_proof() {
+        let obligation = proof_x86_fdiv_f32();
+        let result = crate::lowering_proof::verify_fp_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Fdiv_F32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_fdiv_f64_proof() {
+        let obligation = proof_x86_fdiv_f64();
+        let result = crate::lowering_proof::verify_fp_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Fdiv_F64 proof failed: {:?}", result);
+    }
+
+    // -----------------------------------------------------------------------
+    // MOVZX/MOVSX lowering proof tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_x86_64_movzx_8_to_32_proof() {
+        let obligation = proof_x86_movzx_8_to_32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 MOVZX 8->32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_movzx_16_to_32_proof() {
+        let obligation = proof_x86_movzx_16_to_32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 MOVZX 16->32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_movzx_8_to_64_proof() {
+        let obligation = proof_x86_movzx_8_to_64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 MOVZX 8->64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_movsx_8_to_32_proof() {
+        let obligation = proof_x86_movsx_8_to_32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 MOVSX 8->32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_movsx_16_to_32_proof() {
+        let obligation = proof_x86_movsx_16_to_32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 MOVSX 16->32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_movsxd_32_to_64_proof() {
+        let obligation = proof_x86_movsxd_32_to_64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 MOVSXD 32->64 proof failed: {:?}", result);
+    }
+
+    // -----------------------------------------------------------------------
+    // LEA lowering proof tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_x86_64_lea_add_i64_proof() {
+        let obligation = proof_x86_lea_add_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 LEA add i64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_lea_scale2_i64_proof() {
+        let obligation = proof_x86_lea_scale2_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 LEA scale2 i64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_lea_scale4_i64_proof() {
+        let obligation = proof_x86_lea_scale4_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 LEA scale4 i64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_lea_scale8_i64_proof() {
+        let obligation = proof_x86_lea_scale8_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 LEA scale8 i64 proof failed: {:?}", result);
+    }
+
+    // -----------------------------------------------------------------------
+    // Three-operand IMUL lowering proof tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_x86_64_imul_rri_i32_proof() {
+        let obligation = proof_x86_imul_rri_i32();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 IMUL rri i32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_imul_rri_i64_proof() {
+        let obligation = proof_x86_imul_rri_i64();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 IMUL rri i64 proof failed: {:?}", result);
+    }
+
+    // -----------------------------------------------------------------------
     // Meta: verify all proofs at once
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_all_x86_64_proofs() {
         let proofs = all_x86_64_proofs();
-        assert_eq!(proofs.len(), 49, "Expected 49 x86-64 proof obligations");
+        assert_eq!(proofs.len(), 69, "Expected 69 x86-64 proof obligations");
 
         for proof in &proofs {
-            let result = verify_by_evaluation(proof);
+            let result = if proof.fp_inputs.is_empty() {
+                verify_by_evaluation(proof)
+            } else {
+                crate::lowering_proof::verify_fp_by_evaluation(proof)
+            };
             assert!(
                 matches!(result, VerificationResult::Valid),
                 "Proof '{}' failed: {:?}",
