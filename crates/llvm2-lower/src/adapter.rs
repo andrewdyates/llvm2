@@ -317,6 +317,36 @@ pub fn translate_type_with_structs(
     }
 }
 
+/// Convert a tMIR `Ty` to an internal LIR `Type`, with a module type table for
+/// resolving `Ty::Array(TyId, len)` references.
+///
+/// Unlike [`translate_type`] which returns `Err` for array types, this variant
+/// uses the module's `types: Vec<Ty>` table to look up the element type behind
+/// a `TyId` and recursively translate it. This is essential for the computation
+/// graph builder which needs `Type::Array` entries in `SubgraphDescriptor` so
+/// that `operates_on_arrays()` returns `true` and GPU/ANE legality is evaluated.
+pub fn translate_type_with_type_table(
+    ty: &Ty,
+    type_table: &[Ty],
+) -> Result<Type, AdapterError> {
+    match ty {
+        Ty::Array(elem_ty_id, len) => {
+            let elem_ty = type_table
+                .get(elem_ty_id.index() as usize)
+                .ok_or_else(|| {
+                    AdapterError::UnsupportedType(format!(
+                        "Array(TyId({}), {})",
+                        elem_ty_id.index(),
+                        len,
+                    ))
+                })?;
+            let lir_elem = translate_type_with_type_table(elem_ty, type_table)?;
+            Ok(Type::Array(Box::new(lir_elem), *len as u32))
+        }
+        _ => translate_type(ty),
+    }
+}
+
 /// Convert a tMIR `Ordering` to an internal LIR `AtomicOrdering`.
 fn translate_ordering(ordering: &TmirOrdering) -> AtomicOrdering {
     match ordering {

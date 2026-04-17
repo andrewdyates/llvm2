@@ -649,7 +649,7 @@ impl ComputeGraph {
                 let val = Value(i as u32);
                 lir_values.push(val);
                 if let Some(ty) = value_types_map.get(vid)
-                    && let Ok(lir_ty) = crate::adapter::translate_type(ty) {
+                    && let Ok(lir_ty) = crate::adapter::translate_type_with_type_table(ty, &module.types) {
                         desc.value_types.insert(val, lir_ty);
                     }
             }
@@ -1091,6 +1091,7 @@ impl GraphBuilder {
                     block.id,
                     &block.body,
                     &value_types,
+                    &module.types,
                 );
 
                 for node in nodes {
@@ -1166,6 +1167,7 @@ impl GraphBuilder {
         block_id: BlockId,
         body: &[InstrNode],
         value_types: &HashMap<ValueId, Ty>,
+        module_types: &[Ty],
     ) -> Vec<ComputeNode> {
         if body.is_empty() {
             return Vec::new();
@@ -1258,7 +1260,7 @@ impl GraphBuilder {
             let val = Value(i as u32);
             lir_values.push(val);
             if let Some(ty) = value_types.get(vid)
-                && let Ok(lir_ty) = crate::adapter::translate_type(ty) {
+                && let Ok(lir_ty) = crate::adapter::translate_type_with_type_table(ty, module_types) {
                     subgraph_desc.value_types.insert(val, lir_ty);
                 }
         }
