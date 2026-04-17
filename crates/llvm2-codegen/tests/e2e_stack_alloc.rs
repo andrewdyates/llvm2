@@ -26,7 +26,7 @@
 // calls from the same function will crash due to corrupted FP chain.
 // The link+run tests below are structured to work within this limitation.
 //
-// Part of #243 -- Stack allocation E2E tests through full tMIR pipeline.
+// Part of #243 — Stack allocation E2E tests through full tMIR pipeline.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,9 +34,10 @@ use std::process::Command;
 
 use llvm2_codegen::compiler::{Compiler, CompilerConfig, CompilerTraceLevel};
 use llvm2_codegen::pipeline::OptLevel;
+use tmir::{Module as TmirModule, Ty};
+use tmir::BinOp;
+use tmir_build::ModuleBuilder;
 
-use tmir::Ty;
-use tmir_build::builder::ModuleBuilder;
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -68,7 +69,7 @@ fn cleanup(dir: &Path) {
 /// Compile a tMIR module through Compiler::compile(), link with a C driver,
 /// run, and return (exit_code, stdout).
 fn compile_link_run(
-    module: &tmir::Module,
+    module: &TmirModule,
     test_name: &str,
     driver_src: &str,
 ) -> (i32, String) {
@@ -169,13 +170,11 @@ fn e2e_stack_alloc_store_load_simple() {
     }
 
     let mut mb = ModuleBuilder::new("stack_alloc_simple_test");
-    let ft = mb.add_func_type(vec![], vec![Ty::I64]);
-    let mut fb = mb.function("_stack_simple", ft);
-
+    let ty = mb.add_func_type(vec![], vec![Ty::I64]);
+    let mut fb = mb.function("_stack_simple", ty);
     let entry = fb.create_block();
-    fb.set_entry(entry);
-
     fb.switch_to_block(entry);
+
     let ptr_val = fb.alloca(Ty::I64);
     let const_42 = fb.iconst(Ty::I64, 42);
     fb.store(Ty::I64, ptr_val, const_42);
@@ -238,16 +237,14 @@ fn e2e_stack_alloc_store_load_argument() {
     }
 
     let mut mb = ModuleBuilder::new("stack_alloc_arg_test");
-    let ft = mb.add_func_type(vec![Ty::I64], vec![Ty::I64]);
-    let mut fb = mb.function("_stack_arg", ft);
-
+    let ty = mb.add_func_type(vec![Ty::I64], vec![Ty::I64]);
+    let mut fb = mb.function("_stack_arg", ty);
     let entry = fb.create_block();
-    let a = fb.add_block_param(entry, Ty::I64);
-    fb.set_entry(entry);
-
+    let param0 = fb.add_block_param(entry, Ty::I64);
     fb.switch_to_block(entry);
+
     let ptr = fb.alloca(Ty::I64);
-    fb.store(Ty::I64, ptr, a);
+    fb.store(Ty::I64, ptr, param0);
     let loaded = fb.load(Ty::I64, ptr);
     fb.ret(vec![loaded]);
 
@@ -306,17 +303,15 @@ fn e2e_stack_alloc_compute_store_reload() {
     }
 
     let mut mb = ModuleBuilder::new("stack_alloc_compute_test");
-    let ft = mb.add_func_type(vec![Ty::I64, Ty::I64], vec![Ty::I64]);
-    let mut fb = mb.function("_stack_add_reload", ft);
-
+    let ty = mb.add_func_type(vec![Ty::I64, Ty::I64], vec![Ty::I64]);
+    let mut fb = mb.function("_stack_add_reload", ty);
     let entry = fb.create_block();
-    let a = fb.add_block_param(entry, Ty::I64);
-    let b = fb.add_block_param(entry, Ty::I64);
-    fb.set_entry(entry);
-
+    let param0 = fb.add_block_param(entry, Ty::I64);
+    let param1 = fb.add_block_param(entry, Ty::I64);
     fb.switch_to_block(entry);
+
     let ptr = fb.alloca(Ty::I64);
-    let sum = fb.add(Ty::I64, a, b);
+    let sum = fb.binop(BinOp::Add, Ty::I64, param0, param1);
     fb.store(Ty::I64, ptr, sum);
     let reloaded = fb.load(Ty::I64, ptr);
     fb.ret(vec![reloaded]);
@@ -353,20 +348,18 @@ int main() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: Compilation-only -- verifies Alloc/Store/Load compiles at all
+// Test 4: Compilation-only — verifies Alloc/Store/Load compiles at all
 // optimization levels. Does not require AArch64 or cc.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn e2e_stack_alloc_compiles_all_opt_levels() {
     let mut mb = ModuleBuilder::new("stack_alloc_opt_test");
-    let ft = mb.add_func_type(vec![], vec![Ty::I64]);
-    let mut fb = mb.function("_stack_opt", ft);
-
+    let ty = mb.add_func_type(vec![], vec![Ty::I64]);
+    let mut fb = mb.function("_stack_opt", ty);
     let entry = fb.create_block();
-    fb.set_entry(entry);
-
     fb.switch_to_block(entry);
+
     let ptr = fb.alloca(Ty::I64);
     let const_val = fb.iconst(Ty::I64, 99);
     fb.store(Ty::I64, ptr, const_val);
@@ -416,7 +409,7 @@ fn e2e_stack_alloc_compiles_all_opt_levels() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: Compilation-only -- verifies store-overwrite-load pattern
+// Test 5: Compilation-only — verifies store-overwrite-load pattern
 // compiles correctly, exercising multiple stores to the same slot.
 // Does not require AArch64 or cc.
 // ---------------------------------------------------------------------------
@@ -424,21 +417,19 @@ fn e2e_stack_alloc_compiles_all_opt_levels() {
 #[test]
 fn e2e_stack_alloc_overwrite_compiles() {
     let mut mb = ModuleBuilder::new("stack_overwrite_compile_test");
-    let ft = mb.add_func_type(vec![Ty::I64, Ty::I64], vec![Ty::I64]);
-    let mut fb = mb.function("_stack_ow", ft);
-
+    let ty = mb.add_func_type(vec![Ty::I64, Ty::I64], vec![Ty::I64]);
+    let mut fb = mb.function("_stack_ow", ty);
     let entry = fb.create_block();
-    let a = fb.add_block_param(entry, Ty::I64);
-    let b = fb.add_block_param(entry, Ty::I64);
-    fb.set_entry(entry);
-
+    let param0 = fb.add_block_param(entry, Ty::I64);
+    let param1 = fb.add_block_param(entry, Ty::I64);
     fb.switch_to_block(entry);
+
     let ptr = fb.alloca(Ty::I64);
-    fb.store(Ty::I64, ptr, a);
+    fb.store(Ty::I64, ptr, param0);
     let va = fb.load(Ty::I64, ptr);
-    fb.store(Ty::I64, ptr, b);
+    fb.store(Ty::I64, ptr, param1);
     let vb = fb.load(Ty::I64, ptr);
-    let sum = fb.add(Ty::I64, va, vb);
+    let sum = fb.binop(BinOp::Add, Ty::I64, va, vb);
     fb.ret(vec![sum]);
 
     fb.build();

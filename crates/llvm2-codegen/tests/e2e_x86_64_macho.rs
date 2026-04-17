@@ -766,51 +766,42 @@ fn test_x86_64_macho_tmir_compile() {
     // Test the full tMIR -> adapter -> ISel -> encode -> Mach-O pipeline for x86-64.
     use llvm2_codegen::x86_64::{X86Pipeline, X86PipelineConfig, X86OutputFormat};
 
-    use tmir_func::{Block as TmirBlock, Function as TmirFunction};
-    use tmir_instrs::{BinOp, Instr, InstrNode, Operand};
-    use tmir_types::{BlockId, FuncId, FuncTy, Ty, ValueId};
-
+    use tmir::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule, FuncTy, Ty, FuncTyId, Constant};
+use tmir::{Inst, InstrNode, BinOp, ICmpOp, UnOp};
+use tmir::{BlockId, FuncId, ValueId};
+        
     // Build a simple tMIR function: fn add(a: i64, b: i64) -> i64 { a + b }
-    let tmir_func = TmirFunction {
-        id: FuncId(0),
-        name: "add".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64), Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
-        blocks: vec![TmirBlock {
-            id: BlockId(0),
-            params: vec![
-                (ValueId(0), Ty::int(64)),
-                (ValueId(1), Ty::int(64)),
-            ],
-            body: vec![
-                InstrNode {
-                    instr: Instr::BinOp {
-                        op: BinOp::Add,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(1)),
-                    },
-                    results: vec![ValueId(2)],
-                    proofs: vec![],
-                },
-                InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(2))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                },
-            ],
-        }],
-        proofs: vec![],
-    };
+    let mut module = TmirModule::new("test");
+    let ft_id = module.add_func_type(FuncTy {
+        params: vec![Ty::I64, Ty::I64],
+        returns: vec![Ty::I64],
+        is_vararg: false,
+    });
+    let mut tmir_func = TmirFunction::new(FuncId::new(0), "add", ft_id, BlockId::new(0));
+    tmir_func.blocks = vec![TmirBlock {
+        id: BlockId::new(0),
+        params: vec![
+            (ValueId::new(0), Ty::I64),
+            (ValueId::new(1), Ty::I64),
+        ],
+        body: vec![
+            InstrNode::new(Inst::BinOp {
+                op: BinOp::Add,
+                ty: Ty::I64,
+                lhs: ValueId::new(0),
+                rhs: ValueId::new(1),
+            })
+            .with_result(ValueId::new(2)),
+            InstrNode::new(Inst::Return {
+                values: vec![ValueId::new(2)],
+            }),
+        ],
+    }];
+    module.add_function(tmir_func.clone());
 
     // Translate tMIR to LIR through the adapter.
     let (lir_func, _proof_ctx) =
-        llvm2_lower::translate_function(&tmir_func, &[])
+        llvm2_lower::translate_function(&tmir_func, &module)
             .expect("tMIR adapter translation should succeed");
 
     // Compile through the x86-64 pipeline to Mach-O.

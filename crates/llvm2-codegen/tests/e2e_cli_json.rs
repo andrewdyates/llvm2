@@ -5,8 +5,8 @@
 //
 // Tests the full JSON wire format pipeline:
 //   1. Build a tMIR module programmatically using the builder API
-//   2. Serialize to JSON via serde_json
-//   3. Deserialize back via serde_json
+//   2. Serialize to JSON via reader::write_module_to_string()
+//   3. Deserialize back via reader::read_module_from_str()
 //   4. Compile via Compiler::compile()
 //   5. Write .o file
 //   6. Link with system cc
@@ -15,7 +15,7 @@
 // This exercises the same path the CLI uses when invoked with --input-json,
 // ensuring the JSON wire format is a faithful representation of tMIR modules.
 //
-// Part of #256 -- E2E test for the CLI tMIR-to-binary pipeline.
+// Part of #256 — E2E test for the CLI tMIR-to-binary pipeline.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,9 +23,10 @@ use std::process::Command;
 
 use llvm2_codegen::compiler::{Compiler, CompilerConfig, CompilerTraceLevel};
 use llvm2_codegen::pipeline::OptLevel;
+use tmir::{Module as TmirModule, Ty};
+use tmir::BinOp;
+use tmir_build::ModuleBuilder;
 
-use tmir::Ty;
-use tmir_build::builder::ModuleBuilder;
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -71,16 +72,14 @@ fn e2e_json_wire_format_return_42() {
 
     // Step 1: Build a tMIR module using the builder API.
     let mut mb = ModuleBuilder::new("cli_e2e_test");
-    let ft = mb.add_func_type(vec![], vec![Ty::I64]);
-    let mut fb = mb.function("_return_42", ft);
-
+    // Function names use leading underscore per Mach-O convention:
+    // tMIR name "_return_42" -> Mach-O symbol "__return_42" -> C sees "_return_42"
+    let ty = mb.add_func_type(vec![], vec![Ty::I64]);
+    let mut fb = mb.function("_return_42", ty);
     let entry = fb.create_block();
-    fb.set_entry(entry);
-
     fb.switch_to_block(entry);
     let result_val = fb.iconst(Ty::I64, 42);
     fb.ret(vec![result_val]);
-
     fb.build();
     let module_orig = mb.build();
 
@@ -96,7 +95,7 @@ fn e2e_json_wire_format_return_42() {
     eprintln!("--- end JSON ---");
 
     // Step 3: Deserialize back from JSON (validates round-trip fidelity).
-    let module_rt: tmir::Module = serde_json::from_str(&json_str)
+    let module_rt = serde_json::from_str::<TmirModule>(&json_str)
         .expect("deserializing tMIR module from JSON should succeed");
     assert_eq!(
         module_orig, module_rt,
@@ -135,9 +134,9 @@ fn e2e_json_wire_format_return_42() {
     fs::write(&json_path, &json_str).expect("write JSON file");
 
     // Verify JSON file can be read back from disk too.
-    let json_bytes = fs::read(&json_path).expect("read JSON bytes");
-    let module_from_file: tmir::Module =
-        serde_json::from_slice(&json_bytes).expect("reading JSON from file should succeed");
+    let json_from_file = fs::read_to_string(&json_path).expect("read JSON file");
+    let module_from_file: TmirModule = serde_json::from_str(&json_from_file)
+        .expect("reading JSON from file should succeed");
     assert_eq!(module_orig, module_from_file);
 
     // C driver that calls our compiled function and checks the return value.
@@ -236,26 +235,23 @@ fn e2e_json_wire_format_add_args() {
     }
 
     // Build module: fn _add_i64(a: i64, b: i64) -> i64 { a + b }
+    // Leading underscore for Mach-O convention.
     let mut mb = ModuleBuilder::new("cli_e2e_add");
-    let ft = mb.add_func_type(vec![Ty::I64, Ty::I64], vec![Ty::I64]);
-    let mut fb = mb.function("_add_i64", ft);
-
+    let ty = mb.add_func_type(vec![Ty::I64, Ty::I64], vec![Ty::I64]);
+    let mut fb = mb.function("_add_i64", ty);
     let entry = fb.create_block();
     let a = fb.add_block_param(entry, Ty::I64);
     let b = fb.add_block_param(entry, Ty::I64);
-    fb.set_entry(entry);
-
     fb.switch_to_block(entry);
-    let result_val = fb.add(Ty::I64, a, b);
+    let result_val = fb.binop(BinOp::Add, Ty::I64, a, b);
     fb.ret(vec![result_val]);
-
     fb.build();
     let module_orig = mb.build();
 
     // JSON round-trip.
     let json_str = serde_json::to_string_pretty(&module_orig)
         .expect("JSON serialization should succeed");
-    let module_rt: tmir::Module = serde_json::from_str(&json_str)
+    let module_rt = serde_json::from_str::<TmirModule>(&json_str)
         .expect("JSON deserialization should succeed");
     assert_eq!(module_orig, module_rt, "JSON round-trip must preserve equality");
 
@@ -333,37 +329,34 @@ int main() {
 fn e2e_json_file_roundtrip_compile() {
     // Build a simple tMIR module.
     let mut mb = ModuleBuilder::new("file_roundtrip_test");
-    let ft = mb.add_func_type(vec![Ty::I64], vec![Ty::I64]);
-    let mut fb = mb.function("identity", ft);
-
+    let ty = mb.add_func_type(vec![Ty::I64], vec![Ty::I64]);
+    let mut fb = mb.function("identity", ty);
     let entry = fb.create_block();
-    let a = fb.add_block_param(entry, Ty::I64);
-    fb.set_entry(entry);
-
+    let param0 = fb.add_block_param(entry, Ty::I64);
     fb.switch_to_block(entry);
-    fb.ret(vec![a]);
-
+    fb.ret(vec![param0]);
     fb.build();
     let module_orig = mb.build();
 
     // Write to JSON file on disk (as external tools would produce).
     let test_dir = make_test_dir("file_roundtrip");
     let json_path = test_dir.join("module.json");
-    let json_str = serde_json::to_string_pretty(&module_orig)
-        .expect("serialize to JSON");
-    fs::write(&json_path, &json_str).expect("write JSON to file should succeed");
+    let json_str_file = serde_json::to_string_pretty(&module_orig)
+        .expect("serialize JSON should succeed");
+    fs::write(&json_path, &json_str_file).expect("write JSON to file should succeed");
 
     // Read back from file (as the CLI does with --input-json).
-    let json_bytes = fs::read(&json_path).expect("read JSON bytes");
-    let module_from_file: tmir::Module =
-        serde_json::from_slice(&json_bytes).expect("read JSON from file should succeed");
+    let json_from_file2 = fs::read_to_string(&json_path).expect("read JSON file");
+    let module_from_file: TmirModule = serde_json::from_str(&json_from_file2)
+        .expect("read JSON from file should succeed");
     assert_eq!(
         module_orig, module_from_file,
         "file-based JSON round-trip must preserve module equality"
     );
 
     // Verify the JSON is valid serde_json (raw deserialization without validation).
-    let module_raw: tmir::Module =
+    let json_bytes = fs::read(&json_path).expect("read JSON bytes");
+    let module_raw: TmirModule =
         serde_json::from_slice(&json_bytes).expect("raw serde_json deserialization should work");
     assert_eq!(module_orig, module_raw);
 
@@ -401,30 +394,33 @@ fn e2e_json_multi_function_module() {
     //   fn const_32() -> i64 { 32 }
     let mut mb = ModuleBuilder::new("multi_func_json");
 
-    let ft = mb.add_func_type(vec![], vec![Ty::I64]);
+    // Leading underscore for Mach-O convention.
+    let ty1 = mb.add_func_type(vec![], vec![Ty::I64]);
+    {
+        let mut fb1 = mb.function("_const_10", ty1);
+        let entry1 = fb1.create_block();
+        fb1.switch_to_block(entry1);
+        let r1 = fb1.iconst(Ty::I64, 10);
+        fb1.ret(vec![r1]);
+        fb1.build();
+    }
 
-    let mut fb1 = mb.function("_const_10", ft);
-    let entry1 = fb1.create_block();
-    fb1.set_entry(entry1);
-    fb1.switch_to_block(entry1);
-    let r1 = fb1.iconst(Ty::I64, 10);
-    fb1.ret(vec![r1]);
-    fb1.build();
-
-    let mut fb2 = mb.function("_const_32", ft);
-    let entry2 = fb2.create_block();
-    fb2.set_entry(entry2);
-    fb2.switch_to_block(entry2);
-    let r2 = fb2.iconst(Ty::I64, 32);
-    fb2.ret(vec![r2]);
-    fb2.build();
+    let ty2 = mb.add_func_type(vec![], vec![Ty::I64]);
+    {
+        let mut fb2 = mb.function("_const_32", ty2);
+        let entry2 = fb2.create_block();
+        fb2.switch_to_block(entry2);
+        let r2 = fb2.iconst(Ty::I64, 32);
+        fb2.ret(vec![r2]);
+        fb2.build();
+    }
 
     let module_orig = mb.build();
 
     // JSON round-trip.
     let json_str = serde_json::to_string_pretty(&module_orig)
         .expect("JSON serialization should succeed");
-    let module_rt: tmir::Module = serde_json::from_str(&json_str)
+    let module_rt: TmirModule = serde_json::from_str(&json_str)
         .expect("JSON deserialization should succeed");
     assert_eq!(module_orig, module_rt);
     assert_eq!(module_rt.functions.len(), 2);
@@ -491,29 +487,32 @@ fn e2e_json_multi_function_link_run() {
 
     let mut mb = ModuleBuilder::new("multi_link");
 
-    let ft = mb.add_func_type(vec![], vec![Ty::I64]);
+    // Leading underscore for Mach-O convention.
+    let ty1 = mb.add_func_type(vec![], vec![Ty::I64]);
+    {
+        let mut fb1 = mb.function("_const_10", ty1);
+        let entry1 = fb1.create_block();
+        fb1.switch_to_block(entry1);
+        let r1 = fb1.iconst(Ty::I64, 10);
+        fb1.ret(vec![r1]);
+        fb1.build();
+    }
 
-    let mut fb1 = mb.function("_const_10", ft);
-    let entry1 = fb1.create_block();
-    fb1.set_entry(entry1);
-    fb1.switch_to_block(entry1);
-    let r1 = fb1.iconst(Ty::I64, 10);
-    fb1.ret(vec![r1]);
-    fb1.build();
-
-    let mut fb2 = mb.function("_const_32", ft);
-    let entry2 = fb2.create_block();
-    fb2.set_entry(entry2);
-    fb2.switch_to_block(entry2);
-    let r2 = fb2.iconst(Ty::I64, 32);
-    fb2.ret(vec![r2]);
-    fb2.build();
+    let ty2 = mb.add_func_type(vec![], vec![Ty::I64]);
+    {
+        let mut fb2 = mb.function("_const_32", ty2);
+        let entry2 = fb2.create_block();
+        fb2.switch_to_block(entry2);
+        let r2 = fb2.iconst(Ty::I64, 32);
+        fb2.ret(vec![r2]);
+        fb2.build();
+    }
 
     let module_orig = mb.build();
 
     // JSON round-trip.
     let json_str = serde_json::to_string_pretty(&module_orig).unwrap();
-    let module_rt: tmir::Module = serde_json::from_str(&json_str).unwrap();
+    let module_rt: TmirModule = serde_json::from_str(&json_str).unwrap();
 
     // Compile.
     let compiler = Compiler::new(CompilerConfig {

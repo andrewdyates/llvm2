@@ -10,7 +10,7 @@
 //   ModuleBuilder -> Compiler::compile() -> Mach-O .o -> cc link -> run
 //
 // Unlike e2e_aarch64_link.rs which constructs tMIR with raw struct literals,
-// these tests use the ergonomic builder API from tmir_build::builder, proving
+// these tests use the ergonomic builder API from builder, proving
 // that the builder correctly produces multi-block programs that compile and
 // run correctly end-to-end.
 //
@@ -22,10 +22,10 @@ use std::process::Command;
 
 use llvm2_codegen::compiler::{Compiler, CompilerConfig, CompilerTraceLevel};
 use llvm2_codegen::pipeline::OptLevel;
+use tmir::{Module as TmirModule, Ty};
+use tmir::{BinOp, ICmpOp};
+use tmir_build::ModuleBuilder;
 
-use tmir::Ty;
-use tmir::inst::ICmpOp;
-use tmir_build::builder::ModuleBuilder;
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -55,7 +55,7 @@ fn cleanup(dir: &Path) {
 }
 
 /// Compile a tMIR module through the full Compiler::compile() pipeline.
-fn compile_module(module: &tmir::Module) -> Vec<u8> {
+fn compile_module(module: &TmirModule) -> Vec<u8> {
     let compiler = Compiler::new(CompilerConfig {
         opt_level: OptLevel::O0,
         trace_level: CompilerTraceLevel::Full,
@@ -149,19 +149,16 @@ fn link_and_run(dir: &Path, obj_bytes: &[u8], obj_name: &str, driver_src: &str) 
 // bb2: return b
 // ---------------------------------------------------------------------------
 
-fn build_max_module() -> tmir::Module {
+fn build_max_module() -> TmirModule {
     let mut mb = ModuleBuilder::new("e2e_max_builder_test");
-    let ft = mb.add_func_type(vec![Ty::I64, Ty::I64], vec![Ty::I64]);
-    let mut fb = mb.function("_max_builder", ft);
+    let ty = mb.add_func_type(vec![Ty::I64, Ty::I64], vec![Ty::I64]);
+    let mut fb = mb.function("_max_builder", ty);
 
     let entry = fb.create_block();
-    let bb_then = fb.create_block();
-    let bb_else = fb.create_block();
-
     let a = fb.add_block_param(entry, Ty::I64);
     let b = fb.add_block_param(entry, Ty::I64);
-
-    fb.set_entry(entry);
+    let bb_then = fb.create_block();
+    let bb_else = fb.create_block();
 
     fb.switch_to_block(entry);
     let cmp_result = fb.icmp(ICmpOp::Sgt, Ty::I64, a, b);
@@ -250,37 +247,38 @@ int main(void) {
 // bb3 (exit): return sum
 // ---------------------------------------------------------------------------
 
-fn build_sum_to_module() -> tmir::Module {
+fn build_sum_to_module() -> TmirModule {
     let mut mb = ModuleBuilder::new("e2e_sum_to_builder_test");
-    let ft = mb.add_func_type(vec![Ty::I64], vec![Ty::I64]);
-    let mut fb = mb.function("_sum_to_builder", ft);
+    let ty = mb.add_func_type(vec![Ty::I64], vec![Ty::I64]);
+    let mut fb = mb.function("_sum_to_builder", ty);
 
     let entry = fb.create_block();
+    let n = fb.add_block_param(entry, Ty::I64);
     let bb_loop = fb.create_block();
+    let loop_sum = fb.add_block_param(bb_loop, Ty::I64);
+    let loop_i = fb.add_block_param(bb_loop, Ty::I64);
     let bb_body = fb.create_block();
     let bb_exit = fb.create_block();
 
-    let n = fb.add_block_param(entry, Ty::I64);
-    let loop_sum = fb.add_block_param(bb_loop, Ty::I64);
-    let loop_i = fb.add_block_param(bb_loop, Ty::I64);
-
-    fb.set_entry(entry);
-
+    // bb0 (entry): init sum=0, i=1, jump to loop header
     fb.switch_to_block(entry);
     let sum_init = fb.iconst(Ty::I64, 0);
     let i_init = fb.iconst(Ty::I64, 1);
     fb.br(bb_loop, vec![sum_init, i_init]);
 
+    // bb1 (loop header): check i <= n
     fb.switch_to_block(bb_loop);
     let cmp_val = fb.icmp(ICmpOp::Sle, Ty::I64, loop_i, n);
     fb.condbr(cmp_val, bb_body, vec![], bb_exit, vec![]);
 
+    // bb2 (body): sum += i, i += 1, back to loop
     fb.switch_to_block(bb_body);
-    let new_sum = fb.add(Ty::I64, loop_sum, loop_i);
+    let new_sum = fb.binop(BinOp::Add, Ty::I64, loop_sum, loop_i);
     let one_val = fb.iconst(Ty::I64, 1);
-    let new_i = fb.add(Ty::I64, loop_i, one_val);
+    let new_i = fb.binop(BinOp::Add, Ty::I64, loop_i, one_val);
     fb.br(bb_loop, vec![new_sum, new_i]);
 
+    // bb3 (exit): return sum
     fb.switch_to_block(bb_exit);
     fb.ret(vec![loop_sum]);
 
@@ -362,37 +360,39 @@ int main(void) {
 // bb4: return x
 // ---------------------------------------------------------------------------
 
-fn build_clamp_module() -> tmir::Module {
+fn build_clamp_module() -> TmirModule {
     let mut mb = ModuleBuilder::new("e2e_clamp_builder_test");
-    let ft = mb.add_func_type(vec![Ty::I64, Ty::I64, Ty::I64], vec![Ty::I64]);
-    let mut fb = mb.function("_clamp_builder", ft);
+    let ty = mb.add_func_type(vec![Ty::I64, Ty::I64, Ty::I64], vec![Ty::I64]);
+    let mut fb = mb.function("_clamp_builder", ty);
 
     let entry = fb.create_block();
+    let x = fb.add_block_param(entry, Ty::I64);
+    let lo = fb.add_block_param(entry, Ty::I64);
+    let hi = fb.add_block_param(entry, Ty::I64);
     let bb_ret_lo = fb.create_block();
     let bb_check_hi = fb.create_block();
     let bb_ret_hi = fb.create_block();
     let bb_ret_x = fb.create_block();
 
-    let x = fb.add_block_param(entry, Ty::I64);
-    let lo = fb.add_block_param(entry, Ty::I64);
-    let hi = fb.add_block_param(entry, Ty::I64);
-
-    fb.set_entry(entry);
-
+    // bb0 (entry): check x < lo
     fb.switch_to_block(entry);
     let cmp_lo = fb.icmp(ICmpOp::Slt, Ty::I64, x, lo);
     fb.condbr(cmp_lo, bb_ret_lo, vec![], bb_check_hi, vec![]);
 
+    // bb1: return lo
     fb.switch_to_block(bb_ret_lo);
     fb.ret(vec![lo]);
 
+    // bb2: check x > hi
     fb.switch_to_block(bb_check_hi);
     let cmp_hi = fb.icmp(ICmpOp::Sgt, Ty::I64, x, hi);
     fb.condbr(cmp_hi, bb_ret_hi, vec![], bb_ret_x, vec![]);
 
+    // bb3: return hi
     fb.switch_to_block(bb_ret_hi);
     fb.ret(vec![hi]);
 
+    // bb4: return x
     fb.switch_to_block(bb_ret_x);
     fb.ret(vec![x]);
 
@@ -469,13 +469,13 @@ int main(void) {
 
 #[test]
 fn e2e_multiblock_builder_all_opt_levels() {
-    let modules: Vec<(&str, tmir::Module)> = vec![
+    let modules: &[(&str, TmirModule)] = &[
         ("max_builder", build_max_module()),
         ("sum_to_builder", build_sum_to_module()),
         ("clamp_builder", build_clamp_module()),
     ];
 
-    for (name, module) in &modules {
+    for (name, module) in modules {
         for opt in &[OptLevel::O0, OptLevel::O1, OptLevel::O2, OptLevel::O3] {
             let compiler = Compiler::new(CompilerConfig {
                 opt_level: *opt,

@@ -22,9 +22,11 @@ use llvm2_codegen::pipeline::{
     DispatchVerifyMode, OptLevel, Pipeline, PipelineConfig,
 };
 
-use tmir_func::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule};
-use tmir_instrs::{BinOp, CmpOp, Instr, InstrNode, Operand};
-use tmir_types::{BlockId, FuncId, FuncTy, TmirProof, Ty, ValueId};
+use tmir::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule, FuncTy, Ty, Constant};
+use tmir::{Inst, InstrNode, BinOp, ICmpOp};
+use tmir::{BlockId, FuncId, ValueId};
+use tmir::ProofAnnotation;
+
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -54,9 +56,10 @@ fn macho_filetype(bytes: &[u8]) -> u32 {
 /// Compile a tMIR function through the full pipeline via the Pipeline API.
 fn compile_tmir_via_pipeline(
     tmir_func: &TmirFunction,
+    module: &TmirModule,
     opt_level: OptLevel,
 ) -> Result<Vec<u8>, String> {
-    let (lir_func, _proof_ctx) = llvm2_lower::translate_function(tmir_func, &[])
+    let (lir_func, _proof_ctx) = llvm2_lower::translate_function(tmir_func, module)
         .map_err(|e| format!("adapter error: {}", e))?;
 
     let config = PipelineConfig {
@@ -75,493 +78,379 @@ fn compile_tmir_via_pipeline(
 // ---------------------------------------------------------------------------
 
 /// fn simple_add(a: i64, b: i64) -> i64 { a + b }
-fn build_simple_add() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(0),
-        name: "simple_add".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64), Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
-        blocks: vec![TmirBlock {
-            id: BlockId(0),
+fn build_simple_add() -> (TmirFunction, TmirModule) {
+
+    let mut module = TmirModule::new("test");
+    let ft_id = module.add_func_type(FuncTy { params: vec![Ty::I64, Ty::I64],
+            returns: vec![Ty::I64], is_vararg: false });
+    let mut func = TmirFunction::new(FuncId::new(0), "simple_add", ft_id, BlockId::new(0));
+    func.blocks = vec![TmirBlock {
+            id: BlockId::new(0),
             params: vec![
-                (ValueId(0), Ty::int(64)),
-                (ValueId(1), Ty::int(64)),
+                (ValueId::new(0), Ty::I64),
+                (ValueId::new(1), Ty::I64),
             ],
             body: vec![
-                InstrNode {
-                    instr: Instr::BinOp {
+                InstrNode::new(Inst::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(1)),
-                    },
-                    results: vec![ValueId(2)],
-                    proofs: vec![],
-                },
-                InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(2))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                },
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(1),
+                    })
+
+                    .with_result(ValueId::new(2)),
+                InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(2)],
+                    }),
             ],
-        }],
-        proofs: vec![],
-    }
+        }];
+    module.add_function(func.clone());
+    (func, module)
 }
 
 /// fn simple_sub(a: i64, b: i64) -> i64 { a - b }
-fn build_simple_sub() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(1),
-        name: "simple_sub".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64), Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
-        blocks: vec![TmirBlock {
-            id: BlockId(0),
+fn build_simple_sub() -> (TmirFunction, TmirModule) {
+
+    let mut module = TmirModule::new("test");
+    let ft_id = module.add_func_type(FuncTy { params: vec![Ty::I64, Ty::I64],
+            returns: vec![Ty::I64], is_vararg: false });
+    let mut func = TmirFunction::new(FuncId::new(1), "simple_sub", ft_id, BlockId::new(0));
+    func.blocks = vec![TmirBlock {
+            id: BlockId::new(0),
             params: vec![
-                (ValueId(0), Ty::int(64)),
-                (ValueId(1), Ty::int(64)),
+                (ValueId::new(0), Ty::I64),
+                (ValueId::new(1), Ty::I64),
             ],
             body: vec![
-                InstrNode {
-                    instr: Instr::BinOp {
+                InstrNode::new(Inst::BinOp {
                         op: BinOp::Sub,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(1)),
-                    },
-                    results: vec![ValueId(2)],
-                    proofs: vec![],
-                },
-                InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(2))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                },
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(1),
+                    })
+
+                    .with_result(ValueId::new(2)),
+                InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(2)],
+                    }),
             ],
-        }],
-        proofs: vec![],
-    }
+        }];
+    module.add_function(func.clone());
+    (func, module)
 }
 
 /// fn mul_vals(a: i64, b: i64) -> i64 { a * b }
-fn build_mul() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(2),
-        name: "mul_vals".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64), Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
-        blocks: vec![TmirBlock {
-            id: BlockId(0),
+fn build_mul() -> (TmirFunction, TmirModule) {
+
+    let mut module = TmirModule::new("test");
+    let ft_id = module.add_func_type(FuncTy { params: vec![Ty::I64, Ty::I64],
+            returns: vec![Ty::I64], is_vararg: false });
+    let mut func = TmirFunction::new(FuncId::new(2), "mul_vals", ft_id, BlockId::new(0));
+    func.blocks = vec![TmirBlock {
+            id: BlockId::new(0),
             params: vec![
-                (ValueId(0), Ty::int(64)),
-                (ValueId(1), Ty::int(64)),
+                (ValueId::new(0), Ty::I64),
+                (ValueId::new(1), Ty::I64),
             ],
             body: vec![
-                InstrNode {
-                    instr: Instr::BinOp {
+                InstrNode::new(Inst::BinOp {
                         op: BinOp::Mul,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(1)),
-                    },
-                    results: vec![ValueId(2)],
-                    proofs: vec![],
-                },
-                InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(2))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                },
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(1),
+                    })
+
+                    .with_result(ValueId::new(2)),
+                InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(2)],
+                    }),
             ],
-        }],
-        proofs: vec![],
-    }
+        }];
+    module.add_function(func.clone());
+    (func, module)
 }
 
 /// fn return_const() -> i64 { 42 }
-fn build_return_const() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(3),
-        name: "return_const".to_string(),
-        ty: FuncTy {
-            params: vec![],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
-        blocks: vec![TmirBlock {
-            id: BlockId(0),
+fn build_return_const() -> (TmirFunction, TmirModule) {
+
+    let mut module = TmirModule::new("test");
+    let ft_id = module.add_func_type(FuncTy { params: vec![],
+            returns: vec![Ty::I64], is_vararg: false });
+    let mut func = TmirFunction::new(FuncId::new(3), "return_const", ft_id, BlockId::new(0));
+    func.blocks = vec![TmirBlock {
+            id: BlockId::new(0),
             params: vec![],
             body: vec![
-                InstrNode {
-                    instr: Instr::Const {
-                        ty: Ty::int(64),
-                        value: 42,
-                    },
-                    results: vec![ValueId(0)],
-                    proofs: vec![],
-                },
-                InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(0))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                },
+                InstrNode::new(Inst::Const {
+                        ty: Ty::I64,
+                        value: Constant::Int(42),
+                    })
+
+                    .with_result(ValueId::new(0)),
+                InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(0)],
+                    }),
             ],
-        }],
-        proofs: vec![],
-    }
+        }];
+    module.add_function(func.clone());
+    (func, module)
 }
 
 /// fn max_val(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
 ///
 /// Three blocks: entry with branch, two return blocks.
-fn build_max_val() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(4),
-        name: "max_val".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64), Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
-        blocks: vec![
+fn build_max_val() -> (TmirFunction, TmirModule) {
+
+    let mut module = TmirModule::new("test");
+    let ft_id = module.add_func_type(FuncTy { params: vec![Ty::I64, Ty::I64],
+            returns: vec![Ty::I64], is_vararg: false });
+    let mut func = TmirFunction::new(FuncId::new(4), "max_val", ft_id, BlockId::new(0));
+    func.blocks = vec![
             TmirBlock {
-                id: BlockId(0),
+                id: BlockId::new(0),
                 params: vec![
-                    (ValueId(0), Ty::int(64)),
-                    (ValueId(1), Ty::int(64)),
+                    (ValueId::new(0), Ty::I64),
+                    (ValueId::new(1), Ty::I64),
                 ],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Cmp {
-                            op: CmpOp::Sgt,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(0)),
-                            rhs: Operand::Value(ValueId(1)),
-                        },
-                        results: vec![ValueId(2)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::CondBr {
-                            cond: Operand::Value(ValueId(2)),
-                            then_target: BlockId(1),
+                    InstrNode::new(Inst::ICmp {
+                            op: ICmpOp::Sgt,
+                            ty: Ty::I64,
+                            lhs: ValueId::new(0),
+                            rhs: ValueId::new(1),
+                        })
+
+                        .with_result(ValueId::new(2)),
+                    InstrNode::new(Inst::CondBr {
+                            cond: ValueId::new(2),
+                            then_target: BlockId::new(1),
                             then_args: vec![],
-                            else_target: BlockId(2),
+                            else_target: BlockId::new(2),
                             else_args: vec![],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                        }),
                 ],
             },
             TmirBlock {
-                id: BlockId(1),
+                id: BlockId::new(1),
                 params: vec![],
-                body: vec![InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(0))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                }],
+                body: vec![InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(0)],
+                    })],
             },
             TmirBlock {
-                id: BlockId(2),
+                id: BlockId::new(2),
                 params: vec![],
-                body: vec![InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(1))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                }],
+                body: vec![InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(1)],
+                    })],
             },
-        ],
-        proofs: vec![],
-    }
+        ];
+    module.add_function(func.clone());
+    (func, module)
 }
 
 /// fn count_down(n: i64) -> i64
 ///
 /// Loop: sum = 0, i = n; while (i > 0) { sum += i; i -= 1 }; return sum
-fn build_count_down() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(5),
-        name: "count_down".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
-        blocks: vec![
+fn build_count_down() -> (TmirFunction, TmirModule) {
+
+    let mut module = TmirModule::new("test");
+    let ft_id = module.add_func_type(FuncTy { params: vec![Ty::I64],
+            returns: vec![Ty::I64], is_vararg: false });
+    let mut func = TmirFunction::new(FuncId::new(5), "count_down", ft_id, BlockId::new(0));
+    func.blocks = vec![
             // bb0 (entry): init sum=0, jump to loop header
             TmirBlock {
-                id: BlockId(0),
-                params: vec![(ValueId(0), Ty::int(64))],
+                id: BlockId::new(0),
+                params: vec![(ValueId::new(0), Ty::I64)],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Const {
-                            ty: Ty::int(64),
-                            value: 0,
-                        },
-                        results: vec![ValueId(1)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Br {
-                            target: BlockId(1),
-                            args: vec![Operand::Value(ValueId(1)), Operand::Value(ValueId(0))],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                    InstrNode::new(Inst::Const {
+                            ty: Ty::I64,
+                            value: Constant::Int(0),
+                        })
+
+                        .with_result(ValueId::new(1)),
+                    InstrNode::new(Inst::Br {
+                            target: BlockId::new(1),
+                            args: vec![ValueId::new(1), ValueId::new(0)],
+                        }),
                 ],
             },
             // bb1 (loop header): params(sum, i)
             TmirBlock {
-                id: BlockId(1),
+                id: BlockId::new(1),
                 params: vec![
-                    (ValueId(10), Ty::int(64)),
-                    (ValueId(11), Ty::int(64)),
+                    (ValueId::new(10), Ty::I64),
+                    (ValueId::new(11), Ty::I64),
                 ],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Const {
-                            ty: Ty::int(64),
-                            value: 0,
-                        },
-                        results: vec![ValueId(12)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Cmp {
-                            op: CmpOp::Sle,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(11)),
-                            rhs: Operand::Value(ValueId(12)),
-                        },
-                        results: vec![ValueId(13)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::CondBr {
-                            cond: Operand::Value(ValueId(13)),
-                            then_target: BlockId(2),
-                            then_args: vec![Operand::Value(ValueId(10))],
-                            else_target: BlockId(3),
+                    InstrNode::new(Inst::Const {
+                            ty: Ty::I64,
+                            value: Constant::Int(0),
+                        })
+
+                        .with_result(ValueId::new(12)),
+                    InstrNode::new(Inst::ICmp {
+                            op: ICmpOp::Sle,
+                            ty: Ty::I64,
+                            lhs: ValueId::new(11),
+                            rhs: ValueId::new(12),
+                        })
+
+                        .with_result(ValueId::new(13)),
+                    InstrNode::new(Inst::CondBr {
+                            cond: ValueId::new(13),
+                            then_target: BlockId::new(2),
+                            then_args: vec![ValueId::new(10)],
+                            else_target: BlockId::new(3),
                             else_args: vec![],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                        }),
                 ],
             },
             // bb2 (exit): return sum
             TmirBlock {
-                id: BlockId(2),
-                params: vec![(ValueId(20), Ty::int(64))],
-                body: vec![InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(20))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                }],
+                id: BlockId::new(2),
+                params: vec![(ValueId::new(20), Ty::I64)],
+                body: vec![InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(20)],
+                    })],
             },
             // bb3 (loop body): sum += i, i -= 1, loop back
             TmirBlock {
-                id: BlockId(3),
+                id: BlockId::new(3),
                 params: vec![],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::BinOp {
+                    InstrNode::new(Inst::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(10)),
-                            rhs: Operand::Value(ValueId(11)),
-                        },
-                        results: vec![ValueId(14)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Const {
-                            ty: Ty::int(64),
-                            value: 1,
-                        },
-                        results: vec![ValueId(15)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::BinOp {
+                            ty: Ty::I64,
+                            lhs: ValueId::new(10),
+                            rhs: ValueId::new(11),
+                        })
+
+                        .with_result(ValueId::new(14)),
+                    InstrNode::new(Inst::Const {
+                            ty: Ty::I64,
+                            value: Constant::Int(1),
+                        })
+
+                        .with_result(ValueId::new(15)),
+                    InstrNode::new(Inst::BinOp {
                             op: BinOp::Sub,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(11)),
-                            rhs: Operand::Value(ValueId(15)),
-                        },
-                        results: vec![ValueId(16)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Br {
-                            target: BlockId(1),
-                            args: vec![Operand::Value(ValueId(14)), Operand::Value(ValueId(16))],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                            ty: Ty::I64,
+                            lhs: ValueId::new(11),
+                            rhs: ValueId::new(15),
+                        })
+
+                        .with_result(ValueId::new(16)),
+                    InstrNode::new(Inst::Br {
+                            target: BlockId::new(1),
+                            args: vec![ValueId::new(14), ValueId::new(16)],
+                        }),
                 ],
             },
-        ],
-        proofs: vec![],
-    }
+        ];
+    module.add_function(func.clone());
+    (func, module)
 }
 
 /// fn proven_add(a: i64, b: i64) -> i64 { a + b }
 ///
 /// Same as simple_add but with NoOverflow proof annotation on the add
 /// instruction, which should enable proof-guided optimizations.
-fn build_add_with_no_overflow_proof() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(6),
-        name: "proven_add".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64), Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
-        blocks: vec![TmirBlock {
-            id: BlockId(0),
+fn build_add_with_no_overflow_proof() -> (TmirFunction, TmirModule) {
+
+    let mut module = TmirModule::new("test");
+    let ft_id = module.add_func_type(FuncTy { params: vec![Ty::I64, Ty::I64],
+            returns: vec![Ty::I64], is_vararg: false });
+    let mut func = TmirFunction::new(FuncId::new(6), "proven_add", ft_id, BlockId::new(0));
+    func.blocks = vec![TmirBlock {
+            id: BlockId::new(0),
             params: vec![
-                (ValueId(0), Ty::int(64)),
-                (ValueId(1), Ty::int(64)),
+                (ValueId::new(0), Ty::I64),
+                (ValueId::new(1), Ty::I64),
             ],
             body: vec![
-                InstrNode::with_proofs(
-                    Instr::BinOp {
+                InstrNode::new(Inst::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(1)),
-                    },
-                    vec![ValueId(2)],
-                    vec![TmirProof::NoOverflow { signed: true }],
-                ),
-                InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(2))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                },
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(1),
+                    })
+                    .with_result(ValueId::new(2))
+                    .with_proof(ProofAnnotation::NoOverflow),
+                InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(2)],
+                    }),
             ],
-        }],
-        proofs: vec![],
-    }
+        }];
+    module.add_function(func.clone());
+    (func, module)
 }
 
 /// fn proven_div(a: i64, b: i64) -> i64 { a / b }
 ///
 /// Division with NonZeroDivisor proof annotation on the divisor.
-fn build_div_with_nonzero_proof() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(7),
-        name: "proven_div".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64), Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
-        blocks: vec![TmirBlock {
-            id: BlockId(0),
+fn build_div_with_nonzero_proof() -> (TmirFunction, TmirModule) {
+
+    let mut module = TmirModule::new("test");
+    let ft_id = module.add_func_type(FuncTy { params: vec![Ty::I64, Ty::I64],
+            returns: vec![Ty::I64], is_vararg: false });
+    let mut func = TmirFunction::new(FuncId::new(7), "proven_div", ft_id, BlockId::new(0));
+    func.blocks = vec![TmirBlock {
+            id: BlockId::new(0),
             params: vec![
-                (ValueId(0), Ty::int(64)),
-                (ValueId(1), Ty::int(64)),
+                (ValueId::new(0), Ty::I64),
+                (ValueId::new(1), Ty::I64),
             ],
             body: vec![
-                InstrNode::with_proofs(
-                    Instr::BinOp {
+                InstrNode::new(Inst::BinOp {
                         op: BinOp::SDiv,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(1)),
-                    },
-                    vec![ValueId(2)],
-                    vec![TmirProof::NonZeroDivisor {
-                        divisor: ValueId(1),
-                    }],
-                ),
-                InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(2))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                },
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(1),
+                    })
+                    .with_result(ValueId::new(2))
+                    .with_proof(ProofAnnotation::DivNonZero),
+                InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(2)],
+                    }),
             ],
-        }],
-        proofs: vec![],
-    }
+        }];
+    module.add_function(func.clone());
+    (func, module)
 }
 
 /// fn pure_add(a: i64, b: i64) -> i64 { a + b }
 ///
 /// Function-level Pure proof annotation, which enables aggressive CSE/LICM
 /// and potentially GPU/ANE dispatch.
-fn build_pure_function() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(8),
-        name: "pure_add".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64), Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
-        blocks: vec![TmirBlock {
-            id: BlockId(0),
+fn build_pure_function() -> (TmirFunction, TmirModule) {
+    let mut module = TmirModule::new("test");
+    let ft_id = module.add_func_type(FuncTy { params: vec![Ty::I64, Ty::I64],
+            returns: vec![Ty::I64], is_vararg: false });
+    let mut func = TmirFunction::new(FuncId::new(8), "pure_add", ft_id, BlockId::new(0));
+    func.proofs = vec![ProofAnnotation::Pure];
+    func.blocks = vec![TmirBlock {
+            id: BlockId::new(0),
             params: vec![
-                (ValueId(0), Ty::int(64)),
-                (ValueId(1), Ty::int(64)),
+                (ValueId::new(0), Ty::I64),
+                (ValueId::new(1), Ty::I64),
             ],
             body: vec![
-                InstrNode {
-                    instr: Instr::BinOp {
+                InstrNode::new(Inst::BinOp {
                         op: BinOp::Add,
-                        ty: Ty::int(64),
-                        lhs: Operand::Value(ValueId(0)),
-                        rhs: Operand::Value(ValueId(1)),
-                    },
-                    results: vec![ValueId(2)],
-                    proofs: vec![],
-                },
-                InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(2))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                },
+                        ty: Ty::I64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(1),
+                    })
+                    .with_result(ValueId::new(2)),
+                InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(2)],
+                    }),
             ],
-        }],
-        proofs: vec![TmirProof::Pure],
-    }
+        }];
+    module.add_function(func.clone());
+    (func, module)
 }
 
 /// fn diamond(a: i64, b: i64) -> i64
@@ -571,128 +460,99 @@ fn build_pure_function() -> TmirFunction {
 ///   bb1: result = a + 1, br -> bb3
 ///   bb2: result = b + 1, br -> bb3
 ///   bb3: return result
-fn build_diamond_cfg() -> TmirFunction {
-    TmirFunction {
-        id: FuncId(9),
-        name: "diamond".to_string(),
-        ty: FuncTy {
-            params: vec![Ty::int(64), Ty::int(64)],
-            returns: vec![Ty::int(64)],
-        },
-        entry: BlockId(0),
-        blocks: vec![
+fn build_diamond_cfg() -> (TmirFunction, TmirModule) {
+
+    let mut module = TmirModule::new("test");
+    let ft_id = module.add_func_type(FuncTy { params: vec![Ty::I64, Ty::I64],
+            returns: vec![Ty::I64], is_vararg: false });
+    let mut func = TmirFunction::new(FuncId::new(9), "diamond", ft_id, BlockId::new(0));
+    func.blocks = vec![
             // bb0: compare and branch
             TmirBlock {
-                id: BlockId(0),
+                id: BlockId::new(0),
                 params: vec![
-                    (ValueId(0), Ty::int(64)),
-                    (ValueId(1), Ty::int(64)),
+                    (ValueId::new(0), Ty::I64),
+                    (ValueId::new(1), Ty::I64),
                 ],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Cmp {
-                            op: CmpOp::Sgt,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(0)),
-                            rhs: Operand::Value(ValueId(1)),
-                        },
-                        results: vec![ValueId(2)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::CondBr {
-                            cond: Operand::Value(ValueId(2)),
-                            then_target: BlockId(1),
+                    InstrNode::new(Inst::ICmp {
+                            op: ICmpOp::Sgt,
+                            ty: Ty::I64,
+                            lhs: ValueId::new(0),
+                            rhs: ValueId::new(1),
+                        })
+
+                        .with_result(ValueId::new(2)),
+                    InstrNode::new(Inst::CondBr {
+                            cond: ValueId::new(2),
+                            then_target: BlockId::new(1),
                             then_args: vec![],
-                            else_target: BlockId(2),
+                            else_target: BlockId::new(2),
                             else_args: vec![],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                        }),
                 ],
             },
             // bb1: result = a + 1
             TmirBlock {
-                id: BlockId(1),
+                id: BlockId::new(1),
                 params: vec![],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Const {
-                            ty: Ty::int(64),
-                            value: 1,
-                        },
-                        results: vec![ValueId(3)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::BinOp {
+                    InstrNode::new(Inst::Const {
+                            ty: Ty::I64,
+                            value: Constant::Int(1),
+                        })
+
+                        .with_result(ValueId::new(3)),
+                    InstrNode::new(Inst::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(0)),
-                            rhs: Operand::Value(ValueId(3)),
-                        },
-                        results: vec![ValueId(4)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Br {
-                            target: BlockId(3),
-                            args: vec![Operand::Value(ValueId(4))],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                            ty: Ty::I64,
+                            lhs: ValueId::new(0),
+                            rhs: ValueId::new(3),
+                        })
+
+                        .with_result(ValueId::new(4)),
+                    InstrNode::new(Inst::Br {
+                            target: BlockId::new(3),
+                            args: vec![ValueId::new(4)],
+                        }),
                 ],
             },
             // bb2: result = b + 1
             TmirBlock {
-                id: BlockId(2),
+                id: BlockId::new(2),
                 params: vec![],
                 body: vec![
-                    InstrNode {
-                        instr: Instr::Const {
-                            ty: Ty::int(64),
-                            value: 1,
-                        },
-                        results: vec![ValueId(5)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::BinOp {
+                    InstrNode::new(Inst::Const {
+                            ty: Ty::I64,
+                            value: Constant::Int(1),
+                        })
+
+                        .with_result(ValueId::new(5)),
+                    InstrNode::new(Inst::BinOp {
                             op: BinOp::Add,
-                            ty: Ty::int(64),
-                            lhs: Operand::Value(ValueId(1)),
-                            rhs: Operand::Value(ValueId(5)),
-                        },
-                        results: vec![ValueId(6)],
-                        proofs: vec![],
-                    },
-                    InstrNode {
-                        instr: Instr::Br {
-                            target: BlockId(3),
-                            args: vec![Operand::Value(ValueId(6))],
-                        },
-                        results: vec![],
-                        proofs: vec![],
-                    },
+                            ty: Ty::I64,
+                            lhs: ValueId::new(1),
+                            rhs: ValueId::new(5),
+                        })
+
+                        .with_result(ValueId::new(6)),
+                    InstrNode::new(Inst::Br {
+                            target: BlockId::new(3),
+                            args: vec![ValueId::new(6)],
+                        }),
                 ],
             },
             // bb3 (merge): return result
             TmirBlock {
-                id: BlockId(3),
-                params: vec![(ValueId(10), Ty::int(64))],
-                body: vec![InstrNode {
-                    instr: Instr::Return {
-                        values: vec![Operand::Value(ValueId(10))],
-                    },
-                    results: vec![],
-                    proofs: vec![],
-                }],
+                id: BlockId::new(3),
+                params: vec![(ValueId::new(10), Ty::I64)],
+                body: vec![InstrNode::new(Inst::Return {
+                        values: vec![ValueId::new(10)],
+                    })],
             },
-        ],
-        proofs: vec![],
-    }
+        ];
+    module.add_function(func.clone());
+    (func, module)
 }
 
 // ===========================================================================
@@ -701,15 +561,15 @@ fn build_diamond_cfg() -> TmirFunction {
 
 #[test]
 fn test_pipeline_arithmetic_ops_produce_valid_macho() {
-    let functions: Vec<(&str, TmirFunction)> = vec![
-        ("simple_add", build_simple_add()),
-        ("simple_sub", build_simple_sub()),
-        ("mul_vals", build_mul()),
-        ("return_const", build_return_const()),
+    let functions: Vec<(&str, TmirFunction, TmirModule)> = vec![
+        { let (f, m) = build_simple_add(); ("simple_add", f, m) },
+        { let (f, m) = build_simple_sub(); ("simple_sub", f, m) },
+        { let (f, m) = build_mul(); ("mul_vals", f, m) },
+        { let (f, m) = build_return_const(); ("return_const", f, m) },
     ];
 
-    for (name, tmir_func) in &functions {
-        let obj_bytes = compile_tmir_via_pipeline(tmir_func, OptLevel::O0)
+    for (name, tmir_func, module) in &functions {
+        let obj_bytes = compile_tmir_via_pipeline(tmir_func, module, OptLevel::O0)
             .unwrap_or_else(|e| panic!("{}: compilation failed: {}", name, e));
 
         assert_valid_macho(&obj_bytes, name);
@@ -734,14 +594,15 @@ fn test_pipeline_arithmetic_ops_produce_valid_macho() {
 
 #[test]
 fn test_pipeline_multi_block_control_flow() {
-    let tmir_func = build_max_val();
-    let obj_bytes = compile_tmir_via_pipeline(&tmir_func, OptLevel::O0)
+    let (tmir_func, module) = build_max_val();
+    let obj_bytes = compile_tmir_via_pipeline(&tmir_func, &module, OptLevel::O0)
         .expect("max_val should compile through full pipeline");
 
     assert_valid_macho(&obj_bytes, "max_val");
 
     // Multi-block function should produce larger code than single-block
-    let single_block = compile_tmir_via_pipeline(&build_return_const(), OptLevel::O0)
+    let (rc_func, rc_module) = build_return_const();
+    let single_block = compile_tmir_via_pipeline(&rc_func, &rc_module, OptLevel::O0)
         .expect("return_const should compile");
 
     // max_val (3 blocks, compare + branch + 2 returns) should have more
@@ -760,15 +621,15 @@ fn test_pipeline_multi_block_control_flow() {
 
 #[test]
 fn test_pipeline_diamond_cfg_compiles() {
-    let tmir_func = build_diamond_cfg();
+    let (tmir_func, module) = build_diamond_cfg();
 
-    let obj_bytes = compile_tmir_via_pipeline(&tmir_func, OptLevel::O0)
+    let obj_bytes = compile_tmir_via_pipeline(&tmir_func, &module, OptLevel::O0)
         .expect("diamond CFG should compile through full pipeline");
 
     assert_valid_macho(&obj_bytes, "diamond");
 
     // Also verify the LIR structure has the expected 4 blocks.
-    let (lir_func, _proof_ctx) = llvm2_lower::translate_function(&tmir_func, &[])
+    let (lir_func, _proof_ctx) = llvm2_lower::translate_function(&tmir_func, &module)
         .expect("adapter should translate diamond");
     assert_eq!(
         lir_func.blocks.len(),
@@ -783,15 +644,15 @@ fn test_pipeline_diamond_cfg_compiles() {
 
 #[test]
 fn test_pipeline_loop_compiles() {
-    let tmir_func = build_count_down();
+    let (tmir_func, module) = build_count_down();
 
-    let obj_bytes = compile_tmir_via_pipeline(&tmir_func, OptLevel::O0)
+    let obj_bytes = compile_tmir_via_pipeline(&tmir_func, &module, OptLevel::O0)
         .expect("count_down loop should compile through full pipeline");
 
     assert_valid_macho(&obj_bytes, "count_down");
 
     // count_down has 4 blocks (entry, loop header, exit, loop body).
-    let (lir_func, _) = llvm2_lower::translate_function(&tmir_func, &[])
+    let (lir_func, _) = llvm2_lower::translate_function(&tmir_func, &module)
         .expect("adapter should translate count_down");
     assert_eq!(lir_func.blocks.len(), 4, "count_down should have 4 blocks");
 }
@@ -802,18 +663,18 @@ fn test_pipeline_loop_compiles() {
 
 #[test]
 fn test_pipeline_proof_annotation_no_overflow() {
-    let tmir_func = build_add_with_no_overflow_proof();
+    let (tmir_func, module) = build_add_with_no_overflow_proof();
 
     // The function should compile successfully. The NoOverflow proof
     // annotation enables the proof-guided optimization pass to convert
     // checked arithmetic to unchecked arithmetic.
-    let obj_bytes = compile_tmir_via_pipeline(&tmir_func, OptLevel::O2)
+    let obj_bytes = compile_tmir_via_pipeline(&tmir_func, &module, OptLevel::O2)
         .expect("proven_add with NoOverflow should compile at O2");
 
     assert_valid_macho(&obj_bytes, "proven_add");
 
     // Verify the proof context was extracted by the adapter.
-    let (_, proof_ctx) = llvm2_lower::translate_function(&tmir_func, &[])
+    let (_, proof_ctx) = llvm2_lower::translate_function(&tmir_func, &module)
         .expect("adapter should translate proven_add");
     assert!(
         !proof_ctx.value_proofs.is_empty(),
@@ -827,11 +688,11 @@ fn test_pipeline_proof_annotation_no_overflow() {
 
 #[test]
 fn test_pipeline_proof_annotation_non_zero_divisor() {
-    let tmir_func = build_div_with_nonzero_proof();
+    let (tmir_func, module) = build_div_with_nonzero_proof();
 
     // Division with NonZeroDivisor proof should compile.
     // The optimization pass may eliminate a divide-by-zero check.
-    let obj_bytes = compile_tmir_via_pipeline(&tmir_func, OptLevel::O2)
+    let obj_bytes = compile_tmir_via_pipeline(&tmir_func, &module, OptLevel::O2)
         .expect("proven_div with NonZeroDivisor should compile at O2");
 
     assert_valid_macho(&obj_bytes, "proven_div");
@@ -843,17 +704,17 @@ fn test_pipeline_proof_annotation_non_zero_divisor() {
 
 #[test]
 fn test_pipeline_proof_annotation_pure_function() {
-    let tmir_func = build_pure_function();
+    let (tmir_func, module) = build_pure_function();
 
     // A function-level Pure proof enables aggressive CSE/LICM.
-    let obj_bytes = compile_tmir_via_pipeline(&tmir_func, OptLevel::O2)
+    let obj_bytes = compile_tmir_via_pipeline(&tmir_func, &module, OptLevel::O2)
         .expect("pure_add with Pure annotation should compile at O2");
 
     assert_valid_macho(&obj_bytes, "pure_add");
 
     // Verify function-level proofs are accessible.
     assert_eq!(tmir_func.proofs.len(), 1);
-    assert_eq!(tmir_func.proofs[0], TmirProof::Pure);
+    assert_eq!(tmir_func.proofs[0], ProofAnnotation::Pure);
 }
 
 // ===========================================================================
@@ -862,10 +723,10 @@ fn test_pipeline_proof_annotation_pure_function() {
 
 #[test]
 fn test_pipeline_all_optimization_levels() {
-    let tmir_func = build_count_down(); // Use a non-trivial function with loops
+    let (tmir_func, module) = build_count_down(); // Use a non-trivial function with loops
 
     for opt_level in &[OptLevel::O0, OptLevel::O1, OptLevel::O2, OptLevel::O3] {
-        let obj_bytes = compile_tmir_via_pipeline(&tmir_func, *opt_level)
+        let obj_bytes = compile_tmir_via_pipeline(&tmir_func, &module, *opt_level)
             .unwrap_or_else(|e| panic!("count_down at {:?} failed: {}", opt_level, e));
 
         assert_valid_macho(&obj_bytes, &format!("count_down@{:?}", opt_level));
@@ -966,8 +827,10 @@ fn test_compiler_api_with_proof_certificates() {
 #[test]
 fn test_compiler_api_compile_module() {
     let mut module = TmirModule::new("test_module");
-    module.functions.push(build_simple_add());
-    module.functions.push(build_return_const());
+    let (f1, _) = build_simple_add();
+    let (f2, _) = build_return_const();
+    module.add_function(f1);
+    module.add_function(f2);
 
     let compiler = Compiler::default_o2();
     let result = compiler.compile(&module).expect("module compilation should succeed");
@@ -1018,8 +881,8 @@ fn test_pipeline_dispatch_verify_fallback_mode() {
     );
 
     // Compile a function through this pipeline configuration.
-    let tmir_func = build_simple_add();
-    let (lir_func, _) = llvm2_lower::translate_function(&tmir_func, &[])
+    let (tmir_func, module) = build_simple_add();
+    let (lir_func, _) = llvm2_lower::translate_function(&tmir_func, &module)
         .expect("adapter should translate simple_add");
 
     let obj_bytes = pipeline
@@ -1042,8 +905,8 @@ fn test_pipeline_dispatch_verify_off_mode() {
     };
 
     let pipeline = Pipeline::new(config);
-    let tmir_func = build_simple_add();
-    let (lir_func, _) = llvm2_lower::translate_function(&tmir_func, &[])
+    let (tmir_func, module) = build_simple_add();
+    let (lir_func, _) = llvm2_lower::translate_function(&tmir_func, &module)
         .expect("adapter should translate simple_add");
 
     let obj_bytes = pipeline
@@ -1066,8 +929,8 @@ fn test_pipeline_with_debug_info() {
     };
 
     let pipeline = Pipeline::new(config);
-    let tmir_func = build_simple_add();
-    let (lir_func, _) = llvm2_lower::translate_function(&tmir_func, &[])
+    let (tmir_func, module) = build_simple_add();
+    let (lir_func, _) = llvm2_lower::translate_function(&tmir_func, &module)
         .expect("adapter should translate simple_add");
 
     let obj_bytes = pipeline
@@ -1085,7 +948,7 @@ fn test_pipeline_with_debug_info() {
         ..Default::default()
     };
     let pipeline_no_debug = Pipeline::new(config_no_debug);
-    let (lir_func2, _) = llvm2_lower::translate_function(&tmir_func, &[])
+    let (lir_func2, _) = llvm2_lower::translate_function(&tmir_func, &module)
         .expect("adapter should translate simple_add again");
     let obj_bytes_no_debug = pipeline_no_debug
         .compile_function(&lir_func2)
@@ -1107,11 +970,11 @@ fn test_pipeline_with_debug_info() {
 fn test_proof_annotations_affect_optimization() {
     // Compile the same function (with proof) at O0 and O2.
     // At O2, the proof-guided optimization pass should fire.
-    let tmir_func = build_add_with_no_overflow_proof();
+    let (tmir_func, module) = build_add_with_no_overflow_proof();
 
-    let obj_o0 = compile_tmir_via_pipeline(&tmir_func, OptLevel::O0)
+    let obj_o0 = compile_tmir_via_pipeline(&tmir_func, &module, OptLevel::O0)
         .expect("proven_add at O0 should compile");
-    let obj_o2 = compile_tmir_via_pipeline(&tmir_func, OptLevel::O2)
+    let obj_o2 = compile_tmir_via_pipeline(&tmir_func, &module, OptLevel::O2)
         .expect("proven_add at O2 should compile");
 
     assert_valid_macho(&obj_o0, "proven_add@O0");
@@ -1179,8 +1042,8 @@ fn test_pipeline_default_config() {
 fn test_compile_to_object_convenience() {
     use llvm2_codegen::pipeline::compile_to_object;
 
-    let tmir_func = build_simple_add();
-    let (lir_func, _) = llvm2_lower::translate_function(&tmir_func, &[])
+    let (tmir_func, module) = build_simple_add();
+    let (lir_func, _) = llvm2_lower::translate_function(&tmir_func, &module)
         .expect("adapter should translate simple_add");
 
     let obj_bytes =
@@ -1263,9 +1126,12 @@ fn extract_macho_symbol_names(bytes: &[u8]) -> Vec<String> {
 fn test_multi_function_module_all_functions_emitted() {
     // Build a module with three functions.
     let mut module = TmirModule::new("multi_func_module");
-    module.functions.push(build_simple_add());
-    module.functions.push(build_simple_sub());
-    module.functions.push(build_return_const());
+    let (f1, _) = build_simple_add();
+    let (f2, _) = build_simple_sub();
+    let (f3, _) = build_return_const();
+    module.add_function(f1);
+    module.add_function(f2);
+    module.add_function(f3);
 
     let compiler = Compiler::default_o2();
     let result = compiler.compile(&module).expect("multi-function module should compile");
@@ -1303,11 +1169,14 @@ fn test_multi_function_module_differs_from_single() {
     // A module with two functions should produce different (and larger)
     // output than a module with one function.
     let mut module_one = TmirModule::new("one_func");
-    module_one.functions.push(build_simple_add());
+    let (f1a, _) = build_simple_add();
+    module_one.add_function(f1a);
 
     let mut module_two = TmirModule::new("two_func");
-    module_two.functions.push(build_simple_add());
-    module_two.functions.push(build_return_const());
+    let (f1b, _) = build_simple_add();
+    let (f2, _) = build_return_const();
+    module_two.add_function(f1b);
+    module_two.add_function(f2);
 
     let compiler = Compiler::default_o2();
     let result_one = compiler.compile(&module_one).expect("single-function module");
