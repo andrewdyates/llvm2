@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_x86_64_macho.rs - End-to-end x86-64 Mach-O validation
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Integration tests for the x86-64 Mach-O object file emission pipeline.
 // Validates that the pipeline produces structurally correct Mach-O .o files
@@ -766,9 +766,9 @@ fn test_x86_64_macho_tmir_compile() {
     // Test the full tMIR -> adapter -> ISel -> encode -> Mach-O pipeline for x86-64.
     use llvm2_codegen::x86_64::{X86Pipeline, X86PipelineConfig, X86OutputFormat};
 
-    use tmir::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule, FuncTy, Ty, FuncTyId, Constant};
-use tmir::{Inst, InstrNode, BinOp, ICmpOp, UnOp};
-use tmir::{BlockId, FuncId, ValueId};
+    use tmir::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule, FuncTy, Ty};
+    use tmir::{Inst, InstrNode, BinOp};
+    use tmir::{BlockId, FuncId, ValueId};
         
     // Build a simple tMIR function: fn add(a: i64, b: i64) -> i64 { a + b }
     let mut module = TmirModule::new("test");

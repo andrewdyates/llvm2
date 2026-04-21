@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_macho_link.rs - E2E Mach-O linking integration test
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proves the AArch64 backend works end-to-end:
 //   tMIR -> adapter -> ISel -> opt -> regalloc -> frame -> encode -> Mach-O -> otool -> ld -> run
@@ -22,8 +22,8 @@ use std::process::Command;
 use llvm2_codegen::macho::constants::*;
 use llvm2_codegen::pipeline::{Pipeline, PipelineConfig, OptLevel};
 
-use tmir::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule, FuncTy, Ty, FuncTyId, Constant};
-use tmir::{Inst, InstrNode, BinOp, ICmpOp, UnOp};
+use tmir::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule, FuncTy, Ty, Constant};
+use tmir::{Inst, InstrNode, BinOp, ICmpOp};
 use tmir::{BlockId, FuncId, ValueId};
 
 // ---------------------------------------------------------------------------

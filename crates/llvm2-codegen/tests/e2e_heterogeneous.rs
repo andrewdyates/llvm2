@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_heterogeneous.rs - End-to-end heterogeneous compute tests
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Integration tests exercising the full heterogeneous compute pipeline:
 //   ComputeGraph -> TargetRecommendation -> DispatchPlan -> Verification
@@ -75,6 +75,7 @@ fn cpu_scalar_node(id: u32, dominant_op: &str, data_size: u64) -> ComputeNode {
         consumed_values: vec![],
         dominant_op: dominant_op.to_string(),
         target_legality: None,
+        matmul_shape: None,
     }
 }
 
@@ -106,6 +107,7 @@ fn gpu_data_parallel_node(id: u32, dominant_op: &str, data_size: u64) -> Compute
         consumed_values: vec![],
         dominant_op: dominant_op.to_string(),
         target_legality: None,
+        matmul_shape: None,
     }
 }
 
@@ -137,6 +139,7 @@ fn ane_matrix_node(id: u32, dominant_op: &str, data_size: u64) -> ComputeNode {
         consumed_values: vec![],
         dominant_op: dominant_op.to_string(),
         target_legality: None,
+        matmul_shape: None,
     }
 }
 

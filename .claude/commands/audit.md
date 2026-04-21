@@ -1,1 +1,0 @@
-Be skeptical, rigorous, and ambitious. Is the worker on track? Any issues or blockers? What is the higher level progress? Look at the streaming logs and issue history plus the recent git commit history to get the latest state. Report and then direct the team.

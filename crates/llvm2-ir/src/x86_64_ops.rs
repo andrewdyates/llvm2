@@ -1,7 +1,7 @@
 // llvm2-ir - x86-64 opcode definitions
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Reference: ~/llvm-project-ref/llvm/lib/Target/X86/X86InstrInfo.td
 // Reference: Intel 64 and IA-32 Architectures Software Developer's Manual
@@ -214,6 +214,15 @@ pub enum X86Opcode {
     Ucomiss,
 
     // =====================================================================
+    // SSE RIP-relative constant pool loads
+    // =====================================================================
+
+    /// MOVSS xmm, [RIP+disp32] (load single from constant pool)
+    MovssRipRel,
+    /// MOVSD xmm, [RIP+disp32] (load double from constant pool)
+    MovsdRipRel,
+
+    // =====================================================================
     // Conditional move / set
     // =====================================================================
 
@@ -253,6 +262,32 @@ pub enum X86Opcode {
     Lzcnt,
     /// POPCNT r64, r64 (population count — POPCNT)
     Popcnt,
+    /// BT r/m64, imm8 (bit test — sets CF, 0F BA /4 ib)
+    BtRI,
+    /// BSWAP r64 (byte swap for endianness conversion, 0F C8+rd)
+    Bswap,
+
+    // =====================================================================
+    // Atomic / exchange
+    // =====================================================================
+
+    /// XCHG r64, r64 (swap register contents, 87 /r)
+    Xchg,
+    /// LOCK CMPXCHG r/m64, r64 (atomic compare and exchange, F0 0F B1 /r)
+    Cmpxchg,
+
+    // =====================================================================
+    // GPR ↔ XMM transfers
+    // =====================================================================
+
+    /// MOVD xmm, r/m32 (move 32-bit GPR to low 32 bits of XMM, 66 0F 6E /r)
+    MovdToXmm,
+    /// MOVD r/m32, xmm (move low 32 bits of XMM to GPR, 66 0F 7E /r)
+    MovdFromXmm,
+    /// MOVQ xmm, r/m64 (move 64-bit GPR to XMM, 66 REX.W 0F 6E /r)
+    MovqToXmm,
+    /// MOVQ r/m64, xmm (move XMM to 64-bit GPR, 66 REX.W 0F 7E /r)
+    MovqFromXmm,
 
     // =====================================================================
     // Stack
@@ -301,13 +336,19 @@ impl X86Opcode {
             Ret => InstFlags::IS_RETURN.union(InstFlags::IS_TERMINATOR),
 
             // Memory loads
-            MovRM | MovsdRM | MovssRM | AddRM | SubRM | CmpRM | MovRMSib | ImulRM => InstFlags::READS_MEMORY,
+            MovRM | MovsdRM | MovssRM | AddRM | SubRM | CmpRM | MovRMSib | ImulRM
+            | MovssRipRel | MovsdRipRel => InstFlags::READS_MEMORY,
 
             // Memory stores
             MovMR | MovsdMR | MovssMR | MovMRSib => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Compare/test (set RFLAGS = side effect)
-            CmpRR | CmpRI | CmpRI8 | TestRR | TestRI | Ucomisd | Ucomiss => InstFlags::HAS_SIDE_EFFECTS,
+            CmpRR | CmpRI | CmpRI8 | TestRR | TestRI | Ucomisd | Ucomiss
+            | BtRI => InstFlags::HAS_SIDE_EFFECTS,
+
+            // Atomic / exchange (side effects: swap or CAS modifies registers, CMPXCHG is LOCK-prefixed)
+            Xchg => InstFlags::HAS_SIDE_EFFECTS,
+            Cmpxchg => InstFlags::HAS_SIDE_EFFECTS,
 
             // Compare/test with memory operand (side effect + memory read)
             TestRM => InstFlags::HAS_SIDE_EFFECTS.union(InstFlags::READS_MEMORY),
@@ -490,7 +531,8 @@ mod tests {
 
     #[test]
     fn memory_load_opcodes() {
-        for op in &[X86Opcode::MovRM, X86Opcode::MovsdRM, X86Opcode::MovssRM, X86Opcode::MovRMSib, X86Opcode::ImulRM] {
+        for op in &[X86Opcode::MovRM, X86Opcode::MovsdRM, X86Opcode::MovssRM, X86Opcode::MovRMSib, X86Opcode::ImulRM,
+                     X86Opcode::MovssRipRel, X86Opcode::MovsdRipRel] {
             let flags = op.default_flags();
             assert!(flags.contains(InstFlags::READS_MEMORY), "{:?}", op);
             assert!(!flags.contains(InstFlags::WRITES_MEMORY), "{:?}", op);
@@ -549,6 +591,10 @@ mod tests {
             X86Opcode::Cmovcc, X86Opcode::Setcc,
             X86Opcode::Bsf, X86Opcode::Bsr,
             X86Opcode::Tzcnt, X86Opcode::Lzcnt, X86Opcode::Popcnt,
+            X86Opcode::Bswap,
+            // GPR ↔ XMM transfers
+            X86Opcode::MovdToXmm, X86Opcode::MovdFromXmm,
+            X86Opcode::MovqToXmm, X86Opcode::MovqFromXmm,
             // Hardware NOP
             X86Opcode::NopMulti,
         ];

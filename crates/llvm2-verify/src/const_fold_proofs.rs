@@ -1,7 +1,7 @@
 // llvm2-verify/const_fold_proofs.rs - SMT proofs for constant folding optimizations
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proves that constant folding rules in llvm2-opt/const_fold.rs preserve
 // semantics. Each rule evaluates an operation on constants at compile time

@@ -1,7 +1,7 @@
 // llvm2-verify/nzcv.rs - AArch64 NZCV flag model and condition code evaluation
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Models AArch64 NZCV flags as boolean SMT expressions derived from
 // subtraction results. Used to verify comparison and branch lowering rules.

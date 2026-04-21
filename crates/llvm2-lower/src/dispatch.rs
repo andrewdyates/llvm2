@@ -1,7 +1,7 @@
 // llvm2-lower/dispatch.rs - Dispatch codegen for heterogeneous compute
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Generates dispatch plans from compute graph target recommendations.
 // A dispatch plan is a sequence of operations: data transfers between
@@ -1010,12 +1010,14 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         };
 
         let graph = ComputeGraph {
             profitability: None,
             nodes: vec![node],
             edges: vec![],
+            module_fully_verified: false,
         };
 
         let recs = vec![TargetRecommendation {
@@ -1052,12 +1054,14 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         };
 
         let graph = ComputeGraph {
             profitability: None,
             nodes: vec![node],
             edges: vec![],
+            module_fully_verified: false,
         };
 
         let recs = vec![TargetRecommendation {
@@ -1100,6 +1104,7 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         };
 
         let consumer = ComputeNode {
@@ -1113,6 +1118,7 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         };
 
         let edge = DataEdge {
@@ -1126,6 +1132,7 @@ mod tests {
             profitability: None,
             nodes: vec![producer, consumer],
             edges: vec![edge],
+            module_fully_verified: false,
         };
 
         let recs = vec![
@@ -1177,6 +1184,7 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         };
 
         let consumer = ComputeNode {
@@ -1190,6 +1198,7 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         };
 
         let edge = DataEdge {
@@ -1203,6 +1212,7 @@ mod tests {
             profitability: None,
             nodes: vec![producer, consumer],
             edges: vec![edge],
+            module_fully_verified: false,
         };
 
         let recs = vec![
@@ -1260,6 +1270,7 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         };
 
         let node1 = ComputeNode {
@@ -1273,6 +1284,7 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         };
 
         let node2 = ComputeNode {
@@ -1286,6 +1298,7 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         };
 
         let edges = vec![
@@ -1307,6 +1320,7 @@ mod tests {
             profitability: None,
             nodes: vec![node0, node1, node2],
             edges,
+            module_fully_verified: false,
         };
 
         let recs = vec![
@@ -1768,12 +1782,14 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         };
 
         let graph = ComputeGraph {
             profitability: None,
             nodes: vec![node],
             edges: vec![],
+            module_fully_verified: false,
         };
 
         let recs = vec![TargetRecommendation {
@@ -2033,6 +2049,7 @@ mod tests {
                 consumed_values: vec![],
                 dominant_op: "ADD".to_string(),
                 target_legality: None,
+                matmul_shape: None,
             },
             ComputeNode {
                 id: ComputeNodeId(1),
@@ -2045,6 +2062,7 @@ mod tests {
                 consumed_values: vec![],
                 dominant_op: "ADD".to_string(),
                 target_legality: None,
+                matmul_shape: None,
             },
             ComputeNode {
                 id: ComputeNodeId(2),
@@ -2057,6 +2075,7 @@ mod tests {
                 consumed_values: vec![],
                 dominant_op: "ADD".to_string(),
                 target_legality: None,
+                matmul_shape: None,
             },
             ComputeNode {
                 id: ComputeNodeId(3),
@@ -2069,6 +2088,7 @@ mod tests {
                 consumed_values: vec![],
                 dominant_op: "ADD".to_string(),
                 target_legality: None,
+                matmul_shape: None,
             },
         ];
 
@@ -2099,7 +2119,7 @@ mod tests {
             },
         ];
 
-        let graph = ComputeGraph { profitability: None, nodes, edges };
+        let graph = ComputeGraph { profitability: None, nodes, edges, module_fully_verified: false };
 
         let recs = vec![
             TargetRecommendation {
@@ -2174,6 +2194,7 @@ mod tests {
                 consumed_values: vec![],
                 dominant_op: "ADD".to_string(),
                 target_legality: None,
+                matmul_shape: None,
             },
             ComputeNode {
                 id: ComputeNodeId(1),
@@ -2186,6 +2207,7 @@ mod tests {
                 consumed_values: vec![],
                 dominant_op: "GEMM".to_string(),
                 target_legality: None,
+                matmul_shape: None,
             },
             ComputeNode {
                 id: ComputeNodeId(2),
@@ -2198,6 +2220,7 @@ mod tests {
                 consumed_values: vec![],
                 dominant_op: "ADD".to_string(),
                 target_legality: None,
+                matmul_shape: None,
             },
         ];
 
@@ -2205,6 +2228,7 @@ mod tests {
             profitability: None,
             nodes,
             edges: vec![],
+            module_fully_verified: false,
         };
 
         let recs = vec![
@@ -2283,6 +2307,7 @@ mod tests {
                 consumed_values: vec![],
                 dominant_op: "ADD".to_string(),
                 target_legality: None,
+                matmul_shape: None,
             },
             ComputeNode {
                 id: ComputeNodeId(1),
@@ -2295,6 +2320,7 @@ mod tests {
                 consumed_values: vec![],
                 dominant_op: "ADD".to_string(),
                 target_legality: None,
+                matmul_shape: None,
             },
         ];
 
@@ -2305,7 +2331,7 @@ mod tests {
             transfer_cost: TransferCost::zero(),
         }];
 
-        let graph = ComputeGraph { profitability: None, nodes, edges };
+        let graph = ComputeGraph { profitability: None, nodes, edges, module_fully_verified: false };
 
         let recs = vec![
             TargetRecommendation {
@@ -2361,6 +2387,7 @@ mod tests {
                 consumed_values: vec![],
                 dominant_op: "ADD".to_string(),
                 target_legality: None,
+                matmul_shape: None,
             },
             ComputeNode {
                 id: ComputeNodeId(1),
@@ -2373,6 +2400,7 @@ mod tests {
                 consumed_values: vec![],
                 dominant_op: "ADD".to_string(),
                 target_legality: None,
+                matmul_shape: None,
             },
         ];
 
@@ -2383,7 +2411,7 @@ mod tests {
             transfer_cost: TransferCost::zero(),
         }];
 
-        let graph = ComputeGraph { profitability: None, nodes, edges };
+        let graph = ComputeGraph { profitability: None, nodes, edges, module_fully_verified: false };
 
         // Manually construct plan without transfer.
         let mut assignment = HashMap::new();
@@ -2555,6 +2583,7 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         });
 
         // Get what profitability would recommend.
@@ -2620,6 +2649,7 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         });
 
         // Generate plan using profitability-aware function.
@@ -2724,6 +2754,7 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         });
 
         // Get the recommended target and assign the opposite.

@@ -1,7 +1,7 @@
 // llvm2-verify/proof_database.rs - Unified proof obligation database
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Consolidates all proof obligation registries across llvm2-verify into a
 // single queryable database. Previously, proofs were scattered across 8+
@@ -103,6 +103,11 @@ pub enum ProofCategory {
     /// Source: `memory_proofs::all_memory_proofs()`.
     Memory,
 
+    /// Load/Store lowering proofs: tMIR Load/Store -> AArch64 LDR/LDRB/LDRH/STR/STRB/STRH
+    /// (I8/I16/I32/I64 equivalence) plus store-load roundtrip (I32, I64). 10 obligations.
+    /// Source: `lowering_proof::all_load_store_proofs()`.
+    LoadStoreLowering,
+
     /// NEON SIMD lowering proofs (tMIR vector ops -> NEON instructions).
     /// Source: `neon_lowering_proofs::all_neon_lowering_proofs()`.
     NeonLowering,
@@ -201,6 +206,24 @@ pub enum ProofCategory {
     /// GPR/FPR independent allocation, stack overflow arguments).
     /// Source: `call_lowering_proofs::all_call_lowering_proofs()`.
     CallLowering,
+
+    /// x86-64 lowering proofs (arithmetic, division, bitwise, shifts,
+    /// comparisons, floating-point, extensions, LEA, three-operand IMUL).
+    /// Source: `x86_64_lowering_proofs::all_x86_64_proofs()`.
+    /// Wired in #434; remains opt-in (not default-on) until AArch64 is
+    /// default-on first per #407/#340.
+    X8664Lowering,
+
+    /// Switch lowering correctness proofs: tMIR `Switch(scrutinee, cases,
+    /// default)` lowered as jump table (dense) or balanced BST (sparse)
+    /// selects the same successor block as a linear-scan reference.
+    /// Source: `switch_proofs::all_switch_proofs()`.
+    /// Wired in #444 (deferred proof obligation from #323).
+    ///
+    /// Separate from `Branch` (which is single-target CMP+B.cond) and from
+    /// `CfgSimplification` (which eliminates branches rather than selecting
+    /// among multiple targets).
+    SwitchLowering,
 }
 
 impl ProofCategory {
@@ -221,6 +244,7 @@ impl ProofCategory {
             ProofCategory::DeadCodeElimination,
             ProofCategory::CfgSimplification,
             ProofCategory::Memory,
+            ProofCategory::LoadStoreLowering,
             ProofCategory::NeonLowering,
             ProofCategory::NeonEncoding,
             ProofCategory::Vectorization,
@@ -242,6 +266,8 @@ impl ProofCategory {
             ProofCategory::ExtensionTruncation,
             ProofCategory::AtomicOperations,
             ProofCategory::CallLowering,
+            ProofCategory::X8664Lowering,
+            ProofCategory::SwitchLowering,
         ]
     }
 
@@ -262,6 +288,7 @@ impl ProofCategory {
             ProofCategory::DeadCodeElimination => "Dead Code Elimination",
             ProofCategory::CfgSimplification => "CFG Simplification",
             ProofCategory::Memory => "Memory",
+            ProofCategory::LoadStoreLowering => "Load/Store Lowering",
             ProofCategory::NeonLowering => "NEON Lowering",
             ProofCategory::NeonEncoding => "NEON Encoding",
             ProofCategory::Vectorization => "Vectorization",
@@ -283,6 +310,8 @@ impl ProofCategory {
             ProofCategory::ExtensionTruncation => "Extension/Truncation",
             ProofCategory::AtomicOperations => "Atomic Operations",
             ProofCategory::CallLowering => "Call Lowering",
+            ProofCategory::X8664Lowering => "x86-64 Lowering",
+            ProofCategory::SwitchLowering => "Switch Lowering",
         }
     }
 }
@@ -395,7 +424,25 @@ fn register_arithmetic_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in all_arith.into_iter().take(arith_take) {
         proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Arithmetic });
     }
+    // Remainder lowering proofs (issue #435). Categorized as Division since
+    // Urem/Srem compose UDIV/SDIV + MSUB and share the div-by-zero
+    // precondition.
+    for p in crate::lowering_proof::all_remainder_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Division });
+    }
+    // Bitcast lowering proofs (issue #435). Categorized as Arithmetic since
+    // `Bitcast` is a scalar opcode with no dedicated category and lowers to
+    // MOV/FMOV -- a pure arithmetic identity at the bitvector level.
+    for p in crate::lowering_proof::all_bitcast_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Arithmetic });
+    }
     for p in crate::lowering_proof::all_bitwise_shift_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::BitwiseShift });
+    }
+    // Bitfield lowering proofs (issue #452). ExtractBits / SextractBits /
+    // InsertBits compose shifts, masks, and sign-extends; categorized as
+    // BitwiseShift since they share the underlying shift+mask structure.
+    for p in crate::lowering_proof::all_bitfield_proofs() {
         proofs.push(CategorizedProof { obligation: p, category: ProofCategory::BitwiseShift });
     }
 }
@@ -452,6 +499,9 @@ fn register_analysis_proofs(proofs: &mut Vec<CategorizedProof>) {
     }
     for p in crate::memory_proofs::all_memory_proofs() {
         proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Memory });
+    }
+    for p in crate::lowering_proof::all_load_store_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::LoadStoreLowering });
     }
 }
 
@@ -563,6 +613,20 @@ fn register_call_lowering_proofs(proofs: &mut Vec<CategorizedProof>) {
     }
 }
 
+#[inline(never)]
+fn register_x86_64_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::x86_64_lowering_proofs::all_x86_64_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::X8664Lowering });
+    }
+}
+
+#[inline(never)]
+fn register_switch_proofs(proofs: &mut Vec<CategorizedProof>) {
+    for p in crate::switch_proofs::all_switch_proofs() {
+        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::SwitchLowering });
+    }
+}
+
 impl ProofDatabase {
     /// Construct the database by collecting all proofs from all registries.
     ///
@@ -590,6 +654,8 @@ impl ProofDatabase {
         register_ext_trunc_proofs(&mut proofs);
         register_atomic_proofs(&mut proofs);
         register_call_lowering_proofs(&mut proofs);
+        register_x86_64_proofs(&mut proofs);
+        register_switch_proofs(&mut proofs);
         ProofDatabase { proofs }
     }
 
@@ -751,17 +817,19 @@ mod tests {
     fn test_division_proofs_count() {
         let db = ProofDatabase::new();
         let count = db.count_by_category(ProofCategory::Division);
-        // sdiv/udiv x I32/I64 = 4
-        assert_eq!(count, 4, "expected 4 division proofs, got {}", count);
+        // sdiv/udiv x I32/I64 = 4, plus urem/srem at I8 (issue #435) = 6.
+        assert_eq!(count, 6, "expected 6 division proofs, got {}", count);
     }
 
     #[test]
     fn test_fp_lowering_proofs_count() {
         let db = ProofDatabase::new();
         let count = db.count_by_category(ProofCategory::FloatingPoint);
-        // fadd/fsub/fmul/fdiv/fneg x F32/F64 = 10, plus 14 fcmp conditions x 2 sizes = 28
-        // Total: 10 + 28 = 38
-        assert_eq!(count, 38, "expected 38 FP proofs, got {}", count);
+        // Coverage floor: historic baseline 38
+        // (fadd/fsub/fmul/fdiv/fneg x F32/F64 = 10, plus 14 fcmp conditions x 2
+        // sizes = 28; total 38). Grows monotonically as new FP lowerings land
+        // (#418). Regression is still caught: any decrease fails.
+        assert!(count >= 38, "expected >= 38 FP proofs, got {}", count);
     }
 
     #[test]
@@ -791,8 +859,8 @@ mod tests {
     fn test_peephole_proofs_count() {
         let db = ProofDatabase::new();
         let count = db.count_by_category(ProofCategory::Peephole);
-        // 9 core (64-bit) + 9 (32-bit) + 9 (8-bit exhaustive) = 27
-        assert_eq!(count, 27, "expected 27 peephole proofs, got {}", count);
+        // 51 core (64-bit) + 9 (32-bit) + 39 (8-bit exhaustive) = 99
+        assert_eq!(count, 99, "expected 99 peephole proofs, got {}", count);
     }
 
     #[test]
@@ -947,8 +1015,8 @@ mod tests {
         let categories = ProofCategory::all_categories();
         assert_eq!(
             categories.len(),
-            35,
-            "expected 35 categories, got {}",
+            38,
+            "expected 38 categories, got {}",
             categories.len()
         );
     }
@@ -957,8 +1025,91 @@ mod tests {
     fn test_bitwise_shift_proofs_count() {
         let db = ProofDatabase::new();
         let count = db.count_by_category(ProofCategory::BitwiseShift);
-        // 7 ops x 2 widths = 14
-        assert_eq!(count, 14, "expected 14 bitwise/shift proofs, got {}", count);
+        // I8/I16: 7 ops x 2 widths (14) + BIC/ORN (4, #425/#407) = 18
+        // I32/I64: 6 ops (no BNOT yet) x 2 widths (12) + BIC/ORN (4, #449) = 16
+        // I8 bitfield (ExtractBits/SextractBits/InsertBits, #452) = 3
+        // Total = 37 (#449 widened to I32/I64 + #452 bitfield, epic #407 Task 3).
+        assert_eq!(count, 37, "expected 37 bitwise/shift proofs, got {}", count);
+    }
+
+    // =======================================================================
+    // Load/Store lowering proofs — wired via #422
+    // =======================================================================
+
+    /// Regression test for #422: the `lowering_proof::all_load_store_proofs`
+    /// registry was an orphan for months and not exercised by the default
+    /// `cargo test -p llvm2-verify` suite. Ensure it flows through
+    /// `ProofDatabase::new()` and the 10 obligations are present.
+    #[test]
+    fn test_load_store_proofs_registered() {
+        let db = ProofDatabase::new();
+        let count = db.count_by_category(ProofCategory::LoadStoreLowering);
+        // 4 Load (I8/I16/I32/I64) + 4 Store (I8/I16/I32/I64) + 2 roundtrip (I32/I64) = 10
+        assert!(
+            count >= 10,
+            "expected >= 10 load/store lowering proofs, got {} -- #422 wiring regressed?",
+            count
+        );
+    }
+
+    // =======================================================================
+    // x86-64 lowering proofs — wired via #434 (analog of #422 for LoadStore)
+    // =======================================================================
+
+    /// Regression test for #434: the `x86_64_lowering_proofs::all_x86_64_proofs`
+    /// registry was an orphan and not exercised by the default
+    /// `cargo test -p llvm2-verify` suite. Ensure it flows through
+    /// `ProofDatabase::new()` and every obligation from the registry is
+    /// represented under `ProofCategory::X8664Lowering`.
+    ///
+    /// Note: x86-64 remains opt-in (not default-on for full SMT proof) until
+    /// AArch64 is default-on first — see #407, #340.
+    #[test]
+    fn test_x86_64_proofs_registered() {
+        let db = ProofDatabase::new();
+        let db_count = db.count_by_category(ProofCategory::X8664Lowering);
+        let registry_count = crate::x86_64_lowering_proofs::all_x86_64_proofs().len();
+        assert_eq!(
+            db_count, registry_count,
+            "ProofDatabase x86-64 count ({}) != all_x86_64_proofs() length ({}) -- #434 wiring regressed?",
+            db_count, registry_count
+        );
+        // Current registry size floor; grows as new x86-64 lowerings land.
+        // #458 added 4 direct CMP EFLAGS-write obligations at i32 (ZF/SF/CF/OF)
+        // to the registry, lifting the floor from 81 to 85.
+        assert!(
+            db_count >= 85,
+            "expected >= 85 x86-64 lowering proofs (as of #458 wiring), got {}",
+            db_count
+        );
+    }
+
+    // =======================================================================
+    // Switch lowering proofs — wired via #444
+    // =======================================================================
+
+    /// Regression test for #444: the `switch_proofs::all_switch_proofs`
+    /// registry must flow through `ProofDatabase::new()` so jump-table and
+    /// balanced-BST obligations from the deferred #323 work are exercised by
+    /// the default suite. The obligation count must match the registry length
+    /// and meet a documented floor (dense i8/i16, sparse i8/i16, nonzero base,
+    /// holes, 7-case sparse).
+    #[test]
+    fn test_switch_proofs_registered() {
+        let db = ProofDatabase::new();
+        let db_count = db.count_by_category(ProofCategory::SwitchLowering);
+        let registry_count = crate::switch_proofs::all_switch_proofs().len();
+        assert_eq!(
+            db_count, registry_count,
+            "ProofDatabase SwitchLowering count ({}) != all_switch_proofs() length ({}) -- #444 wiring regressed?",
+            db_count, registry_count
+        );
+        // Current registry size floor; grows as new switch lowerings land.
+        assert!(
+            db_count >= 7,
+            "expected >= 7 switch lowering proofs (as of #444 wiring), got {}",
+            db_count
+        );
     }
 
     // =======================================================================

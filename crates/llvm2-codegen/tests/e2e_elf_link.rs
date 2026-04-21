@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_elf_link.rs - E2E ELF linking integration test
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proves the x86-64 backend works end-to-end:
 //   x86 ISel function -> regalloc -> frame lowering -> encode -> ELF .o
@@ -568,6 +568,7 @@ fn test_e2e_elf_pipeline_configs() {
         output_format: X86OutputFormat::RawBytes,
         emit_elf: false,
         emit_frame: false,
+        ..X86PipelineConfig::default()
     });
     let bytes1 = pipeline1.compile_function(&func).expect("no-elf no-frame should work");
     assert!(!bytes1.is_empty());
@@ -578,6 +579,7 @@ fn test_e2e_elf_pipeline_configs() {
         output_format: X86OutputFormat::RawBytes,
         emit_elf: false,
         emit_frame: true,
+        ..X86PipelineConfig::default()
     });
     let bytes2 = pipeline2.compile_function(&func).expect("no-elf with-frame should work");
     assert!(!bytes2.is_empty());
@@ -594,6 +596,7 @@ fn test_e2e_elf_pipeline_configs() {
         output_format: X86OutputFormat::Elf,
         emit_elf: true,
         emit_frame: true,
+        ..X86PipelineConfig::default()
     });
     let bytes3 = pipeline3.compile_function(&func).expect("elf with-frame should work");
     verify_elf_header_basics(&bytes3);
@@ -609,6 +612,7 @@ fn test_e2e_elf_pipeline_configs() {
         output_format: X86OutputFormat::Elf,
         emit_elf: true,
         emit_frame: false,
+        ..X86PipelineConfig::default()
     });
     let bytes4 = pipeline4.compile_function(&func).expect("elf no-frame should work");
     verify_elf_header_basics(&bytes4);
@@ -673,6 +677,7 @@ fn test_e2e_elf_frame_lowering_patterns() {
         output_format: X86OutputFormat::RawBytes,
         emit_elf: false,
         emit_frame: true,
+        ..X86PipelineConfig::default()
     });
     let code = pipeline.compile_function(&func).expect("compilation should succeed");
 

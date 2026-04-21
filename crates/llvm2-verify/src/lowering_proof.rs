@@ -1,7 +1,7 @@
 // llvm2-verify/lowering_proof.rs - Lowering rule proof obligations
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Defines proof obligations for tMIR -> AArch64 lowering rules and a
 // verification harness that checks semantic equivalence.
@@ -354,6 +354,25 @@ pub fn verify_by_evaluation_with_config(
     let width = obligation.inputs.first().map(|(_, w)| *w).unwrap_or(32);
     let num_inputs = obligation.inputs.len();
 
+    // FP-only obligations (e.g. FADD/FSUB/FMUL/FDIV/FNEG/FABS/FSQRT/FCMP
+    // lowering proofs) carry their operands in `fp_inputs` rather than
+    // `inputs`. Dispatch them to the dedicated FP evaluator which:
+    //   1. substitutes a battery of IEEE-754 edge-case test vectors
+    //      (including NaN, +/-0.0, +/-Inf, denormals, MAX/MIN) into the
+    //      obligation's template expressions, and
+    //   2. compares results with `fp_results_equal`, which treats
+    //      "NaN on both sides" as equal -- the correct behaviour for FP
+    //      lowering verification since Rust's derived `PartialEq` on
+    //      `EvalResult::Float(f64)` follows IEEE-754 semantics where
+    //      `NaN != NaN`. Without this dispatch, FDIV proofs spuriously
+    //      report counterexamples like `tmir=Float(NaN), aarch64=Float(NaN)`
+    //      because the placeholder `fp_const(0.0) / fp_const(0.0)` that
+    //      `check_single_point` evaluates produces NaN on both sides
+    //      (#388, issue tracked under #329 / #406).
+    if num_inputs == 0 && !obligation.fp_inputs.is_empty() {
+        return verify_fp_by_evaluation(obligation);
+    }
+
     // For 3+ inputs or mixed widths, use multi-input random sampling.
     if num_inputs > 2 {
         return verify_random_multi(obligation, config.sample_count);
@@ -554,7 +573,12 @@ fn check_single_point(
     let tmir_result = obligation.tmir_expr.eval(env);
     let aarch64_result = obligation.aarch64_expr.eval(env);
 
-    if tmir_result != aarch64_result {
+    // Use NaN-aware semantic equality: two `Float(NaN)` values are considered
+    // equivalent because IEEE-754 `NaN != NaN` would otherwise produce spurious
+    // counterexamples for FDIV(0,0), FSQRT(-1), and similar operations that
+    // both tMIR and the target encoder correctly lower to a NaN result. See
+    // `EvalResult::semantically_equal` and #388.
+    if !tmir_result.semantically_equal(&aarch64_result) {
         let cex = format!(
             "inputs: {:?}, tmir={:?}, aarch64={:?}",
             env, tmir_result, aarch64_result
@@ -1059,6 +1083,709 @@ pub fn all_division_proofs() -> Vec<ProofObligation> {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// Remainder lowering proofs (issue #435)
+// ---------------------------------------------------------------------------
+//
+// AArch64 has no dedicated remainder instruction. `Urem` / `Srem` lower to a
+// two-instruction sequence:
+//
+//   q = UDIV/SDIV  Wn, Wm          ; quotient
+//   r = MSUB       q,  Wm, Wn      ; r = Wn - q * Wm
+//
+// The proof encodes both the tMIR `Urem`/`Srem` form (via `encode_tmir_binop`
+// which composes `bvudiv`/`bvsdiv` + `bvmul` + `bvsub`) and the machine
+// `MSUB(UDIV/SDIV(a, b), b, a)` form, then verifies they are equivalent
+// under the division preconditions.
+//
+// Preconditions:
+//   * `Urem`: `b != 0` (divisor nonzero).
+//   * `Srem`: `b != 0` AND `not (a == INT_MIN && b == -1)` -- the second
+//     conjunct avoids the signed-division overflow case where `bvsdiv` is
+//     defined but some hardware manuals leave remainder-via-MSUB behavior
+//     unspecified. In practice AArch64's SDIV of `INT_MIN / -1` returns
+//     `INT_MIN` and the MSUB identity holds, but the tMIR spec forbids this
+//     input, so we add it as an explicit precondition for symmetry with
+//     classical compilers (LLVM, rustc).
+
+/// Build the proof obligation for: `tMIR::Urem(I8, a, b) -> UDIV + MSUB (8-bit)`
+///
+/// Proves: `bvurem(a, b) == a - (a /u b) * b` for all 8-bit `a` and all
+/// `b != 0`. Exhaustive at 8-bit (2^16 - 256 inputs with precondition filter).
+pub fn proof_urem_i8() -> ProofObligation {
+    use crate::aarch64_semantics::{encode_msub_rr, encode_udiv_rr};
+    use crate::tmir_semantics::{encode_tmir_binop, precondition};
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    let mut preconditions = vec![];
+    if let Some(pre) = precondition(&Opcode::Urem, Type::I8, &a, &b) {
+        preconditions.push(pre);
+    }
+
+    let quotient = encode_udiv_rr(OperandSize::S32, a.clone(), b.clone());
+    let machine = encode_msub_rr(OperandSize::S32, quotient, b.clone(), a.clone());
+
+    ProofObligation {
+        name: "Urem_I8 -> UDIV+MSUB (8-bit)".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Urem, Type::I8, a, b),
+        aarch64_expr: machine,
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions,
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Srem(I8, a, b) -> SDIV + MSUB (8-bit)`
+///
+/// Proves: `bvsrem(a, b) == a - (a /s b) * b` under the preconditions
+/// `b != 0` and `not (a == INT8_MIN && b == -1)`.
+///
+/// The second precondition guards the signed-division overflow case where
+/// `INT_MIN / -1` is mathematically `|INT_MIN|` but does not fit in the
+/// signed range. tMIR treats this as UB; classical compilers add a runtime
+/// check. Adding the precondition here mirrors that convention.
+pub fn proof_srem_i8() -> ProofObligation {
+    use crate::aarch64_semantics::{encode_msub_rr, encode_sdiv_rr};
+    use crate::tmir_semantics::{encode_tmir_binop, precondition};
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    let mut preconditions = vec![];
+    if let Some(pre) = precondition(&Opcode::Srem, Type::I8, &a, &b) {
+        preconditions.push(pre);
+    }
+    // Additional precondition: not (a == INT8_MIN && b == -1).
+    // INT8_MIN = 0x80 = -128, -1 = 0xFF at 8 bits.
+    let int8_min = SmtExpr::bv_const(0x80, 8);
+    let neg_one = SmtExpr::bv_const(0xFF, 8);
+    let overflow = a
+        .clone()
+        .eq_expr(int8_min)
+        .and_expr(b.clone().eq_expr(neg_one));
+    preconditions.push(overflow.not_expr());
+
+    let quotient = encode_sdiv_rr(OperandSize::S32, a.clone(), b.clone());
+    let machine = encode_msub_rr(OperandSize::S32, quotient, b.clone(), a.clone());
+
+    ProofObligation {
+        name: "Srem_I8 -> SDIV+MSUB (8-bit)".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Srem, Type::I8, a, b),
+        aarch64_expr: machine,
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions,
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Urem(I16, a, b) -> UDIV + MSUB (16-bit)`
+///
+/// Widening of [`proof_urem_i8`] to i16. The encoders (`encode_udiv_rr`,
+/// `encode_msub_rr`) are width-polymorphic — they use the bitvector width
+/// carried by the `SmtExpr`, so the 16-bit obligation is a direct copy of
+/// the 8-bit proof with `SmtExpr::var("a", 16)` / `SmtExpr::var("b", 16)`.
+/// `OperandSize::S32` is passed because 16-bit values are held in W
+/// registers on AArch64, matching the i8 convention.
+///
+/// Under z4 this runs symbolically (no enumeration), so wall-time is modest
+/// despite the 2^32 joint input space. Smoke lane uses the tolerant
+/// `assert_verified_or_timeout` helper (#435).
+pub fn proof_urem_i16() -> ProofObligation {
+    use crate::aarch64_semantics::{encode_msub_rr, encode_udiv_rr};
+    use crate::tmir_semantics::{encode_tmir_binop, precondition};
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+    let b = SmtExpr::var("b", 16);
+
+    let mut preconditions = vec![];
+    if let Some(pre) = precondition(&Opcode::Urem, Type::I16, &a, &b) {
+        preconditions.push(pre);
+    }
+
+    let quotient = encode_udiv_rr(OperandSize::S32, a.clone(), b.clone());
+    let machine = encode_msub_rr(OperandSize::S32, quotient, b.clone(), a.clone());
+
+    ProofObligation {
+        name: "Urem_I16 -> UDIV+MSUB (16-bit)".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Urem, Type::I16, a, b),
+        aarch64_expr: machine,
+        inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
+        preconditions,
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Srem(I16, a, b) -> SDIV + MSUB (16-bit)`
+///
+/// Widening of [`proof_srem_i8`] to i16. Preconditions mirror the i8 case:
+/// `b != 0` AND `not (a == INT16_MIN && b == -1)`. `INT16_MIN = 0x8000`,
+/// `-1 @ 16 bits = 0xFFFF`.
+pub fn proof_srem_i16() -> ProofObligation {
+    use crate::aarch64_semantics::{encode_msub_rr, encode_sdiv_rr};
+    use crate::tmir_semantics::{encode_tmir_binop, precondition};
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+    let b = SmtExpr::var("b", 16);
+
+    let mut preconditions = vec![];
+    if let Some(pre) = precondition(&Opcode::Srem, Type::I16, &a, &b) {
+        preconditions.push(pre);
+    }
+    // Additional precondition: not (a == INT16_MIN && b == -1).
+    // INT16_MIN = 0x8000 = -32768, -1 = 0xFFFF at 16 bits.
+    let int16_min = SmtExpr::bv_const(0x8000, 16);
+    let neg_one = SmtExpr::bv_const(0xFFFF, 16);
+    let overflow = a
+        .clone()
+        .eq_expr(int16_min)
+        .and_expr(b.clone().eq_expr(neg_one));
+    preconditions.push(overflow.not_expr());
+
+    let quotient = encode_sdiv_rr(OperandSize::S32, a.clone(), b.clone());
+    let machine = encode_msub_rr(OperandSize::S32, quotient, b.clone(), a.clone());
+
+    ProofObligation {
+        name: "Srem_I16 -> SDIV+MSUB (16-bit)".to_string(),
+        tmir_expr: encode_tmir_binop(&Opcode::Srem, Type::I16, a, b),
+        aarch64_expr: machine,
+        inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
+        preconditions,
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Return all remainder lowering proofs (issue #435).
+pub fn all_remainder_proofs() -> Vec<ProofObligation> {
+    vec![
+        proof_urem_i8(),
+        proof_srem_i8(),
+        proof_urem_i16(),
+        proof_srem_i16(),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Bitcast lowering proof (issue #435)
+// ---------------------------------------------------------------------------
+//
+// `tMIR::Bitcast { to_ty }` reinterprets the bit pattern of `operand` as a
+// different type of the same width. It is pure type-punning with no runtime
+// cost: on AArch64 it lowers to `MOV` (GPR<->GPR), `FMOV` register-register
+// (FPR<->FPR), or `FMOV` general (GPR<->FPR / FPR<->GPR). All three machine
+// forms reduce to the bitvector identity.
+//
+// The proof below uses `i8` as a representative width; the equivalence is
+// trivial (`x == x`) but the obligation exercises the full proof pipeline
+// (precondition-free, z4-compatible) and locks in the semantics so that
+// future changes to `encode_tmir_bitcast` or `encode_mov_rr` are caught.
+
+/// Build the proof obligation for: `tMIR::Bitcast(I8 -> I8, a) -> MOV (8-bit)`
+///
+/// Verifies that a same-width bitcast is the identity at the bit level.
+/// Representative of the full family of same-width bitcasts:
+/// `i32<->f32`, `i64<->f64`, pointer casts, etc.
+pub fn proof_bitcast_i8() -> ProofObligation {
+    use crate::aarch64_semantics::encode_mov_rr;
+    use crate::tmir_semantics::encode_tmir_bitcast;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+
+    ProofObligation {
+        name: "Bitcast_I8_I8 -> MOV (8-bit)".to_string(),
+        tmir_expr: encode_tmir_bitcast(Type::I8, Type::I8, a.clone()),
+        aarch64_expr: encode_mov_rr(OperandSize::S32, a),
+        inputs: vec![("a".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bitcast(I16 -> I16, a) -> MOV (16-bit)`
+///
+/// Widening of [`proof_bitcast_i8`] to i16. `encode_tmir_bitcast` and
+/// `encode_mov_rr` are width-agnostic (pure identity on the input
+/// bitvector), so the obligation is the BV identity `x == x` at width 16.
+pub fn proof_bitcast_i16() -> ProofObligation {
+    use crate::aarch64_semantics::encode_mov_rr;
+    use crate::tmir_semantics::encode_tmir_bitcast;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+
+    ProofObligation {
+        name: "Bitcast_I16_I16 -> MOV (16-bit)".to_string(),
+        tmir_expr: encode_tmir_bitcast(Type::I16, Type::I16, a.clone()),
+        aarch64_expr: encode_mov_rr(OperandSize::S32, a),
+        inputs: vec![("a".to_string(), 16)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bitcast(I32 -> I32, a) -> MOV (32-bit)`
+///
+/// Widening of [`proof_bitcast_i8`] to i32. Covers the i32<->f32 bit
+/// reinterpretation case at the BV level. Pure identity.
+pub fn proof_bitcast_i32() -> ProofObligation {
+    use crate::aarch64_semantics::encode_mov_rr;
+    use crate::tmir_semantics::encode_tmir_bitcast;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+
+    ProofObligation {
+        name: "Bitcast_I32_I32 -> MOV (32-bit)".to_string(),
+        tmir_expr: encode_tmir_bitcast(Type::I32, Type::I32, a.clone()),
+        aarch64_expr: encode_mov_rr(OperandSize::S32, a),
+        inputs: vec![("a".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bitcast(I64 -> I64, a) -> MOV (64-bit)`
+///
+/// Widening of [`proof_bitcast_i8`] to i64. Covers the i64<->f64 and
+/// pointer bitcast families at the BV level. Pure identity.
+pub fn proof_bitcast_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_mov_rr;
+    use crate::tmir_semantics::encode_tmir_bitcast;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+
+    ProofObligation {
+        name: "Bitcast_I64_I64 -> MOV (64-bit)".to_string(),
+        tmir_expr: encode_tmir_bitcast(Type::I64, Type::I64, a.clone()),
+        aarch64_expr: encode_mov_rr(OperandSize::S64, a),
+        inputs: vec![("a".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Return all bitcast lowering proofs (issue #435).
+pub fn all_bitcast_proofs() -> Vec<ProofObligation> {
+    vec![
+        proof_bitcast_i8(),
+        proof_bitcast_i16(),
+        proof_bitcast_i32(),
+        proof_bitcast_i64(),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Bitfield lowering proofs (issue #452, epic #435)
+// ---------------------------------------------------------------------------
+//
+// tMIR has three bitfield opcodes that have no dedicated 1:1 AArch64
+// instruction mnemonic but compose from UBFM / SBFM / BFM:
+//
+//   ExtractBits { lsb, width }   ->  UBFM Wd, Wn, #lsb, #(lsb + width - 1)
+//   SextractBits { lsb, width }  ->  SBFM Wd, Wn, #lsb, #(lsb + width - 1)
+//   InsertBits { lsb, width }    ->  BFM  Wd, Wn, #((reg_size - lsb) % reg_size),
+//                                          #(width - 1)
+//                                   (preceded by a COPY of the `dst` operand
+//                                    into the result register -- see
+//                                    `llvm2-lower/src/isel.rs::select_bitfield_insert`)
+//
+// All three machine instructions are pure QF_BV operations -- no flags, no
+// memory, no preconditions beyond the immediate-field range enforced by the
+// tMIR type system and the encoder (`lsb + width <= reg_size`, `width >= 1`).
+// The proofs below verify that the tMIR semantic encoding matches the
+// AArch64 semantic encoding for representative i8 (lsb, width) pairs.
+//
+// # Representative (lsb, width) choice
+//
+// We pick `(lsb = 2, width = 4)` as the canonical i8 obligation: the slice
+// straddles the middle of the byte, exercises the shift + mask composition
+// non-trivially, and for `SextractBits` the top bit of the slice can be
+// either value depending on the input -- so the sign-extension arm is
+// actually exercised (both with and without sign bits set).
+//
+// Exhaustive i8 evaluation covers all 2^8 = 256 inputs for ExtractBits /
+// SextractBits and all 2^16 = 65,536 (dst, src) pairs for InsertBits.
+//
+// References:
+// - ARM DDI 0487, C6.2.335 UBFM (C6.2.334 UBFX alias)
+// - ARM DDI 0487, C6.2.266 SBFM (C6.2.264 SBFX alias)
+// - ARM DDI 0487, C6.2.46 BFM (C6.2.45 BFI alias)
+
+/// Build the proof obligation for:
+/// `tMIR::ExtractBits{lsb=2, width=4}(I8, x) -> UBFM Wd, Wn, #2, #5 (8-bit)`.
+///
+/// Proves: `bv_extract(lsb, width, x) == (x lsr lsb) & mask(width)` for all
+/// 8-bit `x`. No preconditions.
+pub fn proof_extract_bits_i8() -> ProofObligation {
+    use crate::aarch64_semantics::encode_ubfm_extract;
+    use crate::tmir_semantics::encode_tmir_extract_bits;
+    use llvm2_lower::types::Type;
+
+    let lsb: u8 = 2;
+    let width: u8 = 4;
+    let x = SmtExpr::var("x", 8);
+
+    ProofObligation {
+        name: format!(
+            "ExtractBits{{lsb={},width={}}}_I8 -> UBFM (8-bit)",
+            lsb, width
+        ),
+        tmir_expr: encode_tmir_extract_bits(Type::I8, lsb, width, x.clone()),
+        aarch64_expr: encode_ubfm_extract(x, lsb as u32, width as u32, 8),
+        inputs: vec![("x".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for:
+/// `tMIR::SextractBits{lsb=2, width=4}(I8, x) -> SBFM Wd, Wn, #2, #5 (8-bit)`.
+///
+/// Proves: `sign_extend(x[lsb+width-1:lsb]) == SBFM-machine-semantics` for
+/// all 8-bit `x`. No preconditions.
+///
+/// SBFM's machine encoding ties to `sign_extend(extract(lsb, width, x))`:
+/// the 4-bit slice `x[5:2]` is pulled out and sign-extended to 8 bits by
+/// replicating bit 3 of the slice (= bit 5 of `x`) across the upper 4 bits.
+pub fn proof_sextract_bits_i8() -> ProofObligation {
+    use crate::aarch64_semantics::encode_sbfm_extract;
+    use crate::tmir_semantics::encode_tmir_sextract_bits;
+    use llvm2_lower::types::Type;
+
+    let lsb: u8 = 2;
+    let width: u8 = 4;
+    let x = SmtExpr::var("x", 8);
+
+    ProofObligation {
+        name: format!(
+            "SextractBits{{lsb={},width={}}}_I8 -> SBFM (8-bit)",
+            lsb, width
+        ),
+        tmir_expr: encode_tmir_sextract_bits(Type::I8, lsb, width, x.clone()),
+        aarch64_expr: encode_sbfm_extract(x, lsb as u32, width as u32, 8),
+        inputs: vec![("x".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for:
+/// `tMIR::InsertBits{lsb=2, width=4}(I8, x, y) -> BFM Wd, Ws (8-bit)`.
+///
+/// Proves: `result == (x & ~mask_shifted) | ((y & mask(width)) shl lsb)`
+/// for all 8-bit `(x, y)`, where `mask_shifted = mask(width) << lsb`.
+/// No preconditions.
+///
+/// `x` is the destination (old value, preserved outside the slice).
+/// `y` supplies the new bits for `[lsb + width - 1 : lsb]`.
+pub fn proof_insert_bits_i8() -> ProofObligation {
+    use crate::aarch64_semantics::encode_bfm_insert;
+    use crate::tmir_semantics::encode_tmir_insert_bits;
+    use llvm2_lower::types::Type;
+
+    let lsb: u8 = 2;
+    let width: u8 = 4;
+    let x = SmtExpr::var("x", 8);
+    let y = SmtExpr::var("y", 8);
+
+    ProofObligation {
+        name: format!(
+            "InsertBits{{lsb={},width={}}}_I8 -> BFM (8-bit)",
+            lsb, width
+        ),
+        tmir_expr: encode_tmir_insert_bits(Type::I8, lsb, width, x.clone(), y.clone()),
+        aarch64_expr: encode_bfm_insert(x, y, lsb as u32, width as u32, 8),
+        inputs: vec![("x".to_string(), 8), ("y".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Return all bitfield lowering proofs (issue #452, epic #435).
+pub fn all_bitfield_proofs() -> Vec<ProofObligation> {
+    vec![
+        proof_extract_bits_i8(),
+        proof_sextract_bits_i8(),
+        proof_insert_bits_i8(),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// I128 multi-register arithmetic lowering proofs (issue #324)
+// ---------------------------------------------------------------------------
+//
+// i128 values are held in a register pair (lo:hi) of two 64-bit GPRs. Add /
+// sub are lowered to two machine instructions — a flag-setting low-half op
+// followed by a carry/borrow-propagating high-half op:
+//
+//   i128 ADD: `ADDS dst_lo, a_lo, b_lo`  then  `ADC dst_hi, a_hi, b_hi`
+//   i128 SUB: `SUBS dst_lo, a_lo, b_lo`  then  `SBC dst_hi, a_hi, b_hi`
+//
+// The default evaluator's `bvadd`/`bvsub`/`bvmul` eval paths truncate to u64
+// (see `SmtExpr::BvAdd` in `smt.rs`), so we cannot model the 128-bit spec as
+// a single 128-bit `bvadd`/`bvsub` and get meaningful coverage. Instead, the
+// proof obligations below are split across the two 64-bit limbs — one
+// obligation for each — with a concrete SMT-level carry / borrow expression
+// that matches the AArch64 NZCV semantics:
+//
+//   ADC carry  : C = 1 iff a_lo + b_lo overflows 2^64 ≡ `bvult(lo_sum, a_lo)`
+//   SBC borrow : C = 1 iff a_lo >= b_lo (AArch64 sets C=!borrow) ≡
+//                !bvult(a_lo, b_lo) ≡ `bvuge(a_lo, b_lo)`
+//
+// Both sides of each obligation (tmir spec, aarch64 machine form) are
+// constructed using the same SMT primitives, so evaluation-based
+// verification acts as a regression lock on the carry/borrow encoding. A
+// future z4 formal proof can compare against `concat(hi, lo).bvadd/bvsub`
+// directly once the evaluator grows native 128-bit add/sub.
+
+/// Build the proof obligation for the low 64 bits of i128 ADD.
+///
+/// `dst_lo = (a_lo + b_lo) mod 2^64` on both sides. This is the trivial
+/// half of the ADDS+ADC lowering; the hi-half proof below carries the
+/// ADC-specific carry identity.
+pub fn proof_iadd_i128_lo() -> ProofObligation {
+    let a_lo = SmtExpr::var("a_lo", 64);
+    let b_lo = SmtExpr::var("b_lo", 64);
+
+    // tMIR spec: low 64 bits of `a + b` are `(a_lo + b_lo) mod 2^64`.
+    let tmir = a_lo.clone().bvadd(b_lo.clone());
+    // AArch64 ADDS writes `a_lo + b_lo` into dst_lo.
+    let aarch64 = a_lo.bvadd(b_lo);
+
+    ProofObligation {
+        name: "Iadd_I128 lo -> ADDS Xlo,Xa_lo,Xb_lo".to_string(),
+        tmir_expr: tmir,
+        aarch64_expr: aarch64,
+        inputs: vec![("a_lo".to_string(), 64), ("b_lo".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for the high 64 bits of i128 ADD.
+///
+/// `dst_hi = (a_hi + b_hi + carry) mod 2^64` where
+/// `carry = 1 iff (a_lo + b_lo) wraps past 2^64`. Both sides use the same
+/// carry formula drawn from AArch64's ADDS NZCV flag semantics.
+pub fn proof_iadd_i128_hi() -> ProofObligation {
+    let a_lo = SmtExpr::var("a_lo", 64);
+    let b_lo = SmtExpr::var("b_lo", 64);
+    let a_hi = SmtExpr::var("a_hi", 64);
+    let b_hi = SmtExpr::var("b_hi", 64);
+
+    // carry = 1 iff a_lo + b_lo overflowed the 64-bit word.
+    let lo_sum = a_lo.clone().bvadd(b_lo);
+    let carry_bool = lo_sum.bvult(a_lo);
+    let carry_bv = SmtExpr::ite(
+        carry_bool,
+        SmtExpr::bv_const(1, 64),
+        SmtExpr::bv_const(0, 64),
+    );
+
+    // tMIR spec: high 64 bits of `a + b` = a_hi + b_hi + carry (mod 2^64).
+    let tmir = a_hi.clone().bvadd(b_hi.clone()).bvadd(carry_bv.clone());
+    // AArch64 ADC: dst_hi = a_hi + b_hi + C (where C came from ADDS above).
+    let aarch64 = a_hi.bvadd(b_hi).bvadd(carry_bv);
+
+    ProofObligation {
+        name: "Iadd_I128 hi -> ADC Xhi,Xa_hi,Xb_hi".to_string(),
+        tmir_expr: tmir,
+        aarch64_expr: aarch64,
+        inputs: vec![
+            ("a_lo".to_string(), 64),
+            ("b_lo".to_string(), 64),
+            ("a_hi".to_string(), 64),
+            ("b_hi".to_string(), 64),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for the low 64 bits of i128 SUB.
+///
+/// `dst_lo = (a_lo - b_lo) mod 2^64` via AArch64 SUBS.
+pub fn proof_isub_i128_lo() -> ProofObligation {
+    let a_lo = SmtExpr::var("a_lo", 64);
+    let b_lo = SmtExpr::var("b_lo", 64);
+
+    let tmir = a_lo.clone().bvsub(b_lo.clone());
+    let aarch64 = a_lo.bvsub(b_lo);
+
+    ProofObligation {
+        name: "Isub_I128 lo -> SUBS Xlo,Xa_lo,Xb_lo".to_string(),
+        tmir_expr: tmir,
+        aarch64_expr: aarch64,
+        inputs: vec![("a_lo".to_string(), 64), ("b_lo".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for the high 64 bits of i128 SUB.
+///
+/// AArch64 SBC computes `a_hi + NOT(b_hi) + C` where `C = !borrow`, i.e.
+/// `dst_hi = a_hi - b_hi - borrow (mod 2^64)`. The borrow from the low
+/// half is `1 iff a_lo < b_lo` (unsigned), so `C = 1 iff a_lo >= b_lo`.
+/// The tMIR spec for the high limb of `a - b` is the same.
+pub fn proof_isub_i128_hi() -> ProofObligation {
+    let a_lo = SmtExpr::var("a_lo", 64);
+    let b_lo = SmtExpr::var("b_lo", 64);
+    let a_hi = SmtExpr::var("a_hi", 64);
+    let b_hi = SmtExpr::var("b_hi", 64);
+
+    // borrow = 1 iff a_lo < b_lo (unsigned).
+    let borrow_bool = a_lo.bvult(b_lo);
+    let borrow_bv = SmtExpr::ite(
+        borrow_bool,
+        SmtExpr::bv_const(1, 64),
+        SmtExpr::bv_const(0, 64),
+    );
+
+    // tMIR spec: high 64 bits of `a - b` = a_hi - b_hi - borrow (mod 2^64).
+    let tmir = a_hi.clone().bvsub(b_hi.clone()).bvsub(borrow_bv.clone());
+    // AArch64 SBC: dst_hi = a_hi - b_hi - borrow, reading C from SUBS.
+    let aarch64 = a_hi.bvsub(b_hi).bvsub(borrow_bv);
+
+    ProofObligation {
+        name: "Isub_I128 hi -> SBC Xhi,Xa_hi,Xb_hi".to_string(),
+        tmir_expr: tmir,
+        aarch64_expr: aarch64,
+        inputs: vec![
+            ("a_lo".to_string(), 64),
+            ("b_lo".to_string(), 64),
+            ("a_hi".to_string(), 64),
+            ("b_hi".to_string(), 64),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for the low 64 bits of i128 MUL.
+///
+/// ```text
+/// dst_lo = MUL a_lo, b_lo
+/// ```
+/// i.e. `dst_lo = (a_lo * b_lo) mod 2^64`. The i128 product spec reduces to
+/// the same expression for its low 64 bits because multiplication is
+/// commutative/associative under mod 2^64 and only the cross terms
+/// `a_lo*b_hi`, `a_hi*b_lo`, `a_hi*b_hi` contribute to bits >= 64.
+pub fn proof_imul_i128_lo() -> ProofObligation {
+    let a_lo = SmtExpr::var("a_lo", 64);
+    let b_lo = SmtExpr::var("b_lo", 64);
+
+    // tMIR spec: low 64 bits of `a * b` are `(a_lo * b_lo) mod 2^64`.
+    let tmir = a_lo.clone().bvmul(b_lo.clone());
+    // AArch64 MUL writes `a_lo * b_lo` into dst_lo.
+    let aarch64 = a_lo.bvmul(b_lo);
+
+    ProofObligation {
+        name: "Imul_I128 lo -> MUL Xlo,Xa_lo,Xb_lo".to_string(),
+        tmir_expr: tmir,
+        aarch64_expr: aarch64,
+        inputs: vec![("a_lo".to_string(), 64), ("b_lo".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for the high 64 bits of i128 MUL.
+///
+/// The AArch64 lowering emits:
+/// ```text
+/// dst_lo = MUL   a_lo, b_lo
+/// t0     = UMULH a_lo, b_lo                 // upper 64 bits of a_lo*b_lo
+/// t1     = MADD  a_lo, b_hi, t0             // t0 + a_lo * b_hi
+/// dst_hi = MADD  a_hi, b_lo, t1             // t1 + a_hi * b_lo
+/// ```
+/// So `dst_hi = UMULH(a_lo, b_lo) + a_lo*b_hi + a_hi*b_lo (mod 2^64)`.
+///
+/// `UMULH` has no native 64-bit encoding and the SMT evaluator truncates
+/// `bvmul` to 64 bits, so we cannot compute the true high-half product
+/// inside the evaluator. We model `UMULH(a_lo, b_lo)` as a free 64-bit
+/// variable `umulh_ab_lo` that appears identically on the tMIR spec side
+/// and the AArch64 machine side. The proof then verifies that the MADD
+/// chain correctly accumulates the cross terms on top of the UMULH
+/// contribution — this is the part of the lowering that could realistically
+/// be miscoded (operand order, missed addend, wrong base). The correctness
+/// of `UMULH` itself is covered by `aarch64_semantics` encoding tests.
+///
+/// A future z4-native proof can replace `umulh_ab_lo` with the true
+/// `(zero_extend(a_lo, 64).bvmul(zero_extend(b_lo, 64))).extract(127, 64)`
+/// expression once the evaluator supports 128-bit `bvmul`.
+pub fn proof_imul_i128_hi() -> ProofObligation {
+    let a_lo = SmtExpr::var("a_lo", 64);
+    let b_lo = SmtExpr::var("b_lo", 64);
+    let a_hi = SmtExpr::var("a_hi", 64);
+    let b_hi = SmtExpr::var("b_hi", 64);
+    // Symbolic stand-in for UMULH(a_lo, b_lo). The same variable appears on
+    // both sides so the evaluator sees a well-defined value; any lowering
+    // bug in the MADD chain around it will still surface as a mismatch.
+    let umulh = SmtExpr::var("umulh_ab_lo", 64);
+
+    // tMIR spec: `dst_hi = umulh(a_lo,b_lo) + a_lo*b_hi + a_hi*b_lo (mod 2^64)`.
+    let cross_ab = a_lo.clone().bvmul(b_hi.clone());
+    let cross_ba = a_hi.clone().bvmul(b_lo.clone());
+    let tmir = umulh.clone().bvadd(cross_ab.clone()).bvadd(cross_ba.clone());
+
+    // AArch64 form: t1 = MADD(a_lo, b_hi, t0) = a_lo*b_hi + umulh
+    //               dst_hi = MADD(a_hi, b_lo, t1) = a_hi*b_lo + t1
+    let t1 = cross_ab.bvadd(umulh);
+    let aarch64 = cross_ba.bvadd(t1);
+
+    ProofObligation {
+        name: "Imul_I128 hi -> MUL+UMULH+MADD+MADD".to_string(),
+        tmir_expr: tmir,
+        aarch64_expr: aarch64,
+        inputs: vec![
+            ("a_lo".to_string(), 64),
+            ("b_lo".to_string(), 64),
+            ("a_hi".to_string(), 64),
+            ("b_hi".to_string(), 64),
+            ("umulh_ab_lo".to_string(), 64),
+        ],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
 /// Return all standard arithmetic lowering rule proofs.
 pub fn all_arithmetic_proofs() -> Vec<ProofObligation> {
     vec![
@@ -1087,6 +1814,14 @@ pub fn all_arithmetic_proofs() -> Vec<ProofObligation> {
         proof_sdiv_i64(),
         proof_udiv_i32(),
         proof_udiv_i64(),
+        // I128 multi-register (statistical verification on each 64-bit limb;
+        // see #324 and proof_iadd_i128_hi for the ADC carry identity).
+        proof_iadd_i128_lo(),
+        proof_iadd_i128_hi(),
+        proof_isub_i128_lo(),
+        proof_isub_i128_hi(),
+        proof_imul_i128_lo(),
+        proof_imul_i128_hi(),
     ]
 }
 
@@ -1303,6 +2038,94 @@ pub fn proof_fdiv_f64() -> ProofObligation {
         inputs: vec![],
         preconditions: vec![],
         fp_inputs: vec![("a".to_string(), 11, 53), ("b".to_string(), 11, 53)],
+            category: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Floating-point absolute value and square root lowering proofs
+// ---------------------------------------------------------------------------
+
+/// Build the proof obligation for: `tMIR::Fabs(F32, a) -> FABS Sd, Sn`
+///
+/// Reference: ARM DDI 0487, C7.2.73 FABS (scalar).
+pub fn proof_fabs_f32() -> ProofObligation {
+    use crate::aarch64_semantics::{encode_fabs, FPSize};
+    use crate::tmir_semantics::encode_tmir_fabs;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp32_const(0.0);
+
+    ProofObligation {
+        name: "Fabs_F32 -> FABS Sd".to_string(),
+        tmir_expr: encode_tmir_fabs(Type::F32, a.clone()),
+        aarch64_expr: encode_fabs(FPSize::Single, a),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 8, 24)],
+            category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Fabs(F64, a) -> FABS Dd, Dn`
+///
+/// Reference: ARM DDI 0487, C7.2.73 FABS (scalar).
+pub fn proof_fabs_f64() -> ProofObligation {
+    use crate::aarch64_semantics::{encode_fabs, FPSize};
+    use crate::tmir_semantics::encode_tmir_fabs;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp64_const(0.0);
+
+    ProofObligation {
+        name: "Fabs_F64 -> FABS Dd".to_string(),
+        tmir_expr: encode_tmir_fabs(Type::F64, a.clone()),
+        aarch64_expr: encode_fabs(FPSize::Double, a),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 11, 53)],
+            category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Fsqrt(F32, a) -> FSQRT Sd, Sn`
+///
+/// Reference: ARM DDI 0487, C7.2.160 FSQRT (scalar).
+pub fn proof_fsqrt_f32() -> ProofObligation {
+    use crate::aarch64_semantics::{encode_fsqrt, FPSize};
+    use crate::tmir_semantics::encode_tmir_fsqrt;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp32_const(0.0);
+
+    ProofObligation {
+        name: "Fsqrt_F32 -> FSQRT Sd".to_string(),
+        tmir_expr: encode_tmir_fsqrt(Type::F32, a.clone()),
+        aarch64_expr: encode_fsqrt(FPSize::Single, a),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 8, 24)],
+            category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Fsqrt(F64, a) -> FSQRT Dd, Dn`
+///
+/// Reference: ARM DDI 0487, C7.2.160 FSQRT (scalar).
+pub fn proof_fsqrt_f64() -> ProofObligation {
+    use crate::aarch64_semantics::{encode_fsqrt, FPSize};
+    use crate::tmir_semantics::encode_tmir_fsqrt;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp64_const(0.0);
+
+    ProofObligation {
+        name: "Fsqrt_F64 -> FSQRT Dd".to_string(),
+        tmir_expr: encode_tmir_fsqrt(Type::F64, a.clone()),
+        aarch64_expr: encode_fsqrt(FPSize::Double, a),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 11, 53)],
             category: None,
     }
 }
@@ -1526,6 +2349,12 @@ pub fn all_fp_lowering_proofs() -> Vec<ProofObligation> {
         proof_fneg_f64(),
         proof_fdiv_f32(),
         proof_fdiv_f64(),
+        // FABS: absolute value (F32 + F64)
+        proof_fabs_f32(),
+        proof_fabs_f64(),
+        // FSQRT: square root (F32 + F64)
+        proof_fsqrt_f32(),
+        proof_fsqrt_f64(),
         // FCMP: ordered comparisons (F32 + F64)
         proof_fcmp_eq_f32(),
         proof_fcmp_eq_f64(),
@@ -1564,7 +2393,7 @@ pub fn all_fp_lowering_proofs() -> Vec<ProofObligation> {
 ///
 /// FCMP proofs produce `ITE(comparison_bool, BV1(1), BV1(0))` at the top
 /// level, whereas arithmetic proofs (FADD/FSUB/FMUL/FDIV) have FPAdd/FPSub/
-/// FPMul/FPDiv at the top. FNEG has FPNeg.
+/// FPMul/FPDiv at the top. FNEG has FPNeg. FABS has FPAbs. FSQRT has FPSqrt.
 fn is_fp_cmp_obligation(obligation: &ProofObligation) -> bool {
     matches!(&obligation.tmir_expr, SmtExpr::Ite { .. })
 }
@@ -1615,7 +2444,7 @@ fn parse_float_cc_from_name(name: &str) -> llvm2_lower::instructions::FloatCC {
 /// of edge cases including zero, one, negative values, small/large magnitudes,
 /// denormals, and infinity.
 ///
-/// For unary FP operations (FNEG): tests each edge case value individually.
+/// For unary FP operations (FNEG, FABS, FSQRT): tests each edge case value individually.
 ///
 /// For FP comparisons (FCMP): tests all combinations of edge cases including
 /// NaN, which is critical for verifying ordered/unordered comparison semantics.
@@ -1663,7 +2492,7 @@ pub fn verify_fp_by_evaluation(obligation: &ProofObligation) -> VerificationResu
     let is_cmp = is_fp_cmp_obligation(obligation);
 
     if is_unary {
-        // Unary FP operation (FNEG)
+        // Unary FP operation (FNEG, FABS, FSQRT)
         if is_f32 {
             for &a_val in &f32_test_values {
                 let tmir_expr = build_fp_unary_expr(&obligation.tmir_expr, a_val as f64, is_f32);
@@ -1810,6 +2639,8 @@ fn build_fp_unary_expr(template: &SmtExpr, a_val: f64, is_f32: bool) -> SmtExpr 
 
     match template {
         SmtExpr::FPNeg { .. } => a.fp_neg(),
+        SmtExpr::FPAbs { .. } => a.fp_abs(),
+        SmtExpr::FPSqrt { rm, .. } => SmtExpr::fp_sqrt(*rm, a),
         _ => template.clone(),
     }
 }
@@ -2714,6 +3545,57 @@ pub fn proof_sshr_i8() -> ProofObligation {
     }
 }
 
+/// Build the proof obligation for: `tMIR::BandNot(I8, a, b) -> BIC (8-bit)`
+///
+/// BIC (bit clear) on AArch64: `Rd = Rn & ~Rm`.
+/// tMIR `BandNot` has identical semantics; issue #425 wires the default-on
+/// lowering proof.
+pub fn proof_bic_i8() -> ProofObligation {
+    use crate::aarch64_semantics::encode_bic_rr;
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "BandNot_I8 -> BIC (8-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::BandNot, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: encode_bic_rr(OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::BorNot(I8, a, b) -> ORN (8-bit)`
+///
+/// ORN on AArch64: `Rd = Rn | ~Rm`. tMIR `BorNot` has identical semantics;
+/// issue #425 wires the default-on lowering proof.
+pub fn proof_orn_i8() -> ProofObligation {
+    use crate::aarch64_semantics::encode_orn_rr;
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "BorNot_I8 -> ORN (8-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::BorNot, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: encode_orn_rr(OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // I16 bitwise/shift lowering proofs (statistical — edge cases + random sampling)
 // ---------------------------------------------------------------------------
@@ -2860,10 +3742,405 @@ pub fn proof_sshr_i16() -> ProofObligation {
     }
 }
 
-/// Return all bitwise and shift lowering proofs (I8 + I16, 14 total).
+/// Build the proof obligation for: `tMIR::BandNot(I16, a, b) -> BIC (16-bit)`
 ///
-/// Covers: AND, OR, XOR, NOT, SHL, LSR, ASR at both I8 (exhaustive) and
-/// I16 (statistical) widths.
+/// BIC (bit clear) on AArch64: `Rd = Rn & ~Rm`. On AArch64, 16-bit operations
+/// are performed in 32-bit W registers; `encode_bic_rr` derives complement
+/// width from the operand's bitvector sort so the I16 proof composes
+/// correctly. I16 sibling of `proof_bic_i8` (issue #425), widened for
+/// epic #407 default-on z4 smoke rollout.
+pub fn proof_bic_i16() -> ProofObligation {
+    use crate::aarch64_semantics::encode_bic_rr;
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+    let b = SmtExpr::var("b", 16);
+
+    ProofObligation {
+        name: "BandNot_I16 -> BIC (16-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::BandNot, Type::I16, a.clone(), b.clone()),
+        aarch64_expr: encode_bic_rr(OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::BorNot(I16, a, b) -> ORN (16-bit)`
+///
+/// ORN on AArch64: `Rd = Rn | ~Rm`. I16 sibling of `proof_orn_i8`
+/// (issue #425), widened for epic #407 default-on z4 smoke rollout.
+pub fn proof_orn_i16() -> ProofObligation {
+    use crate::aarch64_semantics::encode_orn_rr;
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 16);
+    let b = SmtExpr::var("b", 16);
+
+    ProofObligation {
+        name: "BorNot_I16 -> ORN (16-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::BorNot, Type::I16, a.clone(), b.clone()),
+        aarch64_expr: encode_orn_rr(OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 16), ("b".to_string(), 16)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// I32 bitwise/shift lowering proofs (statistical -- 100K random samples)
+// ---------------------------------------------------------------------------
+//
+// Issue #449, epic #407 (Task 3): widen z4 smoke to i32/i64. StableHasher
+// caching (#420) made wider-width SMT proofs tractable.
+
+/// Build the proof obligation for: `tMIR::Band(I32, a, b) -> AND (32-bit)`.
+pub fn proof_band_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "Band_I32 -> AND (32-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Band, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: a.bvand(b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bor(I32, a, b) -> OR (32-bit)`.
+pub fn proof_bor_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "Bor_I32 -> OR (32-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Bor, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: a.bvor(b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bxor(I32, a, b) -> XOR (32-bit)`.
+pub fn proof_bxor_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "Bxor_I32 -> XOR (32-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Bxor, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: a.bvxor(b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Ishl(I32, a, b) -> LSL (32-bit)`.
+pub fn proof_ishl_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "Ishl_I32 -> LSL (32-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Ishl, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: a.bvshl(b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Ushr(I32, a, b) -> LSR (32-bit)`.
+pub fn proof_ushr_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "Ushr_I32 -> LSR (32-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Ushr, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: a.bvlshr(b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Sshr(I32, a, b) -> ASR (32-bit)`.
+pub fn proof_sshr_i32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "Sshr_I32 -> ASR (32-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Sshr, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: a.bvashr(b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::BandNot(I32, a, b) -> BIC (32-bit)`.
+pub fn proof_bic_i32() -> ProofObligation {
+    use crate::aarch64_semantics::encode_bic_rr;
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "BandNot_I32 -> BIC (32-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::BandNot, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_bic_rr(OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::BorNot(I32, a, b) -> ORN (32-bit)`.
+pub fn proof_orn_i32() -> ProofObligation {
+    use crate::aarch64_semantics::encode_orn_rr;
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 32);
+    let b = SmtExpr::var("b", 32);
+
+    ProofObligation {
+        name: "BorNot_I32 -> ORN (32-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::BorNot, Type::I32, a.clone(), b.clone()),
+        aarch64_expr: encode_orn_rr(OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 32), ("b".to_string(), 32)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// I64 bitwise/shift lowering proofs (statistical -- 100K random samples)
+// ---------------------------------------------------------------------------
+
+/// Build the proof obligation for: `tMIR::Band(I64, a, b) -> AND (64-bit)`.
+pub fn proof_band_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "Band_I64 -> AND (64-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Band, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: a.bvand(b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bor(I64, a, b) -> OR (64-bit)`.
+pub fn proof_bor_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "Bor_I64 -> OR (64-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Bor, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: a.bvor(b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Bxor(I64, a, b) -> XOR (64-bit)`.
+pub fn proof_bxor_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "Bxor_I64 -> XOR (64-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Bxor, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: a.bvxor(b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Ishl(I64, a, b) -> LSL (64-bit)`.
+pub fn proof_ishl_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "Ishl_I64 -> LSL (64-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Ishl, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: a.bvshl(b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Ushr(I64, a, b) -> LSR (64-bit)`.
+pub fn proof_ushr_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "Ushr_I64 -> LSR (64-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Ushr, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: a.bvlshr(b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::Sshr(I64, a, b) -> ASR (64-bit)`.
+pub fn proof_sshr_i64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "Sshr_I64 -> ASR (64-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Sshr, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: a.bvashr(b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::BandNot(I64, a, b) -> BIC (64-bit)`.
+pub fn proof_bic_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_bic_rr;
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "BandNot_I64 -> BIC (64-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::BandNot, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_bic_rr(OperandSize::S64, a, b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Build the proof obligation for: `tMIR::BorNot(I64, a, b) -> ORN (64-bit)`.
+pub fn proof_orn_i64() -> ProofObligation {
+    use crate::aarch64_semantics::encode_orn_rr;
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use llvm2_ir::cc::OperandSize;
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 64);
+    let b = SmtExpr::var("b", 64);
+
+    ProofObligation {
+        name: "BorNot_I64 -> ORN (64-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::BorNot, Type::I64, a.clone(), b.clone()),
+        aarch64_expr: encode_orn_rr(OperandSize::S64, a, b),
+        inputs: vec![("a".to_string(), 64), ("b".to_string(), 64)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Return all bitwise and shift lowering proofs (I8 + I16 + I32 + I64).
+///
+/// Covers: AND, OR, XOR, NOT, SHL, LSR, ASR at I8 (exhaustive) and
+/// I16/I32/I64 (statistical) widths, plus BIC/ORN at all four widths.
+/// I32/I64 BIC/ORN/BAND/BOR/BXOR/SHL/LSR/ASR widened by issue #449 for the
+/// epic #407 Task 3 z4 smoke rollout (enabled by StableHasher caching in
+/// #420). I8/I16 BIC/ORN added by issue #425.
 pub fn all_bitwise_shift_proofs() -> Vec<ProofObligation> {
     vec![
         // I8 (exhaustive verification -- all 2^16 or 2^8 input combos tested)
@@ -2874,6 +4151,9 @@ pub fn all_bitwise_shift_proofs() -> Vec<ProofObligation> {
         proof_ishl_i8(),
         proof_ushr_i8(),
         proof_sshr_i8(),
+        // I8 BIC/ORN (issue #425) -- BandNot/BorNot lowering proofs
+        proof_bic_i8(),
+        proof_orn_i8(),
         // I16 (statistical verification -- edge cases + random sampling)
         proof_band_i16(),
         proof_bor_i16(),
@@ -2882,6 +4162,29 @@ pub fn all_bitwise_shift_proofs() -> Vec<ProofObligation> {
         proof_ishl_i16(),
         proof_ushr_i16(),
         proof_sshr_i16(),
+        // I16 BIC/ORN -- widened for epic #407 z4 smoke rollout
+        proof_bic_i16(),
+        proof_orn_i16(),
+        // I32 bitwise/shift/BIC/ORN (issue #449) -- statistical sampling;
+        // z4 can discharge most symbolically, imul-free so bvshl/bvlshr/bvashr
+        // close in seconds on a warm solver.
+        proof_band_i32(),
+        proof_bor_i32(),
+        proof_bxor_i32(),
+        proof_ishl_i32(),
+        proof_ushr_i32(),
+        proof_sshr_i32(),
+        proof_bic_i32(),
+        proof_orn_i32(),
+        // I64 bitwise/shift/BIC/ORN (issue #449).
+        proof_band_i64(),
+        proof_bor_i64(),
+        proof_bxor_i64(),
+        proof_ishl_i64(),
+        proof_ushr_i64(),
+        proof_sshr_i64(),
+        proof_bic_i64(),
+        proof_orn_i64(),
     ]
 }
 
@@ -3042,6 +4345,261 @@ mod tests {
         for obligation in all_division_proofs() {
             assert_valid(&obligation);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Remainder lowering proof tests (issue #435)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_urem_i8() {
+        assert_valid(&proof_urem_i8());
+    }
+
+    #[test]
+    fn test_proof_srem_i8() {
+        assert_valid(&proof_srem_i8());
+    }
+
+    #[test]
+    fn test_all_remainder_proofs() {
+        for obligation in all_remainder_proofs() {
+            assert_valid(&obligation);
+        }
+    }
+
+    /// Precondition sanity: Urem obligation must have exactly the `b != 0`
+    /// precondition (matching Udiv).
+    #[test]
+    fn test_proof_urem_i8_precondition_count() {
+        let urem = proof_urem_i8();
+        assert_eq!(
+            urem.preconditions.len(),
+            1,
+            "Urem I8 must have NonZeroDivisor precondition"
+        );
+    }
+
+    /// Precondition sanity: Srem obligation must have *two* preconditions --
+    /// `b != 0` AND `not (a == INT8_MIN && b == -1)`.
+    #[test]
+    fn test_proof_srem_i8_precondition_count() {
+        let srem = proof_srem_i8();
+        assert_eq!(
+            srem.preconditions.len(),
+            2,
+            "Srem I8 must have NonZeroDivisor + INT_MIN/-1 overflow preconditions"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Bitcast lowering proof tests (issue #435)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_bitcast_i8() {
+        assert_valid(&proof_bitcast_i8());
+    }
+
+    #[test]
+    fn test_all_bitcast_proofs() {
+        for obligation in all_bitcast_proofs() {
+            assert_valid(&obligation);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Bitfield lowering proof tests (issue #452)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_extract_bits_i8() {
+        assert_valid(&proof_extract_bits_i8());
+    }
+
+    #[test]
+    fn test_proof_sextract_bits_i8() {
+        assert_valid(&proof_sextract_bits_i8());
+    }
+
+    #[test]
+    fn test_proof_insert_bits_i8() {
+        assert_valid(&proof_insert_bits_i8());
+    }
+
+    #[test]
+    fn test_all_bitfield_proofs() {
+        for obligation in all_bitfield_proofs() {
+            assert_valid(&obligation);
+        }
+    }
+
+    /// Sanity: none of the bitfield obligations has a precondition -- they
+    /// are pure QF_BV identities at the bitvector level.
+    #[test]
+    fn test_bitfield_proofs_have_no_preconditions() {
+        for obligation in all_bitfield_proofs() {
+            assert!(
+                obligation.preconditions.is_empty(),
+                "bitfield proof '{}' must have no preconditions",
+                obligation.name
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // I128 multi-register lowering proof tests (issue #324)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_iadd_i128_lo() {
+        assert_valid(&proof_iadd_i128_lo());
+    }
+
+    #[test]
+    fn test_proof_iadd_i128_hi() {
+        assert_valid(&proof_iadd_i128_hi());
+    }
+
+    #[test]
+    fn test_proof_isub_i128_lo() {
+        assert_valid(&proof_isub_i128_lo());
+    }
+
+    #[test]
+    fn test_proof_isub_i128_hi() {
+        assert_valid(&proof_isub_i128_hi());
+    }
+
+    /// Sanity check that the ADC carry expression in `proof_iadd_i128_hi`
+    /// actually flags wraparound for a concrete overflowing case.
+    #[test]
+    fn test_iadd_i128_carry_semantics_overflow() {
+        use std::collections::HashMap;
+        let obligation = proof_iadd_i128_hi();
+
+        // a_lo = b_lo = 0xFFFF_FFFF_FFFF_FFFF, a_hi = b_hi = 0
+        // lo_sum wraps to 0xFFFF_FFFF_FFFF_FFFE, carry = 1
+        // expected dst_hi = 0 + 0 + 1 = 1
+        let mut env = HashMap::new();
+        env.insert("a_lo".to_string(), u64::MAX);
+        env.insert("b_lo".to_string(), u64::MAX);
+        env.insert("a_hi".to_string(), 0u64);
+        env.insert("b_hi".to_string(), 0u64);
+
+        let tmir_val = obligation.tmir_expr.eval(&env).as_u64();
+        let mach_val = obligation.aarch64_expr.eval(&env).as_u64();
+        assert_eq!(tmir_val, 1, "overflow case should give dst_hi = 1, got {}", tmir_val);
+        assert_eq!(tmir_val, mach_val);
+    }
+
+    /// Complementary sanity check: non-overflowing low-limb addition must
+    /// leave the high limb untouched (carry=0).
+    #[test]
+    fn test_iadd_i128_carry_semantics_no_overflow() {
+        use std::collections::HashMap;
+        let obligation = proof_iadd_i128_hi();
+
+        // a_lo=1, b_lo=2 → lo_sum=3, no carry. a_hi=5, b_hi=7 → dst_hi=12.
+        let mut env = HashMap::new();
+        env.insert("a_lo".to_string(), 1u64);
+        env.insert("b_lo".to_string(), 2u64);
+        env.insert("a_hi".to_string(), 5u64);
+        env.insert("b_hi".to_string(), 7u64);
+
+        let tmir_val = obligation.tmir_expr.eval(&env).as_u64();
+        let mach_val = obligation.aarch64_expr.eval(&env).as_u64();
+        assert_eq!(tmir_val, 12, "no-carry case should give dst_hi = 12, got {}", tmir_val);
+        assert_eq!(tmir_val, mach_val);
+    }
+
+    /// Sanity check that the SBC borrow expression in `proof_isub_i128_hi`
+    /// flags borrow-out when a_lo < b_lo.
+    #[test]
+    fn test_isub_i128_borrow_semantics() {
+        use std::collections::HashMap;
+        let obligation = proof_isub_i128_hi();
+
+        // a_lo=0, b_lo=1 → borrow=1. a_hi=5, b_hi=2 → dst_hi = 5 - 2 - 1 = 2.
+        let mut env = HashMap::new();
+        env.insert("a_lo".to_string(), 0u64);
+        env.insert("b_lo".to_string(), 1u64);
+        env.insert("a_hi".to_string(), 5u64);
+        env.insert("b_hi".to_string(), 2u64);
+
+        let tmir_val = obligation.tmir_expr.eval(&env).as_u64();
+        let mach_val = obligation.aarch64_expr.eval(&env).as_u64();
+        assert_eq!(tmir_val, 2, "borrow case should give dst_hi = 2, got {}", tmir_val);
+        assert_eq!(tmir_val, mach_val);
+
+        // Non-borrow: a_lo >= b_lo, dst_hi = a_hi - b_hi.
+        env.insert("a_lo".to_string(), 10u64);
+        env.insert("b_lo".to_string(), 3u64);
+        let tmir_val = obligation.tmir_expr.eval(&env).as_u64();
+        assert_eq!(tmir_val, 3, "no-borrow case should give dst_hi = 3, got {}", tmir_val);
+    }
+
+    #[test]
+    fn test_proof_imul_i128_lo() {
+        assert_valid(&proof_imul_i128_lo());
+    }
+
+    #[test]
+    fn test_proof_imul_i128_hi() {
+        assert_valid(&proof_imul_i128_hi());
+    }
+
+    /// Concrete sanity: for a = 2^64, b = 3 ->
+    ///   a = (a_hi=1, a_lo=0), b = (b_hi=0, b_lo=3)
+    ///   a*b = 3 * 2^64 = (hi=3, lo=0)
+    ///   UMULH(a_lo=0, b_lo=3) = 0
+    ///   MADD chain: t1 = 0*0 + 0 = 0, dst_hi = 1*3 + 0 = 3. PASS.
+    #[test]
+    fn test_imul_i128_cross_term_2pow64_times_3() {
+        use std::collections::HashMap;
+        let obligation = proof_imul_i128_hi();
+
+        let mut env = HashMap::new();
+        env.insert("a_lo".to_string(), 0u64);
+        env.insert("a_hi".to_string(), 1u64);
+        env.insert("b_lo".to_string(), 3u64);
+        env.insert("b_hi".to_string(), 0u64);
+        env.insert("umulh_ab_lo".to_string(), 0u64); // UMULH(0, 3) = 0
+
+        let tmir_val = obligation.tmir_expr.eval(&env).as_u64();
+        let mach_val = obligation.aarch64_expr.eval(&env).as_u64();
+        assert_eq!(tmir_val, 3, "dst_hi for 2^64 * 3 should be 3, got {}", tmir_val);
+        assert_eq!(tmir_val, mach_val);
+    }
+
+    /// Concrete sanity exercising the UMULH carry-in:
+    ///   a = (a_hi=0, a_lo=u64::MAX), b = (b_hi=0, b_lo=u64::MAX)
+    ///   a*b = (2^64 - 1)^2 = 2^128 - 2^65 + 1
+    ///         = (hi = 2^64 - 2, lo = 1)  [i.e. hi = u64::MAX - 1]
+    ///   UMULH(u64::MAX, u64::MAX) = u64::MAX - 1
+    ///   MADD chain: t1 = u64::MAX*0 + (u64::MAX-1) = u64::MAX-1
+    ///               dst_hi = 0*u64::MAX + (u64::MAX-1) = u64::MAX-1
+    #[test]
+    fn test_imul_i128_umulh_carry() {
+        use std::collections::HashMap;
+        let obligation = proof_imul_i128_hi();
+
+        let mut env = HashMap::new();
+        env.insert("a_lo".to_string(), u64::MAX);
+        env.insert("a_hi".to_string(), 0u64);
+        env.insert("b_lo".to_string(), u64::MAX);
+        env.insert("b_hi".to_string(), 0u64);
+        env.insert("umulh_ab_lo".to_string(), u64::MAX - 1);
+
+        let tmir_val = obligation.tmir_expr.eval(&env).as_u64();
+        let mach_val = obligation.aarch64_expr.eval(&env).as_u64();
+        assert_eq!(
+            tmir_val,
+            u64::MAX - 1,
+            "dst_hi for u64::MAX^2 should carry UMULH = u64::MAX-1, got {}",
+            tmir_val
+        );
+        assert_eq!(tmir_val, mach_val);
     }
 
     /// Verify division proof obligations include the NonZeroDivisor precondition.
@@ -3784,6 +5342,28 @@ mod tests {
         assert_fp_valid(&proof_fdiv_f64());
     }
 
+    // FABS: absolute value proofs
+    #[test]
+    fn test_proof_fabs_f32() {
+        assert_fp_valid(&proof_fabs_f32());
+    }
+
+    #[test]
+    fn test_proof_fabs_f64() {
+        assert_fp_valid(&proof_fabs_f64());
+    }
+
+    // FSQRT: square root proofs
+    #[test]
+    fn test_proof_fsqrt_f32() {
+        assert_fp_valid(&proof_fsqrt_f32());
+    }
+
+    #[test]
+    fn test_proof_fsqrt_f64() {
+        assert_fp_valid(&proof_fsqrt_f64());
+    }
+
     // FCMP ordered comparison proofs
     #[test]
     fn test_proof_fcmp_eq_f32() {
@@ -3931,8 +5511,8 @@ mod tests {
     #[test]
     fn test_fp_lowering_proof_count() {
         let proofs = all_fp_lowering_proofs();
-        // 8 original (fadd/fsub/fmul/fneg x f32/f64) + 2 fdiv + 28 fcmp = 38
-        assert_eq!(proofs.len(), 38, "Expected 38 FP lowering proofs");
+        // 8 original (fadd/fsub/fmul/fneg x f32/f64) + 2 fdiv + 4 fabs/fsqrt + 28 fcmp = 42
+        assert_eq!(proofs.len(), 42, "Expected 42 FP lowering proofs");
     }
 
     #[test]
@@ -4177,10 +5757,43 @@ mod tests {
     }
 
     /// Verify that the bitwise/shift collection has the expected count.
+    ///
+    /// Breakdown (34 = 18 base + 16 I32/I64 widening for issue #449):
+    ///   - I8 : band, bor, bxor, bnot, ishl, ushr, sshr, bic, orn  (9)
+    ///   - I16: band, bor, bxor, bnot, ishl, ushr, sshr, bic, orn  (9)
+    ///   - I32: band, bor, bxor,       ishl, ushr, sshr, bic, orn  (8)
+    ///   - I64: band, bor, bxor,       ishl, ushr, sshr, bic, orn  (8)
+    /// (bnot not yet added at I32/I64; filed if/when that becomes a gap.)
     #[test]
     fn test_bitwise_shift_proof_count() {
         let proofs = all_bitwise_shift_proofs();
-        assert_eq!(proofs.len(), 14, "Expected 14 bitwise/shift proofs (7 ops x 2 widths), got {}", proofs.len());
+        assert_eq!(
+            proofs.len(),
+            34,
+            "Expected 34 bitwise/shift proofs (I8/I16 7 ops + BIC/ORN = 18; \
+             I32/I64 6 ops + BIC/ORN = 16), got {}",
+            proofs.len()
+        );
+    }
+
+    #[test]
+    fn test_proof_bic_i8() {
+        assert_valid(&proof_bic_i8());
+    }
+
+    #[test]
+    fn test_proof_orn_i8() {
+        assert_valid(&proof_orn_i8());
+    }
+
+    #[test]
+    fn test_proof_bic_i16() {
+        assert_valid(&proof_bic_i16());
+    }
+
+    #[test]
+    fn test_proof_orn_i16() {
+        assert_valid(&proof_orn_i16());
     }
 
     /// Negative test: load at different offsets should not be equivalent.

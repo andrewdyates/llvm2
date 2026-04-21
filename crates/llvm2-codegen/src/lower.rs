@@ -1,7 +1,7 @@
 // llvm2-codegen/lower.rs - Machine code lowering (Phase 8: MachIR -> bytes)
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Lowers a post-regalloc IrMachFunction to encoded AArch64 machine code bytes.
 // This is Phase 8 of the pipeline: the final step before Mach-O emission.

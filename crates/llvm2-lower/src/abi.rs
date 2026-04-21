@@ -1,7 +1,7 @@
 // llvm2-lower/abi.rs - Apple AArch64 calling convention
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Reference: LLVM AArch64CallingConvention.td, AArch64ISelLowering.cpp
 // Reference: ARM AAPCS64 + Apple arm64 ABI delta (DarwinPCS)
@@ -71,6 +71,18 @@ pub enum ArgLocation {
     /// as a single `Reg(V0)` with an implicit count. Explicit register lists
     /// enable unambiguous code generation.
     RegSequence(Vec<PReg>),
+    /// Register pair for i128 values: low 64-bit half in first register,
+    /// high 64-bit half in second register.
+    ///
+    /// Per AAPCS64 / Apple AArch64 ABI, `i128` values are passed and returned
+    /// as two consecutive 64-bit GPRs. For example:
+    /// - First i128 argument: X0 (low), X1 (high)
+    /// - Second i128 argument: X2 (low), X3 (high)
+    /// - i128 return value: X0 (low), X1 (high)
+    ///
+    /// This replaces the previous scaffold encoding which incorrectly used
+    /// `Indirect { ptr_reg }` for register pairs.
+    RegPair(PReg, PReg),
 }
 
 // ---------------------------------------------------------------------------
@@ -311,18 +323,14 @@ impl AppleAArch64ABI {
                     }
                 }
 
-                // 128-bit integer -> two GPRs or stack
+                // 128-bit integer -> register pair (two consecutive GPRs) or stack
                 Type::I128 => {
-                    // Need 2 consecutive GPRs. Apple doesn't require even
-                    // alignment but we do for simplicity.
+                    // Need 2 consecutive GPRs.
                     if gpr_idx + 1 < GPR_ARG_REGS.len() {
-                        // For I128 we return the first register; the second is
-                        // implicitly the next one. A real ABI lowering would
-                        // produce two locations; for the scaffold we use
-                        // Indirect to signal the pair.
-                        result.push(ArgLocation::Indirect {
-                            ptr_reg: GPR_ARG_REGS[gpr_idx],
-                        });
+                        result.push(ArgLocation::RegPair(
+                            GPR_ARG_REGS[gpr_idx],
+                            GPR_ARG_REGS[gpr_idx + 1],
+                        ));
                         gpr_idx += 2;
                     } else {
                         gpr_idx = GPR_ARG_REGS.len(); // exhaust remaining
@@ -481,9 +489,10 @@ impl AppleAArch64ABI {
 
                 Type::I128 => {
                     if gpr_idx + 1 < GPR_ARG_REGS.len() {
-                        result.push(ArgLocation::Indirect {
-                            ptr_reg: GPR_ARG_REGS[gpr_idx],
-                        });
+                        result.push(ArgLocation::RegPair(
+                            GPR_ARG_REGS[gpr_idx],
+                            GPR_ARG_REGS[gpr_idx + 1],
+                        ));
                         gpr_idx += 2;
                     } else {
                         result.push(ArgLocation::Indirect { ptr_reg: gpr::X8 });
@@ -2260,10 +2269,10 @@ mod tests {
 
     #[test]
     fn classify_return_i128() {
-        // I128 returns use two GPRs: Indirect{X0} encoding
+        // I128 returns use two GPRs as a register pair: X0 (low), X1 (high)
         let locs = AppleAArch64ABI::classify_returns(&[Type::I128]);
         assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0], ArgLocation::Indirect { ptr_reg: gpr::X0 });
+        assert_eq!(locs[0], ArgLocation::RegPair(gpr::X0, gpr::X1));
     }
 
     // ===================================================================
@@ -2272,22 +2281,21 @@ mod tests {
 
     #[test]
     fn classify_i128_param_in_register_pair() {
-        // I128 uses two consecutive GPR slots
+        // I128 uses two consecutive GPR slots as a register pair
         let locs = AppleAArch64ABI::classify_params(&[Type::I128]);
         assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0], ArgLocation::Indirect { ptr_reg: gpr::X0 });
+        assert_eq!(locs[0], ArgLocation::RegPair(gpr::X0, gpr::X1));
     }
 
     #[test]
-    fn classify_i128_param_after_6_gpr_args_goes_to_stack() {
-        // 6 i64 args use X0-X5, then I128 needs 2 consecutive but only X6-X7 left.
-        // X6+X7 is 2 consecutive GPRs, so it should fit.
+    fn classify_i128_param_after_6_gpr_args_goes_to_x6_x7() {
+        // 6 i64 args use X0-X5, then I128 needs 2 consecutive: X6+X7 fit.
         let mut params: Vec<Type> = vec![Type::I64; 6];
         params.push(Type::I128);
         let locs = AppleAArch64ABI::classify_params(&params);
         assert_eq!(locs.len(), 7);
-        // I128 at index 6: needs 2 GPRs starting at X6 (X6+X7)
-        assert_eq!(locs[6], ArgLocation::Indirect { ptr_reg: gpr::X6 });
+        // I128 at index 6: register pair X6 (low), X7 (high)
+        assert_eq!(locs[6], ArgLocation::RegPair(gpr::X6, gpr::X7));
     }
 
     #[test]

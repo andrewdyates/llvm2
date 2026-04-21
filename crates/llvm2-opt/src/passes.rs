@@ -1,7 +1,7 @@
 // llvm2-opt - Optimization passes
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Individual optimization passes, each verified for correctness.
 //!
@@ -14,6 +14,7 @@ pub use crate::const_fold::ConstantFolding;
 pub use crate::copy_prop::CopyPropagation;
 pub use crate::cse::CommonSubexprElim;
 pub use crate::dce::DeadCodeElimination;
+pub use crate::inline::FunctionInlining;
 pub use crate::licm::LoopInvariantCodeMotion;
 pub use crate::peephole::Peephole;
 pub use crate::proof_opts::ProofOptimization;

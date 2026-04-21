@@ -1,7 +1,7 @@
 // llvm2-regalloc/phi_elim.rs - Phi elimination and critical edge splitting
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Phi elimination: lowers SSA phi nodes to parallel copies.
 //!
@@ -88,13 +88,24 @@ pub fn split_critical_edges(func: &mut MachFunction) -> u32 {
         }
     }
 
-    // Split each critical edge by inserting a new empty block.
+    // Split each critical edge by inserting a new block with an explicit jump.
     for (src_id, dst_id) in critical_edges {
+        // Create an unconditional jump instruction targeting the original destination.
+        let jump_inst_id = InstId(func.insts.len() as u32);
+        func.insts.push(MachInst {
+            opcode: 0xBA, // Unconditional branch pseudo-opcode
+            defs: Vec::new(),
+            uses: vec![MachOperand::Block(dst_id)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
         let new_block_id = BlockId(func.blocks.len() as u32);
 
-        // Create the new block: it just jumps to the original destination.
+        // Create the new split block containing the explicit jump.
         let new_block = MachBlock {
-            insts: Vec::new(), // Empty for now; jump will be added during lowering.
+            insts: vec![jump_inst_id],
             preds: vec![src_id],
             succs: vec![dst_id],
             loop_depth: func.blocks[dst_id.0 as usize].loop_depth,
@@ -102,10 +113,28 @@ pub fn split_critical_edges(func: &mut MachFunction) -> u32 {
         func.blocks.push(new_block);
 
         // Update source block: replace dst_id with new_block_id in succs.
-        let src_block = &mut func.blocks[src_id.0 as usize];
-        for succ in &mut src_block.succs {
-            if *succ == dst_id {
-                *succ = new_block_id;
+        // Clone inst list to avoid borrowing conflict when rewriting operands.
+        let src_insts = {
+            let src_block = &mut func.blocks[src_id.0 as usize];
+            for succ in &mut src_block.succs {
+                if *succ == dst_id {
+                    *succ = new_block_id;
+                }
+            }
+            src_block.insts.clone()
+        };
+
+        // Rewrite source block's branch instruction operands: replace
+        // Block(dst_id) with Block(new_block_id) so the branch targets
+        // the new split block instead of the original destination.
+        for inst_id in src_insts {
+            let inst = &mut func.insts[inst_id.0 as usize];
+            for operand in &mut inst.uses {
+                if let MachOperand::Block(block_id) = operand {
+                    if *block_id == dst_id {
+                        *block_id = new_block_id;
+                    }
+                }
             }
         }
 
@@ -117,7 +146,7 @@ pub fn split_critical_edges(func: &mut MachFunction) -> u32 {
             }
         }
 
-        // Insert new block into block order (right after source block).
+        // Insert new block into block order (right before destination block).
         if let Some(pos) = func.block_order.iter().position(|&b| b == dst_id) {
             func.block_order.insert(pos, new_block_id);
         } else {
@@ -1773,5 +1802,283 @@ mod tests {
         // Block 3 has no incoming edge to the phi, so no copy.
         let copies3 = get_copies(3);
         assert_eq!(copies3.len(), 0, "block 3 should have no copies (not a phi predecessor)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression test for issue #303: split blocks must have explicit jumps
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_critical_edge_split_blocks_have_explicit_jump() {
+        // Verify that split blocks contain an unconditional jump instruction
+        // to their successor, rather than relying on layout-order fallthrough.
+        // This is the core fix for issue #303.
+        let mut func = make_critical_edge_cfg();
+        let initial_insts = func.insts.len();
+        let edges_split = split_critical_edges(&mut func);
+        assert_eq!(edges_split, 2);
+
+        // Each new split block should have exactly one instruction: an
+        // unconditional branch (opcode 0xBA) with IS_BRANCH | IS_TERMINATOR.
+        let new_block_ids: Vec<BlockId> = func.block_order.iter()
+            .copied()
+            .filter(|&b| b.0 >= 4) // blocks 4+ are new
+            .collect();
+        assert_eq!(new_block_ids.len(), 2, "should have 2 new split blocks");
+
+        for &block_id in &new_block_ids {
+            let block = &func.blocks[block_id.0 as usize];
+            assert_eq!(
+                block.insts.len(), 1,
+                "split block {:?} should have exactly 1 instruction (the jump)",
+                block_id
+            );
+
+            let jump_inst = &func.insts[block.insts[0].0 as usize];
+            assert_eq!(
+                jump_inst.opcode, 0xBA,
+                "split block {:?} instruction should be unconditional branch (0xBA)",
+                block_id
+            );
+            assert!(
+                jump_inst.flags.is_branch() && jump_inst.flags.is_terminator(),
+                "split block {:?} jump should have IS_BRANCH | IS_TERMINATOR flags",
+                block_id
+            );
+
+            // The jump should target the block's sole successor.
+            assert_eq!(block.succs.len(), 1);
+            let target = block.succs[0];
+            let has_block_operand = jump_inst.uses.iter().any(|op| {
+                matches!(op, MachOperand::Block(b) if *b == target)
+            });
+            assert!(
+                has_block_operand,
+                "split block {:?} jump should target successor {:?}",
+                block_id, target
+            );
+        }
+
+        // Verify new instructions were actually created.
+        assert_eq!(
+            func.insts.len(),
+            initial_insts + 2,
+            "should have 2 new jump instructions"
+        );
+    }
+
+    #[test]
+    fn test_critical_edge_split_rewrites_source_branch_operands() {
+        // Verify that after splitting, the source block's branch instruction
+        // operands reference the new split block, not the original destination.
+        // Without this, the branch would jump to the wrong target.
+        let mut func = make_critical_edge_cfg();
+
+        // Before splitting: block 0 branches to block 1 and block 2.
+        // block 1 branches to block 2 and block 3.
+        // Critical edges: 0->2 and 1->2 (both sources have >1 succ, block 2 has >1 pred).
+        split_critical_edges(&mut func);
+
+        // After splitting, block 0's branch should no longer reference block 2
+        // directly — it should reference the new split block instead.
+        let block0 = &func.blocks[0];
+        let block0_branch = &func.insts[block0.insts.last().unwrap().0 as usize];
+        let block0_branch_targets: Vec<BlockId> = block0_branch.uses.iter()
+            .filter_map(|op| {
+                if let MachOperand::Block(b) = op { Some(*b) } else { None }
+            })
+            .collect();
+        // Block 0 should NOT have a direct reference to block 2 anymore.
+        assert!(
+            !block0_branch_targets.contains(&BlockId(2)),
+            "block 0 branch should not reference original block 2 after split, targets: {:?}",
+            block0_branch_targets
+        );
+
+        // Similarly, block 1's branch should not reference block 2 directly.
+        let block1 = &func.blocks[1];
+        let block1_branch = &func.insts[block1.insts.last().unwrap().0 as usize];
+        let block1_branch_targets: Vec<BlockId> = block1_branch.uses.iter()
+            .filter_map(|op| {
+                if let MachOperand::Block(b) = op { Some(*b) } else { None }
+            })
+            .collect();
+        assert!(
+            !block1_branch_targets.contains(&BlockId(2)),
+            "block 1 branch should not reference original block 2 after split, targets: {:?}",
+            block1_branch_targets
+        );
+    }
+
+    #[test]
+    fn test_critical_edge_split_non_adjacent_layout_correctness() {
+        // Regression test for issue #303: verify that critical edge splitting
+        // works correctly even when the split block is NOT adjacent to its
+        // successor in the block layout. Previously, split blocks had no jump
+        // instruction and relied on fallthrough, which broke under reordering.
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        // Block 0: cbranch -> block 1 or block 2
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBB,
+            defs: vec![],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 }),
+                MachOperand::Block(BlockId(1)),
+                MachOperand::Block(BlockId(2)),
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 1: cbranch -> block 2 or block 3
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBB,
+            defs: vec![],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 }),
+                MachOperand::Block(BlockId(2)),
+                MachOperand::Block(BlockId(3)),
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 2: merge point (phi v2 = [v0 from block 0, v1 from block 1])
+        let i2_phi = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0x00,
+            defs: vec![MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 })],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 }),
+                MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 }),
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_PHI,
+        });
+        let i2_use = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xFF,
+            defs: vec![],
+            uses: vec![MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_RETURN.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 3: exit
+        let i3 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xFF,
+            defs: vec![],
+            uses: vec![],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_RETURN.union(InstFlags::IS_TERMINATOR),
+        });
+
+        let mut func = MachFunction {
+            name: "non_adjacent_split".into(),
+            insts,
+            blocks: vec![
+                MachBlock { // Block 0: 2 succs
+                    insts: vec![i0],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(1), BlockId(2)],
+                    loop_depth: 0,
+                },
+                MachBlock { // Block 1: 2 succs
+                    insts: vec![i1],
+                    preds: vec![BlockId(0)],
+                    succs: vec![BlockId(2), BlockId(3)],
+                    loop_depth: 0,
+                },
+                MachBlock { // Block 2: 2 preds — critical edge target
+                    insts: vec![i2_phi, i2_use],
+                    preds: vec![BlockId(0), BlockId(1)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+                MachBlock { // Block 3: 1 pred
+                    insts: vec![i3],
+                    preds: vec![BlockId(1)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+            ],
+            block_order: vec![BlockId(0), BlockId(1), BlockId(2), BlockId(3)],
+            entry_block: BlockId(0),
+            next_vreg: 3,
+            next_stack_slot: 0,
+            stack_slots: Default::default(),
+        };
+
+        // Step 1: Split critical edges.
+        let edges_split = split_critical_edges(&mut func);
+        assert_eq!(edges_split, 2, "edges 0->2 and 1->2 are both critical");
+
+        // Step 2: Scramble block layout — put split blocks NON-adjacent to
+        // their successors. This simulates a block reordering pass.
+        // After splitting, block_order has: [0, split_A, 1, split_B, 2, 3]
+        // (or similar). Reverse the middle section to break adjacency.
+        let order_len = func.block_order.len();
+        assert!(order_len >= 6, "should have 4 original + 2 split blocks");
+
+        // Find the split blocks (id >= 4).
+        let split_blocks: Vec<BlockId> = func.block_order.iter()
+            .copied()
+            .filter(|b| b.0 >= 4)
+            .collect();
+        assert_eq!(split_blocks.len(), 2);
+
+        // Each split block must have an explicit jump, so reordering is safe.
+        for &split_id in &split_blocks {
+            let block = &func.blocks[split_id.0 as usize];
+            assert!(
+                !block.insts.is_empty(),
+                "split block {:?} must not be empty (issue #303 fix)",
+                split_id
+            );
+            let last_inst = &func.insts[block.insts.last().unwrap().0 as usize];
+            assert!(
+                last_inst.flags.is_branch() && last_inst.flags.is_terminator(),
+                "split block {:?} must end with a branch/terminator",
+                split_id
+            );
+        }
+
+        // Step 3: Eliminate phis (should work correctly with the fix).
+        eliminate_phis(&mut func);
+
+        // No phi instructions should remain.
+        for &block_id in &func.block_order {
+            let block = &func.blocks[block_id.0 as usize];
+            for &inst_id in &block.insts {
+                let inst = &func.insts[inst_id.0 as usize];
+                assert!(
+                    !inst.flags.is_phi(),
+                    "phi should be eliminated in block {:?}",
+                    block_id
+                );
+            }
+        }
+
+        // The split blocks should have phi copies inserted before their
+        // terminator (the explicit jump), not relying on fallthrough.
+        for &split_id in &split_blocks {
+            let block = &func.blocks[split_id.0 as usize];
+            let last_inst = &func.insts[block.insts.last().unwrap().0 as usize];
+            assert!(
+                last_inst.flags.is_branch() || last_inst.flags.is_terminator(),
+                "split block {:?} should still end with branch after phi elim",
+                split_id
+            );
+        }
     }
 }

@@ -1,7 +1,7 @@
 // llvm2-codegen/aarch64/encoding_neon.rs - AArch64 NEON SIMD instruction encoding
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! AArch64 NEON (Advanced SIMD) instruction encoding.
 //!

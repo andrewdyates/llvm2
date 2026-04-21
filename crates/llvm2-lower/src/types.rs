@@ -1,7 +1,7 @@
 // llvm2-lower/types.rs - LIR type system
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Type system for LLVM2 Low-level IR (input-level types).
 //!

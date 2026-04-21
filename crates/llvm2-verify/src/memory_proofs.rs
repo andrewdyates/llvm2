@@ -1,7 +1,7 @@
 // llvm2-verify/memory_proofs.rs - Array-based SMT memory model for Load/Store verification
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Verifies tMIR Load/Store lowering to AArch64 LDR/STR using SMT array theory.
 // Memory is modeled as Array(BitVec64, BitVec8) — byte-addressable, little-endian.
@@ -1982,6 +1982,151 @@ pub fn proof_memcpy_source_preserved(count: u32) -> ProofObligation {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Memmove correctness (issue #435)
+// ---------------------------------------------------------------------------
+//
+// `Memmove(dst, src, N)` has the same *postcondition* as `Memcpy`: after the
+// call, `dst[0..N]` equals the *original* `src[0..N]`. The difference is that
+// `Memmove` is also correct when `src` and `dst` overlap — the semantics is as
+// if the source bytes were snapshot-read into a temporary before any write to
+// `dst` occurred.
+//
+// Our adapter lowers `Opcode::Memmove` to a libc `BL memmove` call
+// (`llvm2-lower/src/isel.rs::select_memmove`), deferring the forward-vs-
+// backward copy direction to the library implementation. The proof we verify
+// here is the *semantic contract* of that call: for any `src`, `dst`, and
+// overlap pattern, the destination buffer ends up equal to the source.
+//
+// # Encoding
+//
+// The helper `encode_memcpy` already reads each source byte from the *original*
+// memory array (`select(mem, src+i)` — never from `current_mem`), which is
+// exactly the "snapshot first, then write" semantics of `memmove`. We reuse it
+// here and cover three placement cases to exercise overlap explicitly:
+//
+//   1. Non-overlap         (dst=0x2000, src=0x1000, N=4).
+//   2. Overlap, dst > src  (dst=0x1002, src=0x1000, N=4) — backward direction.
+//   3. Overlap, dst < src  (dst=0x1000, src=0x1002, N=4) — forward direction.
+//
+// Each proof uses a bounded `ForAll i in [0, N)` quantifier; the body asserts
+// `select(mem_after, dst+i) == select(mem_orig, src+i)`. The symbolic
+// `mem_default` byte is the sole input, so the default evaluator runs
+// exhaustively over all 2^8 = 256 default values.
+//
+// Reference: `designs/2026-04-14-memory-verification-status.md` §"memmove".
+// Part of issue #435 acceptance list.
+
+/// Build a Memmove postcondition proof for a concrete `(dst, src)` placement.
+///
+/// Proves: `forall i in [0, count): select(mem_after, dst+i) == select(mem_orig, src+i)`
+/// where `mem_after = encode_memcpy(mem_orig, dst, src, count)` (which
+/// snapshot-reads from `mem_orig`, modeling memmove semantics).
+fn proof_memmove_case(
+    name: &str,
+    dst_addr: u64,
+    src_addr: u64,
+    count: u32,
+) -> ProofObligation {
+    let mem = symbolic_memory("mem_default");
+    let src = SmtExpr::bv_const(src_addr, 64);
+    let dst = SmtExpr::bv_const(dst_addr, 64);
+
+    let mem_after = encode_memcpy(&mem, &dst, &src, count);
+
+    // forall i in [0, count): select(mem_after, dst+i) == select(mem_orig, src+i)
+    let body = SmtExpr::select(
+        mem_after,
+        SmtExpr::bv_const(dst_addr, 64).bvadd(SmtExpr::var("i", 64)),
+    )
+    .eq_expr(SmtExpr::select(
+        mem.clone(),
+        SmtExpr::bv_const(src_addr, 64).bvadd(SmtExpr::var("i", 64)),
+    ));
+
+    let quantified = SmtExpr::forall(
+        "i",
+        64,
+        SmtExpr::bv_const(0, 64),
+        SmtExpr::bv_const(count as u64, 64),
+        body,
+    );
+
+    ProofObligation {
+        name: name.to_string(),
+        tmir_expr: SmtExpr::bool_const(true),
+        aarch64_expr: quantified,
+        inputs: vec![("mem_default".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Memmove postcondition, non-overlapping (dst=0x2000, src=0x1000).
+///
+/// Baseline case — identical in shape to `proof_memcpy_correctness` but with
+/// no non-overlap precondition (memmove must be correct regardless).
+pub fn proof_memmove_correctness_no_overlap(count: u32) -> ProofObligation {
+    proof_memmove_case(
+        &format!(
+            "Memmove_{}B_NoOverlap: dst[i] == orig_src[i] for all i in [0, {})",
+            count, count
+        ),
+        0x2000,
+        0x1000,
+        count,
+    )
+}
+
+/// Memmove postcondition with overlap `dst > src` (backward copy direction).
+///
+/// Placement: `src = 0x1000`, `dst = 0x1002`, `count = 4`. The regions overlap
+/// in bytes `[0x1002, 0x1004)`. A naive forward loop would corrupt the source
+/// before reading it; memmove's backward-copy path avoids this. The
+/// snapshot-read semantics encoded here models that correct behavior.
+pub fn proof_memmove_correctness_overlap_dst_above_src(count: u32) -> ProofObligation {
+    proof_memmove_case(
+        &format!(
+            "Memmove_{}B_OverlapDstGtSrc: dst[i] == orig_src[i] for all i in [0, {})",
+            count, count
+        ),
+        0x1002,
+        0x1000,
+        count,
+    )
+}
+
+/// Memmove postcondition with overlap `dst < src` (forward copy direction).
+///
+/// Placement: `src = 0x1002`, `dst = 0x1000`, `count = 4`. The regions overlap
+/// in bytes `[0x1002, 0x1004)`. A naive backward loop would corrupt the source
+/// before reading it; memmove's forward-copy path avoids this.
+pub fn proof_memmove_correctness_overlap_dst_below_src(count: u32) -> ProofObligation {
+    proof_memmove_case(
+        &format!(
+            "Memmove_{}B_OverlapDstLtSrc: dst[i] == orig_src[i] for all i in [0, {})",
+            count, count
+        ),
+        0x1000,
+        0x1002,
+        count,
+    )
+}
+
+/// All Memmove correctness proofs (issue #435 acceptance item: "Memmove
+/// overlap-handling proof").
+///
+/// Three placements x a single 4-byte count. The non-overlap case is the
+/// baseline postcondition; the two overlap cases exercise both copy directions.
+pub fn all_memmove_proofs() -> Vec<ProofObligation> {
+    vec![
+        proof_memmove_correctness_no_overlap(4),
+        proof_memmove_correctness_overlap_dst_above_src(4),
+        proof_memmove_correctness_overlap_dst_below_src(4),
+    ]
+}
+
 /// Proof: buffer initialization — zeroed memory has all bytes == 0 in range.
 ///
 /// ```text
@@ -2030,6 +2175,11 @@ pub fn all_array_range_proofs() -> Vec<ProofObligation> {
         // Memcpy source preservation
         proof_memcpy_source_preserved(4),
         proof_memcpy_source_preserved(8),
+        // Memmove correctness — 3 placements at 4 bytes (issue #435):
+        //   - non-overlap, dst > src (backward), dst < src (forward).
+        proof_memmove_correctness_no_overlap(4),
+        proof_memmove_correctness_overlap_dst_above_src(4),
+        proof_memmove_correctness_overlap_dst_below_src(4),
         // Buffer initialization
         proof_buffer_init_zero(8),
         proof_buffer_init_zero(16),
@@ -2988,6 +3138,91 @@ mod tests {
     fn test_proof_buffer_init_zero() {
         assert_valid(&proof_buffer_init_zero(8));
         assert_valid(&proof_buffer_init_zero(16));
+    }
+
+    // -----------------------------------------------------------------------
+    // Memmove correctness tests (issue #435)
+    // -----------------------------------------------------------------------
+
+    /// Non-overlapping memmove: same postcondition as memcpy.
+    #[test]
+    fn test_proof_memmove_no_overlap_4() {
+        assert_valid(&proof_memmove_correctness_no_overlap(4));
+    }
+
+    /// Overlapping memmove, dst above src (memmove's backward-copy path).
+    /// Range: src=[0x1000..0x1004), dst=[0x1002..0x1006). Bytes 0x1002 and
+    /// 0x1003 are shared. Naive forward-order writes would corrupt the source
+    /// before reading it; the snapshot-read encoding models the correct result.
+    #[test]
+    fn test_proof_memmove_overlap_dst_above_src_4() {
+        assert_valid(&proof_memmove_correctness_overlap_dst_above_src(4));
+    }
+
+    /// Overlapping memmove, dst below src (memmove's forward-copy path).
+    /// Range: src=[0x1002..0x1006), dst=[0x1000..0x1004). Bytes 0x1002 and
+    /// 0x1003 are shared. A naive backward-order write would corrupt the source.
+    #[test]
+    fn test_proof_memmove_overlap_dst_below_src_4() {
+        assert_valid(&proof_memmove_correctness_overlap_dst_below_src(4));
+    }
+
+    /// Umbrella test: every Memmove obligation from `all_memmove_proofs()`
+    /// must verify. Guards against silent breakage of the registry.
+    #[test]
+    fn test_all_memmove_proofs() {
+        for obligation in all_memmove_proofs() {
+            assert_valid(&obligation);
+        }
+    }
+
+    /// Memmove obligations must have *no* non-overlap precondition — the whole
+    /// point of memmove (vs memcpy) is overlap tolerance.
+    #[test]
+    fn test_memmove_proofs_have_no_preconditions() {
+        for obligation in all_memmove_proofs() {
+            assert!(
+                obligation.preconditions.is_empty(),
+                "memmove proof '{}' must have no preconditions (overlap-tolerant)",
+                obligation.name
+            );
+        }
+    }
+
+    /// Registry sanity: `all_memmove_proofs()` returns exactly 3 obligations
+    /// (non-overlap + 2 overlap directions).
+    #[test]
+    fn test_all_memmove_proofs_count() {
+        let proofs = all_memmove_proofs();
+        assert_eq!(
+            proofs.len(),
+            3,
+            "expected 3 Memmove proofs (no-overlap + 2 overlap placements), got {}",
+            proofs.len()
+        );
+    }
+
+    /// `all_array_range_proofs()` must include all Memmove obligations from
+    /// `all_memmove_proofs()`. Guards the wiring that flows through
+    /// `ProofDatabase::new()`.
+    #[test]
+    fn test_memmove_proofs_flow_through_array_range() {
+        let memmove_names: std::collections::HashSet<String> = all_memmove_proofs()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        let range_names: std::collections::HashSet<String> = all_array_range_proofs()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        for name in &memmove_names {
+            assert!(
+                range_names.contains(name),
+                "Memmove proof '{}' missing from all_array_range_proofs() -- \
+                 wiring regressed?",
+                name
+            );
+        }
     }
 
     #[test]

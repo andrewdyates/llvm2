@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6852c46245977bb3a99cad47e74dd2c7543acb280ee1723d3c05375c4058c7a9 # shrinks to inst = MachInst { opcode: LslRI, operands: [PReg(PReg(0:x0)), PReg(PReg(0:x0)), Imm(-1)], implicit_defs: [], implicit_uses: [], flags: InstFlags(EMPTY), proof: None, source_loc: None }
+cc d3eb5c9ed3d205d0669c6579c844a5065942afbf58717cfb90186622d8d1f346 # shrinks to inst = MachInst { opcode: Movk, operands: [Special(SP), PReg(PReg(0:x0)), Imm(64)], implicit_defs: [], implicit_uses: [], flags: InstFlags(EMPTY), proof: None, source_loc: None }

@@ -1,7 +1,7 @@
 // llvm2-opt - Pass manager framework
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Pass manager framework for running optimization passes on machine functions.
 //!
@@ -23,6 +23,64 @@
 
 use llvm2_ir::MachFunction;
 
+use crate::dom::DomTree;
+use crate::loops::LoopAnalysis;
+
+/// Cached analysis results shared across passes within an iteration.
+///
+/// Avoids redundant recomputation of dominator trees and loop analysis
+/// when multiple passes need them within a single fixpoint iteration.
+/// The cache is invalidated whenever a pass reports modifications to
+/// the function, since CFG changes may invalidate the domtree.
+pub struct AnalysisCache {
+    domtree: Option<DomTree>,
+    loop_analysis: Option<LoopAnalysis>,
+}
+
+impl AnalysisCache {
+    /// Create an empty analysis cache.
+    pub fn new() -> Self {
+        Self {
+            domtree: None,
+            loop_analysis: None,
+        }
+    }
+
+    /// Get the dominator tree, computing and caching it if necessary.
+    pub fn domtree(&mut self, func: &MachFunction) -> &DomTree {
+        if self.domtree.is_none() {
+            self.domtree = Some(DomTree::compute(func));
+        }
+        self.domtree.as_ref().unwrap()
+    }
+
+    /// Get the loop analysis, computing and caching it if necessary.
+    /// This also ensures the dominator tree is cached.
+    pub fn loop_analysis(&mut self, func: &MachFunction) -> &LoopAnalysis {
+        if self.loop_analysis.is_none() {
+            // Ensure domtree is computed first.
+            if self.domtree.is_none() {
+                self.domtree = Some(DomTree::compute(func));
+            }
+            let dom = self.domtree.as_ref().unwrap();
+            self.loop_analysis = Some(LoopAnalysis::compute(func, dom));
+        }
+        self.loop_analysis.as_ref().unwrap()
+    }
+
+    /// Invalidate all cached analyses. Called when a pass modifies the function.
+    pub fn invalidate(&mut self) {
+        self.domtree = None;
+        self.loop_analysis = None;
+    }
+}
+
+impl Default for AnalysisCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A single optimization pass that transforms machine-level IR.
 ///
 /// Passes must be idempotent: running a pass twice on unchanged input
@@ -37,6 +95,19 @@ pub trait MachinePass {
     /// A pass returning `true` may enable further optimizations in
     /// subsequent passes.
     fn run(&mut self, func: &mut MachFunction) -> bool;
+
+    /// Run the pass with access to cached analyses.
+    ///
+    /// Passes that need dominator trees or loop analysis should override
+    /// this method to use the cache instead of recomputing from scratch.
+    /// The default implementation ignores the cache and calls `run()`.
+    fn run_with_analyses(
+        &mut self,
+        func: &mut MachFunction,
+        _analyses: &mut AnalysisCache,
+    ) -> bool {
+        self.run(func)
+    }
 }
 
 /// Statistics collected during pass execution.
@@ -108,6 +179,10 @@ impl PassManager {
     /// Run all passes repeatedly until no pass reports changes, or
     /// `max_iterations` is reached.
     ///
+    /// Uses an [`AnalysisCache`] to avoid redundant domtree/loop analysis
+    /// recomputation within each iteration. The cache is invalidated
+    /// whenever a pass reports modifications.
+    ///
     /// Returns statistics about the run.
     pub fn run_to_fixpoint(
         &mut self,
@@ -123,12 +198,14 @@ impl PassManager {
         for iteration in 0..max_iterations {
             stats.iterations = iteration + 1;
             let mut any_changed = false;
+            let mut cache = AnalysisCache::new();
 
             for (i, pass) in self.passes.iter_mut().enumerate() {
                 stats.runs[i].1 += 1;
-                if pass.run(func) {
+                if pass.run_with_analyses(func, &mut cache) {
                     any_changed = true;
                     stats.changes += 1;
+                    cache.invalidate();
                 }
             }
 
@@ -141,6 +218,9 @@ impl PassManager {
     }
 
     /// Run all passes once, collecting per-pass statistics.
+    ///
+    /// Uses an [`AnalysisCache`] to avoid redundant domtree/loop analysis
+    /// recomputation across passes.
     pub fn run_once_with_stats(&mut self, func: &mut MachFunction) -> PassStats {
         let mut stats = PassStats {
             runs: self.passes.iter().map(|p| (p.name().to_string(), 0)).collect(),
@@ -148,10 +228,29 @@ impl PassManager {
             iterations: 1,
         };
 
+        // Dev hook (#366 bisect): when LLVM2_DUMP_MIR is set and matches
+        // the function name, eprintln! a short MIR dump before and after
+        // each pass. Dump only the entry block to keep output manageable.
+        let dump_name = std::env::var("LLVM2_DUMP_MIR").unwrap_or_default();
+        let should_dump = !dump_name.is_empty() && func.name.contains(&dump_name);
+        if should_dump {
+            eprintln!("=== before passes [func={}] ===", func.name);
+            dump_function(func);
+        }
+
+        let mut cache = AnalysisCache::new();
         for (i, pass) in self.passes.iter_mut().enumerate() {
             stats.runs[i].1 = 1;
-            if pass.run(func) {
+            let pass_name = pass.name().to_string();
+            if pass.run_with_analyses(func, &mut cache) {
                 stats.changes += 1;
+                cache.invalidate();
+                if should_dump {
+                    eprintln!("=== after pass [{}] ===", pass_name);
+                    dump_function(func);
+                }
+            } else if should_dump {
+                eprintln!("=== pass [{}] no changes ===", pass_name);
             }
         }
 
@@ -162,6 +261,18 @@ impl PassManager {
 impl Default for PassManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Dev-only MIR dumper used by the LLVM2_DUMP_MIR debug hook.
+fn dump_function(func: &MachFunction) {
+    for block_id in &func.block_order {
+        let block = func.block(*block_id);
+        eprintln!("  block {:?}  (succs: {:?})", block_id, block.succs);
+        for inst_id in &block.insts {
+            let inst = func.inst(*inst_id);
+            eprintln!("    {:?}: {:?}  {:?}", inst_id, inst.opcode, inst.operands);
+        }
     }
 }
 

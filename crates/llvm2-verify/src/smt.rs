@@ -1,7 +1,7 @@
 // llvm2-verify/smt.rs - SMT expression AST and bitvector evaluator
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Self-contained SMT expression AST for verification of lowering rules.
 // When z4-bindings becomes a direct dependency, these types will serialize
@@ -1241,6 +1241,41 @@ impl EvalResult {
             EvalResult::Bv128(v) => *v as f64,
             EvalResult::Bool(b) => if *b { 1.0 } else { 0.0 },
             EvalResult::Array { .. } => 0.0,
+        }
+    }
+
+    /// Semantic equality that treats NaN values as equal to other NaN values.
+    ///
+    /// The default `PartialEq`/`Eq` derive compares `f64` with `==`, which
+    /// is IEEE-754 equality: `NaN != NaN`. For verification of FP lowerings,
+    /// "both sides produce NaN" is a passing result — the tMIR and the target
+    /// instruction agree that the operation is not a number, which is the
+    /// strongest semantic guarantee available without tracking exact payload
+    /// bits. This method returns `true` in that case.
+    ///
+    /// For non-NaN floats, bit-level equality is used (so +0.0 == +0.0 but
+    /// +0.0 != -0.0), matching IEEE-754 comparison except for the NaN rule.
+    /// For non-Float variants, ordinary `==` is used.
+    ///
+    /// # Rationale
+    ///
+    /// IEEE-754 FDIV(0.0, 0.0) yields NaN; so does AArch64 `FDIV`. Rust's
+    /// default `PartialEq` on `f64` returns false for NaN != NaN, causing
+    /// the evaluator to flag a spurious counterexample even though both
+    /// sides produce the canonical NaN result. See #388.
+    pub fn semantically_equal(&self, other: &Self) -> bool {
+        match (self, other) {
+            (EvalResult::Float(a), EvalResult::Float(b)) => {
+                // Both NaN = semantically equal.
+                if a.is_nan() && b.is_nan() {
+                    return true;
+                }
+                // Otherwise compare by bit pattern so +0.0 == +0.0 but
+                // +0.0 != -0.0 and signalling vs quiet NaN (already handled
+                // above) stay distinct for finite values.
+                a.to_bits() == b.to_bits()
+            }
+            _ => self == other,
         }
     }
 }
@@ -3535,5 +3570,68 @@ mod tests {
         assert!(s.contains("(_ BitVec 8)"));
         assert!(s.contains("bvuge"));
         assert!(s.contains("bvult"));
+    }
+
+    // -----------------------------------------------------------------------
+    // NaN-aware equality (#388)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_semantically_equal_nan_vs_nan() {
+        // Canonical NaN from 0.0/0.0.
+        let a = EvalResult::Float(0.0_f64 / 0.0_f64);
+        let b = EvalResult::Float(0.0_f64 / 0.0_f64);
+        // IEEE-754: NaN != NaN. PartialEq reflects that and reports not-equal.
+        assert!(!(a == b));
+        // Semantic equality: both NaN = equal for verification purposes.
+        assert!(a.semantically_equal(&b));
+    }
+
+    #[test]
+    fn test_semantically_equal_distinct_nan_payloads() {
+        // f64::NAN and a custom NaN bit pattern are both NaN and must compare equal.
+        let a = EvalResult::Float(f64::NAN);
+        let b = EvalResult::Float(f64::from_bits(0x7ff0_0000_0000_0001));
+        assert!(b.as_f64().is_nan());
+        assert!(a.semantically_equal(&b));
+        assert!(b.semantically_equal(&a));
+    }
+
+    #[test]
+    fn test_semantically_equal_nan_vs_finite() {
+        let nan = EvalResult::Float(f64::NAN);
+        let zero = EvalResult::Float(0.0);
+        let one = EvalResult::Float(1.0);
+        assert!(!nan.semantically_equal(&zero));
+        assert!(!zero.semantically_equal(&nan));
+        assert!(!nan.semantically_equal(&one));
+    }
+
+    #[test]
+    fn test_semantically_equal_finite_bit_exact() {
+        // Zero sign matters for bit-exact comparison (so +0 != -0, matching
+        // AArch64 FMOV bit-pattern semantics).
+        let plus_zero = EvalResult::Float(0.0);
+        let neg_zero = EvalResult::Float(-0.0);
+        assert!(!plus_zero.semantically_equal(&neg_zero));
+
+        // Equal finite values with identical bit pattern.
+        let a = EvalResult::Float(3.14);
+        let b = EvalResult::Float(3.14);
+        assert!(a.semantically_equal(&b));
+    }
+
+    #[test]
+    fn test_semantically_equal_non_float_unchanged() {
+        let a = EvalResult::Bv(42);
+        let b = EvalResult::Bv(42);
+        let c = EvalResult::Bv(7);
+        assert!(a.semantically_equal(&b));
+        assert!(!a.semantically_equal(&c));
+
+        let t = EvalResult::Bool(true);
+        let f = EvalResult::Bool(false);
+        assert!(t.semantically_equal(&EvalResult::Bool(true)));
+        assert!(!t.semantically_equal(&f));
     }
 }

@@ -1,7 +1,7 @@
 // llvm2-verify - Verification backend
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Verification backend for LLVM2.
 //!
@@ -43,16 +43,23 @@
 //! **not a formal proof**. Structured or adversarial bugs could theoretically
 //! hide in the untested ~2^64 input space.
 //!
-//! ## Path to formal verification (z4)
+//! ## Formal verification (z4)
 //!
-//! 1. **Current** -- Mock evaluation (this module): fast, catches regressions,
-//!    exhaustive for 8-bit, statistical for 32/64-bit.
-//! 2. **Available** -- z4/z3 CLI via [`z4_bridge`]: serialize proof obligations
-//!    to SMT-LIB2 format with [`lowering_proof::ProofObligation::to_smt2`],
-//!    pipe to an external z3/z4 solver for complete formal proofs.
-//! 3. **Future** -- z4 native API (feature-gated `z4`): in-process SMT solving
-//!    with no subprocess overhead. When this becomes the default, mock evaluation
-//!    will serve as a fast pre-check before the formal proof.
+//! The z4 native Rust API is **opt-in** (the `z4` feature, NOT enabled by
+//! default). Three verification backends are available:
+//!
+//! 1. **Evaluation testing** (default, always available): fast, catches
+//!    regressions, exhaustive for 8-bit, statistical for 32/64-bit. This is
+//!    the primary mode for `cargo test`. Requires no external solver.
+//! 2. **z4/z3 CLI** via [`z4_bridge`]: serialize proof obligations to
+//!    SMT-LIB2 format with [`lowering_proof::ProofObligation::to_smt2`],
+//!    pipe to an external z3/z4 solver for complete formal proofs. Always
+//!    available (no feature gate) when a solver binary is on PATH.
+//! 3. **z4 native API** (opt-in feature `z4`): in-process SMT solving
+//!    with no subprocess overhead. Also enables CHC-based verification
+//!    via the z4-chc engine.
+//!
+//! To enable z4 native API: `cargo build -p llvm2-verify --features z4`.
 //!
 //! ## Configuring sample count
 //!
@@ -94,12 +101,15 @@ pub mod cse_licm_proofs;
 pub mod dce_proofs;
 pub mod copy_prop_proofs;
 pub mod cfg_proofs;
+pub mod switch_proofs;
 pub mod memory_model;
 pub mod memory_proofs;
 pub mod verify;
 pub mod z4_bridge;
+pub mod z4_cache;
 pub mod synthesis;
 pub mod cegis;
+pub mod cegis_pass;
 pub mod rule_discovery;
 pub mod neon_semantics;
 pub mod ane_semantics;
@@ -111,6 +121,7 @@ pub mod vectorization_proofs;
 pub mod ane_precision_proofs;
 pub mod x86_64_semantics;
 pub mod x86_64_eflags;
+pub mod x86_64_eflags_proofs;
 pub mod x86_64_lowering_proofs;
 pub mod regalloc_proofs;
 pub mod scheduler_proofs;
@@ -132,6 +143,8 @@ pub mod proof_certificate;
 pub mod proof_database;
 pub mod verification_runner;
 pub mod function_verifier;
+pub mod x86_64_function_verifier;
+pub mod fsym_null;
 
 pub use verify::{VerificationResult, VerificationReport, ProofResult, Verifier, VerificationStrength};
 pub use lowering_proof::{ProofObligation, TransvalCheckKind, verify_by_evaluation,
@@ -144,15 +157,25 @@ pub use z4_bridge::{Z4Config, Z4Result, verify_with_z4, serialize_to_smt2, verif
     expand_bounded_quantifiers, expand_bounded_quantifiers_with_limit,
     prepare_formula_for_smt, has_quantifiers, BOUNDED_QUANTIFIER_EXPANSION_LIMIT,
     encode_obligation_as_chc};
+pub use z4_cache::{CachedZ4Result, Z4CacheEntry, Z4ResultCache, Z4_CACHE_SCHEMA_VERSION,
+    config_signature, default_cache_root};
+// z4 native API and CHC functions require the z4 feature (opt-in, NOT default).
+// Enable with: cargo build -p llvm2-verify --features z4
 #[cfg(feature = "z4")]
-pub use z4_bridge::{verify_with_chc, verify_obligation_chc, verify_proof_database_with_chc};
+pub use z4_bridge::{verify_with_z4_api, verify_with_z4_api_uncached,
+    verify_with_chc, verify_obligation_chc, verify_proof_database_with_chc};
 pub use cegis::{CegisLoop, CegisResult, ConcreteInput};
+pub use cegis_pass::{
+    CegisCacheEntry, CegisPassStats, CegisSuperoptConfig, CegisSuperoptPass, ProvenRewrite,
+    RewriteLayer,
+};
 pub use rule_discovery::{RuleDiscovery, RuleProposal, RuleResult, RuleDatabase, DiscoveryStats};
 pub use proof_database::{ProofDatabase, ProofCategory, CategorizedProof, ProofSummary};
 pub use verification_runner::{VerificationRunner, VerificationRunReport, VerificationRunResult,
-    CategoryBreakdown, FailedProofDetail, Z4VerificationMode};
+    CategoryBreakdown, FailedProofDetail, Z4VerificationMode, select_auto_mode};
 pub use function_verifier::{FunctionVerifier, FunctionVerificationReport, InstructionVerificationResult,
     InstructionReport, verify_function};
+pub use x86_64_function_verifier::{X86FunctionVerifier, verify_x86_64_function};
 pub use proof_certificate::{ProofCertificate, CertificateChain, CertificateResult, SolverUsed,
     ChainVerificationResult, ChainSummary, CertificateError,
     generate_certificate, generate_certificate_chain};

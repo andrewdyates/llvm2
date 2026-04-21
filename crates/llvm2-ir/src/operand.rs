@@ -1,6 +1,6 @@
 // llvm2-ir - Shared machine IR model
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Machine operand types for AArch64 instructions.
 
@@ -36,6 +36,26 @@ pub enum MachOperand {
     /// Carries the symbol name through the pipeline so the relocation
     /// collector can emit proper linker entries.
     Symbol(String),
+    /// Jump table reference (for ADR used in switch lowering). The `u32`
+    /// indexes into `MachFunction::jump_tables`. The codegen pipeline
+    /// resolves this to a PC-relative byte offset once block layout and
+    /// the appended table position are known.
+    ///
+    /// See `MachFunction::jump_tables` and `JumpTableData`.
+    JumpTableIndex(u32),
+    /// Incoming stack argument offset from the caller's SP (i.e., from the
+    /// top of this callee's frame, above the saved FP/LR and callee-saves).
+    ///
+    /// ISel emits this form when a formal parameter is classified by the
+    /// AArch64 ABI as stack-passed (arg 9+ for typical integer signatures).
+    /// Frame lowering resolves it to `MemOp { base: FP, offset: callee_saved_area_size + N }`
+    /// once the callee-saved area size is known.
+    ///
+    /// This indirection is necessary because the ISel emits loads before
+    /// regalloc has decided which callee-saved registers to preserve; the
+    /// CSA size (and therefore the FP-to-incoming-arg distance) is only
+    /// known after regalloc, during frame lowering.
+    IncomingArg(i64),
 }
 
 impl MachOperand {
@@ -97,6 +117,19 @@ impl MachOperand {
     pub fn as_symbol(&self) -> Option<&str> {
         match self {
             Self::Symbol(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this operand is a JumpTableIndex reference.
+    pub fn is_jump_table_index(&self) -> bool {
+        matches!(self, Self::JumpTableIndex(_))
+    }
+
+    /// Returns the jump-table index, if this is a JumpTableIndex operand.
+    pub fn as_jump_table_index(&self) -> Option<u32> {
+        match self {
+            Self::JumpTableIndex(i) => Some(*i),
             _ => None,
         }
     }

@@ -1,7 +1,7 @@
 // llvm2-regalloc/linear_scan.rs - Linear scan register allocator
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Linear scan register allocator.
 //!
@@ -119,6 +119,9 @@ impl LinearScan {
             // Step 3: Try to allocate a free register.
             if let Some(preg) = self.try_alloc_free_reg(class) {
                 self.allocation.insert(self.intervals[i].vreg, preg);
+                // Remove aliasing registers from their respective free pools.
+                // (Issue #336: mixed-width ABI register aliasing.)
+                self.remove_aliases_from_free_pools(preg);
                 self.insert_active(i);
             } else {
                 // Step 4: No free register — spill something.
@@ -135,19 +138,26 @@ impl LinearScan {
     /// Expire active intervals that end before `pos`.
     fn expire_old_intervals(&mut self, pos: u32) {
         let mut expired = Vec::new();
+        // Collect expired intervals and their freed registers.
+        let mut freed_pregs: Vec<(RegClass, PReg)> = Vec::new();
 
         for (active_idx, &interval_idx) in self.active.iter().enumerate() {
             if self.intervals[interval_idx].end() <= pos {
                 expired.push(active_idx);
-                // Return the register to the free pool.
+                // Collect the register to return to the free pool.
                 let vreg = self.intervals[interval_idx].vreg;
-                if let Some(preg) = self.allocation.get(&vreg) {
-                    self.free_regs
-                        .entry(vreg.class)
-                        .or_default()
-                        .push(*preg);
+                if let Some(&preg) = self.allocation.get(&vreg) {
+                    freed_pregs.push((vreg.class, preg));
                 }
             }
+        }
+
+        // Return freed registers and their aliases to free pools.
+        for (class, preg) in freed_pregs {
+            self.free_regs.entry(class).or_default().push(preg);
+            // Also return aliasing registers to their pools.
+            // (Issue #336: mixed-width ABI register aliasing.)
+            self.return_aliases_to_free_pools(preg);
         }
 
         // Remove expired entries in reverse order to preserve indices.
@@ -159,6 +169,38 @@ impl LinearScan {
     /// Try to allocate a free register from the given class.
     fn try_alloc_free_reg(&mut self, class: RegClass) -> Option<PReg> {
         self.free_regs.get_mut(&class)?.pop()
+    }
+
+    /// Remove aliasing registers from their respective free pools when a
+    /// register is allocated.
+    ///
+    /// On AArch64, allocating X28 means W28 is no longer free (and vice versa).
+    /// (Issue #336: mixed-width ABI register aliasing.)
+    fn remove_aliases_from_free_pools(&mut self, preg: PReg) {
+        use crate::greedy::aliasing_pregs;
+        for alias in aliasing_pregs(preg) {
+            let alias_class = llvm2_ir::regs::preg_class(alias);
+            if let Some(pool) = self.free_regs.get_mut(&alias_class) {
+                pool.retain(|&p| p != alias);
+            }
+        }
+    }
+
+    /// Return aliasing registers to their respective free pools when a
+    /// register is freed.
+    ///
+    /// (Issue #336: mixed-width ABI register aliasing.)
+    fn return_aliases_to_free_pools(&mut self, preg: PReg) {
+        use crate::greedy::aliasing_pregs;
+        for alias in aliasing_pregs(preg) {
+            let alias_class = llvm2_ir::regs::preg_class(alias);
+            if let Some(pool) = self.free_regs.get_mut(&alias_class) {
+                // Only return if not already in the pool (avoid duplicates).
+                if !pool.contains(&alias) {
+                    pool.push(alias);
+                }
+            }
+        }
     }
 
     /// Handle the case where no free register is available.

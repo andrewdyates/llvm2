@@ -1,7 +1,7 @@
 // llvm2-regalloc/machine_types.rs - Machine-level types for register allocation
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Machine-level type definitions used by the register allocator.
 //!
@@ -242,8 +242,11 @@ impl std::error::Error for OperandConversionError {}
 /// Succeeds for the subset of operand variants that regalloc handles
 /// (VReg, PReg, Imm, FImm, Block, StackSlot). Fails for IR-only variants
 /// (FrameIndex, MemOp, Special) that must be lowered before register
-/// allocation. Symbol operands are mapped to Imm(0) since regalloc
-/// does not track relocation metadata.
+/// allocation. Symbol operands are mapped to Imm(0) since regalloc does
+/// not track relocation metadata; likewise `JumpTableIndex` is mapped to
+/// Imm(0) because the table index is opaque to liveness analysis (the
+/// codegen pipeline reads the original IR operand post-regalloc to patch
+/// ADR instructions and append the table bytes).
 impl TryFrom<&llvm2_ir::MachOperand> for RegAllocOperand {
     type Error = OperandConversionError;
 
@@ -257,6 +260,7 @@ impl TryFrom<&llvm2_ir::MachOperand> for RegAllocOperand {
             IrOp::Block(b) => Ok(RegAllocOperand::Block(*b)),
             IrOp::StackSlot(s) => Ok(RegAllocOperand::StackSlot(*s)),
             IrOp::Symbol(_) => Ok(RegAllocOperand::Imm(0)),
+            IrOp::JumpTableIndex(_) => Ok(RegAllocOperand::Imm(0)),
             IrOp::FrameIndex(fi) => Err(OperandConversionError {
                 message: format!(
                     "FrameIndex({:?}) must be eliminated before register allocation",
@@ -275,6 +279,14 @@ impl TryFrom<&llvm2_ir::MachOperand> for RegAllocOperand {
                     s
                 ),
             }),
+            // IncomingArg is an abstract offset operand that frame lowering
+            // resolves to a concrete FP-relative immediate *after* register
+            // allocation. It carries no register reference, so regalloc sees
+            // it as an opaque constant — same treatment as Symbol / JumpTableIndex.
+            // The original IR operand is preserved in the MachFunction (regalloc
+            // only rewrites VReg operands), so frame lowering can still find
+            // and rewrite it.
+            IrOp::IncomingArg(_) => Ok(RegAllocOperand::Imm(0)),
         }
     }
 }

@@ -1,7 +1,7 @@
 // llvm2-codegen/elf/constants.rs - ELF64 format constants
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Reference: System V ABI, ELF-64 Object File Format
 // Reference: AArch64 ELF ABI (ARM IHI 0056B)

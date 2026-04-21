@@ -1,6 +1,6 @@
 // llvm2-ir - Shared machine IR model
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Machine-level function and block types.
 //!
@@ -301,6 +301,46 @@ impl ExceptionHandlingMetadata {
     }
 }
 
+/// Jump table data for switch lowering.
+///
+/// Carried on [`MachFunction`] through the compilation pipeline. The ISel
+/// emits an `Adr` instruction whose second operand is
+/// [`MachOperand::JumpTableIndex(idx)`](crate::operand::MachOperand::JumpTableIndex),
+/// referencing an entry in [`MachFunction::jump_tables`]. The codegen
+/// pipeline resolves this to a PC-relative byte offset once block layout
+/// is known, and appends the table entries (32-bit signed PC-relative
+/// offsets from the table base to each target block) immediately after the
+/// function body in the `__text` section.
+///
+/// Table entries are computed as `target_block_byte_offset - table_base_byte_offset`
+/// and are indexed by `selector - min_val`. Holes (values in the range
+/// without an explicit case) map to the default block.
+#[derive(Debug, Clone)]
+pub struct JumpTableData {
+    /// Minimum case value. The selector is normalized by subtracting this
+    /// before indexing into the table.
+    pub min_val: i64,
+    /// Dense vector of target blocks, indexed from 0. `targets[i]` is the
+    /// block to jump to for case value `min_val + i`. Holes map to the
+    /// default block.
+    pub targets: Vec<BlockId>,
+}
+
+/// Debug metadata extracted from tMIR for DWARF emission.
+///
+/// Carried on [`MachFunction`] through the compilation pipeline so the
+/// codegen can populate [`FunctionDebugInfo`](crate::dwarf_info::FunctionDebugInfo)
+/// with real source-level information rather than stubs.
+#[derive(Debug, Clone, Default)]
+pub struct FunctionDebugMeta {
+    /// Source file name (e.g., "main.rs"). `None` if unknown.
+    pub source_file: Option<String>,
+    /// Source line where the function is declared (1-based, 0 = unknown).
+    pub decl_line: u32,
+    /// Parameter names (from tMIR signature or generated as "arg0", "arg1", ...).
+    pub param_names: Vec<String>,
+}
+
 /// A complete machine-level function, ready for register allocation and encoding.
 #[derive(Debug, Clone)]
 pub struct MachFunction {
@@ -333,6 +373,19 @@ pub struct MachFunction {
     ///
     /// Per-instruction proofs are stored on each [`MachInst::proof`] field.
     pub function_proofs: Vec<ProofAnnotation>,
+    /// Debug metadata extracted from tMIR for DWARF emission.
+    ///
+    /// Populated by the compilation pipeline from the tMIR adapter's debug
+    /// info extraction. Consumed by the codegen pipeline to generate DWARF
+    /// debug sections with real source-level information.
+    pub debug_meta: FunctionDebugMeta,
+    /// Jump tables for switch lowering. Each `Adr` instruction that loads
+    /// a jump table base address carries a
+    /// [`MachOperand::JumpTableIndex`](crate::operand::MachOperand::JumpTableIndex)
+    /// referencing an entry in this vector. The codegen pipeline appends
+    /// the table entries after the function body and patches the `Adr`
+    /// with the correct PC-relative byte offset.
+    pub jump_tables: Vec<JumpTableData>,
 }
 
 impl MachFunction {
@@ -351,6 +404,8 @@ impl MachFunction {
             stack_slots: Vec::new(),
             eh_metadata: ExceptionHandlingMetadata::new(),
             function_proofs: Vec::new(),
+            debug_meta: FunctionDebugMeta::default(),
+            jump_tables: Vec::new(),
         }
     }
 
@@ -936,5 +991,31 @@ mod tests {
         assert_eq!(func.eh_metadata.landing_pads.len(), 1);
         assert!(func.eh_metadata.landing_pads[0].is_cleanup);
         assert_eq!(func.eh_metadata.call_sites.len(), 1);
+    }
+
+    // --- FunctionDebugMeta tests ---
+
+    #[test]
+    fn test_debug_meta_default() {
+        let meta = FunctionDebugMeta::default();
+        assert!(meta.source_file.is_none());
+        assert_eq!(meta.decl_line, 0);
+        assert!(meta.param_names.is_empty());
+    }
+
+    #[test]
+    fn test_debug_meta_on_mach_function() {
+        let mut func = MachFunction::new(
+            "test_func".to_string(),
+            Signature::new(vec![], vec![]),
+        );
+        func.debug_meta = FunctionDebugMeta {
+            source_file: Some("main.rs".to_string()),
+            decl_line: 42,
+            param_names: vec!["arg0".to_string(), "arg1".to_string()],
+        };
+        assert_eq!(func.debug_meta.source_file.as_deref(), Some("main.rs"));
+        assert_eq!(func.debug_meta.decl_line, 42);
+        assert_eq!(func.debug_meta.param_names.len(), 2);
     }
 }

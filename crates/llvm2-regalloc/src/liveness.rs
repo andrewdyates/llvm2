@@ -1,7 +1,7 @@
 // llvm2-regalloc/liveness.rs - Live interval computation
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Live interval computation for register allocation.
 //!
@@ -257,31 +257,91 @@ pub fn compute_live_intervals(func: &MachFunction) -> LivenessResult {
     }
 
     // Step 3: Build intervals from the computed liveness information.
+    //
+    // BUG FIX (issue #306): The original code recorded only point ranges
+    // [idx, idx+1) for each def and each use, without connecting defs to
+    // their subsequent uses within the same block. This created holes in
+    // live ranges: a vreg defined at position D and used at position U
+    // would have ranges [D, D+1) and [U, U+1) instead of the correct
+    // [D, U+1). This allowed the allocator to assign the same physical
+    // register to a CSET destination and a loop counter that was still
+    // needed by a later phi copy, because the allocator didn't see them
+    // as interfering.
+    //
+    // The fix: for each use of a vreg, extend the range from the most
+    // recent def in the block (or block_start if live-in) through the
+    // use point. For live-out vregs defined in the block, extend from
+    // the def point (not block_start) to block_end.
     for &block_id in &func.block_order {
         let bi = block_id.0 as usize;
         let block = &func.blocks[bi];
 
-        let Some(&last_inst_id) = block.insts.last() else {
+        if block.insts.is_empty() {
             continue;
-        };
+        }
 
         let block_start = inst_numbering[&block.insts[0]];
-        let block_end = inst_numbering[&last_inst_id] + 1;
+        let block_end = inst_numbering[block.insts.last().unwrap()] + 1;
 
-        // For VRegs that are live-out of this block, they're live throughout
-        // the entire block (conservatively).
+        // First pass: find all local definitions in this block.
+        // We need to know where each vreg was defined so that uses can
+        // extend the range back to the def point.
+        let mut local_defs: HashMap<u32, u32> = HashMap::new(); // vreg_id -> def position
+        for &inst_id in &block.insts {
+            let inst = &func.insts[inst_id.0 as usize];
+            let idx = inst_numbering[&inst_id];
+            for vreg in inst.vreg_defs() {
+                local_defs.insert(vreg.id, idx);
+            }
+        }
+
+        // Handle live-out vregs: extend from def (or block_start) to block_end.
         for &vreg_id in &live_out[bi] {
             let interval = intervals.entry(vreg_id).or_insert_with(|| {
-                // We don't know the class yet; it will be set when we see a def.
                 LiveInterval::new(VReg {
                     id: vreg_id,
                     class: RegClass::Gpr64,
                 })
             });
-            interval.add_range(block_start, block_end);
+            if let Some(&def_pos) = local_defs.get(&vreg_id) {
+                // Defined in this block and live-out: [def_pos, block_end).
+                interval.add_range(def_pos, block_end);
+            } else {
+                // Not defined here but live-out (must be live-in too):
+                // live throughout the block [block_start, block_end).
+                interval.add_range(block_start, block_end);
+            }
         }
 
-        // Walk instructions forward to record defs and uses.
+        // Handle live-in vregs NOT in live-out: they're live from block_start
+        // until their last use in this block.
+        for &vreg_id in &live_in[bi] {
+            if live_out[bi].contains(&vreg_id) {
+                continue; // Already handled above.
+            }
+            // Find the last use position in this block.
+            let mut last_use_end = block_start;
+            for &inst_id in &block.insts {
+                let inst = &func.insts[inst_id.0 as usize];
+                let idx = inst_numbering[&inst_id];
+                for vreg in inst.vreg_uses() {
+                    if vreg.id == vreg_id {
+                        last_use_end = last_use_end.max(idx + 1);
+                    }
+                }
+            }
+            if last_use_end > block_start {
+                let interval = intervals.entry(vreg_id).or_insert_with(|| {
+                    LiveInterval::new(VReg {
+                        id: vreg_id,
+                        class: RegClass::Gpr64,
+                    })
+                });
+                interval.add_range(block_start, last_use_end);
+            }
+        }
+
+        // Second pass: record def/use positions and build continuous ranges.
         for &inst_id in &block.insts {
             let inst = &func.insts[inst_id.0 as usize];
             let idx = inst_numbering[&inst_id];
@@ -292,8 +352,7 @@ pub fn compute_live_intervals(func: &MachFunction) -> LivenessResult {
                 });
                 interval.vreg.class = vreg.class;
                 interval.def_positions.push(idx);
-                // A def starts a live range that extends at least to idx+1.
-                // If live-out, it was already extended above.
+                // Ensure at minimum a point range for the def.
                 interval.add_range(idx, idx + 1);
             }
 
@@ -302,8 +361,17 @@ pub fn compute_live_intervals(func: &MachFunction) -> LivenessResult {
                     LiveInterval::new(vreg)
                 });
                 interval.use_positions.push(idx);
-                // A use means the VReg must be live at this instruction.
-                interval.add_range(idx, idx + 1);
+
+                // Extend the range from the def point (or block_start if
+                // live-in) through this use. This ensures that a vreg
+                // defined at D and used at U gets a continuous range
+                // [D, U+1), not two point ranges with a hole.
+                if let Some(&def_pos) = local_defs.get(&vreg.id) {
+                    interval.add_range(def_pos, idx + 1);
+                } else {
+                    // Live-in: extend from block_start to this use.
+                    interval.add_range(block_start, idx + 1);
+                }
             }
         }
     }
@@ -1509,5 +1577,337 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression test for issue #306: CSET must not clobber loop counter
+    // -----------------------------------------------------------------------
+
+    /// Build a sum_1_to_n loop with phi copies (simulates post-phi-elimination).
+    ///
+    /// This reproduces the exact scenario from issue #306:
+    ///
+    /// Block 0 (preheader):
+    ///   v0 = imm 0          // initial sum
+    ///   v1 = imm 1          // initial counter
+    ///   branch -> block 1
+    ///
+    /// Block 1 (loop body, depth=1):
+    ///   v2 = add v0, v1     // sum += counter
+    ///   v3 = add v1, 1      // counter++
+    ///   v4 = cset lt        // compare result (CSET)
+    ///   v5 = copy v2         // phi copy: sum for next iteration
+    ///   v6 = copy v3         // phi copy: counter for next iteration
+    ///   cbranch v4, block1, block2  // loop condition
+    ///
+    /// Block 2 (exit):
+    ///   use v2               // return sum
+    ///
+    /// The bug: v4 (CSET) was allocated to the same register as v3 (counter)
+    /// because liveness had a hole between v3's def and its use at the copy.
+    fn make_sum_1_to_n_with_phi_copies() -> crate::machine_types::MachFunction {
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        // Block 0: preheader
+        let i_sum_init = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1, // mov imm
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(0)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let i_ctr_init = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1, // mov imm
+            defs: vec![MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(1)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let i_br0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBA, // branch
+            defs: vec![],
+            uses: vec![MachOperand::Block(BlockId(1))],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 1: loop body
+        // v2 = add v0, v1  (sum += counter)
+        let i_add_sum = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0x10, // add
+            defs: vec![MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 })],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 }),
+                MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 }),
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        // v3 = add v1, 1  (counter++)
+        let i_add_ctr = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0x10, // add
+            defs: vec![MachOperand::VReg(VReg { id: 3, class: RegClass::Gpr64 })],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 }),
+                MachOperand::Imm(1),
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        // v4 = cset lt  (compare result)
+        let i_cset = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0x20, // cset
+            defs: vec![MachOperand::VReg(VReg { id: 4, class: RegClass::Gpr64 })],
+            uses: vec![],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        // v5 = copy v2  (phi copy: sum for next iteration)
+        let i_phi_sum = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xFFE1, // PSEUDO_COPY
+            defs: vec![MachOperand::VReg(VReg { id: 5, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        // v6 = copy v3  (phi copy: counter for next iteration)
+        let i_phi_ctr = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xFFE1, // PSEUDO_COPY
+            defs: vec![MachOperand::VReg(VReg { id: 6, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::VReg(VReg { id: 3, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        // cbranch v4, block1, block2
+        let i_cbr = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0xBB, // cbranch
+            defs: vec![],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 4, class: RegClass::Gpr64 }),
+                MachOperand::Block(BlockId(1)),
+                MachOperand::Block(BlockId(2)),
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR),
+        });
+
+        // Block 2: exit — use v2 (return sum)
+        let i_use_sum = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 0x30, // use
+            defs: vec![],
+            uses: vec![MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        MachFunction {
+            name: "sum_1_to_n".into(),
+            insts,
+            blocks: vec![
+                MachBlock { // Block 0: preheader
+                    insts: vec![i_sum_init, i_ctr_init, i_br0],
+                    preds: Vec::new(),
+                    succs: vec![BlockId(1)],
+                    loop_depth: 0,
+                },
+                MachBlock { // Block 1: loop body
+                    insts: vec![i_add_sum, i_add_ctr, i_cset, i_phi_sum, i_phi_ctr, i_cbr],
+                    preds: vec![BlockId(0), BlockId(1)],
+                    succs: vec![BlockId(1), BlockId(2)],
+                    loop_depth: 1,
+                },
+                MachBlock { // Block 2: exit
+                    insts: vec![i_use_sum],
+                    preds: vec![BlockId(1)],
+                    succs: Vec::new(),
+                    loop_depth: 0,
+                },
+            ],
+            block_order: vec![BlockId(0), BlockId(1), BlockId(2)],
+            entry_block: BlockId(0),
+            next_vreg: 7,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_issue_306_cset_does_not_clobber_loop_counter() {
+        // Regression test for issue #306: CSET overwrites live counter register.
+        //
+        // In the loop body, after phi elimination:
+        //   v2 = add v0, v1     (sum)
+        //   v3 = add v1, 1      (counter next)
+        //   v4 = cset lt        (branch condition)
+        //   v5 = copy v2         (phi copy: sum)
+        //   v6 = copy v3         (phi copy: counter)
+        //   cbranch v4
+        //
+        // v3 (counter next) MUST be live from its def through the phi copy
+        // at v6 = copy v3. v4 (CSET) is defined between v3's def and v3's
+        // use. They MUST interfere (overlap) so the allocator assigns
+        // different physical registers.
+        let func = make_sum_1_to_n_with_phi_copies();
+        let result = compute_live_intervals(&func);
+
+        let v3_interval = result.intervals.get(&3)
+            .expect("v3 (counter next) should have an interval");
+        let v4_interval = result.intervals.get(&4)
+            .expect("v4 (CSET) should have an interval");
+
+        // v3 must be live from its def (add v1, 1) through the phi copy
+        // (v6 = copy v3). Its interval should be continuous, not split.
+        let v3_def_pos = *v3_interval.def_positions.first()
+            .expect("v3 should have a def position");
+        let v3_last_use = *v3_interval.use_positions.iter().max()
+            .expect("v3 should have use positions");
+        assert!(
+            v3_interval.is_live_at(v3_def_pos),
+            "v3 must be live at its def point"
+        );
+        assert!(
+            v3_interval.is_live_at(v3_last_use),
+            "v3 must be live at its last use (phi copy)"
+        );
+
+        // CRITICAL: v3 and v4 must OVERLAP. If they don't, the allocator
+        // can assign them the same register, which is the #306 bug.
+        assert!(
+            v3_interval.overlaps(v4_interval),
+            "v3 (counter next, range {:?}) and v4 (CSET, range {:?}) \
+             MUST overlap to prevent register clobber. \
+             This is the issue #306 regression.",
+            v3_interval.ranges, v4_interval.ranges
+        );
+
+        // Also verify v2 (sum) and v4 (CSET) overlap — same scenario.
+        let v2_interval = result.intervals.get(&2)
+            .expect("v2 (sum) should have an interval");
+        assert!(
+            v2_interval.overlaps(v4_interval),
+            "v2 (sum, range {:?}) and v4 (CSET, range {:?}) \
+             MUST overlap for correctness",
+            v2_interval.ranges, v4_interval.ranges
+        );
+    }
+
+    #[test]
+    fn test_issue_306_continuous_range_def_to_use_same_block() {
+        // Verify that a vreg defined at position D and used at position U
+        // (D < U, same block) has a continuous range [D, U+1), not two
+        // disconnected point ranges [D, D+1) and [U, U+1).
+        use crate::machine_types::*;
+        let mut insts = Vec::new();
+
+        // Block 0:
+        //   v0 = imm 1         (pos 0)
+        //   v1 = imm 2         (pos 1)  <-- gap between def and use
+        //   v2 = imm 3         (pos 2)  <-- gap between def and use
+        //   use v0              (pos 3)
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(1)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(2)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i2 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(3)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i3 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 2,
+            defs: vec![],
+            uses: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let func = MachFunction {
+            name: "continuous_range".into(),
+            insts,
+            blocks: vec![MachBlock {
+                insts: vec![i0, i1, i2, i3],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 3,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+
+        let result = compute_live_intervals(&func);
+        let v0 = result.intervals.get(&0).expect("v0 should have interval");
+
+        // v0 is defined at pos 0 and used at pos 3. It MUST be live at
+        // all positions in between (continuous range [0, 4)).
+        assert!(v0.is_live_at(0), "v0 must be live at pos 0 (def)");
+        assert!(v0.is_live_at(1), "v0 must be live at pos 1 (between def and use)");
+        assert!(v0.is_live_at(2), "v0 must be live at pos 2 (between def and use)");
+        assert!(v0.is_live_at(3), "v0 must be live at pos 3 (use)");
+
+        // v0 must overlap with v1 (defined at pos 1) and v2 (defined at pos 2)
+        // because v0 is still live when they are defined.
+        let v1 = result.intervals.get(&1).expect("v1 should have interval");
+        let v2 = result.intervals.get(&2).expect("v2 should have interval");
+        assert!(
+            v0.overlaps(v1),
+            "v0 (range {:?}) must overlap v1 (range {:?})",
+            v0.ranges, v1.ranges
+        );
+        assert!(
+            v0.overlaps(v2),
+            "v0 (range {:?}) must overlap v2 (range {:?})",
+            v0.ranges, v2.ranges
+        );
     }
 }

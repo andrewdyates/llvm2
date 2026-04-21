@@ -1,0 +1,73 @@
+---
+source: crates/llvm2-test/tests/cli.rs
+expression: "help_of(&[\"fuzz\"])"
+---
+WS3 — Run differential fuzzers: csmith, yarpgen, tmir-gen
+
+Usage: llvm2-test fuzz [OPTIONS]
+
+Options:
+      --driver <DRIVER>
+          Which driver to run
+
+          Possible values:
+          - csmith:  csmith random C program generator
+          - yarpgen: YARPGen random C/C++ program generator
+          - tmirgen: In-tree tMIR random IR generator
+          - all:     Run all drivers for the requested duration
+          
+          [default: all]
+
+  -f, --format <FORMAT>
+          Output format (human, json, junit)
+
+          Possible values:
+          - human: Pretty table + narrative, targeted at humans
+          - json:  Machine-readable JSON following the schemas in `evals/schema/`
+          - junit: JUnit XML for CI consumers
+          
+          [default: human]
+
+      --duration <DUR>
+          Wall-clock duration (humantime, e.g. `10s`, `1h`, `24h`)
+          
+          [default: 10m]
+
+  -o, --out <PATH>
+          Write machine-readable result artifact here. Default:
+          `evals/results/<cmd>/<iso-date>.json`
+
+      --config <PATH>
+          Config file (TOML). Default: `llvm2-test.toml` at repo root
+
+      --seeds <N>
+          Number of seeds to run (cap; earlier of duration or seeds wins)
+
+      --optlevel <N>
+          Optimization level used when compiling generated programs
+          
+          [default: 2]
+
+      --timeout <SECS>
+          Per-unit timeout in seconds. Subcommands may apply per-unit defaults when this is unset
+
+      --parallel <N>
+          Worker count (honors cargo-serialization lock). Default: auto
+
+      --reduce
+          Run creduce on every miscompile before filing
+
+  -q, --quiet
+          Suppress progress bars; errors still go to stderr
+
+  -v, --verbose...
+          Show debug-level events. Repeat for more: -vv, -vvv
+
+      --no-cache
+          Ignore proof / corpus caches
+
+      --dry-run
+          Print what would run without executing external tools
+
+  -h, --help
+          Print help (see a summary with '-h')

@@ -1,7 +1,7 @@
 // llvm2-verify/aarch64_semantics.rs - AArch64 instruction semantics as SMT formulas
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Encodes AArch64 instruction semantics as bitvector SMT expressions.
 // Each instruction maps to a pure function from input bitvectors to output
@@ -73,6 +73,163 @@ pub fn encode_neg(size: OperandSize, rn: SmtExpr) -> SmtExpr {
     rn.bvneg()
 }
 
+/// Encode `MSUB Wd, Wn, Wm, Wa` or `MSUB Xd, Xn, Xm, Xa` -- multiply-subtract.
+///
+/// Semantics: `Rd = Ra - (Rn * Rm)` (wrapping, lower bits).
+/// Reference: ARM DDI 0487, C6.2.183 MSUB.
+///
+/// Used by `Urem`/`Srem` lowering: `rem = a - (a / b) * b`.
+pub fn encode_msub_rr(size: OperandSize, rn: SmtExpr, rm: SmtExpr, ra: SmtExpr) -> SmtExpr {
+    let _ = size;
+    ra.bvsub(rn.bvmul(rm))
+}
+
+/// Encode `MOV Wd, Wn` or `MOV Xd, Xn` -- register-register move.
+///
+/// On AArch64, `MOV` is an alias for `ORR Rd, XZR/WZR, Rn` for GPRs.
+/// Semantics: `Rd = Rn` (identity).
+///
+/// Used by `Bitcast` lowering between same-width GPR types.
+pub fn encode_mov_rr(size: OperandSize, rn: SmtExpr) -> SmtExpr {
+    let _ = size;
+    rn
+}
+
+/// Encode `FMOV Sd, Sn` / `FMOV Dd, Dn` / `FMOV Dd, Xn` / `FMOV Xd, Dn` --
+/// floating-point (or GPR<->FPR) register move.
+///
+/// Semantics: `Fd = Fn` / `Xd = Dn` -- pure bit-level copy with no rounding,
+/// no NaN sanitization, and no width change. Used by `Bitcast` lowering
+/// between integer and FP registers of the same width (e.g. `i32<->f32`,
+/// `i64<->f64`).
+/// Reference: ARM DDI 0487, C7.2.140 FMOV (register), C7.2.141 FMOV (general).
+pub fn encode_fmov(rn: SmtExpr) -> SmtExpr {
+    rn
+}
+
+/// Encode `UBFM Wd, Wn, #immr, #imms` -- unsigned bitfield move.
+///
+/// This helper covers the extract sub-case (`imms >= immr`), which is how
+/// tMIR `ExtractBits { lsb, width }` lowers. With `immr = lsb` and
+/// `imms = lsb + width - 1`:
+///
+///   Wd = zero_extend((Wn >> lsb) & mask(width))
+///
+/// The helper takes the bitvector width `bv_width` (8 for i8 proofs) and
+/// assumes the input is masked to that width. At 8 bits, the result is
+/// simply `(rn lsr lsb) & mask(width)` -- zero-extension is a no-op within
+/// the 8-bit domain. Requires `lsb + width <= bv_width` and `width >= 1`.
+///
+/// Reference: ARM DDI 0487, C6.2.335 UBFM (and alias C6.2.334 UBFX).
+pub fn encode_ubfm_extract(rn: SmtExpr, lsb: u32, width: u32, bv_width: u32) -> SmtExpr {
+    debug_assert!(width >= 1, "encode_ubfm_extract: width must be >= 1");
+    debug_assert!(
+        lsb + width <= bv_width,
+        "encode_ubfm_extract: lsb + width must fit in bv_width"
+    );
+    debug_assert_eq!(
+        rn.bv_width(),
+        bv_width,
+        "encode_ubfm_extract: operand width must match bv_width"
+    );
+
+    let shifted = rn.bvlshr(SmtExpr::bv_const(lsb as u64, bv_width));
+    let mask = SmtExpr::bv_const(crate::smt::mask(u64::MAX, width), bv_width);
+    shifted.bvand(mask)
+}
+
+/// Encode `SBFM Wd, Wn, #immr, #imms` -- signed bitfield move.
+///
+/// This helper covers the extract sub-case (`imms >= immr`), which is how
+/// tMIR `SextractBits { lsb, width }` lowers. With `immr = lsb` and
+/// `imms = lsb + width - 1`:
+///
+///   Wd = sign_extend((Wn >> lsb) & mask(width), from bit (width-1))
+///
+/// In an 8-bit bitvector domain, we realize this as:
+///
+///   1. Extract the `width`-bit slice `Wn[lsb+width-1 : lsb]`.
+///   2. Sign-extend that slice back up to `bv_width` bits (replicating
+///      bit `width-1` of the slice to fill the upper bits).
+///
+/// SMT `(extract)` + `(sign_extend)` expresses this directly.
+/// Requires `lsb + width <= bv_width` and `width >= 1`.
+///
+/// Reference: ARM DDI 0487, C6.2.266 SBFM (and alias C6.2.264 SBFX).
+pub fn encode_sbfm_extract(rn: SmtExpr, lsb: u32, width: u32, bv_width: u32) -> SmtExpr {
+    debug_assert!(width >= 1, "encode_sbfm_extract: width must be >= 1");
+    debug_assert!(
+        lsb + width <= bv_width,
+        "encode_sbfm_extract: lsb + width must fit in bv_width"
+    );
+    debug_assert_eq!(
+        rn.bv_width(),
+        bv_width,
+        "encode_sbfm_extract: operand width must match bv_width"
+    );
+
+    let high = lsb + width - 1;
+    let slice = rn.extract(high, lsb);
+    if width == bv_width {
+        // No extension needed -- slice already has the full width.
+        slice
+    } else {
+        slice.sign_ext(bv_width - width)
+    }
+}
+
+/// Encode `BFM Wd, Wn, #immr, #imms` in its bitfield-insert form (BFI alias).
+///
+/// `BFI Wd, Wn, #lsb, #width` (`BFM Wd, Wn, #(reg_size - lsb) mod reg_size,
+/// #(width - 1)`) copies the low `width` bits of `Wn` into `Wd[lsb+width-1:lsb]`,
+/// leaving the other bits of `Wd` unchanged. This is how tMIR
+/// `InsertBits { lsb, width }` lowers -- `rd` holds the old value of the
+/// destination (propagated from `args[0]` via a `COPY` emitted by ISel;
+/// see `isel.rs::select_bitfield_insert`), and `rn` is the source of the
+/// bits to insert (`args[1]`).
+///
+/// Semantics:
+///
+///   Wd = (Wd_old & ~(mask(width) << lsb)) | ((Wn & mask(width)) << lsb)
+///
+/// Requires `lsb + width <= bv_width` and `width >= 1`.
+///
+/// Reference: ARM DDI 0487, C6.2.46 BFM (and alias C6.2.45 BFI).
+pub fn encode_bfm_insert(
+    rd: SmtExpr,
+    rn: SmtExpr,
+    lsb: u32,
+    width: u32,
+    bv_width: u32,
+) -> SmtExpr {
+    debug_assert!(width >= 1, "encode_bfm_insert: width must be >= 1");
+    debug_assert!(
+        lsb + width <= bv_width,
+        "encode_bfm_insert: lsb + width must fit in bv_width"
+    );
+    debug_assert_eq!(
+        rd.bv_width(),
+        bv_width,
+        "encode_bfm_insert: Wd width must match bv_width"
+    );
+    debug_assert_eq!(
+        rn.bv_width(),
+        bv_width,
+        "encode_bfm_insert: Wn width must match bv_width"
+    );
+
+    let width_mask = crate::smt::mask(u64::MAX, width);
+    let shifted_mask = crate::smt::mask(width_mask << lsb, bv_width);
+    let inv_mask = crate::smt::mask(!shifted_mask, bv_width);
+
+    let preserved = rd.bvand(SmtExpr::bv_const(inv_mask, bv_width));
+    let insert_slice = rn
+        .bvand(SmtExpr::bv_const(width_mask, bv_width))
+        .bvshl(SmtExpr::bv_const(lsb as u64, bv_width));
+
+    preserved.bvor(insert_slice)
+}
+
 // ---------------------------------------------------------------------------
 // Floating-point instruction semantics
 // ---------------------------------------------------------------------------
@@ -140,6 +297,23 @@ pub fn encode_fmul_rr(_size: FPSize, rn: SmtExpr, rm: SmtExpr) -> SmtExpr {
 /// Reference: ARM DDI 0487, C7.2.132 FNEG (scalar).
 pub fn encode_fneg(_size: FPSize, rn: SmtExpr) -> SmtExpr {
     rn.fp_neg()
+}
+
+/// Encode `FABS Sd, Sn` or `FABS Dd, Dn` -- floating-point absolute value.
+///
+/// Semantics: `Fd = |Fn|` (clear sign bit, no rounding needed).
+/// Reference: ARM DDI 0487, C7.2.73 FABS (scalar).
+pub fn encode_fabs(_size: FPSize, rn: SmtExpr) -> SmtExpr {
+    rn.fp_abs()
+}
+
+/// Encode `FSQRT Sd, Sn` or `FSQRT Dd, Dn` -- floating-point square root.
+///
+/// Semantics: `Fd = sqrt(Fn)` with default RNE rounding mode.
+/// Reference: ARM DDI 0487, C7.2.160 FSQRT (scalar).
+pub fn encode_fsqrt(_size: FPSize, rn: SmtExpr) -> SmtExpr {
+    use crate::smt::RoundingMode;
+    SmtExpr::fp_sqrt(RoundingMode::RNE, rn)
 }
 
 /// Encode `FDIV Sd, Sn, Sm` or `FDIV Dd, Dn, Dm` -- floating-point divide.
@@ -230,6 +404,41 @@ pub fn encode_mvn(size: OperandSize, rn: SmtExpr) -> SmtExpr {
     let width = operand_size_bits(size);
     let all_ones = SmtExpr::bv_const(crate::smt::mask(u64::MAX, width), width);
     rn.bvxor(all_ones)
+}
+
+/// Encode `BIC Wd, Wn, Wm` or `BIC Xd, Xn, Xm` — bitwise bit clear (AND-NOT).
+///
+/// Semantics: `Rd = Rn & ~Rm`.
+/// Reference: ARM DDI 0487, C6.2.21 BIC (shifted register).
+///
+/// Used by `tMIR::BandNot` lowering (`select_logic(..., AArch64LogicOp::Bic, ...)`
+/// in `llvm2_lower::isel`). The complement is taken at `rm`'s actual
+/// bitvector width so the encoder composes correctly at sub-register widths
+/// — I8/I16 proofs encode operands as 8/16-bit bitvectors even though the
+/// machine instruction uses a 32-bit W register. The `size` parameter is
+/// accepted for consistency with the rest of this file but ignored for SMT
+/// encoding (width comes from the operand sort, matching `encode_and_rr` /
+/// `encode_orr_rr`).
+pub fn encode_bic_rr(size: OperandSize, rn: SmtExpr, rm: SmtExpr) -> SmtExpr {
+    let _ = size;
+    let width = rm.bv_width();
+    let all_ones = SmtExpr::bv_const(crate::smt::mask(u64::MAX, width), width);
+    rn.bvand(rm.bvxor(all_ones))
+}
+
+/// Encode `ORN Wd, Wn, Wm` or `ORN Xd, Xn, Xm` — bitwise inclusive OR NOT.
+///
+/// Semantics: `Rd = Rn | ~Rm`.
+/// Reference: ARM DDI 0487, C6.2.229 ORN (shifted register).
+///
+/// Used by `tMIR::BorNot` lowering (`select_logic(..., AArch64LogicOp::Orn, ...)`
+/// in `llvm2_lower::isel`). Complements at `rm`'s actual bitvector width for
+/// the same sub-register reason noted on [`encode_bic_rr`].
+pub fn encode_orn_rr(size: OperandSize, rn: SmtExpr, rm: SmtExpr) -> SmtExpr {
+    let _ = size;
+    let width = rm.bv_width();
+    let all_ones = SmtExpr::bv_const(crate::smt::mask(u64::MAX, width), width);
+    rn.bvor(rm.bvxor(all_ones))
 }
 
 // ---------------------------------------------------------------------------
@@ -548,6 +757,45 @@ mod tests {
         assert_eq!(result, EvalResult::Bv(0));
     }
 
+    #[test]
+    fn test_bic_rr_32() {
+        let (a, b) = sym32();
+        let expr = encode_bic_rr(OperandSize::S32, a, b);
+        // a & ~b — clear bits of a where b is set
+        let result = expr.eval(&env(&[("a", 0xFFFF_FFFF), ("b", 0x0F0F_0F0F)]));
+        assert_eq!(result, EvalResult::Bv(0xF0F0_F0F0));
+    }
+
+    #[test]
+    fn test_bic_rr_8() {
+        // Sub-register width: I8 BandNot lowering proof uses 8-bit operands
+        // even though the machine instruction runs in W registers.
+        let a = SmtExpr::var("a", 8);
+        let b = SmtExpr::var("b", 8);
+        let expr = encode_bic_rr(OperandSize::S32, a, b);
+        let result = expr.eval(&env(&[("a", 0xFF), ("b", 0x0F)]));
+        assert_eq!(result, EvalResult::Bv(0xF0));
+    }
+
+    #[test]
+    fn test_orn_rr_32() {
+        let (a, b) = sym32();
+        let expr = encode_orn_rr(OperandSize::S32, a, b);
+        // a | ~b
+        let result = expr.eval(&env(&[("a", 0x0000_FFFF), ("b", 0xFFFF_0000)]));
+        assert_eq!(result, EvalResult::Bv(0x0000_FFFF));
+    }
+
+    #[test]
+    fn test_orn_rr_8() {
+        let a = SmtExpr::var("a", 8);
+        let b = SmtExpr::var("b", 8);
+        let expr = encode_orn_rr(OperandSize::S32, a, b);
+        let result = expr.eval(&env(&[("a", 0x00), ("b", 0x0F)]));
+        // ~0x0F (8-bit) = 0xF0
+        assert_eq!(result, EvalResult::Bv(0xF0));
+    }
+
     // -----------------------------------------------------------------------
     // Shift instruction semantics tests
     // -----------------------------------------------------------------------
@@ -584,5 +832,142 @@ mod tests {
         // Positive value: 0x7FFFFFFF >> 4 = 0x07FFFFFF (zero-fills)
         let result = expr.eval(&env(&[("a", 0x7FFF_FFFF), ("b", 4)]));
         assert_eq!(result, EvalResult::Bv(0x07FF_FFFF));
+    }
+
+    // -----------------------------------------------------------------------
+    // MSUB / MOV / FMOV semantics tests (issue #435)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_msub_rr_32() {
+        let (a, b) = sym32();
+        let c = SmtExpr::var("c", 32);
+        // MSUB: c - (a * b) = 100 - (3 * 4) = 88
+        let expr = encode_msub_rr(OperandSize::S32, a, b, c);
+        let result = expr.eval(&env(&[("a", 3), ("b", 4), ("c", 100)]));
+        assert_eq!(result, EvalResult::Bv(88));
+    }
+
+    #[test]
+    fn test_msub_rr_models_urem() {
+        // Urem lowering: rem = a - (a /u b) * b
+        // Concretely: 17 urem 5 = 2 = 17 - (17/5)*5 = 17 - 15
+        let a = SmtExpr::var("a", 32);
+        let b = SmtExpr::var("b", 32);
+        let q = a.clone().bvudiv(b.clone());
+        let expr = encode_msub_rr(OperandSize::S32, q, b, a);
+        let result = expr.eval(&env(&[("a", 17), ("b", 5)]));
+        assert_eq!(result, EvalResult::Bv(2));
+    }
+
+    #[test]
+    fn test_mov_rr_identity() {
+        let a = SmtExpr::var("a", 32);
+        let expr = encode_mov_rr(OperandSize::S32, a);
+        let result = expr.eval(&env(&[("a", 0xDEAD_BEEF)]));
+        assert_eq!(result, EvalResult::Bv(0xDEAD_BEEF));
+    }
+
+    #[test]
+    fn test_fmov_identity() {
+        // FMOV between GPR/FPR is a pure bit-level copy.
+        let a = SmtExpr::var("a", 64);
+        let expr = encode_fmov(a);
+        let result = expr.eval(&env(&[("a", 0x3FF0_0000_0000_0000)]));
+        assert_eq!(result, EvalResult::Bv(0x3FF0_0000_0000_0000));
+    }
+
+    // -----------------------------------------------------------------------
+    // UBFM / SBFM / BFM semantics tests (issue #452)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ubfm_extract_mid_nibble_i8() {
+        // x = 0b10110100; lsb=2, width=4 -> slice = 0b1101 = 13.
+        let a = SmtExpr::var("a", 8);
+        let expr = encode_ubfm_extract(a, 2, 4, 8);
+        let result = expr.eval(&env(&[("a", 0b1011_0100)]));
+        assert_eq!(result, EvalResult::Bv(0b0000_1101));
+    }
+
+    #[test]
+    fn test_ubfm_extract_low_nibble_i8() {
+        // lsb=0, width=4 -> low nibble.
+        let a = SmtExpr::var("a", 8);
+        let expr = encode_ubfm_extract(a, 0, 4, 8);
+        let result = expr.eval(&env(&[("a", 0xAB)]));
+        assert_eq!(result, EvalResult::Bv(0x0B));
+    }
+
+    #[test]
+    fn test_ubfm_extract_full_width_i8() {
+        // lsb=0, width=8 -> whole byte, identity.
+        let a = SmtExpr::var("a", 8);
+        let expr = encode_ubfm_extract(a, 0, 8, 8);
+        let result = expr.eval(&env(&[("a", 0xDE)]));
+        assert_eq!(result, EvalResult::Bv(0xDE));
+    }
+
+    #[test]
+    fn test_sbfm_extract_negative_slice_i8() {
+        // x = 0b0010_1100; lsb=2, width=4 -> slice = 0b1011 (top bit set).
+        // Sign-extends to 0xFB (-5 in i8).
+        let a = SmtExpr::var("a", 8);
+        let expr = encode_sbfm_extract(a, 2, 4, 8);
+        let result = expr.eval(&env(&[("a", 0b0010_1100)]));
+        assert_eq!(result, EvalResult::Bv(0xFB));
+    }
+
+    #[test]
+    fn test_sbfm_extract_nonnegative_slice_i8() {
+        // x = 0b0001_0100; lsb=2, width=4 -> slice = 0b0101 (top bit clear).
+        // Sign-extend yields 0b0000_0101 = 5.
+        let a = SmtExpr::var("a", 8);
+        let expr = encode_sbfm_extract(a, 2, 4, 8);
+        let result = expr.eval(&env(&[("a", 0b0001_0100)]));
+        assert_eq!(result, EvalResult::Bv(0x05));
+    }
+
+    #[test]
+    fn test_sbfm_extract_full_width_i8() {
+        // lsb=0, width=8 -> whole byte, identity (sign-extend by 0).
+        let a = SmtExpr::var("a", 8);
+        let expr = encode_sbfm_extract(a, 0, 8, 8);
+        let result = expr.eval(&env(&[("a", 0x80)]));
+        assert_eq!(result, EvalResult::Bv(0x80));
+    }
+
+    #[test]
+    fn test_bfm_insert_mid_nibble_i8() {
+        // Wd = 0b1010_1010; Wn = 0b0000_1101; lsb=2, width=4.
+        // Mask of width 4 shifted by 2: 0b0011_1100.
+        // Preserved: Wd & ~mask = 0b1010_1010 & 0b1100_0011 = 0b1000_0010.
+        // Insert: (Wn & 0b1111) << 2 = 0b0011_0100.
+        // Result: 0b1000_0010 | 0b0011_0100 = 0b1011_0110.
+        let d = SmtExpr::var("d", 8);
+        let n = SmtExpr::var("n", 8);
+        let expr = encode_bfm_insert(d, n, 2, 4, 8);
+        let result = expr.eval(&env(&[("d", 0b1010_1010), ("n", 0b0000_1101)]));
+        assert_eq!(result, EvalResult::Bv(0b1011_0110));
+    }
+
+    #[test]
+    fn test_bfm_insert_low_nibble_clear_i8() {
+        // Wd = 0xFF; Wn = 0x00; lsb=0, width=4 -> clear low nibble.
+        let d = SmtExpr::var("d", 8);
+        let n = SmtExpr::var("n", 8);
+        let expr = encode_bfm_insert(d, n, 0, 4, 8);
+        let result = expr.eval(&env(&[("d", 0xFF), ("n", 0x00)]));
+        assert_eq!(result, EvalResult::Bv(0xF0));
+    }
+
+    #[test]
+    fn test_bfm_insert_full_width_i8() {
+        // lsb=0, width=8 -> replace entire byte with Wn (Wd ignored).
+        let d = SmtExpr::var("d", 8);
+        let n = SmtExpr::var("n", 8);
+        let expr = encode_bfm_insert(d, n, 0, 8, 8);
+        let result = expr.eval(&env(&[("d", 0x12), ("n", 0x34)]));
+        assert_eq!(result, EvalResult::Bv(0x34));
     }
 }

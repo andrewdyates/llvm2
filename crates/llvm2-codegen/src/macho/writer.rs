@@ -1,7 +1,7 @@
 // llvm2-codegen/macho/writer.rs - Mach-O object file writer
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Assembles a complete Mach-O 64-bit relocatable object file (.o).
 //!

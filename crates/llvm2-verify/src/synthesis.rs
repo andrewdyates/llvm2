@@ -1,7 +1,7 @@
 // llvm2-verify/synthesis.rs - Offline peephole synthesis via SMT
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Enumerates AArch64 instruction patterns and uses SMT bitvector
 // verification to discover proven-correct peephole optimization rules.
@@ -47,11 +47,10 @@
 //! ```
 
 use crate::cegis::{CegisLoop, CegisResult};
-use crate::lowering_proof::{verify_by_evaluation, ProofObligation};
+use crate::lowering_proof::{ProofObligation, verify_by_evaluation};
 use crate::smt::SmtExpr;
 use crate::verify::VerificationResult;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use llvm2_opt::cache::StableHasher;
 
 // ---------------------------------------------------------------------------
 // Verification mode
@@ -68,8 +67,7 @@ use std::hash::{Hash, Hasher};
 /// - [`EvaluationThenCegis`](VerifyMode::EvaluationThenCegis): Two-phase
 ///   pipeline: use Evaluation for fast filtering, then CEGIS for final
 ///   validation of candidates that pass the evaluation filter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VerifyMode {
     /// Fast evaluation-based verification (random sampling / exhaustive for
     /// small widths). No solver needed.
@@ -83,7 +81,6 @@ pub enum VerifyMode {
     /// CEGIS provides formal guarantees for the survivors.
     EvaluationThenCegis,
 }
-
 
 // ---------------------------------------------------------------------------
 // Opcode enumeration
@@ -155,7 +152,11 @@ impl SynthOpcode {
     pub fn is_commutative(self) -> bool {
         matches!(
             self,
-            SynthOpcode::Add | SynthOpcode::Mul | SynthOpcode::And | SynthOpcode::Orr | SynthOpcode::Eor
+            SynthOpcode::Add
+                | SynthOpcode::Mul
+                | SynthOpcode::And
+                | SynthOpcode::Orr
+                | SynthOpcode::Eor
         )
     }
 
@@ -301,6 +302,65 @@ impl ProvenRuleDb {
     pub fn profitable_rules(&self) -> Vec<&ProvenRule> {
         self.rules.iter().filter(|r| r.cost_delta > 0).collect()
     }
+
+    /// Seed the database with the Layer A MUL-by-zero rule marker.
+    pub fn seed_layer_a() -> Self {
+        let mut db = Self::new();
+        db.add(ProvenRule {
+            name: "LayerA: MUL x, MovzZero => MOVZ #0".to_string(),
+            candidate: RuleCandidate {
+                pattern: vec![InstrPattern {
+                    opcode: SynthOpcode::Mul,
+                    operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(0)],
+                }],
+                replacement: vec![InstrPattern {
+                    opcode: SynthOpcode::MovImm,
+                    operands: vec![OperandPattern::Immediate(0)],
+                }],
+            },
+            proof_hash: 0,
+            cost_delta: 2,
+            verified_width: 32,
+        });
+        db
+    }
+
+    /// Seed the database with the Layer B two-instruction window rule marker.
+    ///
+    /// Pattern: `Movz v, #imm ; AddRR dst, src, v` (where `v` is single-use)
+    /// Replacement: `AddRI dst, src, imm`
+    ///
+    /// Two instructions at one cycle each (latency 2) are fused into a single
+    /// one-cycle instruction (latency 1); the cost delta is `+1`. Semantic
+    /// equivalence is trivial — both forms compute `src + imm` — but the rule
+    /// exercises the two-instruction window enumerator, SSA splicing, and the
+    /// cache-v2 replacement-body format end-to-end.
+    pub fn seed_layer_b() -> Self {
+        let mut db = Self::new();
+        db.add(ProvenRule {
+            name: "LayerB: Movz imm; AddRR x, y, v => AddRI x, y, imm".to_string(),
+            candidate: RuleCandidate {
+                pattern: vec![
+                    InstrPattern {
+                        opcode: SynthOpcode::MovImm,
+                        operands: vec![OperandPattern::Immediate(0)],
+                    },
+                    InstrPattern {
+                        opcode: SynthOpcode::Add,
+                        operands: vec![OperandPattern::InputReg, OperandPattern::InputReg],
+                    },
+                ],
+                replacement: vec![InstrPattern {
+                    opcode: SynthOpcode::Add,
+                    operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(0)],
+                }],
+            },
+            proof_hash: 0,
+            cost_delta: 1,
+            verified_width: 32,
+        });
+        db
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -362,27 +422,23 @@ impl SearchSpace {
                 // Binary: op x, #imm  (register-immediate)
                 for &imm in Self::interesting_immediates() {
                     // Skip shift amounts >= width (undefined behavior)
-                    if matches!(opcode, SynthOpcode::Lsl | SynthOpcode::Lsr | SynthOpcode::Asr)
-                        && (imm < 0 || imm as u32 >= width)
+                    if matches!(
+                        opcode,
+                        SynthOpcode::Lsl | SynthOpcode::Lsr | SynthOpcode::Asr
+                    ) && (imm < 0 || imm as u32 >= width)
                     {
                         continue;
                     }
                     patterns.push(InstrPattern {
                         opcode,
-                        operands: vec![
-                            OperandPattern::InputReg,
-                            OperandPattern::Immediate(imm),
-                        ],
+                        operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(imm)],
                     });
                 }
 
                 // Binary: op x, x  (same register, for idempotent patterns)
                 patterns.push(InstrPattern {
                     opcode,
-                    operands: vec![
-                        OperandPattern::InputReg,
-                        OperandPattern::SameAsInput(0),
-                    ],
+                    operands: vec![OperandPattern::InputReg, OperandPattern::SameAsInput(0)],
                 });
             }
         }
@@ -664,10 +720,14 @@ impl SynthesisEngine {
             VerificationResult::Valid => {
                 self.candidates_proven += 1;
 
-                let mut hasher = DefaultHasher::new();
-                candidate.hash(&mut hasher);
-                self.width.hash(&mut hasher);
-                let proof_hash = hasher.finish();
+                // Option A per issue #405: feed a canonical byte representation
+                // of the candidate (via Debug) + width into StableHasher. See
+                // issue #405 for Option B (impl std::hash::Hasher for StableHasher)
+                // follow-up.
+                let mut hasher = StableHasher::new();
+                hasher.write_str(&format!("{:?}", candidate));
+                hasher.write_u32(self.width);
+                let proof_hash = hasher.finish64();
 
                 Some(self.make_proven_rule(candidate, proof_hash))
             }
@@ -717,10 +777,7 @@ impl SynthesisEngine {
     /// - [`VerifyMode::Cegis`]: calls `verify_candidate_cegis`.
     /// - [`VerifyMode::EvaluationThenCegis`]: first runs evaluation as a
     ///   fast filter; if evaluation says valid, runs CEGIS for confirmation.
-    pub fn verify_candidate_with_mode(
-        &mut self,
-        candidate: &RuleCandidate,
-    ) -> Option<ProvenRule> {
+    pub fn verify_candidate_with_mode(&mut self, candidate: &RuleCandidate) -> Option<ProvenRule> {
         match self.mode {
             VerifyMode::Evaluation => self.verify_candidate_eval(candidate),
             VerifyMode::Cegis => self.verify_candidate_cegis(candidate),
@@ -907,7 +964,8 @@ mod tests {
         for c in &candidates {
             if c.pattern.len() == 1 && c.replacement.len() == 1 {
                 assert_ne!(
-                    c.pattern[0], c.replacement[0],
+                    c.pattern[0],
+                    c.replacement[0],
                     "should not have identity rewrite: {}",
                     c.display()
                 );
@@ -988,10 +1046,7 @@ mod tests {
 
         let mut engine = SynthesisEngine::new(8);
         let rule = engine.verify_candidate(&candidate);
-        assert!(
-            rule.is_some(),
-            "MUL x, #2 => LSL x, #1 should be proven"
-        );
+        assert!(rule.is_some(), "MUL x, #2 => LSL x, #1 should be proven");
         let rule = rule.unwrap();
         // MUL costs 3, LSL costs 1, delta = 2
         assert_eq!(rule.cost_delta, 2, "MUL->LSL should save cost 2");
@@ -1136,10 +1191,7 @@ mod tests {
 
         let mut engine = SynthesisEngine::new(8);
         let rule = engine.verify_candidate(&candidate);
-        assert!(
-            rule.is_none(),
-            "ADD x, #1 => identity should be rejected"
-        );
+        assert!(rule.is_none(), "ADD x, #1 => identity should be rejected");
     }
 
     /// MUL x, #2 => identity should NOT be proven
@@ -1213,10 +1265,7 @@ mod tests {
         eprintln!("Profitable rules: {}", profitable.len());
 
         for rule in &db.rules {
-            eprintln!(
-                "  [cost_delta={}] {}",
-                rule.cost_delta, rule.name
-            );
+            eprintln!("  [cost_delta={}] {}", rule.cost_delta, rule.name);
         }
 
         // Verify specific known rules were discovered
@@ -1224,20 +1273,26 @@ mod tests {
 
         // ADD x, #0 => identity
         assert!(
-            rule_names.iter().any(|n| n.contains("ADD") && n.contains("#0") && !n.contains(";")),
+            rule_names
+                .iter()
+                .any(|n| n.contains("ADD") && n.contains("#0") && !n.contains(";")),
             "should discover ADD x, #0 => identity. Found rules: {:?}",
             rule_names
         );
 
         // SUB x, #0 => identity
         assert!(
-            rule_names.iter().any(|n| n.contains("SUB") && n.contains("#0") && !n.contains(";")),
+            rule_names
+                .iter()
+                .any(|n| n.contains("SUB") && n.contains("#0") && !n.contains(";")),
             "should discover SUB x, #0 => identity"
         );
 
         // MUL x, #1 => identity
         assert!(
-            rule_names.iter().any(|n| n.contains("MUL") && n.contains("#1")),
+            rule_names
+                .iter()
+                .any(|n| n.contains("MUL") && n.contains("#1")),
             "should discover MUL x, #1 => identity"
         );
     }
@@ -1355,10 +1410,7 @@ mod tests {
             operands: vec![OperandPattern::InputReg, OperandPattern::Immediate(1)],
         };
         assert_eq!(SynthesisEngine::estimate_cost(&[mul]), 3);
-        assert_eq!(
-            SynthesisEngine::estimate_cost(&[add.clone(), add]),
-            2
-        );
+        assert_eq!(SynthesisEngine::estimate_cost(&[add.clone(), add]), 2);
     }
 
     // -----------------------------------------------------------------------
@@ -1556,7 +1608,10 @@ mod tests {
 
         let mut engine = SynthesisEngine::with_mode(8, VerifyMode::Evaluation);
         let rule = engine.verify_candidate_with_mode(&candidate);
-        assert!(rule.is_some(), "SUB x, #0 => identity should pass in Evaluation mode");
+        assert!(
+            rule.is_some(),
+            "SUB x, #0 => identity should pass in Evaluation mode"
+        );
     }
 
     /// verify_candidate_with_mode routes correctly for Cegis mode.
@@ -1572,7 +1627,10 @@ mod tests {
 
         let mut engine = SynthesisEngine::with_mode(8, VerifyMode::Cegis);
         let rule = engine.verify_candidate_with_mode(&candidate);
-        assert!(rule.is_none(), "ADD x, #1 => identity should be rejected in Cegis mode");
+        assert!(
+            rule.is_none(),
+            "ADD x, #1 => identity should be rejected in Cegis mode"
+        );
     }
 
     /// verify_candidate_with_mode routes correctly for EvaluationThenCegis mode.
@@ -1589,7 +1647,10 @@ mod tests {
 
         let mut engine = SynthesisEngine::with_mode(8, VerifyMode::EvaluationThenCegis);
         let rule = engine.verify_candidate_with_mode(&candidate);
-        assert!(rule.is_none(), "MUL x, #2 => identity should be rejected early by evaluation");
+        assert!(
+            rule.is_none(),
+            "MUL x, #2 => identity should be rejected early by evaluation"
+        );
     }
 
     /// EvaluationThenCegis: candidate passes evaluation, then gets CEGIS confirmation.
@@ -1625,7 +1686,10 @@ mod tests {
 
         let mut engine = SynthesisEngine::new(8);
         let rule = engine.verify_candidate(&candidate);
-        assert!(rule.is_some(), "verify_candidate should still work (backward compat)");
+        assert!(
+            rule.is_some(),
+            "verify_candidate should still work (backward compat)"
+        );
     }
 
     /// run() with Cegis mode uses CEGIS for all candidates.

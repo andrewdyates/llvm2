@@ -1,7 +1,7 @@
 // llvm2-codegen/target.rs - Target architectures and target-generic info
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Target architecture definitions with per-target register info and calling conventions.
 //!
@@ -97,6 +97,37 @@ impl Target {
             Target::Aarch64 => true,  // Apple AArch64 mandate
             Target::X86_64 => false,  // Optional, but recommended
             Target::Riscv64 => false,
+        }
+    }
+
+    /// Returns the target architecture of the host process.
+    ///
+    /// This is determined at compile time via `cfg(target_arch = ...)`.
+    /// Used by front-end APIs (e.g. `tla-llvm2`) to default to host codegen
+    /// without hard-coding a specific target.
+    ///
+    /// Returns `Target::Aarch64` on unknown architectures as a safe default,
+    /// since AArch64 is LLVM2's primary/most-tested backend.
+    pub fn host() -> Self {
+        #[cfg(target_arch = "x86_64")]
+        {
+            Target::X86_64
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            Target::Aarch64
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            Target::Riscv64
+        }
+        #[cfg(not(any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+        )))]
+        {
+            Target::Aarch64
         }
     }
 
@@ -281,5 +312,25 @@ mod tests {
         assert_eq!(Target::X86_64, Target::X86_64);
         assert_ne!(Target::X86_64, Target::Aarch64);
         assert_ne!(Target::Riscv64, Target::Aarch64);
+    }
+
+    #[test]
+    fn test_host_target_is_known() {
+        // The host() helper must return one of the known targets; which one
+        // depends on the compiler's target_arch. We assert it's consistent
+        // with cfg().
+        let host = Target::host();
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(host, Target::X86_64);
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(host, Target::Aarch64);
+        #[cfg(target_arch = "riscv64")]
+        assert_eq!(host, Target::Riscv64);
+
+        // Sanity: host() is one of the enum variants we know.
+        assert!(matches!(
+            host,
+            Target::X86_64 | Target::Aarch64 | Target::Riscv64
+        ));
     }
 }

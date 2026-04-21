@@ -1,0 +1,41 @@
+# rustc_codegen_llvm2 — WS4 M0 skeleton.
+#
+# This crate is a nightly rustc codegen backend. It is NOT part of the
+# LLVM2 workspace (different toolchain, uses `rustc_private`). Build with
+# the nightly pinned by this crate's `rust-toolchain.toml`.
+#
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+# Copyright 2026 Andrew Yates
+# License: Apache-2.0
+[package]
+name = "rustc_codegen_llvm2"
+version = "0.1.0"
+edition = "2021"
+authors = ["Andrew Yates <andrewyates.name@gmail.com>"]
+license = "Apache-2.0"
+description = "LLVM2 codegen backend for nightly rustc (M0 skeleton)"
+publish = false
+
+[lib]
+# rustc loads the codegen backend as a dylib through
+# `-Zcodegen-backend=<path>`. On macOS that resolves to `.dylib`, on
+# Linux `.so`. This matches rustc_codegen_cranelift's crate-type.
+crate-type = ["dylib"]
+
+[dependencies]
+# Intentionally empty. Everything we need at M0 lives in rustc's sysroot
+# and is brought in via `extern crate rustc_*`. We deliberately do not
+# pull in the LLVM2 workspace crates yet — the M1 milestone will add a
+# `tmir-from-rustc-mir` adapter, at which point we will depend on the
+# LLVM2 workspace via a path or git dep.
+
+[package.metadata.rust-analyzer]
+# Tell rust-analyzer to enable `rustc_private` so it indexes our
+# extern crate rustc_* statements correctly.
+rustc_private = true
+
+# Keep this crate OUT of the LLVM2 cargo workspace on purpose. It needs
+# a pinned nightly toolchain and links against rustc internals; those
+# concerns must not leak into the rest of the workspace.
+[workspace]
+

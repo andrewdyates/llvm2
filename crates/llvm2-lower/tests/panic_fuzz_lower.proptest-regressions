@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4cbe52c9bbe6152d4d5cdf5182702d725add85cbf49e61ba022afbc3ec6e4fb4 # shrinks to spec = FuncSpec { num_params: 0, blocks: [BlockSpec { insts: [] }], bad_entry: false, bad_func_ty: true }

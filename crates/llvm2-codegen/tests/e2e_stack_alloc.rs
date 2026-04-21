@@ -1,8 +1,8 @@
 // llvm2-codegen/tests/e2e_stack_alloc.rs - E2E tests for stack allocation
 // through the full tMIR pipeline (Alloc/Store/Load)
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // These tests exercise stack allocation (Alloc/Store/Load) through the
 // complete tMIR-to-binary pipeline:

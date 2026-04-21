@@ -1,0 +1,58 @@
+---
+source: crates/llvm2-test/tests/cli.rs
+expression: "help_of(&[\"matrix\"])"
+---
+WS1 — Run the workspace unit/integration test matrix
+
+Usage: llvm2-test matrix [OPTIONS]
+
+Options:
+      --crate-filter <CRATE>
+          Only run the named crate (e.g. `llvm2-codegen`)
+
+  -f, --format <FORMAT>
+          Output format (human, json, junit)
+
+          Possible values:
+          - human: Pretty table + narrative, targeted at humans
+          - json:  Machine-readable JSON following the schemas in `evals/schema/`
+          - junit: JUnit XML for CI consumers
+          
+          [default: human]
+
+  -o, --out <PATH>
+          Write machine-readable result artifact here. Default:
+          `evals/results/<cmd>/<iso-date>.json`
+
+      --shard <NAME>
+          Shard of a crate to run (e.g. `aarch64`, `macho`). Requires `--crate`
+
+      --config <PATH>
+          Config file (TOML). Default: `llvm2-test.toml` at repo root
+
+      --since <REF>
+          Only run tests changed since the given git ref
+
+      --compare <PATH>
+          Baseline JSON file to diff the run against
+
+      --timeout <SECS>
+          Per-unit timeout in seconds. Subcommands may apply per-unit defaults when this is unset
+
+      --parallel <N>
+          Worker count (honors cargo-serialization lock). Default: auto
+
+  -q, --quiet
+          Suppress progress bars; errors still go to stderr
+
+  -v, --verbose...
+          Show debug-level events. Repeat for more: -vv, -vvv
+
+      --no-cache
+          Ignore proof / corpus caches
+
+      --dry-run
+          Print what would run without executing external tools
+
+  -h, --help
+          Print help (see a summary with '-h')

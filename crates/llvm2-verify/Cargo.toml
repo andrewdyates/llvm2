@@ -1,11 +1,11 @@
 # llvm2-verify - Verification backend
 #
-# Author: Andrew Yates <ayates@dropbox.com>
-# Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+# Copyright 2026 Andrew Yates | License: Apache-2.0
 
 [package]
 name = "llvm2-verify"
-description = "Verification backend for LLVM2 using SMT solving (z4)"
+description = "Verification backend for LLVM2 — exhaustive/statistical testing by default, z4 SMT proving opt-in"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,15 +15,43 @@ authors.workspace = true
 [features]
 default = []
 # z4 feature: enables in-process z4 Rust API (requires z4 crate).
-# Without this feature, verification uses CLI subprocess fallback (z4_bridge.rs).
-# To enable: `cargo test -p llvm2-verify --features z4`.
+# NOT enabled by default. Default verification uses exhaustive evaluation
+# (8-bit) and statistical sampling (32/64-bit) which requires no external
+# solver. The CLI subprocess fallback (z4_bridge.rs) is always available
+# for formal proofs when a solver binary is on PATH.
+# To enable: `cargo build -p llvm2-verify --features z4`.
 z4 = ["dep:z4", "dep:z4-chc"]
+# z4-prove: user-facing alias for the z4 feature. This is the recommended
+# flag name for CI lanes and documentation, signalling "full SMT proof via
+# z4 solver" rather than just "link the z4 crate". Functionally equivalent
+# to --features z4. See docs/z4-prove-feature.md.
+# To enable: `cargo test -p llvm2-verify --features z4-prove`.
+z4-prove = ["z4"]
+# fsym feature: enables the symbolic-execution UB detector pipeline
+# helpers (see designs/2026-04-18-integrated-symbolic-execution.md).
+# Phase 1a (null-deref) lands the scan helper behind this feature so the
+# pipeline wiring can stay off by default while the core detector types
+# remain compiled and testable. Not enabled by default.
+# To enable: `cargo build -p llvm2-verify --features fsym`.
+fsym = []
 
 [dependencies]
 llvm2-ir = { workspace = true }
 llvm2-lower = { workspace = true }
+llvm2-opt = { workspace = true }
 thiserror = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 # z4 SMT solver: optional, enabled via the `z4` feature above.
 # Uses workspace path dep (~/z4/crates/z4) for local development.
 z4 = { workspace = true, optional = true }
 z4-chc = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Property-based testing for panic-fuzz harnesses (#448 / #387).
+# proptest is dev-only; it MUST NOT leak into the production graph.
+proptest = "1.7"
+
+[lints]
+workspace = true

@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_cli_tmbc.rs - E2E test for the binary tMIR bitcode (.tmbc) wire format pipeline
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Tests the full binary bitcode pipeline:
 //   1. Build a tMIR module programmatically using the builder API
@@ -516,16 +516,18 @@ fn e2e_tmbc_format_detection() {
     // JSON format check: serialized modules start with '{'
     assert!(!is_json_format(b"tMBCextra_bytes"));
 
-    // JSON bytes should NOT be detected as tmbc.
+    // Pretty-printed JSON bytes should also be detected as JSON format
+    // (both compact and pretty JSON start with '{').
     let json = serde_json::to_string_pretty(&module)
         .expect("serializing module to JSON should succeed");
     let json_bytes = json.into_bytes();
 
     assert_eq!(json_bytes.first().copied(), Some(b'{'));
-    assert!(!is_json_format(&json_bytes));
-    assert!(!is_json_format(br#"{"name":"json"}"#));
+    assert!(is_json_format(&json_bytes));
+    assert!(is_json_format(br#"{"name":"json"}"#));
 
-    // Too-short bytes should not match.
+    // Non-JSON bytes should not be detected as JSON format.
+    assert!(!is_json_format(b"tMBCextra_bytes_nonJSON"));
     assert!(!is_json_format(b"tMB"));
     assert!(!is_json_format(b""));
 }

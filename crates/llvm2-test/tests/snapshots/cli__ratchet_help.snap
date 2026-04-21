@@ -1,0 +1,61 @@
+---
+source: crates/llvm2-test/tests/cli.rs
+expression: "help_of(&[\"ratchet\"])"
+---
+Run ratchet checks (called by CI)
+
+Usage: llvm2-test ratchet [OPTIONS] <COMMAND>
+
+Commands:
+  tests            Pass-count regression check — compares the newest JSON under
+                   `evals/results/tests/` against `ratchet/tests_baseline.json`
+  warnings         Warnings-zero ratchet — builds the workspace + tests and compares the diagnostic
+                   count against `ratchet/warnings_baseline.json`
+  unwrap           Monotonic-decrease ratchet on production panic-family sites (`.unwrap()` /
+                   `.expect(` / `panic!` / `unreachable!` / `todo!`). Compares per-file counts
+                   against `ratchet/unwrap_baseline.json`
+  shell-isolation  Enforce `std::process::Command` is only used in `shell.rs` / `external.rs`
+  schema           Assert committed `evals/schema/*.json` matches what schemars emits
+  lint-linux       Cross-compile check for `#[cfg(target_os = "linux")]` paths in `llvm2-codegen`
+                   (issue #346). Safe on macOS-only boxes — targets not installed via `rustup target
+                   add` are reported as `skipped`
+  help             Print this message or the help of the given subcommand(s)
+
+Options:
+  -f, --format <FORMAT>
+          Output format (human, json, junit)
+
+          Possible values:
+          - human: Pretty table + narrative, targeted at humans
+          - json:  Machine-readable JSON following the schemas in `evals/schema/`
+          - junit: JUnit XML for CI consumers
+          
+          [default: human]
+
+  -o, --out <PATH>
+          Write machine-readable result artifact here. Default:
+          `evals/results/<cmd>/<iso-date>.json`
+
+      --config <PATH>
+          Config file (TOML). Default: `llvm2-test.toml` at repo root
+
+      --timeout <SECS>
+          Per-unit timeout in seconds. Subcommands may apply per-unit defaults when this is unset
+
+      --parallel <N>
+          Worker count (honors cargo-serialization lock). Default: auto
+
+  -q, --quiet
+          Suppress progress bars; errors still go to stderr
+
+  -v, --verbose...
+          Show debug-level events. Repeat for more: -vv, -vvv
+
+      --no-cache
+          Ignore proof / corpus caches
+
+      --dry-run
+          Print what would run without executing external tools
+
+  -h, --help
+          Print help (see a summary with '-h')

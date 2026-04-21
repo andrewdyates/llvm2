@@ -1,7 +1,7 @@
 // llvm2-ir integration tests for core types
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Integration tests that exercise the public API of llvm2-ir across modules.
 

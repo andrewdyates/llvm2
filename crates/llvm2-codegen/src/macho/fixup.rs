@@ -1,7 +1,7 @@
 // llvm2-codegen/macho/fixup.rs - Fixup layer for late relocation encoding
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // The fixup layer sits between instruction encoding and relocation emission.
 // During instruction encoding, fixups are recorded with placeholder values.
@@ -18,6 +18,39 @@
 //! are generated for the linker.
 
 use super::reloc::{AArch64RelocKind, Relocation};
+use thiserror::Error;
+
+/// Error type for fixup resolution.
+///
+/// Fixup resolution depends on the user-supplied symbol table (via
+/// `resolve_named_symbols` lookup callback) and on the required call order
+/// (`resolve_named_symbols` before `resolve_to_relocations`). Both failure
+/// modes reflect external input / API misuse at a boundary and must surface
+/// to callers as recoverable errors rather than crashing the pipeline.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum FixupError {
+    /// A `NamedSymbol` fixup target could not be resolved to a symbol-table
+    /// index by the caller-provided lookup function.
+    #[error("unresolved symbol in fixup: '{name}'")]
+    UnresolvedSymbol {
+        /// The symbol name that was not found by the lookup callback.
+        name: String,
+    },
+
+    /// `resolve_to_relocations` was called while at least one `NamedSymbol`
+    /// fixup remained in the list. Callers must invoke
+    /// [`FixupList::resolve_named_symbols`] first.
+    #[error(
+        "unresolved named symbol in fixup at offset {offset:#x}: '{name}'. \
+         Call resolve_named_symbols() before resolve_to_relocations()."
+    )]
+    UnresolvedNamedSymbolAtOffset {
+        /// Byte offset within the section where the fixup applies.
+        offset: u32,
+        /// The unresolved symbol name still present in the fixup list.
+        name: String,
+    },
+}
 
 /// The target of a fixup — what the fixup points at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,6 +257,16 @@ impl FixupList {
         self.fixups.iter()
     }
 
+    /// Mutable slice view of the fixup list.
+    ///
+    /// Used by the JIT block-splice path (issue #364) to shift each fixup's
+    /// byte offset when trampolines are inserted before basic blocks. Kept
+    /// narrower than a general-purpose `iter_mut` so callers cannot add or
+    /// remove fixups through this accessor; use [`Self::push`] for that.
+    pub fn as_mut_slice(&mut self) -> &mut [Fixup] {
+        &mut self.fixups
+    }
+
     /// Get a fixup by index.
     pub fn get(&self, index: usize) -> Option<&Fixup> {
         self.fixups.get(index)
@@ -234,19 +277,24 @@ impl FixupList {
     /// Takes a lookup function that maps symbol names to symbol table indices.
     /// All `NamedSymbol` targets are replaced with `Symbol(index)`.
     ///
-    /// # Panics
-    /// Panics if a named symbol is not found by the lookup function.
-    pub fn resolve_named_symbols<F>(&mut self, lookup: F)
+    /// # Errors
+    /// Returns [`FixupError::UnresolvedSymbol`] if the lookup callback returns
+    /// `None` for any `NamedSymbol`. The list is left partially mutated: any
+    /// fixups that were resolved before the failing one are already updated.
+    /// Callers should treat this as a hard module-emission error.
+    pub fn resolve_named_symbols<F>(&mut self, lookup: F) -> Result<(), FixupError>
     where
         F: Fn(&str) -> Option<u32>,
     {
         for fixup in &mut self.fixups {
             if let FixupTarget::NamedSymbol(ref name) = fixup.target {
-                let index = lookup(name)
-                    .unwrap_or_else(|| panic!("unresolved symbol in fixup: {}", name));
+                let index = lookup(name).ok_or_else(|| FixupError::UnresolvedSymbol {
+                    name: name.clone(),
+                })?;
                 fixup.target = FixupTarget::Symbol(index);
             }
         }
+        Ok(())
     }
 
     /// Resolve all fixups into relocations.
@@ -260,10 +308,11 @@ impl FixupList {
     /// for applying fixup values to the section data based on final layout.
     /// The relocations tell the linker what adjustments are needed at link time.
     ///
-    /// # Panics
-    /// Panics if any `NamedSymbol` fixup targets remain unresolved. Call
+    /// # Errors
+    /// Returns [`FixupError::UnresolvedNamedSymbolAtOffset`] if any
+    /// `NamedSymbol` fixup targets remain unresolved. Call
     /// [`resolve_named_symbols`](Self::resolve_named_symbols) first.
-    pub fn resolve_to_relocations(&self) -> Vec<Relocation> {
+    pub fn resolve_to_relocations(&self) -> Result<Vec<Relocation>, FixupError> {
         let mut relocs = Vec::with_capacity(self.fixups.len() * 2);
 
         for fixup in &self.fixups {
@@ -274,11 +323,10 @@ impl FixupList {
                     symbol_index, ..
                 } => (*symbol_index, true),
                 FixupTarget::NamedSymbol(name) => {
-                    panic!(
-                        "unresolved named symbol in fixup at offset {:#x}: '{}'. \
-                         Call resolve_named_symbols() before resolve_to_relocations().",
-                        fixup.offset, name
-                    );
+                    return Err(FixupError::UnresolvedNamedSymbolAtOffset {
+                        offset: fixup.offset,
+                        name: name.clone(),
+                    });
                 }
             };
 
@@ -306,7 +354,7 @@ impl FixupList {
             });
         }
 
-        relocs
+        Ok(relocs)
     }
 }
 
@@ -469,7 +517,7 @@ mod tests {
         list.push(Fixup::got_adrp(0x00, 5));
         list.push(Fixup::got_ldr(0x04, 5));
 
-        let relocs = list.resolve_to_relocations();
+        let relocs = list.resolve_to_relocations().expect("all Symbol-targeted fixups");
         assert_eq!(relocs.len(), 2);
 
         assert_eq!(relocs[0].kind, AArch64RelocKind::GotLoadPage21);
@@ -489,7 +537,7 @@ mod tests {
         list.push(Fixup::tlvp_adrp(0x00, 9));
         list.push(Fixup::tlvp_ldr(0x04, 9));
 
-        let relocs = list.resolve_to_relocations();
+        let relocs = list.resolve_to_relocations().expect("all Symbol-targeted fixups");
         assert_eq!(relocs.len(), 2);
 
         assert_eq!(relocs[0].kind, AArch64RelocKind::TlvpLoadPage21);
@@ -510,7 +558,7 @@ mod tests {
         list.push(Fixup::adrp(0x04, 2));
         list.push(Fixup::pageoff(0x08, 2));
 
-        let relocs = list.resolve_to_relocations();
+        let relocs = list.resolve_to_relocations().expect("all Symbol-targeted fixups");
         assert_eq!(relocs.len(), 3);
 
         assert_eq!(relocs[0].kind, AArch64RelocKind::Branch26);
@@ -529,7 +577,7 @@ mod tests {
         let mut list = FixupList::new();
         list.push(Fixup::branch(0x00, 1).with_addend(4));
 
-        let relocs = list.resolve_to_relocations();
+        let relocs = list.resolve_to_relocations().expect("all Symbol-targeted fixups");
         assert_eq!(relocs.len(), 2); // addend + branch26
 
         assert_eq!(relocs[0].kind, AArch64RelocKind::Addend);
@@ -551,7 +599,7 @@ mod tests {
             addend: 0,
         });
 
-        let relocs = list.resolve_to_relocations();
+        let relocs = list.resolve_to_relocations().expect("Section-targeted fixups resolve");
         assert_eq!(relocs.len(), 1);
         assert!(!relocs[0].is_extern);
         assert_eq!(relocs[0].symbol_index, 2);
@@ -660,6 +708,67 @@ mod tests {
         let list = FixupList::new();
         assert!(list.is_empty());
         assert_eq!(list.len(), 0);
-        assert_eq!(list.resolve_to_relocations().len(), 0);
+        assert_eq!(
+            list.resolve_to_relocations()
+                .expect("empty list resolves")
+                .len(),
+            0
+        );
+    }
+
+    // ---- Error paths for Phase 1 of #386 ----
+
+    #[test]
+    fn test_resolve_named_symbols_missing_returns_err() {
+        // A NamedSymbol whose name the lookup cannot resolve must return
+        // FixupError::UnresolvedSymbol rather than panicking.
+        let mut list = FixupList::new();
+        list.push(Fixup::branch_sym(0x00, "missing_fn".to_string()));
+
+        let err = list
+            .resolve_named_symbols(|_name| None)
+            .expect_err("missing named symbol must be an error");
+        assert_eq!(
+            err,
+            FixupError::UnresolvedSymbol {
+                name: "missing_fn".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_resolve_to_relocations_unresolved_named_returns_err() {
+        // If resolve_named_symbols was never called (or left a NamedSymbol
+        // behind), resolve_to_relocations must return the API-misuse error
+        // rather than panicking.
+        let mut list = FixupList::new();
+        list.push(Fixup::branch_sym(0x20, "callee".to_string()));
+
+        let err = list
+            .resolve_to_relocations()
+            .expect_err("unresolved NamedSymbol must be an error");
+        assert_eq!(
+            err,
+            FixupError::UnresolvedNamedSymbolAtOffset {
+                offset: 0x20,
+                name: "callee".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_resolve_named_symbols_happy_path_returns_ok() {
+        let mut list = FixupList::new();
+        list.push(Fixup::branch_sym(0x00, "callee".to_string()));
+        list.resolve_named_symbols(|name| if name == "callee" { Some(7) } else { None })
+            .expect("lookup succeeds");
+
+        let relocs = list
+            .resolve_to_relocations()
+            .expect("all NamedSymbol fixups were resolved");
+        assert_eq!(relocs.len(), 1);
+        assert_eq!(relocs[0].kind, AArch64RelocKind::Branch26);
+        assert_eq!(relocs[0].symbol_index, 7);
+        assert!(relocs[0].is_extern);
     }
 }

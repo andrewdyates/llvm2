@@ -1,7 +1,7 @@
 // llvm2-verify/proof_certificate.rs - Proof certificate chain
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proof certificates record the outcome of verification proofs so they can be
 // persisted, inspected, and chained together. They connect tRust's
@@ -38,11 +38,11 @@
 //! assert!(chain.all_verified());
 //! ```
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::Hasher;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
+
+use llvm2_opt::cache::StableHasher;
 
 use crate::lowering_proof::{ProofObligation, TransvalCheckKind, verify_by_evaluation};
 use crate::verify::{VerificationResult, VerificationStrength};
@@ -544,9 +544,9 @@ pub fn generate_certificate_chain(
 fn compute_formula_hash(obligation: &ProofObligation) -> u64 {
     let formula = obligation.negated_equivalence();
     let debug_str = format!("{:?}", formula);
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = StableHasher::new();
     hasher.write(debug_str.as_bytes());
-    hasher.finish()
+    hasher.finish64()
 }
 
 /// Map verification strength to the solver that was used.

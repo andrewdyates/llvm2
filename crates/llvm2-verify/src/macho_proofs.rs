@@ -1,7 +1,7 @@
 // llvm2-verify/macho_proofs.rs - SMT proofs for Mach-O emission correctness
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proves that the Mach-O object file emission pipeline in
 // llvm2-codegen/src/macho/ produces structurally valid output.

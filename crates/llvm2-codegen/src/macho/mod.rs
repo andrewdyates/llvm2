@@ -1,7 +1,7 @@
 // llvm2-codegen/macho/mod.rs - Mach-O object file support
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Mach-O 64-bit object file writer for macOS (AArch64 and x86-64).
 //!
@@ -22,13 +22,14 @@
 pub mod constants;
 pub mod fixup;
 pub mod header;
+pub mod linker;
 pub mod reloc;
 pub mod section;
 pub mod symbol;
 pub mod writer;
 pub mod x86_64_reloc;
 
-pub use fixup::{Fixup, FixupList, FixupTarget};
+pub use fixup::{Fixup, FixupError, FixupList, FixupTarget};
 pub use reloc::{encode_relocation, AArch64RelocKind, Relocation};
 pub use symbol::{DysymtabParams, NList64, SymbolTable};
 pub use writer::{MachORelocation, MachOTarget, MachOWriter, Symbol};

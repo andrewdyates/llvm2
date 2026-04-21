@@ -1,7 +1,7 @@
 // llvm2-verify/verify.rs - Verification interface
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! High-level verification interface.
 //!
@@ -32,16 +32,19 @@
 //! with 100,000 random samples (configurable via [`crate::lowering_proof::VerificationConfig`]).
 //! This provides high confidence but is not a formal proof.
 //!
-//! ## Path to formal verification
+//! ## Formal verification backends
 //!
-//! 1. **Current** (mock evaluation): Fast, catches regressions and most bugs.
-//!    Exhaustive for 8-bit, statistical for 32/64-bit.
-//! 2. **Available** (z4 CLI): Proof obligations can be serialized to SMT-LIB2
-//!    via [`crate::lowering_proof::ProofObligation::to_smt2`] and verified with
+//! 1. **Evaluation testing** (default): Fast, catches regressions and
+//!    most bugs. Exhaustive for 8-bit, statistical for 32/64-bit.
+//!    No external solver required.
+//! 2. **z4 CLI**: Proof obligations serialized to SMT-LIB2 via
+//!    [`crate::lowering_proof::ProofObligation::to_smt2`] and verified with
 //!    an external z3/z4 solver. See [`crate::z4_bridge::verify_with_z4`].
-//! 3. **Future** (z4 native): The `z4` feature gate enables in-process SMT
-//!    solving with no subprocess overhead. When this becomes the default,
-//!    mock evaluation will serve as a fast pre-check.
+//!    Always available when a solver binary is on PATH.
+//! 3. **z4 native API** (opt-in feature `z4`): In-process SMT solving with
+//!    no subprocess overhead. Also enables CHC-based verification.
+//!    Use [`crate::verification_runner::VerificationRunner::run_auto`] to
+//!    automatically select the strongest available backend.
 
 use llvm2_lower::Function;
 use thiserror::Error;
@@ -634,7 +637,14 @@ mod tests {
     fn test_verifier_arithmetic() {
         let verifier = Verifier::new();
         let report = verifier.verify_arithmetic();
-        assert_eq!(report.total(), 20);
+        // Coverage floor: historic baseline 20. Grows monotonically as new
+        // arithmetic proofs land (#418). Same pattern as `test_verifier_memory_model`
+        // below. Regression is still caught: any decrease fails.
+        assert!(
+            report.total() >= 20,
+            "expected >= 20 arithmetic proofs, got {}",
+            report.total()
+        );
         assert!(report.all_valid(), "Arithmetic proofs failed:\n{}", report.summary());
     }
 

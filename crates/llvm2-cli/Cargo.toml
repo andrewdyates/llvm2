@@ -1,7 +1,7 @@
 # llvm2-cli - Command-line driver for LLVM2
 #
-# Author: Andrew Yates <ayates@dropbox.com>
-# Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+# Copyright 2026 Andrew Yates | License: Apache-2.0
 
 [package]
 name = "llvm2-cli"
@@ -19,6 +19,18 @@ path = "src/main.rs"
 [dependencies]
 llvm2-codegen = { workspace = true }
 llvm2-ir = { workspace = true }
+llvm2-opt = { workspace = true }
+llvm2-verify = { workspace = true }
 tmir = { workspace = true, features = ["serde"] }
 serde_json = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+rayon = "1.10"
+
+[dev-dependencies]
+llvm2-codegen = { workspace = true }
+tmir = { workspace = true, features = ["serde"] }
+tmir-build = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

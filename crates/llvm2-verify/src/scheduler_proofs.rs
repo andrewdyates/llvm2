@@ -1,7 +1,7 @@
 // llvm2-verify/scheduler_proofs.rs - SMT proofs for instruction scheduling correctness
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proves that instruction scheduling (reordering within a basic block) in
 // llvm2-opt preserves program semantics. The scheduler builds a dependency

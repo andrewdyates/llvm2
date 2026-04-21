@@ -1,7 +1,7 @@
 // llvm2-lower/tmir_compat.rs - Compatibility layer for tMIR API
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // This module provides re-exports and compatibility types that bridge the
 // unified tmir crate API with LLVM2-internal types. The old 4-crate tMIR
@@ -37,6 +37,9 @@ pub use tmir::AtomicRMWOp as AtomicRmwOp;
 
 // Proof system (renamed for compat with old TmirProof name)
 pub use tmir::ProofAnnotation;
+pub use tmir::{ProofSummary, ProofObligation, ProofStatus, ObligationKind};
+pub use tmir::{ProofEvidence, ProofCertificate};
+pub use tmir::{ProofId, ProofTag};
 
 // Module/Function/Block structures
 pub use tmir::{Module, Function, Block, Global};

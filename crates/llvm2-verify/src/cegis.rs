@@ -1,7 +1,7 @@
 // llvm2-verify/cegis.rs - Counter-Example Guided Inductive Synthesis (CEGIS)
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // CEGIS is the core algorithm for solver-driven superoptimization. Given a
 // candidate equivalence (source_smt == target_smt), it iteratively:
@@ -64,9 +64,8 @@
 use crate::lowering_proof::ProofObligation;
 use crate::smt::SmtExpr;
 use crate::z4_bridge::{verify_with_z4, Z4Config, Z4Result};
+use llvm2_opt::cache::StableHasher;
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 // ---------------------------------------------------------------------------
 // ConcreteInput
@@ -444,6 +443,28 @@ impl CegisLoop {
         self.stats_concrete_rejections = 0;
         self.stats_solver_calls = 0;
     }
+
+    /// Clear accumulated counterexamples without resetting statistics.
+    ///
+    /// This is the right hook to call between independent proof obligations
+    /// that share a single `CegisLoop` instance (e.g. across enumeration
+    /// candidates in a superopt pass). Clearing prevents counterexamples from
+    /// one obligation from causing spurious concrete-path rejections on an
+    /// unrelated obligation (issue #493), while preserving the accumulated
+    /// solver / rejection counters for observability.
+    ///
+    /// Typical usage:
+    /// ```ignore
+    /// let mut cegis = CegisLoop::new(1, 5_000);
+    /// for candidate in candidates {
+    ///     cegis.clear_counterexamples();
+    ///     cegis.add_edge_case_seeds(&candidate.vars);
+    ///     let _ = cegis.verify(&candidate.src, &candidate.tgt, &candidate.vars);
+    /// }
+    /// ```
+    pub fn clear_counterexamples(&mut self) {
+        self.counterexamples.clear();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -456,10 +477,10 @@ impl CegisLoop {
 /// in the rule database. It uses the SMT-LIB2 string representation
 /// which is canonical for structurally identical expressions.
 fn compute_proof_hash(source: &SmtExpr, target: &SmtExpr) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    format!("{}", source).hash(&mut hasher);
-    format!("{}", target).hash(&mut hasher);
-    hasher.finish()
+    let mut hasher = StableHasher::new();
+    hasher.write_str(&format!("{}", source));
+    hasher.write_str(&format!("{}", target));
+    hasher.finish64()
 }
 
 // ---------------------------------------------------------------------------
@@ -791,6 +812,119 @@ mod tests {
         assert_eq!(cegis.counterexample_count(), 0);
         assert_eq!(cegis.stats_concrete_rejections(), 0);
         assert_eq!(cegis.stats_solver_calls(), 0);
+    }
+
+    #[test]
+    fn test_cegis_clear_counterexamples_preserves_stats() {
+        // `clear_counterexamples` (#493) wipes the CX vector but keeps the
+        // stats counters, so a per-function pass can reuse one loop across
+        // independent obligations without losing observability.
+        let mut cegis = CegisLoop::new(10, 5000);
+        cegis.add_seed(ConcreteInput::from_pairs(&[("x", 5)]));
+
+        // Fire a concrete rejection so stats_concrete_rejections increments.
+        let source = SmtExpr::var("x", 32);
+        let target = SmtExpr::var("x", 32).bvadd(SmtExpr::bv_const(1, 32));
+        let _ = cegis.check_concrete_only(&source, &target);
+        assert_eq!(cegis.counterexample_count(), 1);
+        assert_eq!(cegis.stats_concrete_rejections(), 1);
+
+        cegis.clear_counterexamples();
+        assert_eq!(cegis.counterexample_count(), 0);
+        // Stats must survive clear() — that's the whole point of keeping a
+        // dedicated method separate from reset().
+        assert_eq!(cegis.stats_concrete_rejections(), 1);
+    }
+
+    #[test]
+    fn test_cegis_counterexamples_do_not_bleed_between_obligations() {
+        // Regression test for #493: reusing a single CegisLoop across
+        // independent proof obligations used to accumulate counterexamples
+        // from obligation A into the fast-path check for obligation B. If
+        // B's "truly-equivalent" property only holds for a subset of inputs
+        // (e.g. a future Layer-C rule with a precondition), a bled CX from A
+        // that violates B's precondition would trigger a spurious
+        // NotEquivalent. `clear_counterexamples` before each new obligation
+        // keeps the fast-path set scoped to the current proof.
+        let mut cegis = CegisLoop::new(10, 5000);
+        let vars_a = vec![("x".to_string(), 8)];
+
+        // Obligation A: add != sub. Seed edge cases so the concrete path
+        // finds a CX immediately.
+        cegis.add_edge_case_seeds(&vars_a);
+        let src_a = SmtExpr::var("x", 8);
+        let tgt_a = SmtExpr::var("x", 8).bvadd(SmtExpr::bv_const(1, 8));
+        let _ = cegis.check_concrete_only(&src_a, &tgt_a);
+        assert!(
+            cegis.counterexample_count() >= 6,
+            "edge-case seeds for 1 var should contribute 6 CXs",
+        );
+
+        // Simulate the cegis_pass candidate boundary: clear CX before
+        // starting the next obligation. Stats accumulate across candidates.
+        let stats_before_clear = cegis.stats_concrete_rejections();
+        cegis.clear_counterexamples();
+        assert_eq!(cegis.counterexample_count(), 0);
+        assert_eq!(cegis.stats_concrete_rejections(), stats_before_clear);
+
+        // Obligation B (different variable name, independent proof):
+        // `y + 0 == y` is equivalent for all y, so adding B-only seeds and
+        // running `check_concrete_only` must return None. Without the
+        // clear, A's seeds (with key "x" and not "y") would live alongside
+        // B's seeds — harmless in this case because missing vars skip,
+        // but in a Layer-C world where A and B share variable names the
+        // bled values would drive false rejections.
+        let vars_b = vec![("y".to_string(), 8)];
+        cegis.add_edge_case_seeds(&vars_b);
+        let src_b = SmtExpr::var("y", 8).bvadd(SmtExpr::bv_const(0, 8));
+        let tgt_b = SmtExpr::var("y", 8);
+        let result = cegis.check_concrete_only(&src_b, &tgt_b);
+        assert!(
+            result.is_none(),
+            "equivalent obligation B must not be rejected on bled state",
+        );
+        // CX count after B-seeding equals only B's edge cases, no A leftover.
+        assert_eq!(cegis.counterexample_count(), 6);
+    }
+
+    #[test]
+    fn test_cegis_bleed_without_clear_can_falsely_reject() {
+        // Adversarial demonstration of the bug fixed by #493: if we DO NOT
+        // clear between obligations, a bled CX from obligation A can
+        // distinguish the source and target of obligation B and trigger a
+        // spurious concrete rejection. We simulate this purely with manual
+        // seeds so the test is deterministic and solver-free.
+        let mut cegis = CegisLoop::new(10, 5000);
+
+        // Obligation A (imagine Layer-C udiv vs mul-inverse): solver
+        // returns `c = 3, y = 5` distinguishing the two forms, added here
+        // by hand.
+        cegis.add_seed(ConcreteInput::from_pairs(&[("c", 3), ("y", 5)]));
+        assert_eq!(cegis.counterexample_count(), 1);
+
+        // Obligation B (different expressions, SAME variable names): the
+        // bled CX (`c=3, y=5`) distinguishes `y + c` from `y - c`, so the
+        // fast path will falsely reject it despite B being an independent
+        // proof.
+        let src_b = SmtExpr::var("y", 8).bvadd(SmtExpr::var("c", 8));
+        let tgt_b = SmtExpr::var("y", 8).bvsub(SmtExpr::var("c", 8));
+        let rejected_without_clear = cegis.check_concrete_only(&src_b, &tgt_b);
+        assert!(
+            rejected_without_clear.is_some(),
+            "bled CX (c=3, y=5) distinguishes add-vs-sub — this is the bug",
+        );
+
+        // Apply the fix: clear CX between obligations. The same B
+        // expressions now have no accumulated CX to reject against. (The
+        // expressions themselves are not equivalent, but without a seed
+        // the fast path must defer to the solver rather than emit a
+        // spurious concrete-path NotEquivalent.)
+        cegis.clear_counterexamples();
+        let result_after_clear = cegis.check_concrete_only(&src_b, &tgt_b);
+        assert!(
+            result_after_clear.is_none(),
+            "after clear, the fast path has no CX and cannot spuriously reject",
+        );
     }
 
     // -----------------------------------------------------------------------

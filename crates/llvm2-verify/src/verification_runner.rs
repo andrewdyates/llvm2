@@ -1,7 +1,7 @@
 // llvm2-verify/verification_runner.rs - Bulk proof verification with reporting
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Wires the ProofDatabase into the verification pipeline. Provides
 // VerificationRunner for running all proofs in the database and
@@ -43,24 +43,51 @@ use crate::z4_bridge::{Z4Config, Z4Result};
 
 /// Selects the verification backend for [`VerificationRunner`].
 ///
-/// - [`MockOnly`]: Use mock evaluation only (default, current behavior).
+/// - [`MockOnly`]: Use mock evaluation only.
 ///   Fast but provides statistical (not formal) verification for 32/64-bit.
 /// - [`Z4Cli`]: Use z3/z4 CLI for formal verification of every proof.
 ///   Provides complete proofs but requires a solver binary and is slower.
 /// - [`MockThenZ4`]: Run mock evaluation first as a fast pre-check, then
 ///   verify proofs that pass mock with z3/z4 for formal confirmation.
 ///   Best of both worlds: fast failure detection + formal proofs.
+/// - [`Auto`]: Auto-select the best available backend at runtime.
+///   Prefers mock-plus-z4 verification when a solver is available and
+///   falls back to mock-only verification otherwise.
 ///
 /// [`MockOnly`]: Z4VerificationMode::MockOnly
 /// [`Z4Cli`]: Z4VerificationMode::Z4Cli
 /// [`MockThenZ4`]: Z4VerificationMode::MockThenZ4
+/// [`Auto`]: Z4VerificationMode::Auto
 pub enum Z4VerificationMode {
-    /// Use mock evaluation only (default, current behavior).
+    /// Use mock evaluation only.
     MockOnly,
     /// Use z3/z4 CLI for formal verification.
     Z4Cli(Z4Config),
     /// Use mock as fast pre-check, then z4 for proofs that pass mock.
     MockThenZ4(Z4Config),
+    /// Auto-select the best available backend at runtime.
+    ///
+    /// Uses [`MockThenZ4`] with the z4 native API when a solver binary is
+    /// available on the system, otherwise falls back to [`MockOnly`].
+    ///
+    /// [`MockThenZ4`]: Z4VerificationMode::MockThenZ4
+    /// [`MockOnly`]: Z4VerificationMode::MockOnly
+    Auto,
+}
+
+/// Select the best verification mode available in the current environment.
+///
+/// Checks whether an SMT solver binary (z4 or z3) is available on `PATH`
+/// or in well-known build locations. When a solver is found, returns
+/// [`Z4VerificationMode::MockThenZ4`] with default configuration so that
+/// mock evaluation runs as a fast pre-check followed by formal SMT proof.
+/// Otherwise returns [`Z4VerificationMode::MockOnly`].
+pub fn select_auto_mode() -> Z4VerificationMode {
+    if crate::z4_bridge::z3_available() {
+        Z4VerificationMode::MockThenZ4(Z4Config::default())
+    } else {
+        Z4VerificationMode::MockOnly
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +516,20 @@ impl<'a> VerificationRunner<'a> {
         }
     }
 
+    /// Verify proofs using the best available backend, selected automatically.
+    ///
+    /// Uses [`select_auto_mode`] to detect whether an SMT solver binary is
+    /// available. When one is found, runs mock evaluation as a fast pre-check
+    /// then promotes passing proofs to formal z4 verification. When no solver
+    /// is found, falls back to mock evaluation only.
+    ///
+    /// This is the recommended entry point for callers that want the strongest
+    /// verification available without manual configuration.
+    pub fn run_auto(&self) -> VerificationRunReport {
+        let mode = select_auto_mode();
+        self.run_with_mode(&mode)
+    }
+
     /// Verify proofs using the specified [`Z4VerificationMode`].
     ///
     /// - [`Z4VerificationMode::MockOnly`]: equivalent to [`run_all()`].
@@ -496,13 +537,16 @@ impl<'a> VerificationRunner<'a> {
     /// - [`Z4VerificationMode::MockThenZ4`]: run mock evaluation first;
     ///   for proofs that pass mock, re-verify with z4 for formal strength.
     ///   Proofs that fail mock are reported immediately without z4.
+    /// - [`Z4VerificationMode::Auto`]: equivalent to [`run_auto()`].
     ///
     /// [`run_all()`]: VerificationRunner::run_all
     /// [`run_with_z4()`]: VerificationRunner::run_with_z4
+    /// [`run_auto()`]: VerificationRunner::run_auto
     pub fn run_with_mode(&self, mode: &Z4VerificationMode) -> VerificationRunReport {
         match mode {
             Z4VerificationMode::MockOnly => self.run_all(),
             Z4VerificationMode::Z4Cli(z4_config) => self.run_with_z4(z4_config),
+            Z4VerificationMode::Auto => self.run_auto(),
             Z4VerificationMode::MockThenZ4(z4_config) => {
                 let start = Instant::now();
                 let results: Vec<VerificationRunResult> = self
@@ -1187,5 +1231,59 @@ mod tests {
                 r.name
             );
         }
+    }
+
+    // =======================================================================
+    // run_auto and select_auto_mode tests
+    // =======================================================================
+
+    #[test]
+    fn test_select_auto_mode_returns_valid_mode() {
+        let mode = select_auto_mode();
+        // Must be either MockOnly or MockThenZ4 depending on solver availability.
+        match &mode {
+            Z4VerificationMode::MockOnly => {
+                assert!(!crate::z4_bridge::z3_available(),
+                    "select_auto_mode returned MockOnly but z3 is available");
+            }
+            Z4VerificationMode::MockThenZ4(_) => {
+                assert!(crate::z4_bridge::z3_available(),
+                    "select_auto_mode returned MockThenZ4 but z3 is not available");
+            }
+            _ => panic!("select_auto_mode should return MockOnly or MockThenZ4"),
+        }
+    }
+
+    #[test]
+    fn test_run_auto_arithmetic_subset() {
+        let full_db = ProofDatabase::new();
+        let subset: Vec<_> = full_db
+            .by_category(ProofCategory::Arithmetic)
+            .into_iter()
+            .cloned()
+            .collect();
+        let db = ProofDatabase::from_proofs(subset);
+        let runner = VerificationRunner::new(&db);
+
+        let report = runner.run_auto();
+        assert_eq!(report.total(), db.len());
+        assert!(report.all_passed(),
+            "run_auto failed on arithmetic subset:\n{}", report);
+    }
+
+    #[test]
+    fn test_run_with_mode_auto() {
+        let full_db = ProofDatabase::new();
+        let subset: Vec<_> = full_db
+            .by_category(ProofCategory::Arithmetic)
+            .into_iter()
+            .cloned()
+            .collect();
+        let db = ProofDatabase::from_proofs(subset);
+        let runner = VerificationRunner::new(&db);
+
+        let report = runner.run_with_mode(&Z4VerificationMode::Auto);
+        assert_eq!(report.total(), db.len());
+        assert!(report.all_passed());
     }
 }

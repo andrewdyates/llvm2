@@ -1,7 +1,7 @@
 // llvm2-opt - Common Subexpression Elimination
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Common Subexpression Elimination (CSE) for machine-level IR.
 //!
@@ -43,22 +43,46 @@
 
 use std::collections::HashMap;
 
-use llvm2_ir::{AArch64Opcode, BlockId, InstId, MachFunction, MachOperand, ProofAnnotation, VReg};
-// NOTE: AArch64Opcode is still needed for ExprKey (canonical key includes opcode)
-// and for the `produces_value` delegation in effects.rs. The `is_commutative`
-// check now uses the generic method on AArch64Opcode.
+use llvm2_ir::{
+    AArch64Opcode, BlockId, InstId, MachFunction, MachOperand, OpcodeCategory, ProofAnnotation,
+    VReg,
+};
 
 use crate::dom::DomTree;
-use crate::effects::{opcode_effect, produces_value, MemoryEffect};
-use crate::pass_manager::MachinePass;
+use crate::effects::{opcode_effect, produces_value, reads_flags, MemoryEffect};
+use crate::pass_manager::{AnalysisCache, MachinePass};
 
 /// Common Subexpression Elimination pass.
 pub struct CommonSubexprElim;
 
-/// A canonical key for an instruction: (opcode, canonicalized operands).
-/// Two instructions with the same key compute the same value.
+/// A canonical key for an instruction: (category, opcode, canonicalized operands).
+///
+/// Uses [`OpcodeCategory`] to group semantically related opcodes, but ALSO
+/// includes the target-specific opcode discriminant so that two opcodes in
+/// the same category with differing per-operand semantics do NOT collide.
+///
+/// **Why opcode discriminant matters (issue #432).** Multiple target opcodes
+/// can share the same [`OpcodeCategory`] yet interpret their immediate
+/// operand differently. For AArch64:
+/// - `Movz Xd, #imm16` materializes `+imm16` (zero-extended).
+/// - `Movn Xd, #imm16` materializes `~imm16` (bitwise NOT → small negative).
+///
+/// Both are categorized as [`OpcodeCategory::MovRI`]. Without opcode
+/// disambiguation, `Movz #2` (= +2) and `Movn #2` (= -3) produce the same
+/// key, and CSE silently collapses them — a soundness bug that miscompiles
+/// any function referencing both a small positive and small negative
+/// constant whose encoded immediates coincide. Including the opcode in the
+/// key keeps category-based filtering (used for the skip checks) while
+/// making the hash key precise.
+///
+/// Instructions whose category is [`OpcodeCategory::Other`] are excluded
+/// from CSE because distinct target-specific opcodes may map to `Other`
+/// yet have different semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ExprKey {
+    category: OpcodeCategory,
+    /// Exact target opcode — distinguishes opcodes that share a category
+    /// but have different per-operand semantics (e.g., `Movz` vs `Movn`).
     opcode: AArch64Opcode,
     /// Source operands only (excludes the def in operand[0]).
     /// For commutative ops, sorted for canonical form.
@@ -66,18 +90,30 @@ struct ExprKey {
 }
 
 /// A canonicalized operand for hashing purposes.
+///
+/// VReg operands include a "definition version" to distinguish different
+/// definitions of the same virtual register. This is critical for correctness
+/// in non-SSA IR: after phi elimination, the same VReg can be defined multiple
+/// times (e.g., in phi-resolution copy blocks), and expressions using different
+/// definitions of the same VReg must NOT be considered equivalent.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CanonOperand {
-    VReg(u32),
+    /// (vreg_id, definition_version) — version distinguishes multiple defs.
+    VReg(u32, u32),
     Imm(i64),
     FImm(u64), // f64 bits for hashing
     Other,     // non-hashable operands (blocks, etc.)
 }
 
-impl From<&MachOperand> for CanonOperand {
-    fn from(op: &MachOperand) -> Self {
+impl CanonOperand {
+    /// Create a canonical operand from a MachOperand, using version info
+    /// from the vreg_versions map.
+    fn from_operand(op: &MachOperand, vreg_versions: &HashMap<u32, u32>) -> Self {
         match op {
-            MachOperand::VReg(v) => CanonOperand::VReg(v.id),
+            MachOperand::VReg(v) => {
+                let version = vreg_versions.get(&v.id).copied().unwrap_or(0);
+                CanonOperand::VReg(v.id, version)
+            }
             MachOperand::Imm(i) => CanonOperand::Imm(*i),
             MachOperand::FImm(f) => CanonOperand::FImm(f.to_bits()),
             _ => CanonOperand::Other,
@@ -105,6 +141,15 @@ impl MachinePass for CommonSubexprElim {
         let dom = DomTree::compute(func);
         run_cse(func, &dom)
     }
+
+    fn run_with_analyses(
+        &mut self,
+        func: &mut MachFunction,
+        analyses: &mut AnalysisCache,
+    ) -> bool {
+        let dom = analyses.domtree(func).clone();
+        run_cse(func, &dom)
+    }
 }
 
 /// Run CSE on the function, returning true if any changes were made.
@@ -122,6 +167,14 @@ fn run_cse(func: &mut MachFunction, dom: &DomTree) -> bool {
     // Maps surviving inst_id -> proof from eliminated duplicate.
     let mut proof_merges: Vec<(InstId, Option<ProofAnnotation>)> = Vec::new();
 
+    // VReg definition versions: tracks how many times each VReg has been
+    // defined so far. This is critical for correctness in non-SSA IR:
+    // after phi elimination, the same VReg can be defined multiple times
+    // (e.g., `v20 = mov v21; v21 = mov v23` in phi-resolution blocks).
+    // Expressions using different definitions of the same VReg must get
+    // different keys to prevent unsound CSE.
+    let mut vreg_versions: HashMap<u32, u32> = HashMap::new();
+
     // Walk in dominator-tree preorder to see definitions before uses.
     let preorder = dom_preorder(dom, func.entry);
 
@@ -129,6 +182,16 @@ fn run_cse(func: &mut MachFunction, dom: &DomTree) -> bool {
         let block = func.block(block_id);
         for &inst_id in &block.insts {
             let inst = func.inst(inst_id);
+
+            // Track VReg definitions: increment version for each def.
+            // This must happen for ALL instructions (not just CSE candidates)
+            // so that subsequent expressions using redefined VRegs get new keys.
+            if produces_value(inst.opcode) {
+                if let Some(MachOperand::VReg(def_v)) = inst.operands.first() {
+                    let ver = vreg_versions.entry(def_v.id).or_insert(0);
+                    *ver += 1;
+                }
+            }
 
             // Only CSE pure instructions that produce a value.
             if opcode_effect(inst.opcode) != MemoryEffect::Pure {
@@ -138,14 +201,42 @@ fn run_cse(func: &mut MachFunction, dom: &DomTree) -> bool {
                 continue;
             }
 
+            // Skip instructions that read implicit NZCV flags. These
+            // instructions depend on the flag state set by a prior CMP/TST,
+            // which is not captured in their explicit operands. Two CSet
+            // instructions with the same condition code produce different
+            // values if their preceding comparisons set different flags.
+            if reads_flags(inst.opcode) {
+                continue;
+            }
+
+            // Categorize the opcode for the CSE key. Instructions that
+            // map to OpcodeCategory::Other are target-specific opcodes
+            // without a generic category — different opcodes may map to
+            // Other yet have different semantics, so we skip them.
+            let category = inst.opcode.categorize();
+            if category == OpcodeCategory::Other {
+                continue;
+            }
+
             // Get the def vreg (operand[0]).
             let def_vreg = match &inst.operands.first() {
                 Some(MachOperand::VReg(v)) => *v,
                 _ => continue,
             };
 
-            // Build canonical key from source operands.
-            let key = make_expr_key(inst.opcode, &inst.operands);
+            // Build canonical key from category, opcode, and source operands,
+            // including VReg definition versions to distinguish different
+            // definitions. The opcode is part of the key so that two opcodes
+            // sharing a category but with different per-operand semantics
+            // (e.g., `Movz` vs `Movn` in `MovRI`) do not collide — see #432.
+            let key = make_expr_key(
+                category,
+                inst.opcode,
+                inst.opcode.is_commutative(),
+                &inst.operands,
+                &vreg_versions,
+            );
 
             // Check if we have a key with "Other" operands — skip those
             // as they're not reliably hashable.
@@ -224,19 +315,41 @@ fn run_cse(func: &mut MachFunction, dom: &DomTree) -> bool {
 
 /// Build a canonical expression key for an instruction.
 ///
-/// The key consists of the opcode and the source operands (excluding
-/// the def in operand[0]). For commutative operations, source operands
-/// are sorted to produce a canonical form.
-fn make_expr_key(opcode: AArch64Opcode, operands: &[MachOperand]) -> ExprKey {
+/// The key consists of the [`OpcodeCategory`], the exact target opcode, and
+/// the source operands (excluding the def in operand[0]). For commutative
+/// operations, source operands are sorted to produce a canonical form.
+///
+/// [`OpcodeCategory`] remains in the key so that the generic skip checks
+/// (`category == Other`) and any future cross-target reasoning stay meaningful.
+/// The [`AArch64Opcode`] discriminant is included so that opcodes which share
+/// a category but interpret their operands differently do NOT collide. For
+/// example, `Movz` (materializes `+imm`) and `Movn` (materializes `~imm`)
+/// both categorize as [`OpcodeCategory::MovRI`] but have divergent semantics
+/// for the same immediate value — see issue #432.
+///
+/// VReg operands include their current definition version from
+/// `vreg_versions`, ensuring that expressions using different definitions
+/// of the same VReg are not considered equivalent.
+fn make_expr_key(
+    category: OpcodeCategory,
+    opcode: AArch64Opcode,
+    is_commutative: bool,
+    operands: &[MachOperand],
+    vreg_versions: &HashMap<u32, u32>,
+) -> ExprKey {
     // Source operands start at index 1 (operand[0] is the def).
-    let mut canon_ops: Vec<CanonOperand> = operands[1..].iter().map(CanonOperand::from).collect();
+    let mut canon_ops: Vec<CanonOperand> = operands[1..]
+        .iter()
+        .map(|op| CanonOperand::from_operand(op, vreg_versions))
+        .collect();
 
     // For commutative operations, sort operands for canonical form.
-    if opcode.is_commutative() && canon_ops.len() == 2 {
+    if is_commutative && canon_ops.len() == 2 {
         canon_ops.sort_by(canon_operand_cmp);
     }
 
     ExprKey {
+        category,
         opcode,
         operands: canon_ops,
     }
@@ -246,11 +359,13 @@ fn make_expr_key(opcode: AArch64Opcode, operands: &[MachOperand]) -> ExprKey {
 fn canon_operand_cmp(a: &CanonOperand, b: &CanonOperand) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (a, b) {
-        (CanonOperand::VReg(a), CanonOperand::VReg(b)) => a.cmp(b),
+        (CanonOperand::VReg(a_id, a_ver), CanonOperand::VReg(b_id, b_ver)) => {
+            a_id.cmp(b_id).then(a_ver.cmp(b_ver))
+        }
         (CanonOperand::Imm(a), CanonOperand::Imm(b)) => a.cmp(b),
         (CanonOperand::FImm(a), CanonOperand::FImm(b)) => a.cmp(b),
-        (CanonOperand::VReg(_), _) => Ordering::Less,
-        (_, CanonOperand::VReg(_)) => Ordering::Greater,
+        (CanonOperand::VReg(_, _), _) => Ordering::Less,
+        (_, CanonOperand::VReg(_, _)) => Ordering::Greater,
         (CanonOperand::Imm(_), _) => Ordering::Less,
         (_, CanonOperand::Imm(_)) => Ordering::Greater,
         (CanonOperand::FImm(_), _) => Ordering::Less,
@@ -657,5 +772,69 @@ mod tests {
         let surviving = func.inst(block.insts[0]);
         // Different proofs → conservatively dropped
         assert!(surviving.proof.is_none());
+    }
+
+    // ---- Regression tests for #432 (Movz/Movn opcode collision) ----
+
+    #[test]
+    fn test_cse_movz_movn_same_imm_not_merged() {
+        // Issue #432: `Movz Xd, #2` materializes +2, `Movn Xd, #2` materializes
+        // ~2 = -3. Both categorize as `OpcodeCategory::MovRI`. Without opcode
+        // disambiguation, CSE silently collapses them — a soundness bug. The
+        // fix includes the opcode discriminant in the CSE expression key so
+        // that these two instructions produce distinct keys.
+        //
+        // This test MUST fail on main before the fix and pass after.
+        let mz = MachInst::new(AArch64Opcode::Movz, vec![vreg(2), imm(2)]);
+        let mn = MachInst::new(AArch64Opcode::Movn, vec![vreg(3), imm(2)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![mz, mn, ret]);
+
+        let mut cse = CommonSubexprElim;
+        // No CSE should happen: Movz and Movn have different semantics.
+        assert!(!cse.run(&mut func), "CSE must not merge Movz and Movn");
+
+        // Both instructions must remain.
+        let block = func.block(func.entry);
+        assert_eq!(
+            block.insts.len(),
+            3,
+            "Expected Movz, Movn, Ret — got {} insts (CSE miscompiled Movz/Movn)",
+            block.insts.len()
+        );
+        assert_eq!(func.inst(block.insts[0]).opcode, AArch64Opcode::Movz);
+        assert_eq!(func.inst(block.insts[1]).opcode, AArch64Opcode::Movn);
+    }
+
+    #[test]
+    fn test_cse_movz_movz_same_imm_merged() {
+        // Sanity: two identical Movz still get CSE'd. Guards against an
+        // over-aggressive fix that disables CSE across the whole MovRI
+        // category.
+        let mz1 = MachInst::new(AArch64Opcode::Movz, vec![vreg(2), imm(7)]);
+        let mz2 = MachInst::new(AArch64Opcode::Movz, vec![vreg(3), imm(7)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![mz1, mz2, ret]);
+
+        let mut cse = CommonSubexprElim;
+        assert!(cse.run(&mut func), "Identical Movz #7 pair should CSE");
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 2); // Movz, Ret
+    }
+
+    #[test]
+    fn test_cse_movn_movn_same_imm_merged() {
+        // Sanity: two identical Movn still get CSE'd.
+        let mn1 = MachInst::new(AArch64Opcode::Movn, vec![vreg(2), imm(3)]);
+        let mn2 = MachInst::new(AArch64Opcode::Movn, vec![vreg(3), imm(3)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![mn1, mn2, ret]);
+
+        let mut cse = CommonSubexprElim;
+        assert!(cse.run(&mut func), "Identical Movn #3 pair should CSE");
+
+        let block = func.block(func.entry);
+        assert_eq!(block.insts.len(), 2); // Movn, Ret
     }
 }

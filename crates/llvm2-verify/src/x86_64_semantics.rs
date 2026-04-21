@@ -1,7 +1,7 @@
 // llvm2-verify/x86_64_semantics.rs - x86-64 instruction semantics as SMT formulas
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Encodes x86-64 instruction semantics as bitvector SMT expressions.
 // Each instruction maps to a pure function from input bitvectors to output
@@ -336,6 +336,41 @@ pub fn encode_fp_div_rr(_size: X86FPSize, src1: SmtExpr, src2: SmtExpr) -> SmtEx
     SmtExpr::fp_div(RoundingMode::RNE, src1, src2)
 }
 
+// ---------------------------------------------------------------------------
+// Unary floating-point instruction semantics (SSE)
+// ---------------------------------------------------------------------------
+
+/// Encode scalar FP negation via `XORPS`/`XORPD` with sign-bit mask.
+///
+/// On x86-64, scalar FP negation is typically implemented by XOR-ing the
+/// sign bit with a constant mask (0x80000000 for single, 0x8000000000000000
+/// for double). The semantic effect is `fp.neg(src)`.
+///
+/// Reference: Intel SDM Vol 2B, XORPS/XORPD instructions.
+pub fn encode_fp_neg(_size: X86FPSize, src: SmtExpr) -> SmtExpr {
+    src.fp_neg()
+}
+
+/// Encode scalar FP absolute value via `ANDPS`/`ANDPD` with sign-bit mask.
+///
+/// On x86-64, scalar FP absolute value is typically implemented by AND-ing
+/// with a constant mask that clears the sign bit (0x7FFFFFFF for single,
+/// 0x7FFFFFFFFFFFFFFF for double). The semantic effect is `fp.abs(src)`.
+///
+/// Reference: Intel SDM Vol 2A, ANDPS/ANDPD instructions.
+pub fn encode_fp_abs(_size: X86FPSize, src: SmtExpr) -> SmtExpr {
+    src.fp_abs()
+}
+
+/// Encode `SQRTSS xmm, xmm` or `SQRTSD xmm, xmm` -- scalar FP square root.
+///
+/// Semantics: `dst = sqrt(src)` using RNE rounding mode (default MXCSR).
+/// Reference: Intel SDM Vol 2B, SQRTSS/SQRTSD instructions.
+pub fn encode_fp_sqrt(_size: X86FPSize, src: SmtExpr) -> SmtExpr {
+    use crate::smt::RoundingMode;
+    SmtExpr::fp_sqrt(RoundingMode::RNE, src)
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -539,6 +574,58 @@ mod tests {
         let expr = encode_fp_div_rr(X86FPSize::Double, a, b);
         let result = expr.try_eval(&env(&[])).unwrap();
         assert_eq!(result, EvalResult::Float(42.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Unary floating-point instruction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fp_neg_single() {
+        let a = SmtExpr::fp32_const(3.0f32);
+        let expr = encode_fp_neg(X86FPSize::Single, a);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Float(-3.0));
+    }
+
+    #[test]
+    fn test_fp_neg_double() {
+        let a = SmtExpr::fp64_const(42.0);
+        let expr = encode_fp_neg(X86FPSize::Double, a);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Float(-42.0));
+    }
+
+    #[test]
+    fn test_fp_abs_single() {
+        let a = SmtExpr::fp32_const(-5.0f32);
+        let expr = encode_fp_abs(X86FPSize::Single, a);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Float(5.0));
+    }
+
+    #[test]
+    fn test_fp_abs_double() {
+        let a = SmtExpr::fp64_const(-100.0);
+        let expr = encode_fp_abs(X86FPSize::Double, a);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Float(100.0));
+    }
+
+    #[test]
+    fn test_fp_sqrt_single() {
+        let a = SmtExpr::fp32_const(4.0f32);
+        let expr = encode_fp_sqrt(X86FPSize::Single, a);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Float(2.0));
+    }
+
+    #[test]
+    fn test_fp_sqrt_double() {
+        let a = SmtExpr::fp64_const(9.0);
+        let expr = encode_fp_sqrt(X86FPSize::Double, a);
+        let result = expr.try_eval(&env(&[])).unwrap();
+        assert_eq!(result, EvalResult::Float(3.0));
     }
 
     #[test]

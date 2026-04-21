@@ -1,0 +1,4 @@
+{
+  "_comment": "Zero-warnings ratchet for cargo build --workspace and cargo build --workspace --tests. Enforced by scripts/check_warnings_ratchet.sh. If a new warning is unavoidable, raise the baseline in a commit that explains why, rather than silently regressing. The [workspace.lints.rust] warnings='deny' in Cargo.toml already makes warnings hard-errors during local builds; this file documents the invariant for CI.",
+  "warnings": 0
+}

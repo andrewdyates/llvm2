@@ -1,7 +1,7 @@
 // llvm2-opt - Global Value Numbering
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Global Value Numbering (GVN) for machine-level IR.
 //!
@@ -62,8 +62,8 @@ use std::collections::{HashMap, HashSet};
 use llvm2_ir::{AArch64Opcode, BlockId, InstId, MachFunction, MachOperand, ProofAnnotation, VReg};
 
 use crate::dom::DomTree;
-use crate::effects::{opcode_effect, produces_value, MemoryEffect};
-use crate::pass_manager::MachinePass;
+use crate::effects::{has_tied_def_use, opcode_effect, produces_value, reads_flags, MemoryEffect};
+use crate::pass_manager::{AnalysisCache, MachinePass};
 
 /// Global Value Numbering pass.
 pub struct GlobalValueNumbering;
@@ -75,6 +75,15 @@ impl MachinePass for GlobalValueNumbering {
 
     fn run(&mut self, func: &mut MachFunction) -> bool {
         let dom = DomTree::compute(func);
+        run_gvn(func, &dom)
+    }
+
+    fn run_with_analyses(
+        &mut self,
+        func: &mut MachFunction,
+        analyses: &mut AnalysisCache,
+    ) -> bool {
+        let dom = analyses.domtree(func).clone();
         run_gvn(func, &dom)
     }
 }
@@ -410,6 +419,22 @@ fn dom_walk_gvn(
             continue;
         }
 
+        // Skip instructions that read implicit NZCV flags. These
+        // instructions depend on flag state set by a prior CMP/TST,
+        // which is not captured in their explicit operands. Two CSet
+        // instructions with the same condition code produce different
+        // values if their preceding comparisons set different flags.
+        if reads_flags(inst.opcode) {
+            // Assign a fresh value number so downstream uses get
+            // unique numbering, but do NOT insert into the expression
+            // table (no elimination possible).
+            if let Some(MachOperand::VReg(v)) = inst.operands.first() {
+                let vn = alloc.fresh();
+                table.set_vreg_vn(v.id, vn);
+            }
+            continue;
+        }
+
         // Get the def vreg (operand[0]).
         let def_vreg = match &inst.operands.first() {
             Some(MachOperand::VReg(v)) => *v,
@@ -495,7 +520,9 @@ fn dom_walk_gvn(
 /// Build a value-numbered expression key for a pure instruction.
 ///
 /// Returns `None` if any source operand cannot be value-numbered
-/// (e.g., block operands, physical registers).
+/// (e.g., block operands, physical registers) OR if the instruction
+/// has a tied def-use operand whose prior value is an implicit input
+/// (e.g., MOVK).
 fn make_expr_key(
     inst: &llvm2_ir::MachInst,
     table: &mut ScopedValueTable,
@@ -503,6 +530,18 @@ fn make_expr_key(
     fimm_vns: &mut HashMap<u64, ValNum>,
     alloc: &mut ValNumAllocator,
 ) -> Option<VNExprKey> {
+    // Instructions with tied def-use (e.g., MOVK) cannot be value-numbered
+    // using just (opcode, source operands): the destination register's
+    // prior value is also an input. Two MOVKs with identical (imm, shift)
+    // but different dest registers compute DIFFERENT values.
+    //
+    // We could value-number them by including the def's prior VN in the
+    // key, but that requires tracking pre-def VNs which the current
+    // scheme does not. Conservatively skip them.
+    if has_tied_def_use(inst.opcode) {
+        return None;
+    }
+
     // Source operands start at index 1 (operand[0] is the def).
     let mut op_vns = Vec::with_capacity(inst.operands.len() - 1);
     for op in &inst.operands[1..] {
@@ -1178,5 +1217,274 @@ mod tests {
         assert_eq!(func.block(bb1).insts.len(), 3); // store, load, branch
         // bb2: load was eliminated (bb0's load dominates and no store)
         assert_eq!(func.block(bb2).insts.len(), 1); // just branch
+    }
+
+    // ---- MOVK tied def-use regression test (issue #366) ----
+
+    /// Regression test for the #366 residual xxh3 miscompile.
+    ///
+    /// MOVK is a tied def-use instruction: `MOVK Rd, #imm16, LSL #shift`
+    /// inserts `imm16` into Rd at position `shift` while preserving the
+    /// other bits. The instruction depends on the *current* value of Rd,
+    /// but that dependency is not captured in the explicit operand list.
+    ///
+    /// Before this fix, GVN treated two MOVKs with matching (imm, shift)
+    /// as redundant, even when their destination registers held
+    /// different prior values. This corrupted multi-register constant
+    /// materialization chains (e.g., two unrelated 64-bit constants that
+    /// happened to share some 16-bit chunks).
+    ///
+    /// The scenario below mimics xxh3: build two 64-bit constants
+    /// 0x067e2f2a_6bfdd932 and 0x067e2f2a_6d83f618 that share the upper
+    /// 32 bits (MOVKs at positions 32 and 48 have the same imm). GVN
+    /// must NOT eliminate the second register's MOVKs.
+    #[test]
+    fn test_gvn_preserves_movk_with_different_dest() {
+        // v2 = movz #0xd932
+        // v2 = movk #0x6bfd, lsl 16
+        // v2 = movk #0x2f2a, lsl 32  (shared with v3)
+        // v2 = movk #0x067e, lsl 48  (shared with v3)
+        //
+        // v3 = movz #0xf618
+        // v3 = movk #0x6d83, lsl 16
+        // v3 = movk #0x2f2a, lsl 32  (same imm+shift as v2's but DIFFERENT dest)
+        // v3 = movk #0x067e, lsl 48  (same imm+shift as v2's but DIFFERENT dest)
+        // ret
+        //
+        // GVN must preserve all eight instructions — eliminating v3's
+        // upper MOVKs would corrupt v3 to 0x0000_0000_6d83_f618.
+        let m_movz_v2 = MachInst::new(AArch64Opcode::Movz, vec![vreg(2), imm(0xd932)]);
+        let m_movk_v2_16 =
+            MachInst::new(AArch64Opcode::Movk, vec![vreg(2), imm(0x6bfd), imm(16)]);
+        let m_movk_v2_32 =
+            MachInst::new(AArch64Opcode::Movk, vec![vreg(2), imm(0x2f2a), imm(32)]);
+        let m_movk_v2_48 =
+            MachInst::new(AArch64Opcode::Movk, vec![vreg(2), imm(0x067e), imm(48)]);
+
+        let m_movz_v3 = MachInst::new(AArch64Opcode::Movz, vec![vreg(3), imm(0xf618)]);
+        let m_movk_v3_16 =
+            MachInst::new(AArch64Opcode::Movk, vec![vreg(3), imm(0x6d83), imm(16)]);
+        let m_movk_v3_32 =
+            MachInst::new(AArch64Opcode::Movk, vec![vreg(3), imm(0x2f2a), imm(32)]);
+        let m_movk_v3_48 =
+            MachInst::new(AArch64Opcode::Movk, vec![vreg(3), imm(0x067e), imm(48)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+
+        let mut func = make_func_with_insts(vec![
+            m_movz_v2,
+            m_movk_v2_16,
+            m_movk_v2_32,
+            m_movk_v2_48,
+            m_movz_v3,
+            m_movk_v3_16,
+            m_movk_v3_32,
+            m_movk_v3_48,
+            ret,
+        ]);
+
+        let mut gvn = GlobalValueNumbering;
+        // GVN may report no changes for this input — but even if it does
+        // report changes (via the MOVZs, which are safe to number), the
+        // MOVKs must survive.
+        let _ = gvn.run(&mut func);
+
+        let block = func.block(func.entry);
+
+        // Count remaining MOVKs — must still be 6 (three per constant).
+        let movk_count = block
+            .insts
+            .iter()
+            .filter(|id| func.inst(**id).opcode == AArch64Opcode::Movk)
+            .count();
+        assert_eq!(
+            movk_count, 6,
+            "GVN eliminated a MOVK — this is the #366 bug. All six MOVKs must survive."
+        );
+
+        // Verify each MOVK still targets the correct vreg (no def-vreg rewrite).
+        for inst_id in &block.insts {
+            let inst = func.inst(*inst_id);
+            if inst.opcode == AArch64Opcode::Movk {
+                match &inst.operands[0] {
+                    MachOperand::VReg(v) => {
+                        assert!(
+                            v.id == 2 || v.id == 3,
+                            "MOVK destination was rewritten to unexpected vreg {}",
+                            v.id
+                        );
+                    }
+                    _ => panic!("MOVK operand[0] is not a VReg"),
+                }
+            }
+        }
+    }
+
+    /// Tighter version: check that running GVN on a MOVK chain doesn't
+    /// drop or rewrite the MOVKs of either constant.
+    #[test]
+    fn test_gvn_movk_chain_preserves_both_constants() {
+        // Same as above but simpler: just two parallel MOVZ+MOVK pairs
+        // with the SAME (imm, shift) MOVK. GVN must NOT merge them.
+        let m1 = MachInst::new(AArch64Opcode::Movz, vec![vreg(2), imm(0x1111)]);
+        let m2 = MachInst::new(AArch64Opcode::Movk, vec![vreg(2), imm(0xabcd), imm(16)]);
+        let m3 = MachInst::new(AArch64Opcode::Movz, vec![vreg(3), imm(0x2222)]);
+        let m4 = MachInst::new(AArch64Opcode::Movk, vec![vreg(3), imm(0xabcd), imm(16)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![m1, m2, m3, m4, ret]);
+
+        let mut gvn = GlobalValueNumbering;
+        let _ = gvn.run(&mut func);
+
+        let block = func.block(func.entry);
+        let movk_count = block
+            .insts
+            .iter()
+            .filter(|id| func.inst(**id).opcode == AArch64Opcode::Movk)
+            .count();
+        assert_eq!(
+            movk_count, 2,
+            "GVN incorrectly merged two MOVKs with different destinations"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Regression tests for #408 / #409 — BFM tied def-use and ADC/SBC
+    // carry-flag reads must be correctly classified so GVN does not fold
+    // semantically-different instructions into one.
+    // -------------------------------------------------------------------
+
+    /// Regression for #408: two BFMs with identical explicit operands but
+    /// different prior Rd values must NOT be value-numbered together.
+    /// BFM preserves the uncovered bits of Rd, so the prior dest is an
+    /// implicit input just like MOVK.
+    #[test]
+    fn test_gvn_preserves_bfm_with_different_dest() {
+        // v2 = movz #0x1111
+        // v2 = bfm v2, v0, #0, #7       (insert low byte of v0 into v2)
+        // v3 = movz #0x2222
+        // v3 = bfm v3, v0, #0, #7       (same explicit (src, immr, imms) but
+        //                                different prior dest value)
+        // ret
+        //
+        // Eliminating the second BFM and replacing v3 with v2 silently
+        // corrupts v3 — its high bits were 0x2222 but would become 0x1111.
+        let m_movz_v2 = MachInst::new(AArch64Opcode::Movz, vec![vreg(2), imm(0x1111)]);
+        let m_bfm_v2 = MachInst::new(
+            AArch64Opcode::Bfm,
+            vec![vreg(2), vreg(0), imm(0), imm(7)],
+        );
+        let m_movz_v3 = MachInst::new(AArch64Opcode::Movz, vec![vreg(3), imm(0x2222)]);
+        let m_bfm_v3 = MachInst::new(
+            AArch64Opcode::Bfm,
+            vec![vreg(3), vreg(0), imm(0), imm(7)],
+        );
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![m_movz_v2, m_bfm_v2, m_movz_v3, m_bfm_v3, ret]);
+
+        let mut gvn = GlobalValueNumbering;
+        let _ = gvn.run(&mut func);
+
+        let block = func.block(func.entry);
+        let bfm_count = block
+            .insts
+            .iter()
+            .filter(|id| func.inst(**id).opcode == AArch64Opcode::Bfm)
+            .count();
+        assert_eq!(
+            bfm_count, 2,
+            "GVN merged two BFMs with different prior Rd values — this is the #408 bug"
+        );
+
+        // Every surviving BFM must keep its original destination.
+        for inst_id in &block.insts {
+            let inst = func.inst(*inst_id);
+            if inst.opcode == AArch64Opcode::Bfm {
+                match &inst.operands[0] {
+                    MachOperand::VReg(v) => assert!(
+                        v.id == 2 || v.id == 3,
+                        "BFM destination was rewritten to unexpected vreg {}",
+                        v.id
+                    ),
+                    _ => panic!("BFM operand[0] is not a VReg"),
+                }
+            }
+        }
+    }
+
+    /// Regression for #409: two ADCs with the same explicit operands but
+    /// preceded by different flag writers (different carry inputs) must
+    /// NOT be GVN'd together. The carry flag is an implicit input.
+    #[test]
+    fn test_gvn_preserves_adc_across_flag_writers() {
+        // v10 = adds v0, v1           (flag writer #1)
+        // v2  = adc  v4, v5           (reads carry from #1)
+        // v11 = adds v6, v7           (flag writer #2 — different inputs)
+        // v3  = adc  v4, v5           (same explicit operands as above,
+        //                               but carry comes from #2)
+        // ret
+        //
+        // Merging v3 into v2 drops the dependency on the second ADDS and
+        // silently miscompiles any i128 / multi-precision arithmetic.
+        let adds1 = MachInst::new(AArch64Opcode::AddsRR, vec![vreg(10), vreg(0), vreg(1)]);
+        let adc1 = MachInst::new(AArch64Opcode::Adc, vec![vreg(2), vreg(4), vreg(5)]);
+        let adds2 = MachInst::new(AArch64Opcode::AddsRR, vec![vreg(11), vreg(6), vreg(7)]);
+        let adc2 = MachInst::new(AArch64Opcode::Adc, vec![vreg(3), vreg(4), vreg(5)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![adds1, adc1, adds2, adc2, ret]);
+
+        let mut gvn = GlobalValueNumbering;
+        let _ = gvn.run(&mut func);
+
+        let block = func.block(func.entry);
+        let adc_count = block
+            .insts
+            .iter()
+            .filter(|id| func.inst(**id).opcode == AArch64Opcode::Adc)
+            .count();
+        assert_eq!(
+            adc_count, 2,
+            "GVN merged two ADCs across different flag writers — this is the #409 bug"
+        );
+
+        // Each surviving ADC must keep its original destination vreg.
+        let mut seen = std::collections::HashSet::new();
+        for inst_id in &block.insts {
+            let inst = func.inst(*inst_id);
+            if inst.opcode == AArch64Opcode::Adc
+                && let MachOperand::VReg(v) = &inst.operands[0]
+            {
+                seen.insert(v.id);
+            }
+        }
+        assert!(
+            seen.contains(&2) && seen.contains(&3),
+            "ADC destinations were rewritten: surviving dests = {:?}",
+            seen
+        );
+    }
+
+    /// Matching SBC regression: symmetry with ADC.
+    #[test]
+    fn test_gvn_preserves_sbc_across_flag_writers() {
+        let subs1 = MachInst::new(AArch64Opcode::SubsRR, vec![vreg(10), vreg(0), vreg(1)]);
+        let sbc1 = MachInst::new(AArch64Opcode::Sbc, vec![vreg(2), vreg(4), vreg(5)]);
+        let subs2 = MachInst::new(AArch64Opcode::SubsRR, vec![vreg(11), vreg(6), vreg(7)]);
+        let sbc2 = MachInst::new(AArch64Opcode::Sbc, vec![vreg(3), vreg(4), vreg(5)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let mut func = make_func_with_insts(vec![subs1, sbc1, subs2, sbc2, ret]);
+
+        let mut gvn = GlobalValueNumbering;
+        let _ = gvn.run(&mut func);
+
+        let block = func.block(func.entry);
+        let sbc_count = block
+            .insts
+            .iter()
+            .filter(|id| func.inst(**id).opcode == AArch64Opcode::Sbc)
+            .count();
+        assert_eq!(
+            sbc_count, 2,
+            "GVN merged two SBCs across different flag writers — #409 regression"
+        );
     }
 }

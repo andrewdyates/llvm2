@@ -1,7 +1,7 @@
 // llvm2-ir - RISC-V register model
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Reference: RISC-V Unprivileged ISA Specification (Volume 1, Version 20191213)
 // Reference: RISC-V ELF psABI Specification (calling convention)

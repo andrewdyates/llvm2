@@ -1,0 +1,24 @@
+# WS4 M0 — rustc_codegen_llvm2 toolchain pin.
+#
+# We pin the `nightly` channel (latest rustup-blessed nightly) because
+# the crate links against rustc internals via `#![feature(rustc_private)]`
+# and the `CodegenBackend` trait ABI is unstable. Whenever rustup bumps
+# nightly, `cargo build` from this crate may stop compiling with
+# `E0046` / `E0050` / `E0432`; that's the expected symptom of the
+# trait drifting under us. The fix lives in `src/lib.rs` — not here.
+#
+# Last known-good nightly (verified 2026-04-20 PM):
+#     rustc 1.97.0-nightly (e22c616e4 2026-04-19)
+#
+# The in-tree `rustc_codegen_cranelift` reference source used for
+# trait-shape guidance lives at:
+#
+#     $(rustup run nightly rustc --print sysroot)/lib/rustlib/rustc-src/rust/compiler/rustc_codegen_cranelift/src/lib.rs
+#
+# `rustc-dev` and `rust-src` are required because this crate links
+# against rustc internal crates via `#![feature(rustc_private)]`.
+# `llvm-tools` matches cranelift's component list.
+[toolchain]
+channel = "nightly"
+components = ["rust-src", "rustc-dev", "llvm-tools", "rustfmt"]
+profile = "minimal"

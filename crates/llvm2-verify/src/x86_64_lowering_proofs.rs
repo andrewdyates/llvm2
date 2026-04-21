@@ -1,7 +1,7 @@
 // llvm2-verify/x86_64_lowering_proofs.rs - x86-64 lowering rule proof obligations
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Defines proof obligations for tMIR -> x86-64 lowering rules and verifies
 // semantic equivalence using the same ProofObligation framework as AArch64.
@@ -1330,6 +1330,260 @@ pub fn proof_x86_fdiv_f64() -> ProofObligation {
 }
 
 // ===========================================================================
+// Floating-point unary lowering proofs (FNEG, FABS, FSQRT)
+// ===========================================================================
+
+/// Proof: `tMIR::Fneg(F32, a) -> x86-64 XORPS (sign-flip)`
+pub fn proof_x86_fneg_f32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_fneg;
+    use crate::x86_64_semantics::{encode_fp_neg, X86FPSize};
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp32_const(0.0);
+
+    ProofObligation {
+        name: "x86_64: Fneg_F32 -> XORPS (negate)".to_string(),
+        tmir_expr: encode_tmir_fneg(Type::F32, a.clone()),
+        aarch64_expr: encode_fp_neg(X86FPSize::Single, a),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 8, 24)],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Fneg(F64, a) -> x86-64 XORPD (sign-flip)`
+pub fn proof_x86_fneg_f64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_fneg;
+    use crate::x86_64_semantics::{encode_fp_neg, X86FPSize};
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp64_const(0.0);
+
+    ProofObligation {
+        name: "x86_64: Fneg_F64 -> XORPD (negate)".to_string(),
+        tmir_expr: encode_tmir_fneg(Type::F64, a.clone()),
+        aarch64_expr: encode_fp_neg(X86FPSize::Double, a),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 11, 53)],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Fabs(F32, a) -> x86-64 ANDPS (clear sign bit)`
+pub fn proof_x86_fabs_f32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_fabs;
+    use crate::x86_64_semantics::{encode_fp_abs, X86FPSize};
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp32_const(0.0);
+
+    ProofObligation {
+        name: "x86_64: Fabs_F32 -> ANDPS (abs)".to_string(),
+        tmir_expr: encode_tmir_fabs(Type::F32, a.clone()),
+        aarch64_expr: encode_fp_abs(X86FPSize::Single, a),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 8, 24)],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Fabs(F64, a) -> x86-64 ANDPD (clear sign bit)`
+pub fn proof_x86_fabs_f64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_fabs;
+    use crate::x86_64_semantics::{encode_fp_abs, X86FPSize};
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp64_const(0.0);
+
+    ProofObligation {
+        name: "x86_64: Fabs_F64 -> ANDPD (abs)".to_string(),
+        tmir_expr: encode_tmir_fabs(Type::F64, a.clone()),
+        aarch64_expr: encode_fp_abs(X86FPSize::Double, a),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 11, 53)],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Fsqrt(F32, a) -> x86-64 SQRTSS xmm, xmm`
+pub fn proof_x86_fsqrt_f32() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_fsqrt;
+    use crate::x86_64_semantics::{encode_fp_sqrt, X86FPSize};
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp32_const(0.0);
+
+    ProofObligation {
+        name: "x86_64: Fsqrt_F32 -> SQRTSS xmm,xmm".to_string(),
+        tmir_expr: encode_tmir_fsqrt(Type::F32, a.clone()),
+        aarch64_expr: encode_fp_sqrt(X86FPSize::Single, a),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 8, 24)],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Fsqrt(F64, a) -> x86-64 SQRTSD xmm, xmm`
+pub fn proof_x86_fsqrt_f64() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_fsqrt;
+    use crate::x86_64_semantics::{encode_fp_sqrt, X86FPSize};
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::fp64_const(0.0);
+
+    ProofObligation {
+        name: "x86_64: Fsqrt_F64 -> SQRTSD xmm,xmm".to_string(),
+        tmir_expr: encode_tmir_fsqrt(Type::F64, a.clone()),
+        aarch64_expr: encode_fp_sqrt(X86FPSize::Double, a),
+        inputs: vec![],
+        preconditions: vec![],
+        fp_inputs: vec![("a".to_string(), 11, 53)],
+        category: None,
+    }
+}
+
+// ===========================================================================
+// 8-bit exhaustive bitwise proofs (complete verification)
+// ===========================================================================
+
+/// Proof: `tMIR::Band(I8, a, b) -> x86-64 AND (8-bit)`
+///
+/// 8-bit proofs are verified exhaustively (all 65,536 input pairs).
+pub fn proof_x86_band_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use crate::x86_64_semantics::{encode_and_rr, X86OperandSize};
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "x86_64: Band_I8 -> AND (8-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Band, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: encode_and_rr(X86OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Bor(I8, a, b) -> x86-64 OR (8-bit)`
+pub fn proof_x86_bor_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use crate::x86_64_semantics::{encode_or_rr, X86OperandSize};
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "x86_64: Bor_I8 -> OR (8-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Bor, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: encode_or_rr(X86OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Bxor(I8, a, b) -> x86-64 XOR (8-bit)`
+pub fn proof_x86_bxor_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_bitwise_binop;
+    use crate::x86_64_semantics::{encode_xor_rr, X86OperandSize};
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "x86_64: Bxor_I8 -> XOR (8-bit)".to_string(),
+        tmir_expr: encode_tmir_bitwise_binop(&Opcode::Bxor, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: encode_xor_rr(X86OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+// ===========================================================================
+// 8-bit exhaustive shift proofs (complete verification)
+// ===========================================================================
+
+/// Proof: `tMIR::Ishl(I8, a, b) -> x86-64 SHL (8-bit)`
+pub fn proof_x86_ishl_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use crate::x86_64_semantics::{encode_shl_rr, X86OperandSize};
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "x86_64: Ishl_I8 -> SHL (8-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Ishl, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: encode_shl_rr(X86OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Ushr(I8, a, b) -> x86-64 SHR (8-bit)`
+pub fn proof_x86_ushr_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use crate::x86_64_semantics::{encode_shr_rr, X86OperandSize};
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "x86_64: Ushr_I8 -> SHR (8-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Ushr, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: encode_shr_rr(X86OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+/// Proof: `tMIR::Sshr(I8, a, b) -> x86-64 SAR (8-bit)`
+pub fn proof_x86_sshr_i8() -> ProofObligation {
+    use crate::tmir_semantics::encode_tmir_shift;
+    use crate::x86_64_semantics::{encode_sar_rr, X86OperandSize};
+    use llvm2_lower::instructions::Opcode;
+    use llvm2_lower::types::Type;
+
+    let a = SmtExpr::var("a", 8);
+    let b = SmtExpr::var("b", 8);
+
+    ProofObligation {
+        name: "x86_64: Sshr_I8 -> SAR (8-bit)".to_string(),
+        tmir_expr: encode_tmir_shift(&Opcode::Sshr, Type::I8, a.clone(), b.clone()),
+        aarch64_expr: encode_sar_rr(X86OperandSize::S32, a, b),
+        inputs: vec![("a".to_string(), 8), ("b".to_string(), 8)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+        category: None,
+    }
+}
+
+// ===========================================================================
 // MOVZX/MOVSX lowering proofs
 // ===========================================================================
 
@@ -1592,10 +1846,18 @@ pub fn all_x86_64_proofs() -> Vec<ProofObligation> {
         proof_x86_ishl_i64(),
         proof_x86_ushr_i64(),
         proof_x86_sshr_i64(),
-        // 8-bit exhaustive
+        // 8-bit exhaustive (arithmetic)
         proof_x86_iadd_i8(),
         proof_x86_isub_i8(),
         proof_x86_imul_i8(),
+        // 8-bit exhaustive (bitwise)
+        proof_x86_band_i8(),
+        proof_x86_bor_i8(),
+        proof_x86_bxor_i8(),
+        // 8-bit exhaustive (shifts)
+        proof_x86_ishl_i8(),
+        proof_x86_ushr_i8(),
+        proof_x86_sshr_i8(),
         // Comparisons (32-bit)
         proof_x86_icmp_eq_i32(),
         proof_x86_icmp_ne_i32(),
@@ -1618,7 +1880,7 @@ pub fn all_x86_64_proofs() -> Vec<ProofObligation> {
         proof_x86_icmp_uge_i64(),
         proof_x86_icmp_ugt_i64(),
         proof_x86_icmp_ule_i64(),
-        // Floating-point
+        // Floating-point (binary)
         proof_x86_fadd_f32(),
         proof_x86_fadd_f64(),
         proof_x86_fsub_f32(),
@@ -1627,6 +1889,13 @@ pub fn all_x86_64_proofs() -> Vec<ProofObligation> {
         proof_x86_fmul_f64(),
         proof_x86_fdiv_f32(),
         proof_x86_fdiv_f64(),
+        // Floating-point (unary: FNEG, FABS, FSQRT)
+        proof_x86_fneg_f32(),
+        proof_x86_fneg_f64(),
+        proof_x86_fabs_f32(),
+        proof_x86_fabs_f64(),
+        proof_x86_fsqrt_f32(),
+        proof_x86_fsqrt_f64(),
         // Extensions (MOVZX/MOVSX)
         proof_x86_movzx_8_to_32(),
         proof_x86_movzx_16_to_32(),
@@ -1642,6 +1911,16 @@ pub fn all_x86_64_proofs() -> Vec<ProofObligation> {
         // Three-operand IMUL
         proof_x86_imul_rri_i32(),
         proof_x86_imul_rri_i64(),
+        // Direct CMP EFLAGS-write proofs at i32 (issue #458).
+        // These pin the SF/ZF/CF/OF flag-write semantics independent of the
+        // SETcc chain so regressions in a single flag surface locally rather
+        // than cascading through the ten indirect `proof_x86_icmp_*_i32`
+        // obligations. Mirrors the AArch64 NZCV per-flag precedent in
+        // `lowering_proof::proof_nzcv_*_flag_i32`.
+        crate::x86_64_eflags_proofs::proof_x86_cmp_writes_zf_i32(),
+        crate::x86_64_eflags_proofs::proof_x86_cmp_writes_sf_i32(),
+        crate::x86_64_eflags_proofs::proof_x86_cmp_writes_cf_i32(),
+        crate::x86_64_eflags_proofs::proof_x86_cmp_writes_of_i32(),
     ]
 }
 
@@ -2099,6 +2378,102 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Floating-point unary lowering proof tests (FNEG, FABS, FSQRT)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_x86_64_fneg_f32_proof() {
+        let obligation = proof_x86_fneg_f32();
+        let result = crate::lowering_proof::verify_fp_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Fneg_F32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_fneg_f64_proof() {
+        let obligation = proof_x86_fneg_f64();
+        let result = crate::lowering_proof::verify_fp_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Fneg_F64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_fabs_f32_proof() {
+        let obligation = proof_x86_fabs_f32();
+        let result = crate::lowering_proof::verify_fp_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Fabs_F32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_fabs_f64_proof() {
+        let obligation = proof_x86_fabs_f64();
+        let result = crate::lowering_proof::verify_fp_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Fabs_F64 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_fsqrt_f32_proof() {
+        let obligation = proof_x86_fsqrt_f32();
+        let result = crate::lowering_proof::verify_fp_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Fsqrt_F32 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_fsqrt_f64_proof() {
+        let obligation = proof_x86_fsqrt_f64();
+        let result = crate::lowering_proof::verify_fp_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Fsqrt_F64 proof failed: {:?}", result);
+    }
+
+    // -----------------------------------------------------------------------
+    // 8-bit exhaustive bitwise proof tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_x86_64_band_i8_proof() {
+        let obligation = proof_x86_band_i8();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Band_I8 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_bor_i8_proof() {
+        let obligation = proof_x86_bor_i8();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Bor_I8 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_bxor_i8_proof() {
+        let obligation = proof_x86_bxor_i8();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Bxor_I8 proof failed: {:?}", result);
+    }
+
+    // -----------------------------------------------------------------------
+    // 8-bit exhaustive shift proof tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_x86_64_ishl_i8_proof() {
+        let obligation = proof_x86_ishl_i8();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Ishl_I8 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_ushr_i8_proof() {
+        let obligation = proof_x86_ushr_i8();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Ushr_I8 proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_x86_64_sshr_i8_proof() {
+        let obligation = proof_x86_sshr_i8();
+        let result = verify_by_evaluation(&obligation);
+        assert!(matches!(result, VerificationResult::Valid), "x86-64 Sshr_I8 proof failed: {:?}", result);
+    }
+
+    // -----------------------------------------------------------------------
     // MOVZX/MOVSX lowering proof tests
     // -----------------------------------------------------------------------
 
@@ -2201,7 +2576,9 @@ mod tests {
     #[test]
     fn test_all_x86_64_proofs() {
         let proofs = all_x86_64_proofs();
-        assert_eq!(proofs.len(), 69, "Expected 69 x86-64 proof obligations");
+        // 69 original + 6 FP unary (fneg/fabs/fsqrt x f32/f64) + 6 8-bit (band/bor/bxor/ishl/ushr/sshr)
+        //   + 4 direct CMP EFLAGS writes at i32 (#458: ZF/SF/CF/OF) = 85
+        assert_eq!(proofs.len(), 85, "Expected 85 x86-64 proof obligations");
 
         for proof in &proofs {
             let result = if proof.fp_inputs.is_empty() {

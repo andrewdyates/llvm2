@@ -1,0 +1,42 @@
+# llvm2-fuzz - Differential fuzzing for LLVM2
+#
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+# Copyright 2026 Andrew Yates | License: Apache-2.0
+#
+# Part of WS3 (differential fuzzing) in the "proving llvm2 replaces llvm" plan.
+# Three drivers:
+#   - tmir-gen: generate random tMIR, diff interpreter vs compile-pipeline
+#   - csmith-driver: external csmith → clang -O0 oracle vs LLVM2 (via tMIR)
+#   - yarpgen-driver: external yarpgen → same wrapping
+
+[package]
+name = "llvm2-fuzz"
+description = "Differential fuzzing harness for LLVM2 (csmith / YARPGen / tmir-gen)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+llvm2-ir = { workspace = true }
+llvm2-lower = { workspace = true }
+llvm2-opt = { workspace = true }
+llvm2-regalloc = { workspace = true }
+llvm2-codegen = { workspace = true }
+tmir = { workspace = true }
+tmir-build = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "tmir-gen"
+path = "src/bin/tmir_gen.rs"
+
+[[bin]]
+name = "csmith-driver"
+path = "src/bin/csmith_driver.rs"
+
+[[bin]]
+name = "yarpgen-driver"
+path = "src/bin/yarpgen_driver.rs"

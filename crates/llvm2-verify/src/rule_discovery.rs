@@ -1,7 +1,7 @@
 // llvm2-verify/rule_discovery.rs - AI-native automatic rule discovery
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Bridges AI agent proposals to the solver verification pipeline. AI agents
 // propose optimization rules as (pattern, replacement) pairs. The CEGIS loop
@@ -55,9 +55,8 @@ use crate::lowering_proof::{verify_by_evaluation, ProofObligation};
 use crate::smt::SmtExpr;
 use crate::synthesis::{ProvenRule, ProvenRuleDb};
 use crate::verify::VerificationResult;
-use std::collections::hash_map::DefaultHasher;
+use llvm2_opt::cache::StableHasher;
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
 
 // ---------------------------------------------------------------------------
 // RuleProposal
@@ -115,10 +114,10 @@ impl RuleProposal {
 
     /// Compute a deterministic hash of this proposal for deduplication.
     pub fn proposal_hash(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        format!("{}", self.pattern).hash(&mut hasher);
-        format!("{}", self.replacement).hash(&mut hasher);
-        hasher.finish()
+        let mut hasher = StableHasher::new();
+        hasher.write_str(&format!("{}", self.pattern));
+        hasher.write_str(&format!("{}", self.replacement));
+        hasher.finish64()
     }
 
     /// Extract free variables from the pattern and replacement.

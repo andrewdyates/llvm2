@@ -1,7 +1,7 @@
 // llvm2-verify/tests/full_proof_suite.rs - Full ProofDatabase verification
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Integration test that constructs the complete ProofDatabase, runs
 // VerificationRunner.run_all() against every proof obligation, and
@@ -15,7 +15,7 @@
 //            crates/llvm2-verify/src/verification_runner.rs
 
 use llvm2_verify::proof_database::{ProofCategory, ProofDatabase};
-use llvm2_verify::verification_runner::VerificationRunner;
+use llvm2_verify::verification_runner::{VerificationRunner, Z4VerificationMode, select_auto_mode};
 
 // ===========================================================================
 // Core integration test: run all proofs in the database
@@ -100,19 +100,20 @@ fn full_proof_suite_every_category_populated() {
     let db = ProofDatabase::new();
     let categories = ProofCategory::all_categories();
 
-    // 35 categories: Arithmetic, Division, FloatingPoint, NzcvFlags,
+    // 36 categories: Arithmetic, Division, FloatingPoint, NzcvFlags,
     // Comparison, Branch, Peephole, Optimization, ConstantFolding,
     // CopyPropagation, CseLicm, DeadCodeElimination, CfgSimplification,
-    // Memory, NeonLowering, NeonEncoding, Vectorization, AnePrecision,
-    // RegAlloc, BitwiseShift, ConstantMaterialization, AddressMode,
-    // FrameLayout, InstructionScheduling, MachOEmission, LoopOptimization,
+    // Memory, LoadStoreLowering (#422), NeonLowering, NeonEncoding,
+    // Vectorization, AnePrecision, RegAlloc, BitwiseShift,
+    // ConstantMaterialization, AddressMode, FrameLayout,
+    // InstructionScheduling, MachOEmission, LoopOptimization,
     // StrengthReduction, CmpCombine, Gvn, TailCallOptimization,
     // IfConversion, FpConversion, ExtensionTruncation, AtomicOperations,
     // CallLowering.
     assert_eq!(
         categories.len(),
-        35,
-        "Expected 35 proof categories, got {}",
+        36,
+        "Expected 36 proof categories, got {}",
         categories.len()
     );
 
@@ -211,8 +212,12 @@ fn full_proof_suite_known_category_counts() {
     // Division: sdiv/udiv x I32/I64 = 4
     assert_eq!(db.count_by_category(ProofCategory::Division), 4);
 
-    // FP: fadd/fsub/fmul/fdiv/fneg x F32/F64 = 10, plus 14 fcmp conditions x 2 sizes = 28; total = 38
-    assert_eq!(db.count_by_category(ProofCategory::FloatingPoint), 38);
+    // FP: historic baseline 38 (fadd/fsub/fmul/fdiv/fneg x F32/F64 = 10, plus 14
+    // fcmp conditions x 2 sizes = 28; total 38). Relaxed to floor so new FP
+    // lowerings don't break this suite (#418). Matches the Arithmetic/Memory
+    // pattern above.
+    let fp = db.count_by_category(ProofCategory::FloatingPoint);
+    assert!(fp >= 38, "FloatingPoint: expected >= 38, got {}", fp);
 
     // NZCV: N/Z/C/V = 4
     assert_eq!(db.count_by_category(ProofCategory::NzcvFlags), 4);
@@ -223,11 +228,17 @@ fn full_proof_suite_known_category_counts() {
     // Branch: 10 conditions x 2 widths = 20
     assert_eq!(db.count_by_category(ProofCategory::Branch), 20);
 
-    // Peephole: 9 rules x 2 widths = 18
-    assert_eq!(db.count_by_category(ProofCategory::Peephole), 18);
+    // Peephole: historic baseline 18 (9 rules x 2 widths). Relaxed to floor so
+    // new peephole patterns don't break this suite (#418). Matches the
+    // Arithmetic/Memory/FloatingPoint pattern above.
+    let peephole = db.count_by_category(ProofCategory::Peephole);
+    assert!(peephole >= 18, "Peephole: expected >= 18, got {}", peephole);
 
-    // NEON Lowering: 11 ops x 2 arrangements = 22
-    assert_eq!(db.count_by_category(ProofCategory::NeonLowering), 22);
+    // NEON Lowering: historic baseline 22 (11 ops x 2 arrangements). Relaxed to
+    // floor so new NEON lowerings don't break this suite (#418). Matches the
+    // Arithmetic/Memory/FloatingPoint/Peephole pattern.
+    let neon = db.count_by_category(ProofCategory::NeonLowering);
+    assert!(neon >= 22, "NeonLowering: expected >= 22, got {}", neon);
 
     // Memory: 62 (6 load + 6 store + 4 roundtrip + 8 non-interference + 3 endianness
     // + 4 alignment + 3 forwarding + 4 subword + 3 write combining + 10 array axiom
@@ -235,8 +246,10 @@ fn full_proof_suite_known_category_counts() {
     assert!(db.count_by_category(ProofCategory::Memory) >= 41,
         "expected >= 41 memory proofs, got {}", db.count_by_category(ProofCategory::Memory));
 
-    // Vectorization: 31
-    assert_eq!(db.count_by_category(ProofCategory::Vectorization), 31);
+    // Vectorization: historic baseline 31. Relaxed to floor so new vectorization
+    // proofs don't break this suite (#418). Matches surrounding pattern.
+    let vect = db.count_by_category(ProofCategory::Vectorization);
+    assert!(vect >= 31, "Vectorization: expected >= 31, got {}", vect);
 
     // RegAlloc: 43 proofs (16 Phase 1 + 15 Phase 2 + 12 Phase 3/greedy)
     assert!(db.count_by_category(ProofCategory::RegAlloc) >= 16,
@@ -324,5 +337,101 @@ fn full_proof_suite_regalloc_proofs_comprehensive() {
     assert!(
         names.iter().any(|n| n.contains("do not alias")),
         "Missing spill slot non-aliasing proof"
+    );
+}
+
+// ===========================================================================
+// Auto-mode verification (z4 enabled by default)
+// ===========================================================================
+
+#[test]
+fn full_proof_suite_auto_mode_selects_backend() {
+    // select_auto_mode() should return MockThenZ4 when a solver binary is
+    // available, or MockOnly otherwise. Either way it must not panic.
+    let mode = select_auto_mode();
+    let label = match &mode {
+        Z4VerificationMode::MockOnly => "MockOnly (no solver binary found)",
+        Z4VerificationMode::MockThenZ4(_) => "MockThenZ4 (solver binary found)",
+        Z4VerificationMode::Z4Cli(_) => "Z4Cli",
+        Z4VerificationMode::Auto => "Auto",
+    };
+    println!("select_auto_mode() -> {}", label);
+}
+
+#[cfg(feature = "z4")]
+#[test]
+fn full_proof_suite_z4_native_api_arithmetic_subset() {
+    // Verify a small subset of proofs using the z4 native Rust API directly.
+    // This exercises the z4 feature gate being enabled.
+    use llvm2_verify::z4_bridge::{verify_with_z4_api, Z4Config};
+
+    let db = ProofDatabase::new();
+    let config = Z4Config::default().with_timeout(10_000);
+
+    // Take the first 5 arithmetic proofs as a representative subset.
+    let subset: Vec<_> = db
+        .by_category(ProofCategory::Arithmetic)
+        .into_iter()
+        .take(5)
+        .collect();
+    assert!(
+        !subset.is_empty(),
+        "Expected at least 1 arithmetic proof for z4 native API test"
+    );
+
+    for proof in &subset {
+        let result = verify_with_z4_api(&proof.obligation, &config);
+        // The z4 native API should verify these correctly.
+        // Allow Timeout on CI where the solver may be slow.
+        assert!(
+            matches!(
+                result,
+                llvm2_verify::z4_bridge::Z4Result::Verified
+                    | llvm2_verify::z4_bridge::Z4Result::Timeout
+            ),
+            "z4 native API: proof '{}' unexpected result: {}",
+            proof.obligation.name,
+            result
+        );
+    }
+
+    println!(
+        "z4 native API verified {} arithmetic proofs",
+        subset.len()
+    );
+}
+
+#[test]
+fn full_proof_suite_run_auto_passes_subset() {
+    // Exercise run_auto() on a small proof subset to verify the auto-selection
+    // pipeline works end-to-end. Uses a subset to avoid long runtimes.
+    let full_db = ProofDatabase::new();
+    let subset: Vec<_> = full_db
+        .by_category(ProofCategory::Arithmetic)
+        .into_iter()
+        .cloned()
+        .take(5)
+        .collect();
+
+    let db = ProofDatabase::from_proofs(subset);
+    let runner = VerificationRunner::new(&db);
+    let report = runner.run_auto();
+
+    assert_eq!(
+        report.total(),
+        db.len(),
+        "run_auto report total ({}) != db size ({})",
+        report.total(),
+        db.len()
+    );
+    assert!(
+        report.all_passed(),
+        "run_auto failed on arithmetic subset:\n{}",
+        report
+    );
+
+    println!(
+        "run_auto: {} proofs passed (mode: auto-selected)",
+        report.total()
     );
 }

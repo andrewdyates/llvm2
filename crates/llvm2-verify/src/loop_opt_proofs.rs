@@ -1,7 +1,7 @@
 // llvm2-verify/loop_opt_proofs.rs - SMT proofs for loop optimization correctness
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proves that loop unrolling and strength reduction transforms in llvm2-opt
 // preserve semantics. Each proof encodes the optimization's preconditions and

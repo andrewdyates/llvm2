@@ -1,7 +1,7 @@
 // llvm2-opt - Loop unrolling
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Loop unrolling pass for small, bounded loops.
 //!
@@ -37,7 +37,7 @@ use llvm2_ir::{AArch64Opcode, BlockId, InstId, MachFunction, MachInst, MachOpera
 use crate::dom::DomTree;
 use crate::effects::inst_produces_value;
 use crate::loops::{LoopAnalysis, NaturalLoop};
-use crate::pass_manager::MachinePass;
+use crate::pass_manager::{AnalysisCache, MachinePass};
 
 /// Maximum trip count for full unrolling.
 const MAX_TRIP_COUNT: u64 = 4;
@@ -57,7 +57,24 @@ impl MachinePass for LoopUnroll {
     fn run(&mut self, func: &mut MachFunction) -> bool {
         let dom = DomTree::compute(func);
         let loop_analysis = LoopAnalysis::compute(func, &dom);
+        Self::run_with_loop_analysis(func, &loop_analysis)
+    }
 
+    fn run_with_analyses(
+        &mut self,
+        func: &mut MachFunction,
+        analyses: &mut AnalysisCache,
+    ) -> bool {
+        let loop_analysis = analyses.loop_analysis(func).clone();
+        Self::run_with_loop_analysis(func, &loop_analysis)
+    }
+}
+
+impl LoopUnroll {
+    fn run_with_loop_analysis(
+        func: &mut MachFunction,
+        loop_analysis: &LoopAnalysis,
+    ) -> bool {
         if loop_analysis.is_empty() {
             return false;
         }

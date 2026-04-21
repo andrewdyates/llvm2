@@ -1,7 +1,7 @@
 // llvm2-codegen/aarch64/encoding.rs - AArch64 instruction encoding
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! AArch64 binary instruction encoding.
 //!
@@ -173,13 +173,31 @@ pub fn encode_add_sub_imm(
 ///
 /// `opc`: 00=MOVN, 10=MOVZ, 11=MOVK (01 is unallocated).
 ///
+/// Callers are responsible for validating operand ranges and returning
+/// `EncodeError::InvalidOperand` when an untrusted input (e.g. a Movk
+/// shift operand) is out of range. For defense in depth this encoder
+/// masks each sub-field to its legal bit-width instead of tripping a
+/// `debug_assert!` — that used to crash the process on malformed input
+/// from the panic-fuzz harness (#387 / #447). The assertions about
+/// `sf`, `opc != 0b01`, and `rd <= 31` remain because they indicate
+/// *programmer error* internal to the encoder, not attacker-controlled
+/// inputs.
+///
 /// Source: `BaseMoveImmediate` in `AArch64InstrFormats.td`
 pub fn encode_move_wide(sf: u32, opc: u32, hw: u32, imm16: u32, rd: u32) -> u32 {
     debug_assert!(sf <= 1);
     debug_assert!(opc <= 0b11 && opc != 0b01); // 01 is unallocated
-    debug_assert!(hw <= 0b11);
-    debug_assert!(imm16 <= 0xFFFF);
     debug_assert!(rd <= 31);
+
+    // Mask `hw` and `imm16` defensively: on untrusted inputs (e.g. a
+    // Movk dispatch arm that took a garbage shift operand) the caller
+    // is expected to have already returned `Err(..)` — see #447. The
+    // masking here guarantees that if it hasn't, we still produce a
+    // well-formed (but semantically unspecified) encoding instead of
+    // panicking in debug mode.
+    let hw = hw & 0b11;
+    let imm16 = imm16 & 0xFFFF;
+    let rd = rd & 0b1_1111;
 
     (sf << 31)
         | (opc << 29)
@@ -275,6 +293,50 @@ pub fn encode_load_store_ui(
         | (0b01 << 24)
         | (opc << 22)
         | (imm12 << 10)
+        | (rn << 5)
+        | rt
+}
+
+/// Encode **Load/Store (unscaled immediate)** — LDUR, STUR.
+///
+/// ```text
+/// 31:30  29:27  26   25:24  23:22  21   20:12   11:10  9:5  4:0
+/// size    111    V    00     opc    0    imm9     00     Rn   Rt
+/// ```
+///
+/// * `size` — data width (00=byte, 01=half, 10=word, 11=double)
+/// * `v` — 1 for SIMD/FP, 0 for integer
+/// * `opc` — 00=store, 01=load
+/// * `imm9` — signed 9-bit offset (-256..255), NOT scaled
+/// * `rn` — base register (0..31, 31 = SP)
+/// * `rt` — transfer register (0..31)
+///
+/// Source: ARM Architecture Reference Manual (DDI 0487), LDUR/STUR encoding
+pub fn encode_load_store_unscaled(
+    size: u32,
+    v: u32,
+    opc: u32,
+    imm9: i32,
+    rn: u32,
+    rt: u32,
+) -> u32 {
+    debug_assert!(size <= 0b11);
+    debug_assert!(v <= 1);
+    debug_assert!(opc <= 0b11);
+    debug_assert!((-256..=255).contains(&imm9));
+    debug_assert!(rn <= 31);
+    debug_assert!(rt <= 31);
+
+    let imm9_bits = (imm9 as u32) & 0x1FF;
+
+    (size << 30)
+        | (0b111 << 27)
+        | (v << 26)
+        // bits [25:24] = 00 (unscaled/pre/post family)
+        | (opc << 22)
+        // bit [21] = 0
+        | (imm9_bits << 12)
+        // bits [11:10] = 00 (unscaled)
         | (rn << 5)
         | rt
 }

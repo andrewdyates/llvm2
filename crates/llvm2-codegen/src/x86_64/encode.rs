@@ -1,7 +1,7 @@
 // llvm2-codegen/x86_64/encode.rs - x86-64 instruction binary encoder
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Reference: ~/llvm-project-ref/llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp
 // Reference: Intel 64 and IA-32 Architectures SDM, Volume 2
@@ -596,6 +596,28 @@ impl X86Encoder {
         self.emit_mem_operand(src.hw_enc(), base, disp);
     }
 
+    /// Encode an SSE scalar RIP-relative load: `[prefix] [REX] 0F opcode ModRM(00 reg 101) disp32`.
+    ///
+    /// Used for loading float/double constants from a constant pool via
+    /// RIP-relative addressing. `disp` is the signed 32-bit displacement
+    /// from RIP (the address of the next instruction after this one) to
+    /// the constant pool entry.
+    fn encode_sse_rip_rel(&mut self, prefix: u8, opcode: u8, dst: X86PReg, disp: i64) {
+        if prefix != 0 {
+            self.emit_byte(prefix);
+        }
+        let rex = RexPrefix {
+            w: false,
+            r: dst.hw_enc() >= 8,
+            x: false,
+            b: false,
+        };
+        self.emit_rex(rex);
+        self.emit_byte(0x0F);
+        self.emit_byte(opcode);
+        self.emit_rip_relative(dst.hw_enc(), disp);
+    }
+
     /// Encode a two-byte opcode instruction: `REX.W + 0F + opcode /r` (reg-reg, mod=11).
     ///
     /// Used for CMOV, BSF, BSR, IMUL, etc.
@@ -750,8 +772,26 @@ impl X86Encoder {
             // NopMulti: 0F 1F /0 variants (2-9 bytes)
             // Reference: Intel SDM Vol 2B, NOP instruction, Table 4-12
             X86Opcode::NopMulti => {
-                let size = if ops.imm > 0 { ops.imm as usize } else { 3 };
-                self.encode_multibyte_nop(size);
+                // Clamp size to [1, 15] bytes. Real callers request 2-9 for
+                // a single atomic NOP; we accept a small over-run (up to 15)
+                // to cover alignment padding up to a full cache line, then
+                // reject anything larger. Without this clamp, a wild `imm`
+                // (e.g. `i64::MAX`) coerced through `as usize` would cause
+                // `encode_multibyte_nop` to emit gigabytes of bytes and
+                // exhaust memory — see #473 (panic-fuzz) for the bug that
+                // surfaced this. The previous unbounded recursion path has
+                // been converted to iteration in `encode_multibyte_nop`,
+                // but we additionally reject pathological `imm` values at
+                // the dispatch boundary so adversarial input returns a
+                // typed error instead of a giant allocation.
+                let requested = if ops.imm > 0 { ops.imm } else { 3 };
+                if !(1..=15).contains(&requested) {
+                    return Err(X86EncodeError::InvalidOperands(format!(
+                        "NopMulti: imm={} out of range [1, 15]",
+                        requested
+                    )));
+                }
+                self.encode_multibyte_nop(requested as usize);
             }
 
             // =================================================================
@@ -1390,6 +1430,20 @@ impl X86Encoder {
             }
 
             // =================================================================
+            // SSE RIP-relative constant pool loads
+            // =================================================================
+            // MOVSS xmm, [RIP+disp32]: F3 [REX] 0F 10 ModRM(00 reg 101) disp32
+            X86Opcode::MovssRipRel => {
+                let dst = self.require_dst(ops, opcode)?;
+                self.encode_sse_rip_rel(0xF3, 0x10, dst, ops.disp);
+            }
+            // MOVSD xmm, [RIP+disp32]: F2 [REX] 0F 10 ModRM(00 reg 101) disp32
+            X86Opcode::MovsdRipRel => {
+                let dst = self.require_dst(ops, opcode)?;
+                self.encode_sse_rip_rel(0xF2, 0x10, dst, ops.disp);
+            }
+
+            // =================================================================
             // SSE type conversion
             // =================================================================
             // CVTSI2SD xmm, r64: F2 REX.W 0F 2A /r
@@ -1546,6 +1600,101 @@ impl X86Encoder {
                 self.emit_byte(0xB8);
                 self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
             }
+            // BT r/m64, imm8: REX.W + 0F BA /4 ib
+            X86Opcode::BtRI => {
+                let dst = self.require_dst(ops, opcode)?;
+                let rex = Self::rex_m64(dst);
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0xBA);
+                self.emit_modrm(ModRM::ext_reg(4, dst.hw_enc()));
+                self.emit_imm8(ops.imm as i8);
+            }
+            // BSWAP r64: REX.W + 0F C8+rd
+            X86Opcode::Bswap => {
+                let dst = self.require_dst(ops, opcode)?;
+                let rex = Self::rex_oprd(dst, true);
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0xC8 + (dst.hw_enc() & 0x7));
+            }
+
+            // =================================================================
+            // Atomic / exchange
+            // =================================================================
+            // XCHG r/m64, r64: REX.W + 87 /r
+            X86Opcode::Xchg => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.encode_alu_rr(0x87, dst, src);
+            }
+            // LOCK CMPXCHG r/m64, r64: F0 + REX.W + 0F B1 /r
+            // Compare RAX with r/m64; if equal, ZF is set and r64 is
+            // stored into r/m64. Otherwise, r/m64 is loaded into RAX.
+            X86Opcode::Cmpxchg => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.emit_byte(0xF0); // LOCK prefix
+                let rex = Self::rex_rr64(src, dst);
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0xB1);
+                self.emit_modrm(ModRM::reg_reg(src.hw_enc(), dst.hw_enc()));
+            }
+
+            // =================================================================
+            // GPR <-> XMM transfers
+            // =================================================================
+            // MOVD xmm, r/m32: 66 0F 6E /r (no REX.W, 32-bit)
+            X86Opcode::MovdToXmm => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.emit_byte(0x66);
+                let rex = Self::rex_xmm_rr(dst, src);
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0x6E);
+                self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
+            }
+            // MOVD r/m32, xmm: 66 0F 7E /r (no REX.W, 32-bit)
+            X86Opcode::MovdFromXmm => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                // dst=GPR (in rm), src=XMM (in reg)
+                self.emit_byte(0x66);
+                let rex = Self::rex_xmm_rr(src, dst);
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0x7E);
+                self.emit_modrm(ModRM::reg_reg(src.hw_enc(), dst.hw_enc()));
+            }
+            // MOVQ xmm, r/m64: 66 REX.W 0F 6E /r (64-bit with REX.W)
+            X86Opcode::MovqToXmm => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                self.emit_byte(0x66);
+                let rex = RexPrefix {
+                    w: true,
+                    r: dst.hw_enc() >= 8,
+                    x: false,
+                    b: src.hw_enc() >= 8,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0x6E);
+                self.emit_modrm(ModRM::reg_reg(dst.hw_enc(), src.hw_enc()));
+            }
+            // MOVQ r/m64, xmm: 66 REX.W 0F 7E /r (64-bit with REX.W)
+            X86Opcode::MovqFromXmm => {
+                let (dst, src) = self.require_rr(ops, opcode)?;
+                // dst=GPR (in rm), src=XMM (in reg)
+                self.emit_byte(0x66);
+                let rex = RexPrefix {
+                    w: true,
+                    r: src.hw_enc() >= 8,
+                    x: false,
+                    b: dst.hw_enc() >= 8,
+                };
+                self.emit_rex(rex);
+                self.emit_byte(0x0F);
+                self.emit_byte(0x7E);
+                self.emit_modrm(ModRM::reg_reg(src.hw_enc(), dst.hw_enc()));
+            }
         }
 
         Ok(self.position() - start)
@@ -1612,9 +1761,33 @@ impl X86Encoder {
     /// - 8 bytes: 0F 1F 84 00 00 00 00 00
     /// - 9 bytes: 66 0F 1F 84 00 00 00 00 00
     ///
-    /// For sizes > 9, emits multiple NOP sequences.
+    /// For sizes > 9, emits multiple 9-byte NOP sequences iteratively. The
+    /// original implementation recursed via `encode_multibyte_nop(size - 9)`,
+    /// which overflowed the stack for adversarial callers (e.g. a wild
+    /// `ops.imm` of `i64::MAX` coerced through `NopMulti`). The panic-fuzz
+    /// harness `panic_fuzz_encode_x86_64.rs` (#473) surfaced this as a real
+    /// SIGABRT on macOS aarch64; converting to iteration removes the
+    /// unbounded-recursion vector without changing the emitted byte sequence
+    /// for any `size`.
     pub fn encode_multibyte_nop(&mut self, size: usize) {
-        match size {
+        // Emit 9-byte NOP sequences until the remaining size fits in one
+        // atomic NOP emission. This preserves bit-identical output with the
+        // previous recursive implementation but bounds stack depth to O(1).
+        let mut remaining = size;
+        while remaining > 9 {
+            // 9 bytes: 66 NOP DWORD ptr [RAX + RAX*1 + 00000000]
+            self.emit_byte(0x66);
+            self.emit_byte(0x0F);
+            self.emit_byte(0x1F);
+            self.emit_byte(0x84);
+            self.emit_byte(0x00);
+            self.emit_byte(0x00);
+            self.emit_byte(0x00);
+            self.emit_byte(0x00);
+            self.emit_byte(0x00);
+            remaining -= 9;
+        }
+        match remaining {
             0 => {}
             1 => {
                 self.emit_byte(0x90);
@@ -1675,7 +1848,10 @@ impl X86Encoder {
                 self.emit_byte(0x00);
             }
             _ => {
-                // 9 bytes: 66 NOP DWORD ptr [RAX + RAX*1 + 00000000]
+                // Unreachable under the loop above (remaining is in 0..=9
+                // after the while-loop exits). Kept as a defensive 9-byte
+                // emission to preserve behaviour if remaining ever somehow
+                // equals exactly 9.
                 self.emit_byte(0x66);
                 self.emit_byte(0x0F);
                 self.emit_byte(0x1F);
@@ -1685,10 +1861,6 @@ impl X86Encoder {
                 self.emit_byte(0x00);
                 self.emit_byte(0x00);
                 self.emit_byte(0x00);
-                // For sizes > 9, emit additional NOP sequences
-                if size > 9 {
-                    self.encode_multibyte_nop(size - 9);
-                }
             }
         }
     }
@@ -4215,5 +4387,293 @@ mod tests {
             assert_eq!(bytes[1], *expected_byte, "SETcc {:?} opcode byte", cc);
             assert_eq!(bytes[2], 0xC0, "SETcc {:?} ModRM", cc);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // XCHG encoding (Intel SDM: 87 /r)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_xchg_rax_rcx() {
+        // XCHG RAX, RCX: REX.W + 87 + ModRM(11_001_000)
+        // encode_alu_rr puts src(RCX=1) in reg, dst(RAX=0) in rm
+        // REX: W=1,R=0,X=0,B=0 = 0x48
+        // ModRM: mod=11, reg=001, rm=000 = 0xC8
+        let bytes = encode(X86Opcode::Xchg, &X86InstOperands::rr(RAX, RCX));
+        assert_eq!(bytes, &[0x48, 0x87, 0xC8]);
+    }
+
+    #[test]
+    fn test_xchg_r8_rdx() {
+        // XCHG R8, RDX: src=RDX(2) in reg, dst=R8(8) in rm
+        // REX: W=1,R=0,X=0,B=1(R8>=8) = 0x49
+        // ModRM: mod=11, reg=010, rm=000(R8&7=0) = 0xD0
+        let bytes = encode(X86Opcode::Xchg, &X86InstOperands::rr(R8, RDX));
+        assert_eq!(bytes, &[0x49, 0x87, 0xD0]);
+    }
+
+    #[test]
+    fn test_xchg_r15_r14() {
+        // XCHG R15, R14: src=R14(14) in reg, dst=R15(15) in rm
+        // REX: W=1,R=1(R14>=8),X=0,B=1(R15>=8) = 0x4D
+        // ModRM: mod=11, reg=110(R14&7=6), rm=111(R15&7=7) = 0xF7
+        let bytes = encode(X86Opcode::Xchg, &X86InstOperands::rr(R15, R14));
+        assert_eq!(bytes, &[0x4D, 0x87, 0xF7]);
+    }
+
+    // -----------------------------------------------------------------------
+    // CMPXCHG encoding (Intel SDM: F0 + 0F B1 /r)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cmpxchg_rcx_rdx() {
+        // LOCK CMPXCHG RCX, RDX
+        // F0(LOCK) + REX.W(0x48) + 0F B1 + ModRM
+        // src=RDX(2) in reg, dst=RCX(1) in rm
+        // ModRM: mod=11, reg=010, rm=001 = 0xD1
+        let bytes = encode(X86Opcode::Cmpxchg, &X86InstOperands::rr(RCX, RDX));
+        assert_eq!(bytes, &[0xF0, 0x48, 0x0F, 0xB1, 0xD1]);
+    }
+
+    #[test]
+    fn test_cmpxchg_r8_r9() {
+        // LOCK CMPXCHG R8, R9
+        // F0 + REX(W=1,R=1(R9>=8),B=1(R8>=8)) = REX 0x4D
+        // 0F B1 + ModRM: mod=11, reg=001(R9&7=1), rm=000(R8&7=0) = 0xC8
+        let bytes = encode(X86Opcode::Cmpxchg, &X86InstOperands::rr(R8, R9));
+        assert_eq!(bytes, &[0xF0, 0x4D, 0x0F, 0xB1, 0xC8]);
+    }
+
+    // -----------------------------------------------------------------------
+    // BT encoding (Intel SDM: 0F BA /4 ib)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bt_rax_imm5() {
+        // BT RAX, 5: REX.W(0x48) + 0F BA + ModRM(11_100_000) + 05
+        // ModRM ext_reg(4, RAX=0): mod=11, reg=100, rm=000 = 0xE0
+        let bytes = encode(X86Opcode::BtRI, &X86InstOperands::ri(RAX, 5));
+        assert_eq!(bytes, &[0x48, 0x0F, 0xBA, 0xE0, 0x05]);
+    }
+
+    #[test]
+    fn test_bt_r15_imm63() {
+        // BT R15, 63: REX.WB(0x49) + 0F BA + ModRM(11_100_111) + 3F
+        // ModRM ext_reg(4, R15&7=7): mod=11, reg=100, rm=111 = 0xE7
+        let bytes = encode(X86Opcode::BtRI, &X86InstOperands::ri(R15, 63));
+        assert_eq!(bytes, &[0x49, 0x0F, 0xBA, 0xE7, 0x3F]);
+    }
+
+    // -----------------------------------------------------------------------
+    // BSWAP encoding (Intel SDM: 0F C8+rd)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bswap_rax() {
+        // BSWAP RAX: REX.W(0x48) + 0F + C8+0 = [0x48, 0x0F, 0xC8]
+        let bytes = encode(X86Opcode::Bswap, &X86InstOperands::r(RAX));
+        assert_eq!(bytes, &[0x48, 0x0F, 0xC8]);
+    }
+
+    #[test]
+    fn test_bswap_rbx() {
+        // BSWAP RBX: REX.W(0x48) + 0F + C8+3 = [0x48, 0x0F, 0xCB]
+        let bytes = encode(X86Opcode::Bswap, &X86InstOperands::r(RBX));
+        assert_eq!(bytes, &[0x48, 0x0F, 0xCB]);
+    }
+
+    #[test]
+    fn test_bswap_r12() {
+        // BSWAP R12: REX.WB(0x49) + 0F + C8+4(R12&7=4) = [0x49, 0x0F, 0xCC]
+        let bytes = encode(X86Opcode::Bswap, &X86InstOperands::r(R12));
+        assert_eq!(bytes, &[0x49, 0x0F, 0xCC]);
+    }
+
+    // -----------------------------------------------------------------------
+    // MOVD/MOVQ xmm<->gpr encoding (Intel SDM: 66 0F 6E/7E)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_movd_to_xmm_xmm0_rax() {
+        // MOVD XMM0, EAX: 66 0F 6E ModRM(11_000_000)=0xC0
+        // No REX needed (both < 8)
+        let bytes = encode(X86Opcode::MovdToXmm, &X86InstOperands::rr(XMM0, RAX));
+        assert_eq!(bytes, &[0x66, 0x0F, 0x6E, 0xC0]);
+    }
+
+    #[test]
+    fn test_movd_to_xmm8_rcx() {
+        // MOVD XMM8, ECX: 66 REX.R(XMM8>=8)(0x44) 0F 6E ModRM(11_000_001)=0xC1
+        // REX: W=0,R=1(XMM8>=8),X=0,B=0 = 0x44
+        let bytes = encode(X86Opcode::MovdToXmm, &X86InstOperands::rr(XMM8, RCX));
+        assert_eq!(bytes, &[0x66, 0x44, 0x0F, 0x6E, 0xC1]);
+    }
+
+    #[test]
+    fn test_movd_from_xmm_rax_xmm0() {
+        // MOVD EAX, XMM0: 66 0F 7E ModRM(11_000_000)=0xC0
+        // src=XMM0 in reg, dst=RAX in rm
+        let bytes = encode(X86Opcode::MovdFromXmm, &X86InstOperands::rr(RAX, XMM0));
+        assert_eq!(bytes, &[0x66, 0x0F, 0x7E, 0xC0]);
+    }
+
+    #[test]
+    fn test_movq_to_xmm_xmm0_rax() {
+        // MOVQ XMM0, RAX: 66 REX.W(0x48) 0F 6E ModRM(11_000_000)=0xC0
+        let bytes = encode(X86Opcode::MovqToXmm, &X86InstOperands::rr(XMM0, RAX));
+        assert_eq!(bytes, &[0x66, 0x48, 0x0F, 0x6E, 0xC0]);
+    }
+
+    #[test]
+    fn test_movq_from_xmm_rax_xmm0() {
+        // MOVQ RAX, XMM0: 66 REX.W(0x48) 0F 7E ModRM(11_000_000)=0xC0
+        let bytes = encode(X86Opcode::MovqFromXmm, &X86InstOperands::rr(RAX, XMM0));
+        assert_eq!(bytes, &[0x66, 0x48, 0x0F, 0x7E, 0xC0]);
+    }
+
+    #[test]
+    fn test_movq_to_xmm15_r15() {
+        // MOVQ XMM15, R15: 66 REX.WRB(0x4D) 0F 6E ModRM(11_111_111)=0xFF
+        // REX: W=1, R=1(XMM15>=8), X=0, B=1(R15>=8) = 0x4D
+        // ModRM: mod=11, reg=111(XMM15&7=7), rm=111(R15&7=7) = 0xFF
+        let bytes = encode(X86Opcode::MovqToXmm, &X86InstOperands::rr(XMM15, R15));
+        assert_eq!(bytes, &[0x66, 0x4D, 0x0F, 0x6E, 0xFF]);
+    }
+
+    #[test]
+    fn test_movq_from_xmm15_r15() {
+        // MOVQ R15, XMM15: 66 REX.WRB(0x4D) 0F 7E ModRM(11_111_111)=0xFF
+        // src=XMM15 in reg, dst=R15 in rm
+        // REX: W=1, R=1(XMM15>=8), X=0, B=1(R15>=8) = 0x4D
+        let bytes = encode(X86Opcode::MovqFromXmm, &X86InstOperands::rr(R15, XMM15));
+        assert_eq!(bytes, &[0x66, 0x4D, 0x0F, 0x7E, 0xFF]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Instruction size sanity checks for new opcodes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_new_instruction_sizes_v4() {
+        let mut enc = X86Encoder::new();
+
+        // XCHG RAX,RCX = 3 bytes (REX.W + 87 + ModRM)
+        let n = enc.encode_instruction(X86Opcode::Xchg, &X86InstOperands::rr(RAX, RCX)).unwrap();
+        assert_eq!(n, 3, "XCHG RAX,RCX size");
+
+        // CMPXCHG RCX,RDX = 5 bytes (LOCK + REX.W + 0F + B1 + ModRM)
+        let n = enc.encode_instruction(X86Opcode::Cmpxchg, &X86InstOperands::rr(RCX, RDX)).unwrap();
+        assert_eq!(n, 5, "CMPXCHG RCX,RDX size");
+
+        // BT RAX,5 = 5 bytes (REX.W + 0F + BA + ModRM + imm8)
+        let n = enc.encode_instruction(X86Opcode::BtRI, &X86InstOperands::ri(RAX, 5)).unwrap();
+        assert_eq!(n, 5, "BT RAX,5 size");
+
+        // BSWAP RAX = 3 bytes (REX.W + 0F + C8)
+        let n = enc.encode_instruction(X86Opcode::Bswap, &X86InstOperands::r(RAX)).unwrap();
+        assert_eq!(n, 3, "BSWAP RAX size");
+
+        // MOVD XMM0,EAX = 4 bytes (66 + 0F + 6E + ModRM)
+        let n = enc.encode_instruction(X86Opcode::MovdToXmm, &X86InstOperands::rr(XMM0, RAX)).unwrap();
+        assert_eq!(n, 4, "MOVD XMM0,EAX size");
+
+        // MOVQ XMM0,RAX = 5 bytes (66 + REX.W + 0F + 6E + ModRM)
+        let n = enc.encode_instruction(X86Opcode::MovqToXmm, &X86InstOperands::rr(XMM0, RAX)).unwrap();
+        assert_eq!(n, 5, "MOVQ XMM0,RAX size");
+    }
+
+    // -----------------------------------------------------------------------
+    // RIP-relative SSE load tests (MOVSS/MOVSD [RIP+disp32])
+    //
+    // Intel SDM Vol 2:
+    //   MOVSS xmm, m32: F3 0F 10 /r
+    //   MOVSD xmm, m64: F2 0F 10 /r
+    // RIP-relative: ModRM mod=00, rm=101 signals [RIP+disp32] in 64-bit mode
+    // REX.R needed for XMM8-XMM15 (extends ModRM reg field)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_movss_rip_rel_xmm0_disp0() {
+        // MOVSS XMM0, [RIP+0]: F3 0F 10 ModRM(00 000 101) disp32(00000000)
+        // No REX needed (XMM0 hw_enc=0)
+        let bytes = encode(X86Opcode::MovssRipRel, &X86InstOperands::rip_rel(XMM0, 0));
+        assert_eq!(bytes, vec![0xF3, 0x0F, 0x10, 0x05, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_movsd_rip_rel_xmm0_disp0() {
+        // MOVSD XMM0, [RIP+0]: F2 0F 10 ModRM(00 000 101) disp32(00000000)
+        // No REX needed (XMM0 hw_enc=0)
+        let bytes = encode(X86Opcode::MovsdRipRel, &X86InstOperands::rip_rel(XMM0, 0));
+        assert_eq!(bytes, vec![0xF2, 0x0F, 0x10, 0x05, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_movsd_rip_rel_xmm1_disp256() {
+        // MOVSD XMM1, [RIP+256]: F2 0F 10 ModRM(00 001 101) disp32
+        // XMM1 reg=001 -> ModRM = 00_001_101 = 0x0D
+        let bytes = encode(X86Opcode::MovsdRipRel, &X86InstOperands::rip_rel(XMM1, 256));
+        assert_eq!(bytes, vec![0xF2, 0x0F, 0x10, 0x0D, 0x00, 0x01, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_movss_rip_rel_xmm8_disp0() {
+        // MOVSS XMM8, [RIP+0]: F3 REX.R(44) 0F 10 ModRM(00 000 101) disp32
+        // XMM8 hw_enc=8, needs REX.R: 0100 0100 = 0x44
+        let bytes = encode(X86Opcode::MovssRipRel, &X86InstOperands::rip_rel(XMM8, 0));
+        assert_eq!(bytes, vec![0xF3, 0x44, 0x0F, 0x10, 0x05, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_movsd_rip_rel_xmm8_negative_disp() {
+        // MOVSD XMM8, [RIP-16]: F2 REX.R(44) 0F 10 ModRM(00 000 101) disp32(F0FFFFFF)
+        let bytes = encode(X86Opcode::MovsdRipRel, &X86InstOperands::rip_rel(XMM8, -16));
+        assert_eq!(bytes, vec![0xF2, 0x44, 0x0F, 0x10, 0x05, 0xF0, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn test_movss_rip_rel_xmm15_disp128() {
+        // MOVSS XMM15, [RIP+128]: F3 REX.R(44) 0F 10 ModRM(00 111 101) disp32
+        // XMM15 hw_enc=15, reg&7=7 -> ModRM = 00_111_101 = 0x3D
+        let bytes = encode(X86Opcode::MovssRipRel, &X86InstOperands::rip_rel(XMM15, 128));
+        assert_eq!(bytes, vec![0xF3, 0x44, 0x0F, 0x10, 0x3D, 0x80, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_movss_rip_rel_size_no_rex() {
+        // MOVSS XMM0, [RIP+0] should be 8 bytes (no REX)
+        // F3(1) + 0F(1) + 10(1) + ModRM(1) + disp32(4) = 8
+        let mut enc = X86Encoder::new();
+        let n = enc.encode_instruction(
+            X86Opcode::MovssRipRel,
+            &X86InstOperands::rip_rel(XMM0, 0),
+        ).unwrap();
+        assert_eq!(n, 8, "MOVSS XMM0,[RIP+0] size without REX");
+    }
+
+    #[test]
+    fn test_movsd_rip_rel_size_with_rex() {
+        // MOVSD XMM8, [RIP+0] should be 9 bytes (with REX.R)
+        // F2(1) + REX(1) + 0F(1) + 10(1) + ModRM(1) + disp32(4) = 9
+        let mut enc = X86Encoder::new();
+        let n = enc.encode_instruction(
+            X86Opcode::MovsdRipRel,
+            &X86InstOperands::rip_rel(XMM8, 0),
+        ).unwrap();
+        assert_eq!(n, 9, "MOVSD XMM8,[RIP+0] size with REX.R");
+    }
+
+    #[test]
+    fn test_movss_rip_rel_missing_dst_error() {
+        let mut enc = X86Encoder::new();
+        let result = enc.encode_instruction(X86Opcode::MovssRipRel, &X86InstOperands::none());
+        assert!(result.is_err(), "MovssRipRel without dst should fail");
+    }
+
+    #[test]
+    fn test_movsd_rip_rel_missing_dst_error() {
+        let mut enc = X86Encoder::new();
+        let result = enc.encode_instruction(X86Opcode::MovsdRipRel, &X86InstOperands::none());
+        assert!(result.is_err(), "MovsdRipRel without dst should fail");
     }
 }

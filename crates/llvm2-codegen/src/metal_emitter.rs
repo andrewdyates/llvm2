@@ -1,7 +1,7 @@
 // llvm2-codegen/metal_emitter.rs - Metal Shading Language (MSL) kernel emitter
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Generates Metal compute kernel source text from GpuKernelShape and kernel
 // pattern descriptors. Phase 1 of the Metal emission pipeline (MSL source;
@@ -658,8 +658,52 @@ impl MetalKernelEmitter {
         ));
     }
 
-    /// Emit a tiled 8x8 matrix multiply kernel using `simdgroup_matrix`.
+    /// Emit a tiled 8x8 matrix multiply kernel.
+    ///
+    /// # Emission strategy
+    ///
+    /// Two kernel variants are emitted based on the compile-time shape:
+    ///
+    /// * **Aligned path** (M, K, N all divisible by 8): uses `simdgroup_matrix`
+    ///   with `simdgroup_load` / `simdgroup_multiply_accumulate` / `simdgroup_store`
+    ///   for peak throughput. A grid-bounds early-return guards against
+    ///   rounded-up dispatch grids.
+    /// * **Unaligned path** (any of M/K/N not divisible by 8): falls back to a
+    ///   scalar per-thread accumulator loop. One thread computes one `C[row][col]`
+    ///   element via a straight `for (kk = 0; kk < K; ++kk)` multiply-add. This is
+    ///   slower but correct for arbitrary shapes (handles the `K % 8 != 0` tail,
+    ///   `N % 8 != 0` partial column tiles, and `M % 8 != 0` partial row tiles
+    ///   uniformly). See issue #403.
+    ///
+    /// # Shape semantics (issue #404)
+    ///
+    /// `m`, `k`, `n` are passed as explicit parameters. The current
+    /// `emit_kernel_from_node` MatrixHeavy arm derives them from
+    /// `data_size_bytes` assuming a square matmul; #404 tracks replacing that
+    /// heuristic with an explicit `MatMulShape` field on `ComputeNode`. This
+    /// emitter is already shape-aware and will Just Work once that lands.
     fn emit_matmul(
+        &self,
+        out: &mut String,
+        m: u64,
+        k: u64,
+        n: u64,
+    ) {
+        let tile: u64 = DEFAULT_MATMUL_TILE as u64;
+        let aligned = m % tile == 0 && k % tile == 0 && n % tile == 0;
+        if aligned {
+            self.emit_matmul_simdgroup(out, m, k, n);
+        } else {
+            self.emit_matmul_scalar(out, m, k, n);
+        }
+    }
+
+    /// Emit the aligned tiled 8x8 matmul using `simdgroup_matrix`.
+    ///
+    /// Precondition: caller has verified M, K, N are all multiples of 8.
+    /// A grid-bounds early-return is still emitted so rounded-up dispatch
+    /// grids (e.g. `MetalDispatchParams::for_2d`) stay safe.
+    fn emit_matmul_simdgroup(
         &self,
         out: &mut String,
         m: u64,
@@ -680,6 +724,7 @@ impl MetalKernelEmitter {
              \x20   const uint N = {n}u;\n\
              \x20   uint row = gid.y;\n\
              \x20   uint col = gid.x;\n\
+             \x20   if (row >= M || col >= N) return;\n\
              \x20   simdgroup_matrix<{ty}, 8, 8> acc;\n\
              \x20   acc = make_filled_simdgroup_matrix<{ty}, 8, 8>(0.0{suffix});\n\
              \x20   for (uint kk = 0; kk < K; kk += 8) {{\n\
@@ -696,6 +741,53 @@ impl MetalKernelEmitter {
             k = k,
             n = n,
             suffix = if *ty == MslElementType::Half { "h" } else { "f" },
+        ));
+    }
+
+    /// Emit a scalar per-thread matmul kernel for shapes not divisible by 8.
+    ///
+    /// One thread owns one output element `C[row, col]`. The per-thread
+    /// accumulator loops over the full K dimension with element-wise
+    /// multiply-add. A grid-bounds early-return handles rounded-up dispatch
+    /// grids. Correct for any M, K, N.
+    fn emit_matmul_scalar(
+        &self,
+        out: &mut String,
+        m: u64,
+        k: u64,
+        n: u64,
+    ) {
+        let ty = &self.elem_type;
+        let zero = match ty {
+            MslElementType::Half => "0.0h",
+            MslElementType::Float => "0.0f",
+            MslElementType::Int | MslElementType::Uint => "0",
+        };
+        out.push_str(&format!(
+            "kernel void llvm2_matmul_{node}(\n\
+             \x20   const device {ty}* A  [[buffer(0)]],\n\
+             \x20   const device {ty}* B  [[buffer(1)]],\n\
+             \x20   device {ty}* C        [[buffer(2)]],\n\
+             \x20   uint2 gid [[thread_position_in_grid]])\n\
+             {{\n\
+             \x20   const uint M = {m}u;\n\
+             \x20   const uint K = {k}u;\n\
+             \x20   const uint N = {n}u;\n\
+             \x20   uint row = gid.y;\n\
+             \x20   uint col = gid.x;\n\
+             \x20   if (row >= M || col >= N) return;\n\
+             \x20   {ty} acc = {zero};\n\
+             \x20   for (uint kk = 0; kk < K; ++kk) {{\n\
+             \x20       acc += A[row * K + kk] * B[kk * N + col];\n\
+             \x20   }}\n\
+             \x20   C[row * N + col] = acc;\n\
+             }}\n",
+            node = self.node_id,
+            ty = ty,
+            m = m,
+            k = k,
+            n = n,
+            zero = zero,
         ));
     }
 
@@ -885,23 +977,53 @@ pub fn emit_kernel_from_node(node: &ComputeNode) -> Result<String, MetalEmitErro
         }
 
         NodeKind::MatrixHeavy => {
-            // Infer square matrix dimensions from data size.
-            // For C = A*B where A is MxK and B is KxN, total data is:
-            //   (M*K + K*N + M*N) * elem_bytes
-            // For simplicity, assume square: M=K=N=dim, so 3*dim^2*elem_bytes = data_size
-            let total_elements = node.data_size_bytes / elem_bytes;
-            // 3*dim^2 = total_elements  =>  dim = sqrt(total_elements / 3)
-            let dim_sq = total_elements / 3;
-            let dim = (dim_sq as f64).sqrt() as u64;
+            // Issue #404: Prefer the explicit `matmul_shape` field. It may
+            // encode a non-square matmul (M != K != N) which cannot be
+            // expressed through the legacy `data_size_bytes / 3 / sqrt`
+            // heuristic. Fall back to the heuristic only for nodes that
+            // were constructed without a `matmul_shape` (deprecated path).
+            let (m, k, n) = if let Some(shape) = node.matmul_shape.as_ref() {
+                if shape.m == 0 || shape.k == 0 || shape.n == 0 {
+                    return Err(MetalEmitError::MatMulDimensionError {
+                        node_id: node.id,
+                        data_size_bytes: node.data_size_bytes,
+                    });
+                }
+                (shape.m, shape.k, shape.n)
+            } else {
+                // Deprecated legacy path (issue #404): ComputeNode was
+                // constructed without a `matmul_shape`. We assume a square
+                // matmul (M == K == N) and recover `dim` from
+                // `data_size_bytes` under the convention that
+                // `data_size_bytes = (M*K + K*N + M*N) * elem_bytes` with
+                // M == K == N == dim, so `3 * dim^2 * elem_bytes = data_size_bytes`.
+                //
+                // This path is retained for back-compat with callers that
+                // have not yet been migrated. The `debug_assert!` below
+                // fires in debug builds to surface stragglers.
+                debug_assert!(
+                    false,
+                    "ComputeNode {} (MatrixHeavy) was constructed without \
+                     `matmul_shape`; falling back to deprecated \
+                     data_size_bytes/3/sqrt heuristic (issue #404). \
+                     Populate `matmul_shape: Some(MatMulShape {{..}})` at \
+                     construction time.",
+                    node.id,
+                );
+                let total_elements = node.data_size_bytes / elem_bytes;
+                // 3*dim^2 = total_elements  =>  dim = sqrt(total_elements / 3)
+                let dim_sq = total_elements / 3;
+                let dim = (dim_sq as f64).sqrt() as u64;
+                if dim == 0 {
+                    return Err(MetalEmitError::MatMulDimensionError {
+                        node_id: node.id,
+                        data_size_bytes: node.data_size_bytes,
+                    });
+                }
+                (dim, dim, dim)
+            };
 
-            if dim == 0 {
-                return Err(MetalEmitError::MatMulDimensionError {
-                    node_id: node.id,
-                    data_size_bytes: node.data_size_bytes,
-                });
-            }
-
-            let kernel = MslKernel::matmul(dim, dim, dim);
+            let kernel = MslKernel::matmul(m, k, n);
             Ok(emitter.emit(&kernel))
         }
 
@@ -1260,6 +1382,8 @@ pub fn emit_metal_kernels(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use llvm2_lower::compute_graph::MatMulShape;
+    use llvm2_lower::types::Type as LowerLirType;
     use std::collections::HashMap;
 
     #[test]
@@ -1348,6 +1472,158 @@ mod tests {
         assert!(source.contains("const uint M = 64u;"));
         assert!(source.contains("const uint K = 32u;"));
         assert!(source.contains("const uint N = 64u;"));
+        // Grid bounds early-return MUST be present even on the aligned fast path
+        // (rounded-up dispatch grids can still over-subscribe). Issue #403.
+        assert!(source.contains("if (row >= M || col >= N) return;"),
+            "aligned matmul kernel must emit grid bounds check, got:\n{}", source);
+    }
+
+    /// Issue #403: matmul emitter MUST handle K not divisible by the 8-element
+    /// tile size. When any of M, K, N is unaligned, we fall back to a scalar
+    /// per-thread accumulator loop that reads exactly `K` elements per thread,
+    /// avoiding the out-of-bounds `simdgroup_load` that the aligned path would
+    /// perform on the final partial K tile.
+    #[test]
+    fn test_emit_matmul_k_not_multiple_of_tile() {
+        let emitter = MetalKernelEmitter::new("node_8", MslElementType::Float);
+        // K=10 is not a multiple of 8 — must trigger the scalar fallback.
+        let kernel = MslKernel::matmul(16, 10, 16);
+        let source = emitter.emit(&kernel);
+
+        // Scalar fallback characteristics.
+        assert!(source.contains("kernel void llvm2_matmul_node_8("),
+            "expected matmul kernel name, got:\n{}", source);
+        assert!(source.contains("const uint K = 10u;"),
+            "expected K=10, got:\n{}", source);
+        assert!(source.contains("if (row >= M || col >= N) return;"),
+            "scalar fallback must emit grid bounds check, got:\n{}", source);
+        assert!(source.contains("for (uint kk = 0; kk < K; ++kk)"),
+            "scalar fallback must emit scalar accumulator loop, got:\n{}", source);
+        assert!(source.contains("A[row * K + kk] * B[kk * N + col]"),
+            "scalar fallback must emit element-wise multiply-add, got:\n{}", source);
+        assert!(source.contains("C[row * N + col] = acc;"),
+            "scalar fallback must emit scalar store, got:\n{}", source);
+        // The scalar fallback must NOT use simdgroup_matrix (which would do
+        // out-of-bounds 8x8 loads on the K=10 tail).
+        assert!(!source.contains("simdgroup_load"),
+            "scalar fallback must not emit simdgroup_load, got:\n{}", source);
+        assert!(!source.contains("simdgroup_multiply_accumulate"),
+            "scalar fallback must not emit simdgroup_multiply_accumulate, got:\n{}", source);
+    }
+
+    /// Issue #403: even when the matmul is shape-unaligned, the grid bounds
+    /// early-return guards against `MetalDispatchParams::for_2d`-style dispatch
+    /// grids that round up to a multiple of the tile size. Here M=7 is smaller
+    /// than the 8-wide tile, so any rounded-up grid will spawn threads with
+    /// `row >= M` that must bail out cleanly.
+    #[test]
+    fn test_emit_matmul_m_smaller_than_tile_has_grid_bounds() {
+        let emitter = MetalKernelEmitter::new("node_9", MslElementType::Float);
+        let kernel = MslKernel::matmul(7, 8, 8);
+        let source = emitter.emit(&kernel);
+
+        assert!(source.contains("kernel void llvm2_matmul_node_9("),
+            "expected matmul kernel name, got:\n{}", source);
+        assert!(source.contains("const uint M = 7u;"),
+            "expected M=7, got:\n{}", source);
+        assert!(source.contains("if (row >= M || col >= N) return;"),
+            "unaligned-M matmul must emit grid bounds check, got:\n{}", source);
+        // M=7 forces the scalar fallback (7 % 8 != 0).
+        assert!(source.contains("for (uint kk = 0; kk < K; ++kk)"),
+            "M<8 must trigger scalar fallback, got:\n{}", source);
+    }
+
+    /// Issue #403 regression guard: for the pre-existing aligned square case
+    /// (M=K=N=64), the emitted kernel must still use the simdgroup_matrix fast
+    /// path. The only legal delta from the pre-fix output is the addition of
+    /// the `if (row >= M || col >= N) return;` grid-bounds line.
+    #[test]
+    fn test_emit_matmul_aligned_square_no_regression() {
+        let emitter = MetalKernelEmitter::new("node_10", MslElementType::Float);
+        let kernel = MslKernel::matmul(64, 64, 64);
+        let source = emitter.emit(&kernel);
+
+        // Aligned fast path retained.
+        assert!(source.contains("#include <metal_simdgroup_matrix>"),
+            "aligned 64x64x64 must still emit simdgroup header, got:\n{}", source);
+        assert!(source.contains("simdgroup_matrix<float, 8, 8> acc;"),
+            "aligned path must still declare acc tile, got:\n{}", source);
+        assert!(source.contains("simdgroup_load(a_tile, A + row * K + kk, K);"),
+            "aligned path must still use simdgroup_load for A, got:\n{}", source);
+        assert!(source.contains("simdgroup_load(b_tile, B + kk * N + col, N);"),
+            "aligned path must still use simdgroup_load for B, got:\n{}", source);
+        assert!(source.contains("simdgroup_multiply_accumulate(acc, a_tile, b_tile, acc);"),
+            "aligned path must still use simdgroup_multiply_accumulate, got:\n{}", source);
+        assert!(source.contains("simdgroup_store(acc, C + row * N + col, N);"),
+            "aligned path must still use simdgroup_store, got:\n{}", source);
+        // K-stride must still be 8 on the aligned path (not the scalar ++kk).
+        assert!(source.contains("for (uint kk = 0; kk < K; kk += 8)"),
+            "aligned path must retain tile-stride K loop, got:\n{}", source);
+        assert!(!source.contains("for (uint kk = 0; kk < K; ++kk)"),
+            "aligned path must not fall back to scalar loop, got:\n{}", source);
+
+        // New in #403: grid bounds early-return.
+        assert!(source.contains("if (row >= M || col >= N) return;"),
+            "aligned path must now emit grid bounds early-return, got:\n{}", source);
+    }
+
+    /// Issue #403 AC #4: explicit repro from the issue body.
+    ///
+    /// `MslKernel::matmul(10, 10, 10)` was the original out-of-bounds repro.
+    /// All three dims are unaligned (10 % 8 = 2), so the emitter must:
+    /// 1. Trigger the scalar fallback (no simdgroup_load / simdgroup_matrix).
+    /// 2. Emit a grid-bounds early-return for M=10, N=10 padded dispatch.
+    /// 3. Loop the full K=10 elements per thread with a bounded index.
+    /// 4. Produce a single deterministic kernel (string-match friendly).
+    ///
+    /// The final AC criterion ("compiles under `xcrun metal`") is not
+    /// verifiable on CI-less developer machines without the Metal toolchain;
+    /// this test guarantees the emitted MSL is *structurally* correct so a
+    /// downstream `xcrun metal -c` pass can be run manually on an Apple
+    /// Silicon machine with Xcode installed.
+    #[test]
+    fn test_emit_matmul_10_10_10_issue_403_repro() {
+        let emitter = MetalKernelEmitter::new("repro_403", MslElementType::Float);
+        let kernel = MslKernel::matmul(10, 10, 10);
+        let source = emitter.emit(&kernel);
+
+        // Kernel signature uses the expected node id.
+        assert!(source.contains("kernel void llvm2_matmul_repro_403("),
+            "expected matmul kernel signature, got:\n{}", source);
+
+        // Declared shape.
+        assert!(source.contains("const uint M = 10u;"),
+            "expected M=10, got:\n{}", source);
+        assert!(source.contains("const uint K = 10u;"),
+            "expected K=10, got:\n{}", source);
+        assert!(source.contains("const uint N = 10u;"),
+            "expected N=10, got:\n{}", source);
+
+        // Grid bounds early-return is mandatory under rounded-up dispatch.
+        assert!(source.contains("if (row >= M || col >= N) return;"),
+            "matmul(10,10,10) must emit grid bounds check, got:\n{}", source);
+
+        // Must NOT use simdgroup_matrix / simdgroup_load / simdgroup_store:
+        // any of these on K=10 would read 4 elements OOB on the final tile.
+        assert!(!source.contains("simdgroup_matrix"),
+            "matmul(10,10,10) must not use simdgroup_matrix, got:\n{}", source);
+        assert!(!source.contains("simdgroup_load"),
+            "matmul(10,10,10) must not use simdgroup_load, got:\n{}", source);
+        assert!(!source.contains("simdgroup_multiply_accumulate"),
+            "matmul(10,10,10) must not use simdgroup_multiply_accumulate, got:\n{}", source);
+        assert!(!source.contains("simdgroup_store"),
+            "matmul(10,10,10) must not use simdgroup_store, got:\n{}", source);
+        assert!(!source.contains("<metal_simdgroup_matrix>"),
+            "matmul(10,10,10) must not include simdgroup_matrix header, got:\n{}", source);
+
+        // Scalar fallback body: element-wise MAC over the full K range,
+        // single per-thread accumulator store.
+        assert!(source.contains("for (uint kk = 0; kk < K; ++kk)"),
+            "matmul(10,10,10) must use scalar K loop, got:\n{}", source);
+        assert!(source.contains("acc += A[row * K + kk] * B[kk * N + col];"),
+            "matmul(10,10,10) must emit scalar multiply-add, got:\n{}", source);
+        assert!(source.contains("C[row * N + col] = acc;"),
+            "matmul(10,10,10) must emit scalar store, got:\n{}", source);
     }
 
     #[test]
@@ -1388,6 +1664,7 @@ mod tests {
             consumed_values: vec![],
             dominant_op: dominant_op.to_string(),
             target_legality: None,
+            matmul_shape: None,
         }
     }
 
@@ -1496,15 +1773,18 @@ mod tests {
 
     #[test]
     fn test_emit_kernel_from_node_matmul() {
-        // 3 * 64^2 * 4 = 49152 bytes for a 64x64 matmul (A + B + C)
+        // 3 * 64^2 * 4 = 49152 bytes for a 64x64 matmul (A + B + C).
+        // Issue #404: populate `matmul_shape` explicitly; the legacy
+        // square-derivation fallback is now debug_assert-gated.
         let data_size = 3 * 64 * 64 * 4;
-        let node = make_test_node(
+        let mut node = make_test_node(
             20,
             NodeKind::MatrixHeavy,
             "FMUL",
             data_size,
             vec![ComputeTarget::Gpu],
         );
+        node.matmul_shape = Some(MatMulShape::new(64, 64, 64, LowerLirType::F32));
 
         let source = emit_kernel_from_node(&node).unwrap();
         assert!(source.contains("kernel void llvm2_matmul_node_20("),
@@ -1515,6 +1795,103 @@ mod tests {
             "Expected simdgroup_multiply_accumulate, got:\n{}", source);
         assert!(source.contains("const uint M = 64u;"),
             "Expected M=64, got:\n{}", source);
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #404: explicit MatMulShape on ComputeNode
+    // -------------------------------------------------------------------
+
+    /// Non-square matmul (M=128, K=64, N=32) must round-trip through
+    /// `emit_kernel_from_node` into correct M/K/N loop bounds. Before #404
+    /// this was unrepresentable: `data_size_bytes / 3 / sqrt` assumed
+    /// M == K == N.
+    #[test]
+    fn test_emit_kernel_from_node_matmul_nonsquare_shape() {
+        let mut node = make_test_node(
+            41,
+            NodeKind::MatrixHeavy,
+            "FMUL",
+            // data_size_bytes is intentionally the byte count of this
+            // non-square matmul; the emitter MUST read M/K/N from
+            // `matmul_shape`, not from `data_size_bytes / 3 / sqrt`.
+            // (128*64 + 64*32 + 128*32) * 4 = (8192 + 2048 + 4096) * 4 = 57344.
+            (128 * 64 + 64 * 32 + 128 * 32) * 4,
+            vec![ComputeTarget::Gpu],
+        );
+        node.matmul_shape = Some(MatMulShape::new(128, 64, 32, LowerLirType::F32));
+
+        let source = emit_kernel_from_node(&node).unwrap();
+        assert!(source.contains("const uint M = 128u;"),
+            "Expected M=128 from matmul_shape, got:\n{}", source);
+        assert!(source.contains("const uint K = 64u;"),
+            "Expected K=64 from matmul_shape, got:\n{}", source);
+        assert!(source.contains("const uint N = 32u;"),
+            "Expected N=32 from matmul_shape, got:\n{}", source);
+        // The #403 grid-bounds check on row/col must still be emitted.
+        assert!(source.contains("if (row >= M || col >= N) return;"),
+            "Expected grid-bounds early-return from #403, got:\n{}", source);
+    }
+
+    /// A ComputeNode with `matmul_shape: None` MUST fall back to the
+    /// legacy `data_size_bytes / 3 / sqrt` heuristic so pre-#404 callers
+    /// continue to work. The `debug_assert!` on the fallback path means
+    /// this test only runs in release builds; `cargo test --release`
+    /// exercises it.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn test_emit_kernel_from_node_matmul_fallback_no_shape() {
+        // 3 * 64^2 * 4 = 49152 bytes for a 64x64 square matmul.
+        let data_size = 3 * 64 * 64 * 4;
+        let node = make_test_node(
+            42,
+            NodeKind::MatrixHeavy,
+            "FMUL",
+            data_size,
+            vec![ComputeTarget::Gpu],
+        );
+        // matmul_shape: None on purpose (make_test_node's default).
+        assert!(node.matmul_shape.is_none());
+
+        let source = emit_kernel_from_node(&node).unwrap();
+        // Heuristic recovers dim=64 from 3*dim^2*4 = 49152.
+        assert!(source.contains("const uint M = 64u;"),
+            "Expected fallback heuristic to derive M=64, got:\n{}", source);
+        assert!(source.contains("const uint N = 64u;"),
+            "Expected fallback heuristic to derive N=64, got:\n{}", source);
+    }
+
+    /// An explicit non-square `matmul_shape` must NOT trip the
+    /// square-derivation fallback — even if `data_size_bytes` would
+    /// coincidentally produce a valid square dim. This pins the
+    /// invariant that `matmul_shape` wins whenever it is `Some`.
+    #[test]
+    fn test_emit_kernel_from_node_matmul_shape_wins_over_data_size() {
+        let mut node = make_test_node(
+            43,
+            NodeKind::MatrixHeavy,
+            "FMUL",
+            // A "square friendly" byte count: 3 * 16^2 * 4 = 3072. If the
+            // emitter fell back to the heuristic, it would emit a 16x16
+            // matmul. The explicit shape below says 32x8x16 — M != N,
+            // which the heuristic cannot represent.
+            3 * 16 * 16 * 4,
+            vec![ComputeTarget::Gpu],
+        );
+        node.matmul_shape = Some(MatMulShape::new(32, 8, 16, LowerLirType::F32));
+
+        let source = emit_kernel_from_node(&node).unwrap();
+        assert!(source.contains("const uint M = 32u;"),
+            "Expected explicit M=32 to override heuristic, got:\n{}", source);
+        assert!(source.contains("const uint K = 8u;"),
+            "Expected explicit K=8 to override heuristic, got:\n{}", source);
+        assert!(source.contains("const uint N = 16u;"),
+            "Expected explicit N=16 to override heuristic, got:\n{}", source);
+        // M=32, K=8, N=16 — all multiples of 8, so aligned path.
+        assert!(source.contains("simdgroup_matrix<float, 8, 8>"),
+            "Expected simdgroup aligned path for 32x8x16, got:\n{}", source);
+        // #403 grid-bounds check must be preserved on the aligned path.
+        assert!(source.contains("if (row >= M || col >= N) return;"),
+            "Expected grid-bounds early-return from #403, got:\n{}", source);
     }
 
     #[test]
@@ -1867,13 +2244,16 @@ mod tests {
 
         let data_size = 3 * 64 * 64 * 4; // 64x64 square matmul
         let mut graph = ComputeGraph::new();
-        graph.nodes.push(make_test_node(
+        // Issue #404: populate `matmul_shape` explicitly.
+        let mut mm_node = make_test_node(
             4,
             NodeKind::MatrixHeavy,
             "FMUL",
             data_size,
             vec![ComputeTarget::Gpu],
-        ));
+        );
+        mm_node.matmul_shape = Some(MatMulShape::new(64, 64, 64, LowerLirType::F32));
+        graph.nodes.push(mm_node);
 
         let plan = DispatchPlan {
             ops: vec![

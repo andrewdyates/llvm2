@@ -1,7 +1,7 @@
 // llvm2-verify/frame_proofs.rs - SMT proofs for Frame Index Elimination correctness
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proves that frame index elimination in llvm2-codegen/src/frame.rs preserves
 // program semantics. Frame index elimination replaces abstract FrameIndex

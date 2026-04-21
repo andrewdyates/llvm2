@@ -1,7 +1,7 @@
 // llvm2-verify/const_materialize_proofs.rs - SMT proofs for constant materialization
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proves that AArch64 constant materialization strategies in
 // llvm2-opt/const_materialize.rs produce the correct register values.

@@ -1,7 +1,7 @@
 // llvm2-verify/neon_encoding_proofs.rs - NEON encoding correctness proofs
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proof obligations verifying that NEON SIMD instructions produce correct
 // results at the encoding level. Wave 22 added 21 NEON opcodes with binary

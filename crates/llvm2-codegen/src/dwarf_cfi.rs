@@ -1,14 +1,15 @@
-// llvm2-codegen - DWARF CFI (Call Frame Information) for AArch64 macOS
+// llvm2-codegen - DWARF CFI (Call Frame Information) for AArch64 and x86-64 macOS
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Reference: DWARF 5 spec, Section 6.4 (Call Frame Information)
 // Reference: ~/llvm-project-ref/llvm/lib/MC/MCDwarf.cpp
 //            (CIE/FDE emission)
 // Reference: Apple __eh_frame format (based on .eh_frame, LSB extensions)
+// Reference: System V AMD64 ABI, Section 3.7 (Register Mapping)
 
-//! DWARF Call Frame Information (CFI) emission for AArch64 Darwin.
+//! DWARF Call Frame Information (CFI) emission for AArch64 and x86-64 Darwin.
 //!
 //! When a function's frame layout cannot be described by Darwin compact
 //! unwind encoding (variable-size frames, unusual layouts), we fall back
@@ -41,9 +42,33 @@
 //! - Data alignment factor: -8 (stack grows down, 8-byte slots)
 //! - Return address register: 30 (X30/LR)
 //! - Pointer encoding: DW_EH_PE_pcrel | DW_EH_PE_sdata4
+//!
+//! # x86-64 Darwin CIE parameters
+//!
+//! - Version: 1 (eh_frame uses version 1)
+//! - Augmentation: "zR" (pointer encoding follows)
+//! - Code alignment factor: 1 (variable-length x86-64 instructions)
+//! - Data alignment factor: -8 (stack grows down, 8-byte slots)
+//! - Return address register: 16 (RIP)
+//! - Pointer encoding: DW_EH_PE_pcrel | DW_EH_PE_sdata4
+//!
+//! # x86-64 DWARF register numbers (AMD64 ABI)
+//!
+//! | Register | DWARF # | Register | DWARF # |
+//! |----------|---------|----------|---------|
+//! | RAX      | 0       | R8       | 8       |
+//! | RDX      | 1       | R9       | 9       |
+//! | RCX      | 2       | R10      | 10      |
+//! | RBX      | 3       | R11      | 11      |
+//! | RSI      | 4       | R12      | 12      |
+//! | RDI      | 5       | R13      | 13      |
+//! | RBP      | 6       | R14      | 14      |
+//! | RSP      | 7       | R15      | 15      |
+//! | RIP      | 16      | XMM0-15  | 17-32   |
 
 use crate::frame::FrameLayout;
 use llvm2_ir::regs::PReg;
+use llvm2_ir::x86_64_regs::X86PReg;
 
 // ---------------------------------------------------------------------------
 // DWARF CFA opcodes (subset needed for AArch64 frames)
@@ -79,6 +104,44 @@ const RA_REGISTER: u64 = 30;
 const FP_REGISTER: u64 = 29;
 /// AArch64 stack pointer DWARF register number (X31/SP).
 const SP_REGISTER: u64 = 31;
+
+// ---------------------------------------------------------------------------
+// x86-64 DWARF constants (AMD64 ABI)
+// ---------------------------------------------------------------------------
+
+/// x86-64 code alignment factor (variable-length instructions, 1 byte granularity).
+const X86_64_CODE_ALIGN_FACTOR: u64 = 1;
+/// x86-64 data alignment factor (stack grows down, 8-byte slots).
+const X86_64_DATA_ALIGN_FACTOR: i64 = -8;
+/// x86-64 return address DWARF register number (RIP).
+const X86_64_RA_REGISTER: u64 = 16;
+/// x86-64 stack pointer DWARF register number (RSP).
+const X86_64_SP_REGISTER: u64 = 7;
+/// x86-64 frame pointer DWARF register number (RBP).
+const X86_64_FP_REGISTER: u64 = 6;
+
+/// x86-64 DWARF register numbers (AMD64 ABI, DWARF 5 mapping).
+///
+/// Reference: System V AMD64 ABI, Figure 3.36 "DWARF Register Number Mapping"
+pub const X86_64_DWARF_RAX: u64 = 0;
+pub const X86_64_DWARF_RDX: u64 = 1;
+pub const X86_64_DWARF_RCX: u64 = 2;
+pub const X86_64_DWARF_RBX: u64 = 3;
+pub const X86_64_DWARF_RSI: u64 = 4;
+pub const X86_64_DWARF_RDI: u64 = 5;
+pub const X86_64_DWARF_RBP: u64 = 6;
+pub const X86_64_DWARF_RSP: u64 = 7;
+pub const X86_64_DWARF_R8: u64 = 8;
+pub const X86_64_DWARF_R9: u64 = 9;
+pub const X86_64_DWARF_R10: u64 = 10;
+pub const X86_64_DWARF_R11: u64 = 11;
+pub const X86_64_DWARF_R12: u64 = 12;
+pub const X86_64_DWARF_R13: u64 = 13;
+pub const X86_64_DWARF_R14: u64 = 14;
+pub const X86_64_DWARF_R15: u64 = 15;
+pub const X86_64_DWARF_RIP: u64 = 16;
+pub const X86_64_DWARF_XMM0: u64 = 17;
+pub const X86_64_DWARF_XMM15: u64 = 32;
 
 // ---------------------------------------------------------------------------
 // DwarfCie — Common Information Entry
@@ -176,6 +239,75 @@ impl DwarfCie {
             code_alignment_factor: CODE_ALIGN_FACTOR,
             data_alignment_factor: DATA_ALIGN_FACTOR,
             return_address_register: RA_REGISTER,
+            fde_pointer_encoding: DW_EH_PE_PCREL | DW_EH_PE_SDATA4,
+            personality_encoding: Some(personality_enc),
+            personality_pointer: Some(0), // placeholder, relocated
+            lsda_encoding: Some(lsda_enc),
+            initial_instructions,
+        }
+    }
+
+    /// Create the standard x86-64 Darwin CIE (no personality/LSDA).
+    ///
+    /// Augmentation: "zR" -- only FDE pointer encoding.
+    /// Initial instructions: CFA = RSP + 8 (return address is pushed at entry).
+    /// Return address register: RIP (DWARF 16).
+    ///
+    /// Key differences from AArch64:
+    /// - code_alignment_factor = 1 (variable-length instructions)
+    /// - CFA starts at RSP + 8 (not RSP + 0) because CALL pushes return address
+    /// - Return address register = 16 (RIP) instead of 30 (X30/LR)
+    ///
+    /// Reference: System V AMD64 ABI, Section 3.7
+    pub fn x86_64_darwin() -> Self {
+        let mut initial_instructions = Vec::new();
+        // DW_CFA_def_cfa RSP(7), 8 -- CFA = RSP + 8 at function entry
+        // (the CALL instruction pushed the 8-byte return address onto the stack)
+        initial_instructions.push(DW_CFA_DEF_CFA);
+        encode_uleb128(X86_64_SP_REGISTER, &mut initial_instructions);
+        encode_uleb128(8, &mut initial_instructions);
+
+        // DW_CFA_offset RIP(16), 1 -- return address at CFA-8 (factored: 8/8=1)
+        initial_instructions.push(DW_CFA_OFFSET | (X86_64_RA_REGISTER as u8 & 0x3F));
+        encode_uleb128(1, &mut initial_instructions);
+
+        Self {
+            version: 1,
+            augmentation: b"zR\0".to_vec(),
+            code_alignment_factor: X86_64_CODE_ALIGN_FACTOR,
+            data_alignment_factor: X86_64_DATA_ALIGN_FACTOR,
+            return_address_register: X86_64_RA_REGISTER,
+            fde_pointer_encoding: DW_EH_PE_PCREL | DW_EH_PE_SDATA4,
+            personality_encoding: None,
+            personality_pointer: None,
+            lsda_encoding: None,
+            initial_instructions,
+        }
+    }
+
+    /// Create an x86-64 Darwin CIE with personality and LSDA support.
+    ///
+    /// Augmentation: "zPLR" -- personality pointer, LSDA pointer encoding,
+    /// and FDE pointer encoding. Used for functions that participate in
+    /// C++ exception handling or Rust panic unwinding.
+    pub fn x86_64_darwin_with_eh() -> Self {
+        let mut initial_instructions = Vec::new();
+        initial_instructions.push(DW_CFA_DEF_CFA);
+        encode_uleb128(X86_64_SP_REGISTER, &mut initial_instructions);
+        encode_uleb128(8, &mut initial_instructions);
+
+        initial_instructions.push(DW_CFA_OFFSET | (X86_64_RA_REGISTER as u8 & 0x3F));
+        encode_uleb128(1, &mut initial_instructions);
+
+        let personality_enc = DW_EH_PE_PCREL | DW_EH_PE_SDATA4;
+        let lsda_enc = DW_EH_PE_PCREL | DW_EH_PE_SDATA4;
+
+        Self {
+            version: 1,
+            augmentation: b"zPLR\0".to_vec(),
+            code_alignment_factor: X86_64_CODE_ALIGN_FACTOR,
+            data_alignment_factor: X86_64_DATA_ALIGN_FACTOR,
+            return_address_register: X86_64_RA_REGISTER,
             fde_pointer_encoding: DW_EH_PE_PCREL | DW_EH_PE_SDATA4,
             personality_encoding: Some(personality_enc),
             personality_pointer: Some(0), // placeholder, relocated
@@ -441,6 +573,22 @@ impl DwarfCfiSection {
         }
     }
 
+    /// Create a new DWARF CFI section with the standard x86-64 Darwin CIE.
+    pub fn new_x86_64() -> Self {
+        Self {
+            cie: DwarfCie::x86_64_darwin(),
+            fdes: Vec::new(),
+        }
+    }
+
+    /// Create a new DWARF CFI section with x86-64 Darwin CIE + personality/LSDA.
+    pub fn new_x86_64_with_eh() -> Self {
+        Self {
+            cie: DwarfCie::x86_64_darwin_with_eh(),
+            fdes: Vec::new(),
+        }
+    }
+
     /// Add an FDE for a function.
     pub fn add_fde(&mut self, fde: DwarfFde) {
         self.fdes.push(fde);
@@ -555,6 +703,28 @@ fn encode_advance_loc(n_instructions: u32, out: &mut Vec<u8>) {
     }
 }
 
+/// Encode a DW_CFA_advance_loc for `n_bytes` of code (byte granularity).
+///
+/// For x86-64 where code_alignment_factor = 1, the delta is in bytes.
+/// Uses the smallest encoding that fits:
+/// - DW_CFA_advance_loc (6-bit delta, 0-63 bytes)
+/// - DW_CFA_advance_loc1 (8-bit delta, 0-255 bytes)
+/// - DW_CFA_advance_loc2 (16-bit delta, 0-65535 bytes)
+fn encode_advance_loc_bytes(n_bytes: u32, out: &mut Vec<u8>) {
+    if n_bytes == 0 {
+        return;
+    }
+    if n_bytes <= 63 {
+        out.push(DW_CFA_ADVANCE_LOC | (n_bytes as u8));
+    } else if n_bytes <= 255 {
+        out.push(DW_CFA_ADVANCE_LOC1);
+        out.push(n_bytes as u8);
+    } else {
+        out.push(DW_CFA_ADVANCE_LOC2);
+        out.extend_from_slice(&(n_bytes as u16).to_le_bytes());
+    }
+}
+
 /// Map a physical register to its DWARF register number.
 ///
 /// AArch64 DWARF register numbering:
@@ -571,6 +741,124 @@ fn preg_to_dwarf(preg: PReg, is_fpr: bool) -> u64 {
     } else {
         // X-registers: encoding 0-31, DWARF 0-31
         enc as u64
+    }
+}
+
+/// Map an x86-64 physical register (X86PReg) to its DWARF register number.
+///
+/// CRITICAL: X86PReg hardware encoding differs from DWARF numbering!
+///
+/// | X86PReg  | hw_enc | DWARF |   | X86PReg  | hw_enc | DWARF |
+/// |----------|--------|-------|---|----------|--------|-------|
+/// | RAX      | 0      | 0     |   | R8       | 8      | 8     |
+/// | RCX      | 1      | 2     |   | R9       | 9      | 9     |
+/// | RDX      | 2      | 1     |   | R10      | 10     | 10    |
+/// | RBX      | 3      | 3     |   | R11      | 11     | 11    |
+/// | RSP      | 4      | 7     |   | R12      | 12     | 12    |
+/// | RBP      | 5      | 6     |   | R13      | 13     | 13    |
+/// | RSI      | 6      | 4     |   | R14      | 14     | 14    |
+/// | RDI      | 7      | 5     |   | R15      | 15     | 15    |
+/// | XMM0-15  | 64-79  | 17-32 |
+///
+/// Reference: System V AMD64 ABI, Figure 3.36
+pub fn x86_64_preg_to_dwarf(preg: X86PReg) -> u64 {
+    let enc = preg.encoding();
+    match enc {
+        // GPR64 (0-15): non-trivial mapping for first 8 registers
+        0 => X86_64_DWARF_RAX,   // RAX: hw 0 -> DWARF 0
+        1 => X86_64_DWARF_RCX,   // RCX: hw 1 -> DWARF 2
+        2 => X86_64_DWARF_RDX,   // RDX: hw 2 -> DWARF 1
+        3 => X86_64_DWARF_RBX,   // RBX: hw 3 -> DWARF 3
+        4 => X86_64_DWARF_RSP,   // RSP: hw 4 -> DWARF 7
+        5 => X86_64_DWARF_RBP,   // RBP: hw 5 -> DWARF 6
+        6 => X86_64_DWARF_RSI,   // RSI: hw 6 -> DWARF 4
+        7 => X86_64_DWARF_RDI,   // RDI: hw 7 -> DWARF 5
+        8..=15 => enc as u64,     // R8-R15: hw == DWARF (8-15)
+        // XMM registers (64-79): DWARF 17-32
+        64..=79 => X86_64_DWARF_XMM0 + (enc as u64 - 64),
+        _ => panic!("Unknown x86-64 register encoding: {}", enc),
+    }
+}
+
+/// Generate x86-64 FDE CFI instructions from prologue parameters.
+///
+/// Describes the standard System V AMD64 ABI frame:
+/// ```text
+///   [entry]     CFA = RSP + 8       (return address on stack)
+///   PUSH RBP    CFA = RSP + 16      (RBP saved at CFA-16)
+///   MOV RBP,RSP CFA = RBP + 16      (switch to frame pointer based CFA)
+///   PUSH reg    CFA = RBP + 16      (callee-saved at known offsets from RBP)
+///   ...
+///   SUB RSP, N  CFA = RBP + 16      (CFA still FP-based, unaffected)
+/// ```
+///
+/// # Arguments
+/// - `callee_saved`: callee-saved registers pushed after RBP (in push order)
+/// - `frame_size`: bytes allocated via SUB RSP (for locals/spills, may be 0)
+/// - `function_offset`: function start address (for relocations)
+/// - `function_length`: total code size in bytes
+/// - `symbol_index`: symbol table index for relocations
+///
+/// # Instruction size estimates (conservative, used for advance_loc)
+/// - PUSH reg: 1 byte (no REX) or 2 bytes (REX prefix for R8-R15)
+/// - MOV RBP, RSP: 3 bytes (REX.W + 0x89 + ModRM)
+/// - SUB RSP, imm: 4 bytes (REX.W + 0x83 + ModRM + imm8) or 7 bytes (imm32)
+pub fn x86_64_fde_from_prologue(
+    callee_saved: &[X86PReg],
+    frame_size: u32,
+    function_offset: u64,
+    function_length: u32,
+    symbol_index: u32,
+) -> DwarfFde {
+    let mut instructions = Vec::new();
+
+    // After PUSH RBP: CFA = RSP + 16 (was RSP+8, pushed 8 bytes)
+    // PUSH RBP is 1 byte (opcode 0x55)
+    encode_advance_loc_bytes(1, &mut instructions);
+    instructions.push(DW_CFA_DEF_CFA_OFFSET);
+    encode_uleb128(16, &mut instructions);
+
+    // RBP saved at CFA - 16 (factored: 16/8 = 2)
+    instructions.push(DW_CFA_OFFSET | (X86_64_FP_REGISTER as u8 & 0x3F));
+    encode_uleb128(2, &mut instructions);
+
+    // After MOV RBP, RSP: CFA = RBP + 16 (switch to FP-based CFA)
+    // MOV RBP, RSP is 3 bytes (REX.W 0x48, MOV 0x89, ModRM 0xE5)
+    encode_advance_loc_bytes(3, &mut instructions);
+    instructions.push(DW_CFA_DEF_CFA);
+    encode_uleb128(X86_64_FP_REGISTER, &mut instructions);
+    encode_uleb128(16, &mut instructions);
+
+    // After each PUSH of callee-saved register:
+    // Register is saved at RBP - 8*(i+1) where i is 0-based push index
+    // In DWARF terms: saved at CFA - 16 - 8*(i+1) = CFA - (24 + 8*i)
+    // Factored offset: (24 + 8*i) / 8 = 3 + i
+    for (i, &reg) in callee_saved.iter().enumerate() {
+        // PUSH is 1 byte for RAX-RDI, 2 bytes for R8-R15 (REX prefix)
+        let enc = reg.encoding();
+        let push_size: u32 = if enc >= 8 && enc <= 15 { 2 } else { 1 };
+        encode_advance_loc_bytes(push_size, &mut instructions);
+
+        let dwarf_reg = x86_64_preg_to_dwarf(reg);
+        let factored_offset = (3 + i) as u64;
+        instructions.push(DW_CFA_OFFSET | (dwarf_reg as u8 & 0x3F));
+        encode_uleb128(factored_offset, &mut instructions);
+    }
+
+    // After SUB RSP, frame_size: no CFA change needed (CFA is RBP-based)
+    // We still advance the location counter for completeness if frame_size > 0
+    if frame_size > 0 {
+        // SUB RSP, imm8 = 4 bytes; SUB RSP, imm32 = 7 bytes
+        let sub_size: u32 = if frame_size <= 127 { 4 } else { 7 };
+        encode_advance_loc_bytes(sub_size, &mut instructions);
+    }
+
+    DwarfFde {
+        function_offset,
+        function_length,
+        symbol_index,
+        instructions,
+        lsda_pointer: None,
     }
 }
 
@@ -1111,5 +1399,425 @@ mod tests {
         // Verify terminator
         let last_4 = &bytes[bytes.len() - 4..];
         assert_eq!(last_4, &[0, 0, 0, 0]);
+    }
+
+    // =========================================================================
+    // x86-64 DWARF CFI tests
+    // =========================================================================
+
+    // --- x86-64 CIE tests ---
+
+    #[test]
+    fn test_x86_64_cie_creation() {
+        let cie = DwarfCie::x86_64_darwin();
+        assert_eq!(cie.version, 1);
+        assert_eq!(cie.code_alignment_factor, 1);
+        assert_eq!(cie.data_alignment_factor, -8);
+        assert_eq!(cie.return_address_register, 16); // RIP
+        assert_eq!(cie.fde_pointer_encoding, DW_EH_PE_PCREL | DW_EH_PE_SDATA4);
+        assert!(!cie.has_personality());
+    }
+
+    #[test]
+    fn test_x86_64_cie_serialization_not_empty() {
+        let cie = DwarfCie::x86_64_darwin();
+        let bytes = cie.to_bytes();
+        assert!(!bytes.is_empty());
+        assert!(bytes.len() >= 12);
+    }
+
+    #[test]
+    fn test_x86_64_cie_alignment() {
+        let cie = DwarfCie::x86_64_darwin();
+        let bytes = cie.to_bytes();
+        assert_eq!(bytes.len() % 8, 0, "CIE must be 8-byte aligned, got {}", bytes.len());
+    }
+
+    #[test]
+    fn test_x86_64_cie_length_field() {
+        let cie = DwarfCie::x86_64_darwin();
+        let bytes = cie.to_bytes();
+        let length = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        assert_eq!(length as usize, bytes.len() - 4);
+    }
+
+    #[test]
+    fn test_x86_64_cie_id_is_zero() {
+        let cie = DwarfCie::x86_64_darwin();
+        let bytes = cie.to_bytes();
+        let cie_id = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert_eq!(cie_id, 0, "eh_frame CIE ID must be 0");
+    }
+
+    #[test]
+    fn test_x86_64_cie_version() {
+        let cie = DwarfCie::x86_64_darwin();
+        let bytes = cie.to_bytes();
+        assert_eq!(bytes[8], 1, "eh_frame version must be 1");
+    }
+
+    #[test]
+    fn test_x86_64_cie_augmentation_string() {
+        let cie = DwarfCie::x86_64_darwin();
+        let bytes = cie.to_bytes();
+        // After length(4) + CIE id(4) + version(1) = byte 9
+        assert_eq!(&bytes[9..12], b"zR\0");
+    }
+
+    #[test]
+    fn test_x86_64_cie_initial_instructions_cfa_rsp_plus_8() {
+        let cie = DwarfCie::x86_64_darwin();
+        // Initial instructions should start with DW_CFA_def_cfa RSP(7), 8
+        assert!(cie.initial_instructions.len() >= 3);
+        assert_eq!(cie.initial_instructions[0], DW_CFA_DEF_CFA);
+        assert_eq!(cie.initial_instructions[1], 7); // RSP = ULEB128(7)
+        assert_eq!(cie.initial_instructions[2], 8); // offset = ULEB128(8)
+    }
+
+    #[test]
+    fn test_x86_64_cie_initial_instructions_ra_offset() {
+        let cie = DwarfCie::x86_64_darwin();
+        // After DW_CFA_def_cfa(1) + RSP(1) + 8(1) = 3 bytes,
+        // should have DW_CFA_offset RIP(16), 1
+        assert!(cie.initial_instructions.len() >= 5);
+        // DW_CFA_offset with register 16: 0x80 | (16 & 0x3F) = 0x80 | 0x10 = 0x90
+        assert_eq!(cie.initial_instructions[3], 0x90);
+        assert_eq!(cie.initial_instructions[4], 1); // factored offset: 8/8 = 1
+    }
+
+    // --- x86-64 zPLR CIE tests ---
+
+    #[test]
+    fn test_x86_64_cie_with_eh_creation() {
+        let cie = DwarfCie::x86_64_darwin_with_eh();
+        assert_eq!(cie.version, 1);
+        assert_eq!(cie.augmentation, b"zPLR\0");
+        assert_eq!(cie.code_alignment_factor, 1);
+        assert_eq!(cie.return_address_register, 16);
+        assert!(cie.has_personality());
+    }
+
+    #[test]
+    fn test_x86_64_cie_with_eh_alignment() {
+        let cie = DwarfCie::x86_64_darwin_with_eh();
+        let bytes = cie.to_bytes();
+        assert_eq!(bytes.len() % 8, 0, "CIE must be 8-byte aligned");
+    }
+
+    #[test]
+    fn test_x86_64_cie_with_eh_length_field() {
+        let cie = DwarfCie::x86_64_darwin_with_eh();
+        let bytes = cie.to_bytes();
+        let length = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        assert_eq!(length as usize, bytes.len() - 4);
+    }
+
+    #[test]
+    fn test_x86_64_cie_with_eh_larger_than_basic() {
+        let eh_cie = DwarfCie::x86_64_darwin_with_eh();
+        let basic_cie = DwarfCie::x86_64_darwin();
+        assert!(eh_cie.to_bytes().len() > basic_cie.to_bytes().len(),
+            "zPLR CIE should be larger than zR CIE");
+    }
+
+    // --- x86-64 register mapping tests ---
+
+    #[test]
+    fn test_x86_64_preg_to_dwarf_trivial_mappings() {
+        use llvm2_ir::x86_64_regs::*;
+        // RAX: hw 0 -> DWARF 0
+        assert_eq!(x86_64_preg_to_dwarf(RAX), 0);
+        // RBX: hw 3 -> DWARF 3
+        assert_eq!(x86_64_preg_to_dwarf(RBX), 3);
+    }
+
+    #[test]
+    fn test_x86_64_preg_to_dwarf_swapped_mappings() {
+        use llvm2_ir::x86_64_regs::*;
+        // RCX: hw 1 -> DWARF 2 (swapped with RDX!)
+        assert_eq!(x86_64_preg_to_dwarf(RCX), 2);
+        // RDX: hw 2 -> DWARF 1
+        assert_eq!(x86_64_preg_to_dwarf(RDX), 1);
+        // RSP: hw 4 -> DWARF 7
+        assert_eq!(x86_64_preg_to_dwarf(RSP), 7);
+        // RBP: hw 5 -> DWARF 6
+        assert_eq!(x86_64_preg_to_dwarf(RBP), 6);
+        // RSI: hw 6 -> DWARF 4
+        assert_eq!(x86_64_preg_to_dwarf(RSI), 4);
+        // RDI: hw 7 -> DWARF 5
+        assert_eq!(x86_64_preg_to_dwarf(RDI), 5);
+    }
+
+    #[test]
+    fn test_x86_64_preg_to_dwarf_extended_regs() {
+        use llvm2_ir::x86_64_regs::*;
+        // R8-R15: hw == DWARF
+        assert_eq!(x86_64_preg_to_dwarf(R8), 8);
+        assert_eq!(x86_64_preg_to_dwarf(R9), 9);
+        assert_eq!(x86_64_preg_to_dwarf(R12), 12);
+        assert_eq!(x86_64_preg_to_dwarf(R15), 15);
+    }
+
+    #[test]
+    fn test_x86_64_preg_to_dwarf_xmm() {
+        use llvm2_ir::x86_64_regs::*;
+        // XMM0: hw 64 -> DWARF 17
+        assert_eq!(x86_64_preg_to_dwarf(XMM0), 17);
+        // XMM15: hw 79 -> DWARF 32
+        assert_eq!(x86_64_preg_to_dwarf(XMM15), 32);
+        // XMM7: hw 71 -> DWARF 24
+        assert_eq!(x86_64_preg_to_dwarf(XMM7), 24);
+    }
+
+    // --- x86-64 FDE tests ---
+
+    #[test]
+    fn test_x86_64_fde_minimal_frame() {
+        // Simplest case: no callee-saved, no locals
+        let fde = x86_64_fde_from_prologue(&[], 0, 0, 32, 0);
+        assert_eq!(fde.function_length, 32);
+        assert!(!fde.instructions.is_empty());
+        // Should have: advance_loc(PUSH RBP) + def_cfa_offset(16) + offset(RBP) +
+        //             advance_loc(MOV) + def_cfa(RBP,16) = at least ~10 bytes
+        assert!(fde.instructions.len() >= 8,
+            "Minimal x86-64 FDE should have at least 8 instruction bytes, got {}",
+            fde.instructions.len());
+    }
+
+    #[test]
+    fn test_x86_64_fde_with_callee_saved() {
+        use llvm2_ir::x86_64_regs::*;
+        let callee_saved = vec![RBX, R12, R13];
+        let fde = x86_64_fde_from_prologue(&callee_saved, 64, 0, 256, 1);
+        assert_eq!(fde.function_length, 256);
+        assert_eq!(fde.symbol_index, 1);
+        // More instructions than minimal due to callee-saved + SUB RSP
+        let minimal = x86_64_fde_from_prologue(&[], 0, 0, 32, 0);
+        assert!(fde.instructions.len() > minimal.instructions.len(),
+            "FDE with callee-saved ({}) should be larger than minimal ({})",
+            fde.instructions.len(), minimal.instructions.len());
+    }
+
+    #[test]
+    fn test_x86_64_fde_with_large_frame() {
+        use llvm2_ir::x86_64_regs::*;
+        let callee_saved = vec![RBX, R12, R13, R14, R15];
+        let fde = x86_64_fde_from_prologue(&callee_saved, 4096, 0, 512, 2);
+        assert_eq!(fde.function_length, 512);
+        assert!(!fde.instructions.is_empty());
+    }
+
+    #[test]
+    fn test_x86_64_fde_serialization_alignment() {
+        let fde = x86_64_fde_from_prologue(&[], 0, 0, 64, 0);
+        let bytes = fde.to_bytes(24);
+        assert_eq!(bytes.len() % 8, 0, "FDE must be 8-byte aligned, got {}", bytes.len());
+    }
+
+    #[test]
+    fn test_x86_64_fde_length_field() {
+        let fde = x86_64_fde_from_prologue(&[], 0, 0, 64, 0);
+        let bytes = fde.to_bytes(24);
+        let length = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        assert_eq!(length as usize, bytes.len() - 4);
+    }
+
+    #[test]
+    fn test_x86_64_fde_instructions_start_with_advance_push_rbp() {
+        let fde = x86_64_fde_from_prologue(&[], 0, 0, 64, 0);
+        // First instruction: DW_CFA_advance_loc 1 (PUSH RBP = 1 byte)
+        assert_eq!(fde.instructions[0], DW_CFA_ADVANCE_LOC | 1);
+    }
+
+    #[test]
+    fn test_x86_64_fde_cfa_offset_16_after_push_rbp() {
+        let fde = x86_64_fde_from_prologue(&[], 0, 0, 64, 0);
+        // After advance_loc(1): DW_CFA_def_cfa_offset 16
+        assert_eq!(fde.instructions[1], DW_CFA_DEF_CFA_OFFSET);
+        assert_eq!(fde.instructions[2], 16); // ULEB128(16)
+    }
+
+    #[test]
+    fn test_x86_64_fde_rbp_saved_at_cfa_minus_16() {
+        let fde = x86_64_fde_from_prologue(&[], 0, 0, 64, 0);
+        // After def_cfa_offset: DW_CFA_offset RBP(6), 2 (factored: 16/8=2)
+        // DW_CFA_offset | (6 & 0x3F) = 0x80 | 0x06 = 0x86
+        assert_eq!(fde.instructions[3], 0x86);
+        assert_eq!(fde.instructions[4], 2); // factored offset
+    }
+
+    #[test]
+    fn test_x86_64_fde_advance_3_for_mov_rbp_rsp() {
+        let fde = x86_64_fde_from_prologue(&[], 0, 0, 64, 0);
+        // After RBP offset: advance_loc 3 (MOV RBP,RSP = 3 bytes)
+        assert_eq!(fde.instructions[5], DW_CFA_ADVANCE_LOC | 3);
+    }
+
+    #[test]
+    fn test_x86_64_fde_cfa_rbp_plus_16_after_mov() {
+        let fde = x86_64_fde_from_prologue(&[], 0, 0, 64, 0);
+        // After advance_loc(3): DW_CFA_def_cfa RBP(6), 16
+        assert_eq!(fde.instructions[6], DW_CFA_DEF_CFA);
+        assert_eq!(fde.instructions[7], 6);  // RBP DWARF number
+        assert_eq!(fde.instructions[8], 16); // offset
+    }
+
+    #[test]
+    fn test_x86_64_fde_callee_saved_rbx_at_correct_offset() {
+        use llvm2_ir::x86_64_regs::*;
+        let fde = x86_64_fde_from_prologue(&[RBX], 0, 0, 64, 0);
+        // After the base prologue (9 bytes):
+        // advance_loc(1) for PUSH RBX (RBX hw=3, 1 byte push)
+        assert_eq!(fde.instructions[9], DW_CFA_ADVANCE_LOC | 1);
+        // DW_CFA_offset RBX(DWARF 3), factored_offset=3
+        // 0x80 | (3 & 0x3F) = 0x83
+        assert_eq!(fde.instructions[10], 0x83);
+        assert_eq!(fde.instructions[11], 3); // factored: (24)/8 = 3
+    }
+
+    #[test]
+    fn test_x86_64_fde_callee_saved_r12_uses_2byte_push() {
+        use llvm2_ir::x86_64_regs::*;
+        let fde = x86_64_fde_from_prologue(&[R12], 0, 0, 64, 0);
+        // R12 has hw encoding 12 (>= 8), so PUSH needs REX prefix = 2 bytes
+        assert_eq!(fde.instructions[9], DW_CFA_ADVANCE_LOC | 2);
+        // DW_CFA_offset R12(DWARF 12), factored_offset=3
+        // 0x80 | (12 & 0x3F) = 0x8C
+        assert_eq!(fde.instructions[10], 0x8C);
+        assert_eq!(fde.instructions[11], 3);
+    }
+
+    // --- x86-64 section tests ---
+
+    #[test]
+    fn test_x86_64_section_empty() {
+        let section = DwarfCfiSection::new_x86_64();
+        assert!(section.is_empty());
+        assert_eq!(section.fde_count(), 0);
+        assert_eq!(section.to_bytes().len(), 0);
+    }
+
+    #[test]
+    fn test_x86_64_section_with_one_fde() {
+        let mut section = DwarfCfiSection::new_x86_64();
+        let fde = x86_64_fde_from_prologue(&[], 0, 0, 64, 0);
+        section.add_fde(fde);
+
+        assert_eq!(section.fde_count(), 1);
+        let bytes = section.to_bytes();
+        assert!(!bytes.is_empty());
+
+        // Terminator
+        let last_4 = &bytes[bytes.len() - 4..];
+        assert_eq!(last_4, &[0, 0, 0, 0], "Section must end with zero terminator");
+    }
+
+    #[test]
+    fn test_x86_64_section_with_multiple_fdes() {
+        use llvm2_ir::x86_64_regs::*;
+        let mut section = DwarfCfiSection::new_x86_64();
+
+        section.add_fde(x86_64_fde_from_prologue(&[], 0, 0, 64, 0));
+        section.add_fde(x86_64_fde_from_prologue(&[RBX, R12], 128, 64, 128, 1));
+        section.add_fde(x86_64_fde_from_prologue(&[RBX, R12, R13, R14, R15], 256, 192, 512, 2));
+
+        assert_eq!(section.fde_count(), 3);
+        let bytes = section.to_bytes();
+        assert!(!bytes.is_empty());
+
+        // Terminator
+        let last_4 = &bytes[bytes.len() - 4..];
+        assert_eq!(last_4, &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_x86_64_section_with_eh_cie() {
+        let mut section = DwarfCfiSection::new_x86_64_with_eh();
+        assert!(section.is_empty());
+
+        let mut fde = x86_64_fde_from_prologue(&[], 0, 0, 64, 0);
+        fde.lsda_pointer = Some(0);
+        section.add_fde(fde);
+
+        assert_eq!(section.fde_count(), 1);
+        let bytes = section.to_bytes();
+        assert!(!bytes.is_empty());
+
+        let last_4 = &bytes[bytes.len() - 4..];
+        assert_eq!(last_4, &[0, 0, 0, 0]);
+    }
+
+    // --- encode_advance_loc_bytes tests ---
+
+    #[test]
+    fn test_advance_loc_bytes_zero() {
+        let mut buf = Vec::new();
+        encode_advance_loc_bytes(0, &mut buf);
+        assert!(buf.is_empty(), "advance_loc_bytes(0) should emit nothing");
+    }
+
+    #[test]
+    fn test_advance_loc_bytes_small() {
+        let mut buf = Vec::new();
+        encode_advance_loc_bytes(1, &mut buf);
+        assert_eq!(buf.len(), 1);
+        assert_eq!(buf[0], DW_CFA_ADVANCE_LOC | 1);
+    }
+
+    #[test]
+    fn test_advance_loc_bytes_max_inline() {
+        let mut buf = Vec::new();
+        encode_advance_loc_bytes(63, &mut buf);
+        assert_eq!(buf.len(), 1);
+        assert_eq!(buf[0], DW_CFA_ADVANCE_LOC | 63);
+    }
+
+    #[test]
+    fn test_advance_loc_bytes_1byte_encoding() {
+        let mut buf = Vec::new();
+        encode_advance_loc_bytes(100, &mut buf);
+        assert_eq!(buf.len(), 2);
+        assert_eq!(buf[0], DW_CFA_ADVANCE_LOC1);
+        assert_eq!(buf[1], 100);
+    }
+
+    #[test]
+    fn test_advance_loc_bytes_2byte_encoding() {
+        let mut buf = Vec::new();
+        encode_advance_loc_bytes(300, &mut buf);
+        assert_eq!(buf.len(), 3);
+        assert_eq!(buf[0], DW_CFA_ADVANCE_LOC2);
+        assert_eq!(u16::from_le_bytes([buf[1], buf[2]]), 300);
+    }
+
+    // --- Cross-architecture comparison tests ---
+
+    #[test]
+    fn test_x86_64_cie_differs_from_aarch64() {
+        let x86_cie = DwarfCie::x86_64_darwin();
+        let arm_cie = DwarfCie::aarch64_darwin();
+
+        // Code alignment factor differs
+        assert_ne!(x86_cie.code_alignment_factor, arm_cie.code_alignment_factor);
+        assert_eq!(x86_cie.code_alignment_factor, 1);
+        assert_eq!(arm_cie.code_alignment_factor, 4);
+
+        // Return address register differs
+        assert_ne!(x86_cie.return_address_register, arm_cie.return_address_register);
+        assert_eq!(x86_cie.return_address_register, 16); // RIP
+        assert_eq!(arm_cie.return_address_register, 30); // X30
+
+        // Data alignment factor is the same
+        assert_eq!(x86_cie.data_alignment_factor, arm_cie.data_alignment_factor);
+
+        // Initial instructions differ (x86-64 has CFA=RSP+8, AArch64 has CFA=SP+0)
+        assert_ne!(x86_cie.initial_instructions, arm_cie.initial_instructions);
+    }
+
+    #[test]
+    fn test_x86_64_cie_serialized_bytes_differ_from_aarch64() {
+        let x86_bytes = DwarfCie::x86_64_darwin().to_bytes();
+        let arm_bytes = DwarfCie::aarch64_darwin().to_bytes();
+        assert_ne!(x86_bytes, arm_bytes);
     }
 }

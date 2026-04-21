@@ -1,7 +1,7 @@
 // E2E integration tests: tMIR -> LLVM2 pipeline -> Mach-O .o -> link -> run
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // These tests verify the complete compilation pipeline produces runnable
 // AArch64 binaries on macOS (Apple Silicon). This is the most important
@@ -14,9 +14,9 @@ use std::process::Command;
 use llvm2_codegen::compiler::{Compiler, CompilerConfig, CompilerTraceLevel};
 use llvm2_codegen::pipeline::{self, OptLevel};
 
-// Multi-block test imports
-use tmir::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule, FuncTy, Ty, FuncTyId, Constant};
-use tmir::{Inst, InstrNode, BinOp, ICmpOp, UnOp};
+// tMIR imports
+use tmir::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule, FuncTy, Ty, Constant};
+use tmir::{Inst, InstrNode, BinOp, ICmpOp};
 use tmir::{BlockId, FuncId, ValueId};
 
 // =============================================================================

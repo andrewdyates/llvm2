@@ -1,27 +1,32 @@
 # LLVM2
 # Verified compiler backend - tMIR to machine code
 #
-# Author: Andrew Yates <ayates@dropbox.com>
-# Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+# Copyright 2026 Andrew Yates | License: Apache-2.0
 
 [workspace]
 resolver = "2"
 members = [
     "crates/llvm2-ir",
+    "crates/llvm2-dialect",
     "crates/llvm2-lower",
     "crates/llvm2-opt",
     "crates/llvm2-verify",
     "crates/llvm2-codegen",
     "crates/llvm2-regalloc",
+    "crates/llvm2-gpu",
     "crates/llvm2-cli",
+    "crates/llvm2-fuzz",
+    "crates/llvm2-llvm-import",
+    "crates/llvm2-test",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/ayates_dbx/LLVM2"
-authors = ["Andrew Yates <ayates@dropbox.com>"]
+repository = "https://github.com/andrewdyates/LLVM2"
+authors = ["Andrew Yates <andrewyates.name@gmail.com>"]
 
 [workspace.dependencies]
 # Serialization
@@ -34,18 +39,38 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Verification (z4 SMT solver)
-# For git dep: z4 = { git = "https://github.com/ayates_dbx/z4" }
-z4 = { path = "/Users/ayates/z4/crates/z4" }
-z4-chc = { path = "/Users/ayates/z4/crates/z4-chc" }
+# For git dep: z4 = { git = "https://github.com/andrewdyates/z4" }
+z4 = { git = "https://github.com/andrewdyates/z4" }
+z4-chc = { git = "https://github.com/andrewdyates/z4" }
 
 # Input IR (tMIR) — real crate from the tMIR repo.
-tmir = { git = "ssh://git@github.com/dropbox-ai-prototypes/tMIR.git", rev = "f9b132a", features = ["serde"] }
-tmir-build = { git = "ssh://git@github.com/dropbox-ai-prototypes/tMIR.git", rev = "f9b132a" }
+# `parser` enables the `.tmir` text-format reader (see #413 and
+# designs/2026-04-16-tmir-transport-architecture.md, Layer 3).
+tmir = { git = "https://github.com/andrewdyates/tMIR", features = ["serde", "parser", "binary", "dialect-verif-example"] }
+tmir-build = { git = "https://github.com/andrewdyates/tMIR" }
 
 # Internal crates
 llvm2-ir = { path = "crates/llvm2-ir" }
+llvm2-dialect = { path = "crates/llvm2-dialect" }
 llvm2-lower = { path = "crates/llvm2-lower" }
 llvm2-opt = { path = "crates/llvm2-opt" }
 llvm2-verify = { path = "crates/llvm2-verify" }
 llvm2-codegen = { path = "crates/llvm2-codegen" }
 llvm2-regalloc = { path = "crates/llvm2-regalloc" }
+llvm2-gpu = { path = "crates/llvm2-gpu" }
+llvm2-llvm-import = { path = "crates/llvm2-llvm-import" }
+
+# Workspace-wide lint configuration.
+#
+# deny(warnings) is the zero-warnings ratchet enforced by
+# `scripts/check_warnings_ratchet.sh`. Production and test code must
+# compile without warnings. If a new warning is unavoidable (e.g., an
+# inherited dependency quirk), prefer a narrowly-scoped `#[allow(...)]`
+# with a comment explaining why, rather than loosening this lint.
+#
+# Per-crate opt-in: every member crate should include
+#   [lints]
+#   workspace = true
+# so this policy applies.
+[workspace.lints.rust]
+warnings = "deny"

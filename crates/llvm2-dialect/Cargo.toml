@@ -1,0 +1,19 @@
+# llvm2-dialect - Dialect framework and progressive lowering (MLIR-style)
+#
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+# Copyright 2026 Andrew Yates | License: Apache-2.0
+
+[package]
+name = "llvm2-dialect"
+description = "Dialect framework for LLVM2 (verif.* / tmir.* / machir.* progressive lowering)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+llvm2-ir = { workspace = true }
+
+[lints]
+workspace = true

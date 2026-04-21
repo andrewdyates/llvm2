@@ -1,7 +1,7 @@
 // llvm2-lower/x86_64_isel.rs - x86-64 instruction selection
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Reference: LLVM X86ISelLowering.cpp
 // Reference: Intel 64 and IA-32 Architectures Software Developer's Manual
@@ -30,7 +30,7 @@ use thiserror::Error;
 use llvm2_ir::regs::{RegClass, VReg};
 use llvm2_ir::x86_64_ops::{X86CondCode, X86Opcode};
 use llvm2_ir::x86_64_regs::{
-    self, X86PReg, RAX, RCX, RDX, RSP,
+    self, X86PReg, RAX, RCX, RDX, RSP, RBP, AL,
     X86_ARG_GPRS, X86_ARG_XMMS, X86_RET_GPRS,
 };
 
@@ -63,6 +63,14 @@ pub enum X86ISelError {
     UnsupportedFconstType(Type),
     #[error("unsupported ABI location: stack-passed returns are not supported")]
     UnsupportedReturnLocation,
+    #[error("Return arity mismatch: function signature declares {expected} return value(s) but Return instruction has {actual} arg(s); every non-void function must pass its return value(s) in Return.args")]
+    ReturnArityMismatch { expected: usize, actual: usize },
+    #[error("Return type mismatch at index {index}: signature declares {expected} but Return arg has type {actual}")]
+    ReturnTypeMismatch {
+        index: usize,
+        expected: String,
+        actual: String,
+    },
     #[error("malformed instruction: expected at least {expected} args, got {actual} (opcode context: {context})")]
     InsufficientArgs {
         expected: usize,
@@ -71,8 +79,6 @@ pub enum X86ISelError {
     },
     #[error("malformed instruction: expected at least 1 result (opcode context: {0})")]
     MissingResult(&'static str),
-    #[error("too many arguments for System V ABI: {0} (max 6 integer + 8 float)")]
-    TooManyArgs(usize),
     #[error("unsupported opcode for x86-64 ISel: {0}")]
     UnsupportedOpcode(String),
 }
@@ -97,38 +103,92 @@ pub fn x86cc_from_intcc(cc: IntCC) -> X86CondCode {
     }
 }
 
-/// Map tMIR floating-point comparison condition to x86-64 condition code.
+// ---------------------------------------------------------------------------
+// NaN-correct float comparison strategy
+// ---------------------------------------------------------------------------
+
+/// Strategy for materializing a NaN-correct x86-64 floating-point comparison
+/// after `UCOMISS`/`UCOMISD`.
 ///
-/// x86-64 UCOMISD sets CF, ZF, PF:
+/// x86-64 UCOMISD/UCOMISS sets CF, ZF, PF:
 ///   Equal:   CF=0, ZF=1, PF=0
 ///   Less:    CF=1, ZF=0, PF=0
 ///   Greater: CF=0, ZF=0, PF=0
 ///   NaN:     CF=1, ZF=1, PF=1
 ///
-/// Note: Fully NaN-correct float comparisons on x86-64 generally require
-/// two-instruction sequences (e.g., ordered equal = JE + JNP). The single-CC
-/// mappings below are best-effort for the current scaffolding ISel. The
-/// unordered variants use the negation of the complementary ordered CC,
-/// which is correct except for UnorderedEqual (E || P) and NotEqual
-/// (NE && NP) which need multi-instruction sequences.
-pub fn x86cc_from_floatcc(cc: FloatCC) -> X86CondCode {
+/// Some predicates can be expressed with a single condition code; others
+/// need a two-SETcc sequence combined with AND (ordered) or OR (unordered)
+/// to correctly handle the parity flag set by NaN inputs.
+///
+/// Reference: Intel SDM Vol 1 §8.1.2 (UCOMISD flag results);
+/// LLVM X86ISelLowering.cpp getX86ConditionCode().
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum X86FloatCmpStrategy {
+    /// Single condition code suffices (no parity fixup needed).
+    SingleCC(X86CondCode),
+    /// Two `SETcc` + `AND`: `result = SETcc(cc) & SETNP` (ordered — exclude NaN).
+    AndNotParity(X86CondCode),
+    /// Two `SETcc` + `OR`: `result = SETcc(cc) | SETP` (unordered — include NaN).
+    OrParity(X86CondCode),
+}
+
+/// Return the NaN-correct x86-64 materialization strategy for a `FloatCC`.
+///
+/// # Single-CC cases (no parity fixup):
+/// - `NotEqual` → NE: NaN has ZF=1 so NE is false → correct for ordered NE.
+/// - `GreaterThan` → A: NaN has CF=1,ZF=1 so A (CF=0∧ZF=0) is false → correct.
+/// - `GreaterThanOrEqual` → AE: NaN has CF=1 so AE (CF=0) is false → correct.
+/// - `Ordered` → NP: NaN has PF=1 so NP is false → correct.
+/// - `Unordered` → P: NaN has PF=1 so P is true → correct.
+/// - `UnorderedLessThan` → B: NaN has CF=1 so B is true → correct.
+/// - `UnorderedLessThanOrEqual` → BE: NaN has CF=1,ZF=1 so BE is true → correct.
+///
+/// # AndNotParity cases (ordered — NaN must be false):
+/// - `Equal` → SETE & SETNP: NaN has ZF=1 but PF=1, so SETE=1 but SETNP=0 → 0.
+/// - `LessThan` → SETB & SETNP: NaN has CF=1 but PF=1 → 0.
+/// - `LessThanOrEqual` → SETBE & SETNP: NaN has CF=1,ZF=1 but PF=1 → 0.
+///
+/// # OrParity cases (unordered — NaN must be true):
+/// - `UnorderedEqual` → SETE | SETP: NaN has PF=1 → 1.
+/// - `UnorderedNotEqual` → SETNE | SETP: NaN has ZF=1 so NE=0 but PF=1 → 1.
+/// - `UnorderedGreaterThan` → SETA | SETP: NaN has CF=1 so A=0 but PF=1 → 1.
+/// - `UnorderedGreaterThanOrEqual` → SETAE | SETP: NaN has CF=1 so AE=0 but PF=1 → 1.
+pub fn x86_float_cmp_strategy(cc: FloatCC) -> X86FloatCmpStrategy {
     match cc {
-        // Ordered (false for NaN)
-        FloatCC::Equal => X86CondCode::E,
-        FloatCC::NotEqual => X86CondCode::NE,
-        FloatCC::LessThan => X86CondCode::B,
-        FloatCC::LessThanOrEqual => X86CondCode::BE,
-        FloatCC::GreaterThan => X86CondCode::A,
-        FloatCC::GreaterThanOrEqual => X86CondCode::AE,
-        FloatCC::Ordered => X86CondCode::NP,
-        FloatCC::Unordered => X86CondCode::P,
-        // Unordered (true for NaN) — invert complementary ordered CC
-        FloatCC::UnorderedNotEqual => X86CondCode::NE,  // !OEQ (best single-CC approx)
-        FloatCC::UnorderedLessThan => X86CondCode::B,    // CF=1; NaN has CF=1
-        FloatCC::UnorderedLessThanOrEqual => X86CondCode::BE, // CF=1||ZF=1; NaN has both
-        FloatCC::UnorderedGreaterThan => X86CondCode::A, // CF=0&&ZF=0; needs two CCs
-        FloatCC::UnorderedGreaterThanOrEqual => X86CondCode::AE, // CF=0; needs two CCs
-        FloatCC::UnorderedEqual => X86CondCode::E,       // ZF=1; NaN has ZF=1 (correct!)
+        // Ordered — single CC (NaN already gives the correct false result)
+        FloatCC::NotEqual => X86FloatCmpStrategy::SingleCC(X86CondCode::NE),
+        FloatCC::GreaterThan => X86FloatCmpStrategy::SingleCC(X86CondCode::A),
+        FloatCC::GreaterThanOrEqual => X86FloatCmpStrategy::SingleCC(X86CondCode::AE),
+        FloatCC::Ordered => X86FloatCmpStrategy::SingleCC(X86CondCode::NP),
+
+        // Ordered — need AND with NP to exclude NaN
+        FloatCC::Equal => X86FloatCmpStrategy::AndNotParity(X86CondCode::E),
+        FloatCC::LessThan => X86FloatCmpStrategy::AndNotParity(X86CondCode::B),
+        FloatCC::LessThanOrEqual => X86FloatCmpStrategy::AndNotParity(X86CondCode::BE),
+
+        // Unordered — single CC (NaN already gives the correct true result)
+        FloatCC::Unordered => X86FloatCmpStrategy::SingleCC(X86CondCode::P),
+        FloatCC::UnorderedLessThan => X86FloatCmpStrategy::SingleCC(X86CondCode::B),
+        FloatCC::UnorderedLessThanOrEqual => X86FloatCmpStrategy::SingleCC(X86CondCode::BE),
+
+        // Unordered — need OR with P to include NaN
+        FloatCC::UnorderedEqual => X86FloatCmpStrategy::OrParity(X86CondCode::E),
+        FloatCC::UnorderedNotEqual => X86FloatCmpStrategy::OrParity(X86CondCode::NE),
+        FloatCC::UnorderedGreaterThan => X86FloatCmpStrategy::OrParity(X86CondCode::A),
+        FloatCC::UnorderedGreaterThanOrEqual => X86FloatCmpStrategy::OrParity(X86CondCode::AE),
+    }
+}
+
+/// Map tMIR floating-point comparison condition to x86-64 condition code.
+///
+/// **Deprecated:** This function returns only the primary condition code and
+/// omits the parity combination needed for NaN-correct lowering.  Use
+/// [`x86_float_cmp_strategy`] for new floating-point comparison selection.
+pub fn x86cc_from_floatcc(cc: FloatCC) -> X86CondCode {
+    match x86_float_cmp_strategy(cc) {
+        X86FloatCmpStrategy::SingleCC(cc)
+        | X86FloatCmpStrategy::AndNotParity(cc)
+        | X86FloatCmpStrategy::OrParity(cc) => cc,
     }
 }
 
@@ -163,6 +223,11 @@ pub enum X86ISelOperand {
         base: Box<X86ISelOperand>,
         disp: i32,
     },
+    /// Constant pool entry index (for RIP-relative float/double loads).
+    ///
+    /// References an entry in `X86ISelFunction::const_pool_entries`.
+    /// The codegen pipeline resolves this to a RIP-relative displacement.
+    ConstPoolEntry(usize),
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +259,23 @@ pub struct X86ISelBlock {
 }
 
 // ---------------------------------------------------------------------------
+// ISel constant pool entry
+// ---------------------------------------------------------------------------
+
+/// A float/double constant collected during instruction selection.
+///
+/// Each entry records the raw bytes and alignment. The codegen pipeline
+/// uses these to build a proper constant pool section and compute
+/// RIP-relative displacements.
+#[derive(Debug, Clone)]
+pub struct X86ISelConstPoolEntry {
+    /// Raw bytes of the constant (4 for f32, 8 for f64).
+    pub data: Vec<u8>,
+    /// Required alignment (4 for f32, 8 for f64).
+    pub align: u32,
+}
+
+// ---------------------------------------------------------------------------
 // x86-64 ISel function
 // ---------------------------------------------------------------------------
 
@@ -205,6 +287,10 @@ pub struct X86ISelFunction {
     pub blocks: HashMap<Block, X86ISelBlock>,
     pub block_order: Vec<Block>,
     pub next_vreg: u32,
+    /// Constant pool entries collected during ISel (float/double immediates).
+    ///
+    /// Indexed by the `ConstPoolEntry(usize)` operand variant.
+    pub const_pool_entries: Vec<X86ISelConstPoolEntry>,
 }
 
 impl X86ISelFunction {
@@ -215,6 +301,7 @@ impl X86ISelFunction {
             blocks: HashMap::new(),
             block_order: Vec::new(),
             next_vreg: 0,
+            const_pool_entries: Vec::new(),
         }
     }
 
@@ -336,6 +423,18 @@ impl X86InstructionSelector {
         self.value_types.insert(val, ty);
     }
 
+    /// Seed the `value_types` map with type hints from the adapter.
+    ///
+    /// See `InstructionSelector::seed_value_types` (AArch64) for the
+    /// motivating #381 case — `Opcode::Call` result values need their
+    /// return type recorded here so ABI classification picks the right
+    /// ret-reg width instead of defaulting to I64.
+    pub fn seed_value_types(&mut self, types: &HashMap<Value, Type>) {
+        for (val, ty) in types {
+            self.value_types.insert(*val, ty.clone());
+        }
+    }
+
     /// Look up the machine operand for a tMIR Value.
     pub fn use_value(&self, val: &Value) -> Result<X86ISelOperand, X86ISelError> {
         self.value_map
@@ -385,8 +484,18 @@ impl X86InstructionSelector {
             Opcode::Iconst { ty, imm } => self.select_iconst(ty.clone(), *imm, inst, block)?,
             Opcode::Fconst { ty, imm } => self.select_fconst(ty.clone(), *imm, inst, block)?,
 
+            // Copy pseudo — register-to-register move. See #417.
+            Opcode::Copy => self.select_move_reg(inst, block)?,
             // Arithmetic
-            Opcode::Iadd if inst.args.len() == 1 => self.select_move_reg(inst, block)?,
+            // Guard: single-arg Iadd was previously the COPY placeholder.
+            // After #417 it must not appear in well-formed LIR.
+            Opcode::Iadd if inst.args.len() == 1 => {
+                return Err(X86ISelError::InsufficientArgs {
+                    expected: 2,
+                    actual: 1,
+                    context: "Iadd (use Opcode::Copy for single-arg moves; see #417)",
+                })
+            }
             Opcode::Iadd => self.select_arithmetic(X86ArithOp::Add, inst, block)?,
             Opcode::Isub => self.select_arithmetic(X86ArithOp::Sub, inst, block)?,
             Opcode::Imul => self.select_arithmetic(X86ArithOp::Imul, inst, block)?,
@@ -445,6 +554,9 @@ impl X86InstructionSelector {
             } => self.select_condbranch(inst, *then_dest, *else_dest, block)?,
             Opcode::Return => self.lower_return(inst, block)?,
             Opcode::Call { name } => self.lower_call(name, inst, block)?,
+            Opcode::CallVariadic { name, fixed_args } => {
+                self.lower_variadic_call(name, *fixed_args as usize, inst, block)?
+            }
 
             // Switch (multi-way branch)
             Opcode::Switch { cases, default } => self.select_switch(inst, cases, *default, block)?,
@@ -492,9 +604,11 @@ impl X86InstructionSelector {
 
     /// Select float constant materialization.
     ///
-    /// For the scaffold, we emit a MOVSD from a constant pool address.
-    /// This is simplified: a real implementation would emit a RIP-relative
-    /// MOVSD load from .rodata.
+    /// Emits a RIP-relative MOVSS/MOVSD from the constant pool. On x86-64,
+    /// there is no instruction to load a float immediate directly into XMM;
+    /// constants are placed in a .rodata section and loaded via:
+    ///   MOVSS xmm, [RIP + offset]   (for f32)
+    ///   MOVSD xmm, [RIP + offset]   (for f64)
     fn select_fconst(
         &mut self,
         ty: Type,
@@ -507,18 +621,34 @@ impl X86InstructionSelector {
         let dst = self.new_vreg(class);
         let result = &inst.results[0];
 
-        match ty {
-            Type::F32 | Type::F64 => {}
+        let (opcode, entry_idx) = match ty {
+            Type::F32 => {
+                let val = imm as f32;
+                let entry = X86ISelConstPoolEntry {
+                    data: val.to_le_bytes().to_vec(),
+                    align: 4,
+                };
+                let idx = self.func.const_pool_entries.len();
+                self.func.const_pool_entries.push(entry);
+                (X86Opcode::MovssRipRel, idx)
+            }
+            Type::F64 => {
+                let entry = X86ISelConstPoolEntry {
+                    data: imm.to_le_bytes().to_vec(),
+                    align: 8,
+                };
+                let idx = self.func.const_pool_entries.len();
+                self.func.const_pool_entries.push(entry);
+                (X86Opcode::MovsdRipRel, idx)
+            }
             _ => return Err(X86ISelError::UnsupportedFconstType(ty)),
-        }
+        };
 
-        // Emit as FImm placeholder; the encoder/legalization will handle
-        // materializing this via constant pool + RIP-relative MOVSD.
         self.func.push_inst(
             block,
             X86ISelInst::new(
-                X86Opcode::MovsdRR,
-                vec![X86ISelOperand::VReg(dst), X86ISelOperand::FImm(imm)],
+                opcode,
+                vec![X86ISelOperand::VReg(dst), X86ISelOperand::ConstPoolEntry(entry_idx)],
             ),
         );
 
@@ -962,13 +1092,29 @@ impl X86InstructionSelector {
 
         let is_f32 = matches!(ty, Type::F32);
 
-        // Materialize 0.0 into a register
-        let mov_opc = if is_f32 { X86Opcode::MovssRR } else { X86Opcode::MovsdRR };
+        // Materialize 0.0 into a register via constant pool + RIP-relative load
+        let (mov_opc, entry_idx) = if is_f32 {
+            let entry = X86ISelConstPoolEntry {
+                data: 0.0_f32.to_le_bytes().to_vec(),
+                align: 4,
+            };
+            let idx = self.func.const_pool_entries.len();
+            self.func.const_pool_entries.push(entry);
+            (X86Opcode::MovssRipRel, idx)
+        } else {
+            let entry = X86ISelConstPoolEntry {
+                data: 0.0_f64.to_le_bytes().to_vec(),
+                align: 8,
+            };
+            let idx = self.func.const_pool_entries.len();
+            self.func.const_pool_entries.push(entry);
+            (X86Opcode::MovsdRipRel, idx)
+        };
         self.func.push_inst(
             block,
             X86ISelInst::new(
                 mov_opc,
-                vec![X86ISelOperand::VReg(zero), X86ISelOperand::FImm(0.0)],
+                vec![X86ISelOperand::VReg(zero), X86ISelOperand::ConstPoolEntry(entry_idx)],
             ),
         );
 
@@ -994,11 +1140,37 @@ impl X86InstructionSelector {
     // Floating-point comparison
     // -----------------------------------------------------------------------
 
-    /// Select floating-point comparison: UCOMISS/UCOMISD + SETcc.
+    /// Select floating-point comparison: `UCOMISS/UCOMISD` + NaN-correct `SETcc`.
     ///
-    /// tMIR `Fcmp(cond, lhs, rhs) -> bool_result` becomes:
-    ///   UCOMIS{S,D} lhs, rhs   (sets RFLAGS: CF, ZF, PF)
-    ///   MOV dst, 0 + CondCode  (pseudo for SETcc)
+    /// tMIR `Fcmp(cond, lhs, rhs) -> bool_result` becomes one of three patterns
+    /// depending on the NaN handling required by the comparison predicate:
+    ///
+    /// **SingleCC(cc):**
+    /// ```text
+    ///   UCOMIS{S,D} lhs, rhs
+    ///   SETcc       dst
+    ///   MOVZX       dst, dst    ; zero-extend byte to 32-bit
+    /// ```
+    ///
+    /// **AndNotParity(cc)** — ordered comparisons where NaN must yield false:
+    /// ```text
+    ///   UCOMIS{S,D} lhs, rhs
+    ///   SETcc       dst
+    ///   MOVZX       dst, dst
+    ///   SETNP       tmp
+    ///   MOVZX       tmp, tmp
+    ///   AND         dst, dst, tmp
+    /// ```
+    ///
+    /// **OrParity(cc)** — unordered comparisons where NaN must yield true:
+    /// ```text
+    ///   UCOMIS{S,D} lhs, rhs
+    ///   SETcc       dst
+    ///   MOVZX       dst, dst
+    ///   SETP        tmp
+    ///   MOVZX       tmp, tmp
+    ///   OR          dst, dst, tmp
+    /// ```
     fn select_fcmp(
         &mut self,
         cond: FloatCC,
@@ -1016,9 +1188,7 @@ impl X86InstructionSelector {
         let lhs = self.use_value(&lhs_val)?;
         let rhs = self.use_value(&rhs_val)?;
 
-        let x86cc = x86cc_from_floatcc(cond);
-
-        // UCOMISD/UCOMISS lhs, rhs
+        // UCOMISD/UCOMISS lhs, rhs — sets CF, ZF, PF
         let cmp_opc = if matches!(ty, Type::F32) {
             X86Opcode::Ucomiss
         } else {
@@ -1029,21 +1199,112 @@ impl X86InstructionSelector {
             X86ISelInst::new(cmp_opc, vec![lhs, rhs]),
         );
 
-        // Materialize boolean result with condition code
         let dst = self.new_vreg(RegClass::Gpr32);
-        self.func.push_inst(
-            block,
-            X86ISelInst::new(
-                X86Opcode::MovRI,
-                vec![
-                    X86ISelOperand::VReg(dst),
-                    X86ISelOperand::Imm(0),
-                    X86ISelOperand::CondCode(x86cc),
-                ],
-            ),
-        );
+        let dst_op = X86ISelOperand::VReg(dst);
 
-        self.define_value(result_val, X86ISelOperand::VReg(dst), Type::B1);
+        match x86_float_cmp_strategy(cond) {
+            X86FloatCmpStrategy::SingleCC(cc) => {
+                // SETcc dst; MOVZX dst, dst
+                self.func.push_inst(
+                    block,
+                    X86ISelInst::new(
+                        X86Opcode::Setcc,
+                        vec![dst_op.clone(), X86ISelOperand::CondCode(cc)],
+                    ),
+                );
+                self.func.push_inst(
+                    block,
+                    X86ISelInst::new(
+                        X86Opcode::Movzx,
+                        vec![dst_op.clone(), dst_op.clone()],
+                    ),
+                );
+            }
+            X86FloatCmpStrategy::AndNotParity(cc) => {
+                // SETcc dst; MOVZX dst,dst; SETNP tmp; MOVZX tmp,tmp; AND dst,dst,tmp
+                let tmp = self.new_vreg(RegClass::Gpr32);
+                let tmp_op = X86ISelOperand::VReg(tmp);
+
+                self.func.push_inst(
+                    block,
+                    X86ISelInst::new(
+                        X86Opcode::Setcc,
+                        vec![dst_op.clone(), X86ISelOperand::CondCode(cc)],
+                    ),
+                );
+                self.func.push_inst(
+                    block,
+                    X86ISelInst::new(
+                        X86Opcode::Movzx,
+                        vec![dst_op.clone(), dst_op.clone()],
+                    ),
+                );
+                self.func.push_inst(
+                    block,
+                    X86ISelInst::new(
+                        X86Opcode::Setcc,
+                        vec![tmp_op.clone(), X86ISelOperand::CondCode(X86CondCode::NP)],
+                    ),
+                );
+                self.func.push_inst(
+                    block,
+                    X86ISelInst::new(
+                        X86Opcode::Movzx,
+                        vec![tmp_op.clone(), tmp_op.clone()],
+                    ),
+                );
+                self.func.push_inst(
+                    block,
+                    X86ISelInst::new(
+                        X86Opcode::AndRR,
+                        vec![dst_op.clone(), dst_op.clone(), tmp_op],
+                    ),
+                );
+            }
+            X86FloatCmpStrategy::OrParity(cc) => {
+                // SETcc dst; MOVZX dst,dst; SETP tmp; MOVZX tmp,tmp; OR dst,dst,tmp
+                let tmp = self.new_vreg(RegClass::Gpr32);
+                let tmp_op = X86ISelOperand::VReg(tmp);
+
+                self.func.push_inst(
+                    block,
+                    X86ISelInst::new(
+                        X86Opcode::Setcc,
+                        vec![dst_op.clone(), X86ISelOperand::CondCode(cc)],
+                    ),
+                );
+                self.func.push_inst(
+                    block,
+                    X86ISelInst::new(
+                        X86Opcode::Movzx,
+                        vec![dst_op.clone(), dst_op.clone()],
+                    ),
+                );
+                self.func.push_inst(
+                    block,
+                    X86ISelInst::new(
+                        X86Opcode::Setcc,
+                        vec![tmp_op.clone(), X86ISelOperand::CondCode(X86CondCode::P)],
+                    ),
+                );
+                self.func.push_inst(
+                    block,
+                    X86ISelInst::new(
+                        X86Opcode::Movzx,
+                        vec![tmp_op.clone(), tmp_op.clone()],
+                    ),
+                );
+                self.func.push_inst(
+                    block,
+                    X86ISelInst::new(
+                        X86Opcode::OrRR,
+                        vec![dst_op.clone(), dst_op.clone(), tmp_op],
+                    ),
+                );
+            }
+        }
+
+        self.define_value(result_val, dst_op, Type::B1);
         Ok(())
     }
 
@@ -1487,86 +1748,169 @@ impl X86InstructionSelector {
     ///
     /// Integer arguments: RDI, RSI, RDX, RCX, R8, R9 (in order)
     /// FP arguments: XMM0-XMM7
+    /// Stack arguments: pushed via SUB RSP + MOV [RSP+offset] (16-byte aligned)
     /// Return value: RAX (integer), XMM0 (float)
     ///
-    /// 1. Move arguments to physical registers
-    /// 2. Emit CALL symbol
-    /// 3. Copy return value from RAX/XMM0 to vreg
+    /// Two-pass approach:
+    /// 1. Classify each argument as register or stack
+    /// 2. Pre-allocate aligned stack space, emit register/stack moves
+    /// 3. Emit CALL, clean up stack, copy return values
     pub fn lower_call(
         &mut self,
         name: &str,
         inst: &Instruction,
         block: Block,
     ) -> Result<(), X86ISelError> {
+        self.lower_call_inner(name, inst, block, false, 0)
+    }
+
+    /// Shared call lowering for both normal and variadic calls.
+    ///
+    /// When `is_variadic` is true, AL is set to the count of XMM argument
+    /// registers used before the CALL, as required by the System V AMD64 ABI.
+    fn lower_call_inner(
+        &mut self,
+        name: &str,
+        inst: &Instruction,
+        block: Block,
+        is_variadic: bool,
+        _fixed_args: usize,
+    ) -> Result<(), X86ISelError> {
+        // -- Pass 1: classify each arg into register or stack -----------------
+        #[derive(Clone)]
+        enum ArgLoc {
+            Gpr(usize),   // index into X86_ARG_GPRS
+            Xmm(usize),   // index into X86_ARG_XMMS
+            Stack(i64),    // offset from RSP after allocation
+        }
+
         let mut gpr_idx: usize = 0;
         let mut xmm_idx: usize = 0;
-        let mut stack_offset: i64 = 0;
+        let mut stack_count: i64 = 0;
+        let mut arg_locs = Vec::with_capacity(inst.args.len());
 
-        // Move arguments to ABI registers
         for val in &inst.args {
-            let src = self.use_value(val)?;
             let ty = self.value_type(val);
-
             let is_fp = matches!(ty, Type::F32 | Type::F64);
 
             if is_fp {
                 if xmm_idx < X86_ARG_XMMS.len() {
-                    // Move to XMM argument register
+                    arg_locs.push(ArgLoc::Xmm(xmm_idx));
+                    xmm_idx += 1;
+                } else {
+                    arg_locs.push(ArgLoc::Stack(stack_count * 8));
+                    stack_count += 1;
+                }
+            } else if gpr_idx < X86_ARG_GPRS.len() {
+                arg_locs.push(ArgLoc::Gpr(gpr_idx));
+                gpr_idx += 1;
+            } else {
+                arg_locs.push(ArgLoc::Stack(stack_count * 8));
+                stack_count += 1;
+            }
+        }
+
+        let xmm_count = xmm_idx;
+
+        // -- Compute aligned stack allocation ---------------------------------
+        // Stack args occupy stack_count * 8 bytes. Round up to 16-byte boundary
+        // so RSP is 16-byte aligned before the CALL instruction (which pushes
+        // an 8-byte return address).
+        let stack_bytes = stack_count * 8;
+        let aligned_stack = if stack_bytes == 0 {
+            0i64
+        } else {
+            (stack_bytes + 15) & !15
+        };
+
+        // -- Allocate stack space if needed ------------------------------------
+        if aligned_stack > 0 {
+            self.func.push_inst(
+                block,
+                X86ISelInst::new(
+                    X86Opcode::SubRI,
+                    vec![
+                        X86ISelOperand::PReg(RSP),
+                        X86ISelOperand::Imm(aligned_stack),
+                    ],
+                ),
+            );
+        }
+
+        // -- Pass 2: emit register moves and stack stores ---------------------
+        for (val, loc) in inst.args.iter().zip(arg_locs.iter()) {
+            let src = self.use_value(val)?;
+            let ty = self.value_type(val);
+            let is_fp = matches!(ty, Type::F32 | Type::F64);
+
+            match loc {
+                ArgLoc::Gpr(idx) => {
+                    self.func.push_inst(
+                        block,
+                        X86ISelInst::new(
+                            X86Opcode::MovRR,
+                            vec![
+                                X86ISelOperand::PReg(X86_ARG_GPRS[*idx]),
+                                src,
+                            ],
+                        ),
+                    );
+                }
+                ArgLoc::Xmm(idx) => {
                     self.func.push_inst(
                         block,
                         X86ISelInst::new(
                             X86Opcode::MovsdRR,
                             vec![
-                                X86ISelOperand::PReg(X86_ARG_XMMS[xmm_idx]),
+                                X86ISelOperand::PReg(X86_ARG_XMMS[*idx]),
                                 src,
                             ],
                         ),
                     );
-                    xmm_idx += 1;
-                } else {
-                    // Stack-passed FP argument
-                    self.func.push_inst(
-                        block,
-                        X86ISelInst::new(
-                            X86Opcode::MovMR,
-                            vec![
-                                X86ISelOperand::MemAddr {
-                                    base: Box::new(X86ISelOperand::PReg(RSP)),
-                                    disp: stack_offset as i32,
-                                },
-                                src,
-                            ],
-                        ),
-                    );
-                    stack_offset += 8;
                 }
-            } else if gpr_idx < X86_ARG_GPRS.len() {
-                // Move to GPR argument register
-                self.func.push_inst(
-                    block,
-                    X86ISelInst::new(
-                        X86Opcode::MovRR,
-                        vec![
-                            X86ISelOperand::PReg(X86_ARG_GPRS[gpr_idx]),
-                            src,
-                        ],
-                    ),
-                );
-                gpr_idx += 1;
-            } else {
-                // Stack-passed integer argument
-                self.func.push_inst(
-                    block,
-                    X86ISelInst::new(
-                        X86Opcode::Push,
-                        vec![src],
-                    ),
-                );
-                stack_offset += 8;
+                ArgLoc::Stack(offset) => {
+                    let mem = X86ISelOperand::MemAddr {
+                        base: Box::new(X86ISelOperand::PReg(RSP)),
+                        disp: *offset as i32,
+                    };
+                    if is_fp {
+                        // MOVSD [RSP+offset], xmm
+                        self.func.push_inst(
+                            block,
+                            X86ISelInst::new(
+                                X86Opcode::MovsdMR,
+                                vec![mem, src],
+                            ),
+                        );
+                    } else {
+                        // MOV [RSP+offset], r64
+                        self.func.push_inst(
+                            block,
+                            X86ISelInst::new(
+                                X86Opcode::MovMR,
+                                vec![mem, src],
+                            ),
+                        );
+                    }
+                }
             }
         }
 
-        // Emit CALL with symbol for relocation
+        // -- Set AL = XMM count for variadic calls ----------------------------
+        if is_variadic {
+            self.func.push_inst(
+                block,
+                X86ISelInst::new(
+                    X86Opcode::MovRI,
+                    vec![
+                        X86ISelOperand::PReg(AL),
+                        X86ISelOperand::Imm(xmm_count as i64),
+                    ],
+                ),
+            );
+        }
+
+        // -- Emit CALL --------------------------------------------------------
         self.func.push_inst(
             block,
             X86ISelInst::new(
@@ -1575,7 +1919,21 @@ impl X86InstructionSelector {
             ),
         );
 
-        // Copy return values from physical registers to vregs
+        // -- Clean up stack ---------------------------------------------------
+        if aligned_stack > 0 {
+            self.func.push_inst(
+                block,
+                X86ISelInst::new(
+                    X86Opcode::AddRI,
+                    vec![
+                        X86ISelOperand::PReg(RSP),
+                        X86ISelOperand::Imm(aligned_stack),
+                    ],
+                ),
+            );
+        }
+
+        // -- Copy return values from physical registers to vregs ---------------
         for (i, result_val) in inst.results.iter().enumerate() {
             let ret_ty = self.value_type(result_val);
             let is_fp = matches!(ret_ty, Type::F32 | Type::F64);
@@ -1583,7 +1941,6 @@ impl X86InstructionSelector {
             let dst = self.new_vreg(class);
 
             if is_fp {
-                // Return in XMM0 (or XMM1 for second return)
                 let xmm_ret = if i == 0 {
                     x86_64_regs::XMM0
                 } else {
@@ -1600,7 +1957,6 @@ impl X86InstructionSelector {
                     ),
                 );
             } else {
-                // Return in RAX (or RDX for second return)
                 let gpr_ret = X86_RET_GPRS[i.min(X86_RET_GPRS.len() - 1)];
                 self.func.push_inst(
                     block,
@@ -1621,6 +1977,27 @@ impl X86InstructionSelector {
     }
 
     // -----------------------------------------------------------------------
+    // Variadic call (System V AMD64 ABI)
+    // -----------------------------------------------------------------------
+
+    /// Lower a variadic function call (e.g., printf).
+    ///
+    /// System V AMD64 ABI variadic calling convention:
+    /// - Fixed and variadic args use the same register/stack classification
+    ///   (unlike Apple AArch64 ABI where ALL varargs go to stack)
+    /// - AL must contain the number of XMM registers used (0-8)
+    /// - This allows the callee's va_start to know how many XMM regs to save
+    pub fn lower_variadic_call(
+        &mut self,
+        name: &str,
+        fixed_args: usize,
+        inst: &Instruction,
+        block: Block,
+    ) -> Result<(), X86ISelError> {
+        self.lower_call_inner(name, inst, block, true, fixed_args)
+    }
+
+    // -----------------------------------------------------------------------
     // Return
     // -----------------------------------------------------------------------
 
@@ -1632,10 +2009,31 @@ impl X86InstructionSelector {
         inst: &Instruction,
         block: Block,
     ) -> Result<(), X86ISelError> {
+        let sig_returns = self.func.sig.returns.clone();
+        let expected = sig_returns.len();
+        let actual = inst.args.len();
+        if expected != actual {
+            return Err(X86ISelError::ReturnArityMismatch { expected, actual });
+        }
+
+        for (i, val) in inst.args.iter().enumerate() {
+            let sig_ty = &sig_returns[i];
+            let arg_ty = self.value_type(val);
+            let sig_class = reg_class_for_type(sig_ty);
+            let arg_class = reg_class_for_type(&arg_ty);
+            if &arg_ty != sig_ty || arg_class != sig_class {
+                return Err(X86ISelError::ReturnTypeMismatch {
+                    index: i,
+                    expected: format!("{:?}", sig_ty),
+                    actual: format!("{:?}", arg_ty),
+                });
+            }
+        }
+
         // Move each return value into its designated physical register
         for (i, val) in inst.args.iter().enumerate() {
             let src = self.use_value(val)?;
-            let ty = self.value_type(val);
+            let ty = sig_returns[i].clone();
             let is_fp = matches!(ty, Type::F32 | Type::F64);
 
             if is_fp {
@@ -1680,6 +2078,8 @@ impl X86InstructionSelector {
     /// By convention, formal args are Value(0), Value(1), ..., Value(n-1).
     /// Integer args arrive in RDI, RSI, RDX, RCX, R8, R9.
     /// FP args arrive in XMM0-XMM7.
+    /// Arguments that overflow registers are on the stack at [RBP+16],
+    /// [RBP+24], etc. (after return address at [RBP+8]).
     pub fn lower_formal_arguments(
         &mut self,
         sig: &Signature,
@@ -1689,6 +2089,8 @@ impl X86InstructionSelector {
 
         let mut gpr_idx: usize = 0;
         let mut xmm_idx: usize = 0;
+        // First stack arg is at RBP+16 (RBP+0 = old RBP, RBP+8 = return addr)
+        let mut stack_offset: i64 = 16;
 
         for (i, ty) in sig.params.iter().enumerate() {
             let val = Value(i as u32);
@@ -1698,6 +2100,7 @@ impl X86InstructionSelector {
 
             if is_fp {
                 if xmm_idx < X86_ARG_XMMS.len() {
+                    // FP arg in XMM register
                     self.func.push_inst(
                         entry_block,
                         X86ISelInst::new(
@@ -1709,8 +2112,25 @@ impl X86InstructionSelector {
                         ),
                     );
                     xmm_idx += 1;
+                } else {
+                    // FP arg on stack: MOVSD vreg, [RBP + stack_offset]
+                    self.func.push_inst(
+                        entry_block,
+                        X86ISelInst::new(
+                            X86Opcode::MovsdRM,
+                            vec![
+                                X86ISelOperand::VReg(vreg),
+                                X86ISelOperand::MemAddr {
+                                    base: Box::new(X86ISelOperand::PReg(RBP)),
+                                    disp: stack_offset as i32,
+                                },
+                            ],
+                        ),
+                    );
+                    stack_offset += 8;
                 }
             } else if gpr_idx < X86_ARG_GPRS.len() {
+                // Integer arg in GPR
                 self.func.push_inst(
                     entry_block,
                     X86ISelInst::new(
@@ -1722,6 +2142,22 @@ impl X86InstructionSelector {
                     ),
                 );
                 gpr_idx += 1;
+            } else {
+                // Integer arg on stack: MOV vreg, [RBP + stack_offset]
+                self.func.push_inst(
+                    entry_block,
+                    X86ISelInst::new(
+                        X86Opcode::MovRM,
+                        vec![
+                            X86ISelOperand::VReg(vreg),
+                            X86ISelOperand::MemAddr {
+                                base: Box::new(X86ISelOperand::PReg(RBP)),
+                                disp: stack_offset as i32,
+                            },
+                        ],
+                    ),
+                );
+                stack_offset += 8;
             }
 
             self.define_value(val, X86ISelOperand::VReg(vreg), ty.clone());
@@ -1795,6 +2231,7 @@ mod tests {
 
     #[test]
     fn test_floatcc_to_x86cc() {
+        // x86cc_from_floatcc returns the primary CC (without parity fixup)
         assert_eq!(x86cc_from_floatcc(FloatCC::Equal), X86CondCode::E);
         assert_eq!(x86cc_from_floatcc(FloatCC::NotEqual), X86CondCode::NE);
         assert_eq!(x86cc_from_floatcc(FloatCC::LessThan), X86CondCode::B);
@@ -1803,6 +2240,77 @@ mod tests {
         assert_eq!(x86cc_from_floatcc(FloatCC::GreaterThanOrEqual), X86CondCode::AE);
         assert_eq!(x86cc_from_floatcc(FloatCC::Ordered), X86CondCode::NP);
         assert_eq!(x86cc_from_floatcc(FloatCC::Unordered), X86CondCode::P);
+    }
+
+    #[test]
+    fn test_float_cmp_strategy_single_cc() {
+        // These conditions are correct with a single condition code
+        assert_eq!(
+            x86_float_cmp_strategy(FloatCC::NotEqual),
+            X86FloatCmpStrategy::SingleCC(X86CondCode::NE),
+        );
+        assert_eq!(
+            x86_float_cmp_strategy(FloatCC::GreaterThan),
+            X86FloatCmpStrategy::SingleCC(X86CondCode::A),
+        );
+        assert_eq!(
+            x86_float_cmp_strategy(FloatCC::GreaterThanOrEqual),
+            X86FloatCmpStrategy::SingleCC(X86CondCode::AE),
+        );
+        assert_eq!(
+            x86_float_cmp_strategy(FloatCC::Ordered),
+            X86FloatCmpStrategy::SingleCC(X86CondCode::NP),
+        );
+        assert_eq!(
+            x86_float_cmp_strategy(FloatCC::Unordered),
+            X86FloatCmpStrategy::SingleCC(X86CondCode::P),
+        );
+        assert_eq!(
+            x86_float_cmp_strategy(FloatCC::UnorderedLessThan),
+            X86FloatCmpStrategy::SingleCC(X86CondCode::B),
+        );
+        assert_eq!(
+            x86_float_cmp_strategy(FloatCC::UnorderedLessThanOrEqual),
+            X86FloatCmpStrategy::SingleCC(X86CondCode::BE),
+        );
+    }
+
+    #[test]
+    fn test_float_cmp_strategy_and_not_parity() {
+        // Ordered comparisons that need SETcc AND SETNP to exclude NaN
+        assert_eq!(
+            x86_float_cmp_strategy(FloatCC::Equal),
+            X86FloatCmpStrategy::AndNotParity(X86CondCode::E),
+        );
+        assert_eq!(
+            x86_float_cmp_strategy(FloatCC::LessThan),
+            X86FloatCmpStrategy::AndNotParity(X86CondCode::B),
+        );
+        assert_eq!(
+            x86_float_cmp_strategy(FloatCC::LessThanOrEqual),
+            X86FloatCmpStrategy::AndNotParity(X86CondCode::BE),
+        );
+    }
+
+    #[test]
+    fn test_float_cmp_strategy_or_parity() {
+        // Unordered comparisons that need SETcc OR SETP to include NaN
+        assert_eq!(
+            x86_float_cmp_strategy(FloatCC::UnorderedEqual),
+            X86FloatCmpStrategy::OrParity(X86CondCode::E),
+        );
+        assert_eq!(
+            x86_float_cmp_strategy(FloatCC::UnorderedNotEqual),
+            X86FloatCmpStrategy::OrParity(X86CondCode::NE),
+        );
+        assert_eq!(
+            x86_float_cmp_strategy(FloatCC::UnorderedGreaterThan),
+            X86FloatCmpStrategy::OrParity(X86CondCode::A),
+        );
+        assert_eq!(
+            x86_float_cmp_strategy(FloatCC::UnorderedGreaterThanOrEqual),
+            X86FloatCmpStrategy::OrParity(X86CondCode::AE),
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2119,12 +2627,13 @@ mod tests {
 
     #[test]
     fn test_select_mov_reg() {
+        // Opcode::Copy lowers to MOVrr (formerly single-arg Iadd; see #417).
         let (mut isel, entry) = make_empty_isel();
         define_vreg(&mut isel, Value(0), Type::I64);
 
         isel.select_instruction(
             &Instruction {
-                opcode: Opcode::Iadd, // Single-arg Iadd = COPY
+                opcode: Opcode::Copy,
                 args: vec![Value(0)],
                 results: vec![Value(1)],
             },
@@ -2135,6 +2644,23 @@ mod tests {
         let mfunc = isel.finalize();
         let inst = &mfunc.blocks[&entry].insts[0];
         assert_eq!(inst.opcode, X86Opcode::MovRR);
+    }
+
+    #[test]
+    fn test_single_arg_iadd_rejected() {
+        // Regression guard for #417: single-arg Iadd must be rejected.
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::I64);
+
+        let result = isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Iadd,
+                args: vec![Value(0)],
+                results: vec![Value(1)],
+            },
+            entry,
+        );
+        assert!(result.is_err(), "single-arg Iadd must be rejected; use Opcode::Copy");
     }
 
     #[test]
@@ -2181,6 +2707,135 @@ mod tests {
         let inst = &mfunc.blocks[&entry].insts[0];
         assert_eq!(inst.opcode, X86Opcode::MovRI);
         assert_eq!(inst.operands[1], X86ISelOperand::Imm(-1));
+    }
+
+    // -----------------------------------------------------------------------
+    // Float constants (Fconst -> constant pool)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_select_fconst_f64() {
+        let (mut isel, entry) = make_empty_isel();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fconst {
+                    ty: Type::F64,
+                    imm: 3.14,
+                },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, X86Opcode::MovsdRipRel);
+        // Operands: VReg(dst), ConstPoolEntry(0)
+        assert_eq!(inst.operands.len(), 2);
+        assert!(matches!(inst.operands[0], X86ISelOperand::VReg(_)));
+        assert_eq!(inst.operands[1], X86ISelOperand::ConstPoolEntry(0));
+        // Verify constant pool entry has correct f64 bytes
+        assert_eq!(mfunc.const_pool_entries.len(), 1);
+        assert_eq!(mfunc.const_pool_entries[0].data, 3.14_f64.to_le_bytes().to_vec());
+        assert_eq!(mfunc.const_pool_entries[0].align, 8);
+    }
+
+    #[test]
+    fn test_select_fconst_f32() {
+        let (mut isel, entry) = make_empty_isel();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fconst {
+                    ty: Type::F32,
+                    imm: 2.5,
+                },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, X86Opcode::MovssRipRel);
+        assert_eq!(inst.operands.len(), 2);
+        assert!(matches!(inst.operands[0], X86ISelOperand::VReg(_)));
+        assert_eq!(inst.operands[1], X86ISelOperand::ConstPoolEntry(0));
+        // Verify constant pool entry has correct f32 bytes
+        assert_eq!(mfunc.const_pool_entries.len(), 1);
+        assert_eq!(mfunc.const_pool_entries[0].data, 2.5_f32.to_le_bytes().to_vec());
+        assert_eq!(mfunc.const_pool_entries[0].align, 4);
+    }
+
+    #[test]
+    fn test_select_fconst_f64_zero() {
+        // Special case: 0.0 is still materialized via constant pool on x86-64
+        let (mut isel, entry) = make_empty_isel();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fconst {
+                    ty: Type::F64,
+                    imm: 0.0,
+                },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let inst = &mfunc.blocks[&entry].insts[0];
+        assert_eq!(inst.opcode, X86Opcode::MovsdRipRel);
+        assert_eq!(mfunc.const_pool_entries.len(), 1);
+        assert_eq!(mfunc.const_pool_entries[0].data, 0.0_f64.to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn test_select_fconst_multiple_dedup_check() {
+        // Two different float constants should create two entries
+        let (mut isel, entry) = make_empty_isel();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fconst {
+                    ty: Type::F64,
+                    imm: 1.0,
+                },
+                args: vec![],
+                results: vec![Value(0)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fconst {
+                    ty: Type::F32,
+                    imm: 2.0,
+                },
+                args: vec![],
+                results: vec![Value(1)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        assert_eq!(insts.len(), 2);
+        assert_eq!(insts[0].opcode, X86Opcode::MovsdRipRel);
+        assert_eq!(insts[1].opcode, X86Opcode::MovssRipRel);
+        assert_eq!(mfunc.const_pool_entries.len(), 2);
+        assert_eq!(mfunc.const_pool_entries[0].data, 1.0_f64.to_le_bytes().to_vec());
+        assert_eq!(mfunc.const_pool_entries[1].data, 2.0_f32.to_le_bytes().to_vec());
     }
 
     // -----------------------------------------------------------------------
@@ -2393,6 +3048,68 @@ mod tests {
         // Just RET, no MOV
         assert_eq!(insts.len(), 1);
         assert_eq!(insts[0].opcode, X86Opcode::Ret);
+    }
+
+    #[test]
+    fn test_lower_return_rejects_empty_args_for_non_void() {
+        let sig = Signature {
+            params: vec![],
+            returns: vec![Type::I64],
+        };
+        let mut isel = X86InstructionSelector::new("test_fn".to_string(), sig);
+        let entry = Block(0);
+        isel.func.ensure_block(entry);
+
+        let err = isel
+            .lower_return(
+                &Instruction {
+                    opcode: Opcode::Return,
+                    args: vec![],
+                    results: vec![],
+                },
+                entry,
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            X86ISelError::ReturnArityMismatch {
+                expected: 1,
+                actual: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn test_lower_return_rejects_type_mismatch() {
+        let sig = Signature {
+            params: vec![],
+            returns: vec![Type::F32],
+        };
+        let mut isel = X86InstructionSelector::new("test_fn".to_string(), sig);
+        let entry = Block(0);
+        isel.func.ensure_block(entry);
+        define_vreg(&mut isel, Value(0), Type::I32);
+
+        let err = isel
+            .lower_return(
+                &Instruction {
+                    opcode: Opcode::Return,
+                    args: vec![Value(0)],
+                    results: vec![],
+                },
+                entry,
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            X86ISelError::ReturnTypeMismatch {
+                index: 0,
+                expected,
+                actual,
+            } if expected == "F32" && actual == "I32"
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -2863,10 +3580,14 @@ mod tests {
 
         let mfunc = isel.finalize();
         let insts = &mfunc.blocks[&entry].insts;
-        // MovsdRR (zero) + Subsd (0 - x)
+        // MovsdRipRel (load 0.0 from constant pool) + Subsd (0 - x)
         assert_eq!(insts.len(), 2);
-        assert_eq!(insts[0].opcode, X86Opcode::MovsdRR);
+        assert_eq!(insts[0].opcode, X86Opcode::MovsdRipRel);
         assert_eq!(insts[1].opcode, X86Opcode::Subsd);
+        // Verify constant pool entry was created for 0.0
+        assert_eq!(mfunc.const_pool_entries.len(), 1);
+        assert_eq!(mfunc.const_pool_entries[0].data, 0.0_f64.to_le_bytes().to_vec());
+        assert_eq!(mfunc.const_pool_entries[0].align, 8);
     }
 
     #[test]
@@ -2887,16 +3608,21 @@ mod tests {
         let mfunc = isel.finalize();
         let insts = &mfunc.blocks[&entry].insts;
         assert_eq!(insts.len(), 2);
-        assert_eq!(insts[0].opcode, X86Opcode::MovssRR);
+        assert_eq!(insts[0].opcode, X86Opcode::MovssRipRel);
         assert_eq!(insts[1].opcode, X86Opcode::Subss);
+        // Verify constant pool entry was created for 0.0f32
+        assert_eq!(mfunc.const_pool_entries.len(), 1);
+        assert_eq!(mfunc.const_pool_entries[0].data, 0.0_f32.to_le_bytes().to_vec());
+        assert_eq!(mfunc.const_pool_entries[0].align, 4);
     }
 
     // -----------------------------------------------------------------------
-    // Floating-point comparison
+    // Floating-point comparison (NaN-correct sequences)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_select_fcmp_f64_eq() {
+    fn test_select_fcmp_f64_eq_nan_correct() {
+        // Equal is AndNotParity(E): UCOMISD + SETE + MOVZX + SETNP + MOVZX + AND
         let (mut isel, entry) = make_empty_isel();
         define_vreg(&mut isel, Value(0), Type::F64);
         define_vreg(&mut isel, Value(1), Type::F64);
@@ -2915,19 +3641,21 @@ mod tests {
 
         let mfunc = isel.finalize();
         let insts = &mfunc.blocks[&entry].insts;
-        assert_eq!(insts.len(), 2);
+        // 6 instructions: UCOMISD, SETE, MOVZX, SETNP, MOVZX, AND
+        assert_eq!(insts.len(), 6);
         assert_eq!(insts[0].opcode, X86Opcode::Ucomisd);
-        assert_eq!(insts[1].opcode, X86Opcode::MovRI);
-        assert!(
-            insts[1]
-                .operands
-                .iter()
-                .any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::E)))
-        );
+        assert_eq!(insts[1].opcode, X86Opcode::Setcc);
+        assert!(insts[1].operands.iter().any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::E))));
+        assert_eq!(insts[2].opcode, X86Opcode::Movzx);
+        assert_eq!(insts[3].opcode, X86Opcode::Setcc);
+        assert!(insts[3].operands.iter().any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::NP))));
+        assert_eq!(insts[4].opcode, X86Opcode::Movzx);
+        assert_eq!(insts[5].opcode, X86Opcode::AndRR);
     }
 
     #[test]
-    fn test_select_fcmp_f32_lt() {
+    fn test_select_fcmp_f32_lt_nan_correct() {
+        // LessThan is AndNotParity(B): UCOMISS + SETB + MOVZX + SETNP + MOVZX + AND
         let (mut isel, entry) = make_empty_isel();
         define_vreg(&mut isel, Value(0), Type::F32);
         define_vreg(&mut isel, Value(1), Type::F32);
@@ -2946,13 +3674,164 @@ mod tests {
 
         let mfunc = isel.finalize();
         let insts = &mfunc.blocks[&entry].insts;
+        // 6 instructions: UCOMISS, SETB, MOVZX, SETNP, MOVZX, AND
+        assert_eq!(insts.len(), 6);
         assert_eq!(insts[0].opcode, X86Opcode::Ucomiss);
-        assert!(
-            insts[1]
-                .operands
-                .iter()
-                .any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::B)))
-        );
+        assert_eq!(insts[1].opcode, X86Opcode::Setcc);
+        assert!(insts[1].operands.iter().any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::B))));
+        assert_eq!(insts[2].opcode, X86Opcode::Movzx);
+        assert_eq!(insts[3].opcode, X86Opcode::Setcc);
+        assert!(insts[3].operands.iter().any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::NP))));
+        assert_eq!(insts[4].opcode, X86Opcode::Movzx);
+        assert_eq!(insts[5].opcode, X86Opcode::AndRR);
+    }
+
+    #[test]
+    fn test_select_fcmp_f64_gt_single_cc() {
+        // GreaterThan is SingleCC(A): UCOMISD + SETA + MOVZX (3 instructions)
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F64);
+        define_vreg(&mut isel, Value(1), Type::F64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fcmp {
+                    cond: FloatCC::GreaterThan,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        // 3 instructions: UCOMISD, SETA, MOVZX
+        assert_eq!(insts.len(), 3);
+        assert_eq!(insts[0].opcode, X86Opcode::Ucomisd);
+        assert_eq!(insts[1].opcode, X86Opcode::Setcc);
+        assert!(insts[1].operands.iter().any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::A))));
+        assert_eq!(insts[2].opcode, X86Opcode::Movzx);
+    }
+
+    #[test]
+    fn test_select_fcmp_f64_unordered_ne_or_parity() {
+        // UnorderedNotEqual is OrParity(NE): UCOMISD + SETNE + MOVZX + SETP + MOVZX + OR
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F64);
+        define_vreg(&mut isel, Value(1), Type::F64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fcmp {
+                    cond: FloatCC::UnorderedNotEqual,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        // 6 instructions: UCOMISD, SETNE, MOVZX, SETP, MOVZX, OR
+        assert_eq!(insts.len(), 6);
+        assert_eq!(insts[0].opcode, X86Opcode::Ucomisd);
+        assert_eq!(insts[1].opcode, X86Opcode::Setcc);
+        assert!(insts[1].operands.iter().any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::NE))));
+        assert_eq!(insts[2].opcode, X86Opcode::Movzx);
+        assert_eq!(insts[3].opcode, X86Opcode::Setcc);
+        assert!(insts[3].operands.iter().any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::P))));
+        assert_eq!(insts[4].opcode, X86Opcode::Movzx);
+        assert_eq!(insts[5].opcode, X86Opcode::OrRR);
+    }
+
+    #[test]
+    fn test_select_fcmp_f32_unordered_single_cc() {
+        // Unordered is SingleCC(P): UCOMISS + SETP + MOVZX
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F32);
+        define_vreg(&mut isel, Value(1), Type::F32);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fcmp {
+                    cond: FloatCC::Unordered,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        assert_eq!(insts.len(), 3);
+        assert_eq!(insts[0].opcode, X86Opcode::Ucomiss);
+        assert_eq!(insts[1].opcode, X86Opcode::Setcc);
+        assert!(insts[1].operands.iter().any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::P))));
+        assert_eq!(insts[2].opcode, X86Opcode::Movzx);
+    }
+
+    #[test]
+    fn test_select_fcmp_f64_le_nan_correct() {
+        // LessThanOrEqual is AndNotParity(BE): UCOMISD + SETBE + MOVZX + SETNP + MOVZX + AND
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F64);
+        define_vreg(&mut isel, Value(1), Type::F64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fcmp {
+                    cond: FloatCC::LessThanOrEqual,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        assert_eq!(insts.len(), 6);
+        assert_eq!(insts[0].opcode, X86Opcode::Ucomisd);
+        assert_eq!(insts[1].opcode, X86Opcode::Setcc);
+        assert!(insts[1].operands.iter().any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::BE))));
+        assert_eq!(insts[5].opcode, X86Opcode::AndRR);
+    }
+
+    #[test]
+    fn test_select_fcmp_f64_unordered_ge_or_parity() {
+        // UnorderedGreaterThanOrEqual is OrParity(AE): UCOMISD + SETAE + MOVZX + SETP + MOVZX + OR
+        let (mut isel, entry) = make_empty_isel();
+        define_vreg(&mut isel, Value(0), Type::F64);
+        define_vreg(&mut isel, Value(1), Type::F64);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::Fcmp {
+                    cond: FloatCC::UnorderedGreaterThanOrEqual,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+        assert_eq!(insts.len(), 6);
+        assert_eq!(insts[0].opcode, X86Opcode::Ucomisd);
+        assert_eq!(insts[1].opcode, X86Opcode::Setcc);
+        assert!(insts[1].operands.iter().any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::AE))));
+        assert_eq!(insts[3].opcode, X86Opcode::Setcc);
+        assert!(insts[3].operands.iter().any(|op| matches!(op, X86ISelOperand::CondCode(X86CondCode::P))));
+        assert_eq!(insts[5].opcode, X86Opcode::OrRR);
     }
 
     // -----------------------------------------------------------------------
@@ -3212,5 +4091,392 @@ mod tests {
             "Error message should name the unsupported opcode, got: {}",
             msg,
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Stack-passed arguments
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lower_call_seven_integer_args() {
+        // 7 integer args: 6 in registers (RDI-R9), 1 on stack.
+        let sig = Signature {
+            params: vec![],
+            returns: vec![],
+        };
+        let mut isel = X86InstructionSelector::new("caller".to_string(), sig);
+        let entry = Block(0);
+        isel.func.ensure_block(entry);
+
+        for i in 0..7u32 {
+            define_vreg(&mut isel, Value(i), Type::I64);
+        }
+
+        isel.lower_call(
+            "target",
+            &Instruction {
+                opcode: Opcode::Call {
+                    name: "target".to_string(),
+                },
+                args: (0..7).map(Value).collect(),
+                results: vec![],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+
+        // Expected: SUB RSP,16 + 6 MOV to regs + 1 MOV to [RSP] + CALL + ADD RSP,16 = 10
+        assert_eq!(insts.len(), 10);
+
+        // First instruction: SUB RSP, 16 (8 bytes for 1 stack arg, aligned to 16)
+        assert_eq!(insts[0].opcode, X86Opcode::SubRI);
+        assert_eq!(insts[0].operands[0], X86ISelOperand::PReg(RSP));
+        assert_eq!(insts[0].operands[1], X86ISelOperand::Imm(16));
+
+        // 6 register moves: RDI, RSI, RDX, RCX, R8, R9
+        let expected_regs = [RDI, RSI, RDX, RCX, R8, R9];
+        for (i, expected) in expected_regs.iter().enumerate() {
+            assert_eq!(insts[1 + i].opcode, X86Opcode::MovRR);
+            assert_eq!(insts[1 + i].operands[0], X86ISelOperand::PReg(*expected));
+        }
+
+        // 7th arg on stack: MOV [RSP+0], vreg
+        assert_eq!(insts[7].opcode, X86Opcode::MovMR);
+        assert_eq!(
+            insts[7].operands[0],
+            X86ISelOperand::MemAddr {
+                base: Box::new(X86ISelOperand::PReg(RSP)),
+                disp: 0,
+            }
+        );
+
+        // CALL
+        assert_eq!(insts[8].opcode, X86Opcode::Call);
+
+        // ADD RSP, 16 (cleanup)
+        assert_eq!(insts[9].opcode, X86Opcode::AddRI);
+        assert_eq!(insts[9].operands[0], X86ISelOperand::PReg(RSP));
+        assert_eq!(insts[9].operands[1], X86ISelOperand::Imm(16));
+    }
+
+    #[test]
+    fn test_lower_call_stack_alignment() {
+        // 8 integer args: 6 in registers, 2 on stack.
+        // 2 * 8 = 16 bytes, already aligned to 16.
+        let sig = Signature {
+            params: vec![],
+            returns: vec![],
+        };
+        let mut isel = X86InstructionSelector::new("caller".to_string(), sig);
+        let entry = Block(0);
+        isel.func.ensure_block(entry);
+
+        for i in 0..8u32 {
+            define_vreg(&mut isel, Value(i), Type::I64);
+        }
+
+        isel.lower_call(
+            "target",
+            &Instruction {
+                opcode: Opcode::Call {
+                    name: "target".to_string(),
+                },
+                args: (0..8).map(Value).collect(),
+                results: vec![],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+
+        // SUB RSP,16 + 6 MOV regs + 2 MOV stack + CALL + ADD RSP,16 = 11
+        assert_eq!(insts.len(), 11);
+
+        // SUB RSP, 16 (2*8 = 16, already aligned)
+        assert_eq!(insts[0].opcode, X86Opcode::SubRI);
+        assert_eq!(insts[0].operands[1], X86ISelOperand::Imm(16));
+
+        // Second stack arg should be at [RSP+8]
+        assert_eq!(insts[8].opcode, X86Opcode::MovMR);
+        assert_eq!(
+            insts[8].operands[0],
+            X86ISelOperand::MemAddr {
+                base: Box::new(X86ISelOperand::PReg(RSP)),
+                disp: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn test_lower_call_no_stack_args() {
+        // 6 integer args: all in registers, no stack allocation.
+        let sig = Signature {
+            params: vec![],
+            returns: vec![],
+        };
+        let mut isel = X86InstructionSelector::new("caller".to_string(), sig);
+        let entry = Block(0);
+        isel.func.ensure_block(entry);
+
+        for i in 0..6u32 {
+            define_vreg(&mut isel, Value(i), Type::I64);
+        }
+
+        isel.lower_call(
+            "target",
+            &Instruction {
+                opcode: Opcode::Call {
+                    name: "target".to_string(),
+                },
+                args: (0..6).map(Value).collect(),
+                results: vec![],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+
+        // 6 MOV + CALL = 7 (no SUB/ADD RSP)
+        assert_eq!(insts.len(), 7);
+        assert_eq!(insts[0].opcode, X86Opcode::MovRR); // first arg, not SubRI
+        assert_eq!(insts[6].opcode, X86Opcode::Call);
+    }
+
+    // -----------------------------------------------------------------------
+    // Formal arguments with stack overflow
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lower_formal_arguments_stack_overflow() {
+        // 8 I64 params: first 6 from registers, last 2 from stack.
+        let sig = Signature {
+            params: vec![Type::I64; 8],
+            returns: vec![],
+        };
+        let mut isel = X86InstructionSelector::new("test_fn".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+
+        // 6 MOV from GPRs + 2 MOV from stack = 8
+        assert_eq!(insts.len(), 8);
+
+        // First 6: register moves
+        let expected_regs = [RDI, RSI, RDX, RCX, R8, R9];
+        for (i, expected) in expected_regs.iter().enumerate() {
+            assert_eq!(insts[i].opcode, X86Opcode::MovRR);
+            assert_eq!(insts[i].operands[1], X86ISelOperand::PReg(*expected));
+        }
+
+        // 7th arg from stack: MOV vreg, [RBP+16]
+        assert_eq!(insts[6].opcode, X86Opcode::MovRM);
+        assert_eq!(
+            insts[6].operands[1],
+            X86ISelOperand::MemAddr {
+                base: Box::new(X86ISelOperand::PReg(RBP)),
+                disp: 16,
+            }
+        );
+
+        // 8th arg from stack: MOV vreg, [RBP+24]
+        assert_eq!(insts[7].opcode, X86Opcode::MovRM);
+        assert_eq!(
+            insts[7].operands[1],
+            X86ISelOperand::MemAddr {
+                base: Box::new(X86ISelOperand::PReg(RBP)),
+                disp: 24,
+            }
+        );
+    }
+
+    #[test]
+    fn test_lower_formal_arguments_fp_stack_overflow() {
+        // 10 FP (F64) params: first 8 from XMM0-XMM7, last 2 from stack.
+        let sig = Signature {
+            params: vec![Type::F64; 10],
+            returns: vec![],
+        };
+        let mut isel = X86InstructionSelector::new("test_fn".to_string(), sig.clone());
+        let entry = Block(0);
+        isel.lower_formal_arguments(&sig, entry).unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+
+        // 8 MOVSD from XMMs + 2 MOVSD from stack = 10
+        assert_eq!(insts.len(), 10);
+
+        // First 8: XMM register moves
+        for i in 0..8 {
+            assert_eq!(insts[i].opcode, X86Opcode::MovsdRR);
+        }
+
+        // 9th arg from stack: MOVSD vreg, [RBP+16]
+        assert_eq!(insts[8].opcode, X86Opcode::MovsdRM);
+        assert_eq!(
+            insts[8].operands[1],
+            X86ISelOperand::MemAddr {
+                base: Box::new(X86ISelOperand::PReg(RBP)),
+                disp: 16,
+            }
+        );
+
+        // 10th arg from stack: MOVSD vreg, [RBP+24]
+        assert_eq!(insts[9].opcode, X86Opcode::MovsdRM);
+        assert_eq!(
+            insts[9].operands[1],
+            X86ISelOperand::MemAddr {
+                base: Box::new(X86ISelOperand::PReg(RBP)),
+                disp: 24,
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Variadic calls
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lower_variadic_call_sets_al() {
+        // printf(fmt, 3.14) -> fmt in RDI, 3.14 in XMM0, AL = 1
+        let sig = Signature {
+            params: vec![],
+            returns: vec![Type::I32],
+        };
+        let mut isel = X86InstructionSelector::new("caller".to_string(), sig);
+        let entry = Block(0);
+        isel.func.ensure_block(entry);
+
+        define_vreg(&mut isel, Value(0), Type::I64); // fmt
+        define_vreg(&mut isel, Value(1), Type::F64); // 3.14
+
+        isel.lower_variadic_call(
+            "printf",
+            1, // 1 fixed arg (fmt)
+            &Instruction {
+                opcode: Opcode::CallVariadic {
+                    name: "printf".to_string(),
+                    fixed_args: 1,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![Value(2)],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+
+        // No stack args: MOV RDI + MOVSD XMM0 + MOV AL,1 + CALL + MOV result = 5
+        assert_eq!(insts.len(), 5);
+
+        // MOV RDI, fmt
+        assert_eq!(insts[0].opcode, X86Opcode::MovRR);
+        assert_eq!(insts[0].operands[0], X86ISelOperand::PReg(RDI));
+
+        // MOVSD XMM0, 3.14
+        assert_eq!(insts[1].opcode, X86Opcode::MovsdRR);
+
+        // MOV AL, 1 (one XMM register used)
+        assert_eq!(insts[2].opcode, X86Opcode::MovRI);
+        assert_eq!(insts[2].operands[0], X86ISelOperand::PReg(AL));
+        assert_eq!(insts[2].operands[1], X86ISelOperand::Imm(1));
+
+        // CALL printf
+        assert_eq!(insts[3].opcode, X86Opcode::Call);
+        assert_eq!(
+            insts[3].operands[0],
+            X86ISelOperand::Symbol("printf".to_string())
+        );
+
+        // MOV result from RAX
+        assert_eq!(insts[4].opcode, X86Opcode::MovRR);
+        assert_eq!(insts[4].operands[1], X86ISelOperand::PReg(RAX));
+    }
+
+    #[test]
+    fn test_lower_variadic_call_no_xmm_sets_al_zero() {
+        // printf(fmt, 42) -> fmt in RDI, 42 in RSI, AL = 0
+        let sig = Signature {
+            params: vec![],
+            returns: vec![],
+        };
+        let mut isel = X86InstructionSelector::new("caller".to_string(), sig);
+        let entry = Block(0);
+        isel.func.ensure_block(entry);
+
+        define_vreg(&mut isel, Value(0), Type::I64); // fmt
+        define_vreg(&mut isel, Value(1), Type::I32); // 42
+
+        isel.lower_variadic_call(
+            "printf",
+            1,
+            &Instruction {
+                opcode: Opcode::CallVariadic {
+                    name: "printf".to_string(),
+                    fixed_args: 1,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+
+        // MOV RDI + MOV RSI + MOV AL,0 + CALL = 4
+        assert_eq!(insts.len(), 4);
+
+        // AL = 0 (no XMM registers used)
+        assert_eq!(insts[2].opcode, X86Opcode::MovRI);
+        assert_eq!(insts[2].operands[0], X86ISelOperand::PReg(AL));
+        assert_eq!(insts[2].operands[1], X86ISelOperand::Imm(0));
+    }
+
+    #[test]
+    fn test_variadic_call_via_select_instruction() {
+        // Verify CallVariadic dispatches through select_instruction.
+        let (mut isel, entry) = make_empty_isel();
+
+        define_vreg(&mut isel, Value(0), Type::I64);
+        define_vreg(&mut isel, Value(1), Type::I32);
+
+        isel.select_instruction(
+            &Instruction {
+                opcode: Opcode::CallVariadic {
+                    name: "printf".to_string(),
+                    fixed_args: 1,
+                },
+                args: vec![Value(0), Value(1)],
+                results: vec![],
+            },
+            entry,
+        )
+        .unwrap();
+
+        let mfunc = isel.finalize();
+        let insts = &mfunc.blocks[&entry].insts;
+
+        // Should have dispatched to lower_variadic_call: MOV + MOV + MOV AL + CALL = 4
+        assert_eq!(insts.len(), 4);
+
+        // Verify AL is set (variadic marker)
+        let al_inst = insts.iter().find(|i| {
+            i.opcode == X86Opcode::MovRI
+                && i.operands.first() == Some(&X86ISelOperand::PReg(AL))
+        });
+        assert!(al_inst.is_some(), "AL should be set for variadic call");
     }
 }

@@ -1,7 +1,7 @@
 // llvm2-verify/cse_licm_proofs.rs - SMT proofs for CSE and LICM optimization correctness
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proves that Common Subexpression Elimination (CSE) and Loop-Invariant Code
 // Motion (LICM) transforms in llvm2-opt preserve semantics. Each proof encodes

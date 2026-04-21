@@ -1,0 +1,30 @@
+# llvm2-gpu - GPU passes (Metal first)
+#
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+# Copyright 2026 Andrew Yates | License: Apache-2.0
+
+[package]
+name = "llvm2-gpu"
+description = "GPU passes for LLVM2 (KernelExtract, AddressSpaceInfer, MemoryPartition, DivergenceFlatten, HeteroPartition, LaunchSynth)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+# Enable the pipeline hookup. The code always compiles; the pipeline is
+# only wired into the main optimization pipeline when this feature is on.
+gpu-passes = []
+
+[dependencies]
+llvm2-ir = { workspace = true }
+llvm2-lower = { workspace = true }
+llvm2-codegen = { workspace = true }
+tmir = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

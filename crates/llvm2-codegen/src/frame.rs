@@ -1,7 +1,7 @@
 // llvm2-codegen - Frame lowering for AArch64 macOS
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Reference: ~/llvm-project-ref/llvm/lib/Target/AArch64/AArch64FrameLowering.cpp
 // Reference: ~/llvm-project-ref/llvm/lib/Target/AArch64/AArch64PrologueEpilogue.cpp
@@ -234,6 +234,68 @@ fn compute_stack_slot_area(func: &MachFunction) -> u32 {
         offset += slot.size;
     }
     offset
+}
+
+/// Compute the maximum outgoing stack-argument area needed by any call site.
+///
+/// ISel emits outgoing stack arguments as `STR{,B,H}` / `STP` with a base of
+/// `PReg(SP)` (or `Special(SP)`) and a non-negative immediate offset. This
+/// helper scans every instruction and returns the high-water mark of
+/// `offset + access_size` across all such stores.
+///
+/// This runs BEFORE [`eliminate_frame_indices`], so spill stores are still
+/// encoded as `FrameIndex`/`StackSlot` operands and do not use `PReg(SP)`
+/// bases directly — meaning this scan only matches genuine outgoing-arg
+/// stores emitted by ISel, never spill stores.
+///
+/// The result is rounded up to 16 bytes (AArch64 stack alignment requirement)
+/// so the caller can safely subtract it from SP on entry without misaligning
+/// the stack.
+pub fn compute_max_outgoing_arg_size(func: &MachFunction) -> u32 {
+    use AArch64Opcode::*;
+
+    let mut max_end: i64 = 0;
+    for inst in &func.insts {
+        // Access size in bytes keyed off opcode. StrRI covers both 32- and
+        // 64-bit variants depending on source register class; we conservatively
+        // assume 8 bytes (worst case). StpRI pair is 16 bytes.
+        let (base_idx, offset_idx, access_size) = match inst.opcode {
+            StrRI => (1, 2, 8),
+            StrbRI => (1, 2, 1),
+            StrhRI => (1, 2, 2),
+            // StpRI layout: [Rt, Rt2, base, Imm(offset)] — 16 bytes total.
+            StpRI => (2, 3, 16),
+            _ => continue,
+        };
+
+        if inst.operands.len() <= offset_idx {
+            continue;
+        }
+
+        // Base must be SP (either PReg(SP) or Special(SP)).
+        let base_is_sp = match &inst.operands[base_idx] {
+            MachOperand::PReg(p) if *p == SP => true,
+            MachOperand::Special(SpecialReg::SP) => true,
+            _ => false,
+        };
+        if !base_is_sp {
+            continue;
+        }
+
+        // Offset must be a non-negative literal immediate (not an IncomingArg
+        // marker or FrameIndex; those never reach this point on SP bases).
+        if let MachOperand::Imm(off) = &inst.operands[offset_idx] {
+            if *off >= 0 {
+                let end = *off + access_size as i64;
+                if end > max_end {
+                    max_end = end;
+                }
+            }
+        }
+    }
+
+    // Round up to 16-byte alignment for AArch64 SP requirements.
+    align_up(max_end as u32, 16)
 }
 
 /// Compute the complete frame layout for a function.
@@ -536,12 +598,7 @@ pub fn emit_epilogue(layout: &FrameLayout) -> Vec<MachInst> {
 /// Frame index encoding: `FrameIdx(i)` where `i` is the stack slot index.
 /// The concrete offset is computed from the frame layout.
 pub fn eliminate_frame_indices(func: &mut MachFunction, layout: &FrameLayout) {
-    // Early exit: if no stack slots, no FrameIndex operands can exist.
-    if func.stack_slots.is_empty() {
-        return;
-    }
-
-    // Precompute stack slot offsets from FP.
+    // Precompute stack slot offsets from FP (empty if no stack slots).
     // Stack slots are in the spill/local area, which starts at FP - callee_saved_area_size.
     let slot_offsets = compute_slot_offsets(func, layout);
 
@@ -549,29 +606,42 @@ pub fn eliminate_frame_indices(func: &mut MachFunction, layout: &FrameLayout) {
     let sp_adj = layout.sp_adjustment() as i32;
     let uses_fp = layout.uses_frame_pointer;
 
-    // Walk all instructions and rewrite FrameIndex operands.
+    // IncomingArg offsets resolve to `[FP, #callee_saved_area_size + offset]`.
+    // The callee's FP points at the saved FP/LR pair; callee-saves occupy
+    // positive offsets [0..CSA_size); incoming stack args sit directly above
+    // the callee-saved area at the caller's SP = FP + CSA_size.
+    let csa_size = layout.callee_saved_area_size as i64;
+
+    // Walk all instructions and rewrite frame-related operands.
     for inst in &mut func.insts {
         for operand in &mut inst.operands {
-            if let MachOperand::FrameIndex(fi) = operand {
-                let slot_idx = fi.0 as usize;
-                if slot_idx < slot_offsets.len() {
-                    let offset = slot_offsets[slot_idx];
-                    if uses_fp {
-                        // FP-relative: MemOp { base: X29, offset }
-                        *operand = MachOperand::MemOp {
-                            base: X29,
-                            offset: offset as i64,
-                        };
-                    } else {
-                        // SP-relative: offset from current SP
-                        // SP-relative offset = FP_offset + callee_saved_area + sp_adjustment
-                        let sp_offset = offset + sp_adj;
-                        *operand = MachOperand::MemOp {
-                            base: SP, // SP = PReg(31)
-                            offset: sp_offset as i64,
-                        };
+            match operand {
+                MachOperand::FrameIndex(fi) => {
+                    let slot_idx = fi.0 as usize;
+                    if slot_idx < slot_offsets.len() {
+                        let offset = slot_offsets[slot_idx];
+                        if uses_fp {
+                            // FP-relative: MemOp { base: X29, offset }
+                            *operand = MachOperand::MemOp {
+                                base: X29,
+                                offset: offset as i64,
+                            };
+                        } else {
+                            // SP-relative: offset from current SP
+                            // SP-relative offset = FP_offset + callee_saved_area + sp_adjustment
+                            let sp_offset = offset + sp_adj;
+                            *operand = MachOperand::MemOp {
+                                base: SP, // SP = PReg(31)
+                                offset: sp_offset as i64,
+                            };
+                        }
                     }
                 }
+                MachOperand::IncomingArg(arg_offset) => {
+                    let fp_offset = csa_size + *arg_offset;
+                    *operand = MachOperand::Imm(fp_offset);
+                }
+                _ => {}
             }
         }
     }

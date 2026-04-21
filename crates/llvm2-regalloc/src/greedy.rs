@@ -1,7 +1,7 @@
 // llvm2-regalloc/greedy.rs - Greedy register allocator
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Greedy register allocator (Phase 2).
 //!
@@ -55,6 +55,73 @@ use crate::machine_types::{MachFunction, PReg, RegClass, VReg};
 use crate::split;
 use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Ordering;
+
+// ---------------------------------------------------------------------------
+// Sub-register aliasing support (issue #336)
+// ---------------------------------------------------------------------------
+
+/// Returns all physical registers that alias the given register (in different
+/// register classes).
+///
+/// On AArch64, W-registers are the lower 32 bits of X-registers, and
+/// D/S/H/B-registers are sub-views of V-registers. Writing to any alias
+/// clobbers the others, so the allocator must treat them as conflicting.
+///
+/// Does NOT include the input register itself.
+pub fn aliasing_pregs(preg: PReg) -> Vec<PReg> {
+    use llvm2_ir::regs::{
+        gpr64_to_gpr32, gpr32_to_gpr64,
+        fpr128_to_fpr64, fpr128_to_fpr32,
+        fpr64_to_fpr128, fpr32_to_fpr128,
+    };
+    let mut aliases = Vec::new();
+    let e = preg.encoding();
+    match e {
+        0..=30 => {
+            // GPR64 X0-X30 -> alias is the corresponding W register
+            if let Some(w) = gpr64_to_gpr32(preg) {
+                aliases.push(w);
+            }
+        }
+        32..=62 => {
+            // GPR32 W0-W30 -> alias is the corresponding X register
+            if let Some(x) = gpr32_to_gpr64(preg) {
+                aliases.push(x);
+            }
+        }
+        64..=95 => {
+            // FPR128 V0-V31 -> aliases are D, S sub-registers
+            if let Some(d) = fpr128_to_fpr64(preg) {
+                aliases.push(d);
+            }
+            if let Some(s) = fpr128_to_fpr32(preg) {
+                aliases.push(s);
+            }
+        }
+        96..=127 => {
+            // FPR64 D0-D31 -> aliases are V (parent) and S (sibling)
+            if let Some(v) = fpr64_to_fpr128(preg) {
+                aliases.push(v);
+                // S register has same number as D
+                if let Some(s) = fpr128_to_fpr32(v) {
+                    aliases.push(s);
+                }
+            }
+        }
+        128..=159 => {
+            // FPR32 S0-S31 -> aliases are V (parent) and D (sibling)
+            if let Some(v) = fpr32_to_fpr128(preg) {
+                aliases.push(v);
+                // D register has same number as S
+                if let Some(d) = fpr128_to_fpr64(v) {
+                    aliases.push(d);
+                }
+            }
+        }
+        _ => {}
+    }
+    aliases
+}
 
 // ---------------------------------------------------------------------------
 // Stage tracking
@@ -350,13 +417,34 @@ impl GreedyAllocator {
     }
 
     /// Check whether assigning `preg` to `vreg_id` would interfere with
-    /// any interval already assigned to `preg`.
+    /// any interval already assigned to `preg` or its aliases.
+    ///
+    /// On AArch64, writing to X28 clobbers W28 (and vice versa), so we must
+    /// check both the exact register and all aliasing registers for conflicts.
+    /// (Issue #336: mixed-width ABI register aliasing.)
     fn interferes(&self, vreg_id: u32, preg: PReg) -> bool {
         let interval = match self.intervals.get(&vreg_id) {
             Some(iv) => iv,
             None => return false,
         };
 
+        // Check the exact PReg.
+        if self.interferes_with_preg(vreg_id, preg, interval) {
+            return true;
+        }
+
+        // Check all aliasing PRegs (e.g., W28 when checking X28).
+        for alias in aliasing_pregs(preg) {
+            if self.interferes_with_preg(vreg_id, alias, interval) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Check whether any interval assigned to a specific `preg` overlaps `interval`.
+    fn interferes_with_preg(&self, vreg_id: u32, preg: PReg, interval: &LiveInterval) -> bool {
         if let Some(assigned_vregs) = self.preg_assignments.get(&preg) {
             for &other_id in assigned_vregs {
                 if other_id == vreg_id {
@@ -368,11 +456,14 @@ impl GreedyAllocator {
                     }
             }
         }
-
         false
     }
 
     /// Record the assignment of `vreg_id` to `preg`.
+    ///
+    /// Also records the assignment against all aliasing registers so that
+    /// interference checks on aliased registers will find this interval.
+    /// (Issue #336: mixed-width ABI register aliasing.)
     fn assign(&mut self, vreg_id: u32, preg: PReg) {
         if let Some(iv) = self.intervals.get(&vreg_id) {
             self.assignment.insert(iv.vreg, preg);
@@ -381,15 +472,32 @@ impl GreedyAllocator {
             .entry(preg)
             .or_default()
             .push(vreg_id);
+        // Also record in aliasing registers.
+        for alias in aliasing_pregs(preg) {
+            self.preg_assignments
+                .entry(alias)
+                .or_default()
+                .push(vreg_id);
+        }
     }
 
     /// Remove the assignment of `vreg_id`.
+    ///
+    /// Also removes from all aliasing registers.
+    /// (Issue #336: mixed-width ABI register aliasing.)
     fn unassign(&mut self, vreg_id: u32) {
         if let Some(iv) = self.intervals.get(&vreg_id)
-            && let Some(preg) = self.assignment.remove(&iv.vreg)
-                && let Some(list) = self.preg_assignments.get_mut(&preg) {
+            && let Some(preg) = self.assignment.remove(&iv.vreg) {
+                if let Some(list) = self.preg_assignments.get_mut(&preg) {
                     list.retain(|&id| id != vreg_id);
                 }
+                // Also remove from aliasing registers.
+                for alias in aliasing_pregs(preg) {
+                    if let Some(list) = self.preg_assignments.get_mut(&alias) {
+                        list.retain(|&id| id != vreg_id);
+                    }
+                }
+            }
     }
 
     fn is_assigned(&self, vreg_id: u32) -> bool {
@@ -549,27 +657,61 @@ impl GreedyAllocator {
     // Splitting
     // -----------------------------------------------------------------------
 
-    /// Try to split `vreg_id`'s interval at its optimal split point.
+    /// Try to split `vreg_id`'s interval using multiple strategies.
     ///
-    /// If successful, both halves are inserted into the interval map and
-    /// enqueued on the worklist.  Returns `true` if the split was
-    /// performed.
+    /// Strategies are attempted in order of increasing aggressiveness:
+    /// 1. **Gap-based**: split at the midpoint of the largest gap between
+    ///    consecutive use/def positions (existing `find_optimal_split_point`).
+    /// 2. **Interference-aware**: find where register pressure is highest
+    ///    and split just before that region, keeping the first half in a
+    ///    register.
+    /// 3. **Per-use**: split between consecutive use/def positions,
+    ///    creating short intervals that are easy to allocate individually.
+    ///
+    /// If any strategy succeeds, both halves are inserted into the
+    /// interval map and enqueued on the worklist.  Returns `true` if
+    /// a split was performed.
     fn try_split(&mut self, vreg_id: u32, func: &mut MachFunction) -> bool {
         let interval = match self.intervals.get(&vreg_id) {
             Some(iv) => iv.clone(),
             None => return false,
         };
 
-        let split_point = match split::find_optimal_split_point(&interval) {
-            Some(pt) => pt,
-            None => return false,
-        };
+        // Strategy 1: gap-based split (least aggressive, best quality).
+        if let Some(split_point) = split::find_optimal_split_point(&interval) {
+            if let Some(result) = split::split_interval(&interval, split_point, func) {
+                self.apply_split(vreg_id, result);
+                return true;
+            }
+        }
 
-        let result = match split::split_interval(&interval, split_point, func) {
-            Some(r) => r,
-            None => return false,
-        };
+        // Strategy 2: interference-aware split.
+        if let Some(interference_start) = self.find_interference_start(vreg_id) {
+            if let Some(split_point) =
+                split::find_split_near_interference(&interval, interference_start)
+            {
+                if let Some(result) = split::split_interval(&interval, split_point, func) {
+                    self.apply_split(vreg_id, result);
+                    return true;
+                }
+            }
+        }
 
+        // Strategy 3: per-use split (most aggressive).
+        let per_use_splits = split::find_per_use_split_points(&interval);
+        for (split_point, _weight) in per_use_splits {
+            if let Some(result) = split::split_interval(&interval, split_point, func) {
+                self.apply_split(vreg_id, result);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Apply a split result: remove the old interval, insert both halves,
+    /// and enqueue them on the worklist.
+    fn apply_split(&mut self, vreg_id: u32, result: split::SplitResult) {
         // Remove the old interval.
         self.intervals.remove(&vreg_id);
         self.stage.remove(&vreg_id);
@@ -593,8 +735,54 @@ impl GreedyAllocator {
             vreg_id: new_id,
             weight: new_weight,
         });
+    }
 
-        true
+    // -----------------------------------------------------------------------
+    // Interference analysis (for splitting)
+    // -----------------------------------------------------------------------
+
+    /// Find the earliest point where all allocatable registers for
+    /// `vreg_id`'s class are occupied by other assigned intervals.
+    ///
+    /// This identifies where register pressure is highest, guiding
+    /// the interference-aware split strategy.  Returns `None` if
+    /// there is no fully-blocked point (meaning direct assignment
+    /// should have succeeded).
+    fn find_interference_start(&self, vreg_id: u32) -> Option<u32> {
+        let interval = self.intervals.get(&vreg_id)?;
+        let class = interval.vreg.class;
+        let allocatable = self.allocatable_regs.get(&class)?;
+
+        for range in &interval.ranges {
+            for pos in range.start..range.end {
+                let all_interfere = allocatable
+                    .iter()
+                    .all(|&preg| self.is_occupied_at(preg, pos, vreg_id));
+                if all_interfere {
+                    return Some(pos);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Check whether a physical register is occupied at a specific
+    /// program point by any interval other than `exclude_vreg_id`.
+    fn is_occupied_at(&self, preg: PReg, pos: u32, exclude_vreg_id: u32) -> bool {
+        if let Some(assigned_vregs) = self.preg_assignments.get(&preg) {
+            for &other_id in assigned_vregs {
+                if other_id == exclude_vreg_id {
+                    continue;
+                }
+                if let Some(other_iv) = self.intervals.get(&other_id) {
+                    if other_iv.is_live_at(pos) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     // -----------------------------------------------------------------------
@@ -1121,7 +1309,7 @@ mod tests {
     #[test]
     fn test_multiple_register_classes_independent() {
         // GPR and FPR intervals use disjoint PReg sets and don't interfere.
-        // AArch64 convention: GPRs are PReg 0-30, FPRs are PReg 32-63.
+        // AArch64 encoding: GPR64 = PReg 0-30, FPR64 = PReg 96-127.
         let gpr_iv = {
             let mut iv = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
             iv.add_range(0, 10);
@@ -1141,7 +1329,7 @@ mod tests {
 
         let mut regs = HashMap::new();
         regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);
-        regs.insert(RegClass::Fpr64, vec![PReg::new(32)]); // disjoint from GPR
+        regs.insert(RegClass::Fpr64, vec![PReg::new(96)]); // D0 — disjoint from GPR
 
         let intervals = vec![gpr_iv, fpr_iv];
         let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
@@ -1327,5 +1515,367 @@ mod tests {
         for i in 1..100 {
             assert_eq!(result.allocation[&vreg(i)], preg0);
         }
+    }
+
+    // =====================================================================
+    // Live range splitting tests (issue #332)
+    // =====================================================================
+
+    #[test]
+    fn test_greedy_split_at_interference() {
+        // v0: [0, 20) with uses at 0, 5, 10, 15, 19 (no large gap for
+        // gap-based split). v1: [4, 12) weight 10.0 (blocks the middle).
+        // 2 registers. After eviction fails (v1 heavier), splitting v0
+        // around interference should produce two halves.
+        let mut iv0 = LiveInterval::new(vreg(0));
+        iv0.add_range(0, 20);
+        iv0.spill_weight = 2.0;
+        iv0.def_positions = vec![0];
+        iv0.use_positions = vec![5, 10, 15, 19];
+
+        let iv1 = make_interval(1, &[(4, 12)], 10.0);
+
+        let intervals = vec![iv0, iv1];
+        let regs = two_gpr_regs();
+        let mut func = make_test_func(20);
+
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate_with_splitting(&mut func).unwrap();
+
+        // Should complete without panic and account for all original intervals.
+        let total = result.allocation.len() + alloc.spilled.len();
+        assert!(total >= 2, "all original intervals should be accounted for");
+    }
+
+    #[test]
+    fn test_greedy_per_use_split() {
+        // An interval with many closely-spaced uses and high pressure.
+        // Two blockers occupy both registers over different halves.
+        let mut iv0 = LiveInterval::new(vreg(0));
+        iv0.add_range(0, 30);
+        iv0.spill_weight = 1.0;
+        iv0.def_positions = vec![0];
+        iv0.use_positions = vec![3, 7, 12, 18, 25, 29];
+
+        let iv1 = make_interval(1, &[(0, 15)], 5.0);
+        let iv2 = make_interval(2, &[(10, 30)], 5.0);
+
+        let intervals = vec![iv0, iv1, iv2];
+        let regs = two_gpr_regs();
+        let mut func = make_test_func(30);
+
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let _result = alloc.allocate_with_splitting(&mut func).unwrap();
+
+        // Verify allocation completed (may have spills, that's OK).
+        // The key is that splitting was attempted before spilling.
+    }
+
+    #[test]
+    fn test_split_near_interference_from_greedy() {
+        // Test find_split_near_interference via the split module.
+        let mut iv = LiveInterval::new(vreg(0));
+        iv.add_range(0, 20);
+        iv.use_positions = vec![2, 8, 15];
+        iv.def_positions = vec![0];
+
+        let sp = split::find_split_near_interference(&iv, 10);
+        assert!(sp.is_some());
+        assert_eq!(
+            sp.unwrap(),
+            9,
+            "should split at 9 (after last use at 8 before interference at 10)"
+        );
+    }
+
+    #[test]
+    fn test_per_use_split_points_from_greedy() {
+        let mut iv = LiveInterval::new(vreg(0));
+        iv.add_range(0, 30);
+        iv.use_positions = vec![3, 7, 15, 25];
+        iv.def_positions = vec![0];
+
+        let splits = split::find_per_use_split_points(&iv);
+        assert!(!splits.is_empty(), "should find split points between uses");
+
+        for (sp, _weight) in &splits {
+            assert!(*sp > iv.start());
+            assert!(*sp < iv.end());
+        }
+
+        // Sorted by weight descending (largest gaps first).
+        if splits.len() >= 2 {
+            assert!(
+                splits[0].1 >= splits[1].1,
+                "splits should be sorted by weight descending"
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_split_helper() {
+        // Test that apply_split properly re-enqueues both halves.
+        let iv0 = make_interval(0, &[(0, 20)], 3.0);
+        let intervals = vec![iv0.clone()];
+        let regs = one_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+
+        let mut func = make_test_func(20);
+        let result = split::split_interval(&iv0, 10, &mut func).unwrap();
+
+        // Drain the worklist first.
+        while alloc.worklist.pop().is_some() {}
+
+        alloc.apply_split(0, result);
+
+        // Both halves should be in the worklist now.
+        let mut found = 0;
+        while alloc.worklist.pop().is_some() {
+            found += 1;
+        }
+        assert_eq!(found, 2, "both split halves should be enqueued");
+    }
+
+    #[test]
+    fn test_greedy_split_attempts_before_spill() {
+        // Verify that splitting is attempted and produces split intervals
+        // when there is a large gap.  With 2 registers and a blocker in
+        // the middle, the split halves of v0 should be allocable.
+        let mut iv0 = LiveInterval::new(vreg(0));
+        iv0.add_range(0, 30);
+        iv0.spill_weight = 2.0;
+        iv0.def_positions = vec![0];
+        iv0.use_positions = vec![2, 28];
+
+        let iv1 = make_interval(1, &[(10, 20)], 10.0);
+
+        let intervals = vec![iv0, iv1];
+        let regs = two_gpr_regs();
+        let mut func = make_test_func(30);
+
+        let mut alloc =
+            GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate_with_splitting(&mut func).unwrap();
+
+        // With 2 registers, the split halves of v0 don't fully overlap
+        // v1, so everything should be allocable without spills.
+        assert!(
+            alloc.spilled.is_empty(),
+            "with 2 regs and a split, expected no spills but got {} spills: {:?}",
+            alloc.spilled.len(),
+            alloc.spilled
+        );
+        // v1 plus the two halves of v0 should all be allocated.
+        assert!(result.allocation.len() >= 2);
+    }
+
+    #[test]
+    fn test_find_interference_start() {
+        // Set up an allocator where one register is occupied, then
+        // query find_interference_start.
+        let iv0 = make_interval(0, &[(0, 20)], 1.0);
+        let iv1 = make_interval(1, &[(5, 15)], 5.0);
+
+        let intervals = vec![iv0, iv1];
+        let regs = one_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+
+        // Manually assign v1 to the only register.
+        alloc.assign(1, PReg::new(0));
+
+        // v0 should find interference starting at position 5 (where v1 starts).
+        let start = alloc.find_interference_start(0);
+        assert!(start.is_some());
+        assert_eq!(start.unwrap(), 5);
+    }
+
+    #[test]
+    fn test_is_occupied_at() {
+        let iv0 = make_interval(0, &[(0, 10)], 1.0);
+        let iv1 = make_interval(1, &[(3, 8)], 2.0);
+
+        let intervals = vec![iv0, iv1];
+        let regs = one_gpr_regs();
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+
+        // Assign v1 to PReg(0).
+        alloc.assign(1, PReg::new(0));
+
+        // PReg(0) should be occupied at position 5 (v1 is [3,8)).
+        assert!(alloc.is_occupied_at(PReg::new(0), 5, 0));
+        // PReg(0) should NOT be occupied at position 1 (before v1).
+        assert!(!alloc.is_occupied_at(PReg::new(0), 1, 0));
+        // PReg(0) should NOT be occupied at position 9 (after v1).
+        assert!(!alloc.is_occupied_at(PReg::new(0), 9, 0));
+    }
+
+    // =====================================================================
+    // Issue #336: Mixed-width ABI register aliasing tests
+    // =====================================================================
+
+    #[test]
+    fn test_issue_336_mixed_width_gpr_aliasing() {
+        // A Gpr64 interval (i64) and a Gpr32 interval (i32) that are
+        // simultaneously live MUST NOT be assigned to aliasing registers
+        // (e.g., X0/W0 share the same physical storage).
+        let gpr64_iv = {
+            let mut iv = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+            iv.add_range(0, 10);
+            iv.spill_weight = 1.0;
+            iv.def_positions.push(0);
+            iv.use_positions.push(9);
+            iv
+        };
+        let gpr32_iv = {
+            let mut iv = LiveInterval::new(VReg { id: 1, class: RegClass::Gpr32 });
+            iv.add_range(0, 10);
+            iv.spill_weight = 1.0;
+            iv.def_positions.push(0);
+            iv.use_positions.push(9);
+            iv
+        };
+
+        // Provide X0 for Gpr64 and W0 for Gpr32 (they alias!).
+        // The allocator must NOT assign both — one should be detected as
+        // interfering with the other's alias.
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0), PReg::new(1)]);    // X0, X1
+        regs.insert(RegClass::Gpr32, vec![PReg::new(32), PReg::new(33)]);  // W0, W1
+
+        let intervals = vec![gpr64_iv, gpr32_iv];
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        // Both should be allocated (we have 2 regs in each class).
+        assert_eq!(result.allocation.len(), 2);
+        assert!(alloc.spilled.is_empty());
+
+        // Critical: they must NOT alias!
+        let p0 = result.allocation[&VReg { id: 0, class: RegClass::Gpr64 }];
+        let p1 = result.allocation[&VReg { id: 1, class: RegClass::Gpr32 }];
+        assert!(
+            !llvm2_ir::regs::regs_overlap(p0, p1),
+            "X register {:?} and W register {:?} must not alias! \
+             This is the issue #336 regression.",
+            p0, p1
+        );
+    }
+
+    #[test]
+    fn test_issue_336_mixed_width_only_one_reg_available() {
+        // If we only have X0 for Gpr64 and W0 for Gpr32 (they alias),
+        // the allocator cannot assign both simultaneously-live intervals.
+        // One must be spilled.
+        let gpr64_iv = {
+            let mut iv = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+            iv.add_range(0, 10);
+            iv.spill_weight = 2.0;
+            iv.def_positions.push(0);
+            iv.use_positions.push(9);
+            iv
+        };
+        let gpr32_iv = {
+            let mut iv = LiveInterval::new(VReg { id: 1, class: RegClass::Gpr32 });
+            iv.add_range(0, 10);
+            iv.spill_weight = 1.0;
+            iv.def_positions.push(0);
+            iv.use_positions.push(9);
+            iv
+        };
+
+        // Only one physical register pair available: X0/W0 (they alias).
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);   // X0
+        regs.insert(RegClass::Gpr32, vec![PReg::new(32)]);  // W0 (aliases X0!)
+
+        let intervals = vec![gpr64_iv, gpr32_iv];
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        // Cannot both be allocated — one must be spilled.
+        assert_eq!(result.allocation.len(), 1, "only one can be allocated when registers alias");
+        assert_eq!(alloc.spilled.len(), 1, "one must be spilled");
+        // The higher-weight interval (v0, weight=2.0) should be allocated.
+        assert!(result.allocation.contains_key(&VReg { id: 0, class: RegClass::Gpr64 }));
+    }
+
+    #[test]
+    fn test_issue_336_aliasing_pregs_function() {
+        // Verify the aliasing_pregs helper function.
+        use super::aliasing_pregs;
+
+        // X0 (PReg(0)) aliases W0 (PReg(32))
+        let aliases_x0 = aliasing_pregs(PReg::new(0));
+        assert_eq!(aliases_x0.len(), 1);
+        assert_eq!(aliases_x0[0], PReg::new(32)); // W0
+
+        // W0 (PReg(32)) aliases X0 (PReg(0))
+        let aliases_w0 = aliasing_pregs(PReg::new(32));
+        assert_eq!(aliases_w0.len(), 1);
+        assert_eq!(aliases_w0[0], PReg::new(0)); // X0
+
+        // X28 (PReg(28)) aliases W28 (PReg(60))
+        let aliases_x28 = aliasing_pregs(PReg::new(28));
+        assert_eq!(aliases_x28.len(), 1);
+        assert_eq!(aliases_x28[0], PReg::new(60)); // W28
+
+        // V0 (PReg(64)) aliases D0 (PReg(96)) and S0 (PReg(128))
+        let aliases_v0 = aliasing_pregs(PReg::new(64));
+        assert_eq!(aliases_v0.len(), 2);
+        assert!(aliases_v0.contains(&PReg::new(96)));  // D0
+        assert!(aliases_v0.contains(&PReg::new(128))); // S0
+
+        // D0 (PReg(96)) aliases V0 (PReg(64)) and S0 (PReg(128))
+        let aliases_d0 = aliasing_pregs(PReg::new(96));
+        assert_eq!(aliases_d0.len(), 2);
+        assert!(aliases_d0.contains(&PReg::new(64)));  // V0
+        assert!(aliases_d0.contains(&PReg::new(128))); // S0
+
+        // S0 (PReg(128)) aliases V0 (PReg(64)) and D0 (PReg(96))
+        let aliases_s0 = aliasing_pregs(PReg::new(128));
+        assert_eq!(aliases_s0.len(), 2);
+        assert!(aliases_s0.contains(&PReg::new(64)));  // V0
+        assert!(aliases_s0.contains(&PReg::new(96)));  // D0
+
+        // SP (PReg(31)) has no aliases in our alias function: encoding 31
+        // falls outside 0..=30 (X0-X30) and 32..=62 (W0-W30), so the match
+        // returns nothing. SP is not allocatable — this is by design.
+        let aliases_sp = aliasing_pregs(PReg::new(31));
+        assert_eq!(aliases_sp.len(), 0);
+    }
+
+    #[test]
+    fn test_issue_336_non_overlapping_mixed_width_ok() {
+        // Non-overlapping intervals of different widths CAN share the
+        // same physical register pair (no conflict).
+        let gpr64_iv = {
+            let mut iv = LiveInterval::new(VReg { id: 0, class: RegClass::Gpr64 });
+            iv.add_range(0, 5);
+            iv.spill_weight = 1.0;
+            iv.def_positions.push(0);
+            iv.use_positions.push(4);
+            iv
+        };
+        let gpr32_iv = {
+            let mut iv = LiveInterval::new(VReg { id: 1, class: RegClass::Gpr32 });
+            iv.add_range(5, 10);
+            iv.spill_weight = 1.0;
+            iv.def_positions.push(5);
+            iv.use_positions.push(9);
+            iv
+        };
+
+        // Only X0/W0 available (they alias, but intervals don't overlap).
+        let mut regs = HashMap::new();
+        regs.insert(RegClass::Gpr64, vec![PReg::new(0)]);   // X0
+        regs.insert(RegClass::Gpr32, vec![PReg::new(32)]);  // W0
+
+        let intervals = vec![gpr64_iv, gpr32_iv];
+        let mut alloc = GreedyAllocator::new(intervals, &regs, HashMap::new());
+        let result = alloc.allocate().unwrap();
+
+        // Both should be allocated since they don't overlap in time.
+        assert_eq!(result.allocation.len(), 2);
+        assert!(alloc.spilled.is_empty());
     }
 }

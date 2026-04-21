@@ -1,7 +1,7 @@
 // llvm2-codegen/benches/compare_clang.rs - LLVM2 vs clang -O2 comparison
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Benchmark comparison: measures LLVM2 compile time and instruction count
 // against clang -O2 for equivalent functions. LLVM2 operates on pre-built

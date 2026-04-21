@@ -1,7 +1,7 @@
 // llvm2-verify/strength_reduce_proofs.rs - SMT proofs for strength reduction pass correctness
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proves that each algebraic identity used by the strength reduction pass
 // (crates/llvm2-opt/src/strength_reduce.rs) is correct for all bitvector

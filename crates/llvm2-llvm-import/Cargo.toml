@@ -1,0 +1,33 @@
+# llvm2-llvm-import
+#
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+# Copyright 2026 Andrew Yates | License: Apache-2.0
+#
+# Minimal textual LLVM IR (.ll) -> tMIR importer. Used by Workstream 2
+# (issue #439) as the bridge between the llvm/llvm-test-suite SingleSource
+# correctness corpus and the LLVM2 codegen pipeline. See README.md for
+# the supported subset and the initial 5-program corpus.
+
+[package]
+name = "llvm2-llvm-import"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+description = "Minimal LLVM IR (.ll) to tMIR importer for WS2 external correctness corpus"
+
+[dependencies]
+tmir = { workspace = true }
+thiserror = { workspace = true }
+
+# Binary helper used by scripts/run_llvm_test_suite.sh. Takes a .ll on
+# disk and writes a .o (Mach-O) through the codegen pipeline, exiting
+# with `unsupported:` on stderr if the importer hits an Error::Unsupported.
+llvm2-codegen = { workspace = true }
+
+[[bin]]
+name = "llvm2-ws2-import"
+path = "src/bin/llvm2-ws2-import.rs"
+
+[lints.rust]
+unused_must_use = "warn"

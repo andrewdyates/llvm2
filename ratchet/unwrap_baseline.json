@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "note": "Per-file production-code counts of .unwrap() / .expect(/panic!/unreachable!/todo! outside #[cfg(test)]. Ratchet script (scripts/check_unwrap_ratchet.sh) fails CI if any file exceeds its baseline. Regenerate with `python3 scripts/generate_unwrap_audit.py --write`.",
+  "excluded_crates": [
+    "llvm2-verify"
+  ],
+  "per_crate_totals": {
+    "llvm2-cli": 2,
+    "llvm2-codegen": 7,
+    "llvm2-ir": 6,
+    "llvm2-lower": 7,
+    "llvm2-opt": 8,
+    "llvm2-regalloc": 2
+  },
+  "per_file": {
+    "crates/llvm2-cli/src/main.rs": 2,
+    "crates/llvm2-codegen/src/dwarf_cfi.rs": 1,
+    "crates/llvm2-codegen/src/jit.rs": 2,
+    "crates/llvm2-codegen/src/macho/linker.rs": 2,
+    "crates/llvm2-codegen/src/metal_emitter.rs": 2,
+    "crates/llvm2-ir/src/trace.rs": 6,
+    "crates/llvm2-lower/src/adapter.rs": 1,
+    "crates/llvm2-lower/src/isel.rs": 2,
+    "crates/llvm2-lower/src/switch.rs": 4,
+    "crates/llvm2-opt/src/const_fold.rs": 4,
+    "crates/llvm2-opt/src/gvn.rs": 1,
+    "crates/llvm2-opt/src/pass_manager.rs": 3,
+    "crates/llvm2-regalloc/src/liveness.rs": 1,
+    "crates/llvm2-regalloc/src/split.rs": 1
+  },
+  "total": 32
+}

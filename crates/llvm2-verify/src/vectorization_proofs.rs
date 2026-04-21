@@ -1,7 +1,7 @@
 // llvm2-verify/vectorization_proofs.rs - NEON auto-vectorization lowering proofs
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proof obligations verifying that the NEON auto-vectorization pass
 // (`llvm2_opt::vectorize::scalar_to_neon_op()`) correctly maps scalar

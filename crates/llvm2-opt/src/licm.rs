@@ -1,7 +1,7 @@
 // llvm2-opt - Loop-Invariant Code Motion
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Loop-Invariant Code Motion (LICM) for machine-level IR.
 //!
@@ -42,9 +42,9 @@ use std::collections::{HashMap, HashSet};
 use llvm2_ir::{BlockId, InstId, MachFunction, MachOperand};
 
 use crate::dom::DomTree;
-use crate::effects::{opcode_effect, produces_value, MemoryEffect};
+use crate::effects::{category_memory_effect, category_reads_flags, opcode_effect, produces_value, reads_flags, MemoryEffect};
 use crate::loops::{create_preheader, LoopAnalysis, NaturalLoop};
-use crate::pass_manager::MachinePass;
+use crate::pass_manager::{AnalysisCache, MachinePass};
 
 /// Loop-Invariant Code Motion pass.
 pub struct LoopInvariantCodeMotion;
@@ -57,7 +57,24 @@ impl MachinePass for LoopInvariantCodeMotion {
     fn run(&mut self, func: &mut MachFunction) -> bool {
         let dom = DomTree::compute(func);
         let loop_analysis = LoopAnalysis::compute(func, &dom);
+        Self::run_with_loop_analysis(func, &loop_analysis)
+    }
 
+    fn run_with_analyses(
+        &mut self,
+        func: &mut MachFunction,
+        analyses: &mut AnalysisCache,
+    ) -> bool {
+        let loop_analysis = analyses.loop_analysis(func).clone();
+        Self::run_with_loop_analysis(func, &loop_analysis)
+    }
+}
+
+impl LoopInvariantCodeMotion {
+    fn run_with_loop_analysis(
+        func: &mut MachFunction,
+        loop_analysis: &LoopAnalysis,
+    ) -> bool {
         if loop_analysis.is_empty() {
             return false;
         }
@@ -121,10 +138,35 @@ fn hoist_loop_invariants(func: &mut MachFunction, lp: &NaturalLoop) -> bool {
                 let inst = func.inst(inst_id);
 
                 // Only hoist pure instructions that produce a value.
+                // We check both the target-specific opcode_effect (precise)
+                // and the category-based classification (target-independent)
+                // to ensure safety. The target-specific check is authoritative;
+                // the category check is a cross-validation that the category
+                // model is consistent.
                 if opcode_effect(inst.opcode) != MemoryEffect::Pure {
                     continue;
                 }
+                let cat = inst.opcode.categorize();
+                debug_assert!(
+                    category_memory_effect(cat).is_pure()
+                        || cat == llvm2_ir::OpcodeCategory::Other,
+                    "category says non-pure but opcode says pure: {:?}",
+                    inst.opcode,
+                );
                 if !produces_value(inst.opcode) {
+                    continue;
+                }
+
+                // Skip instructions that read implicit NZCV flags.
+                // Their explicit operands (condition code immediates) may
+                // appear loop-invariant, but the implicit flag input changes
+                // each iteration based on the loop's CMP/TST instructions.
+                // Hoisting a CSet out of a loop would break the loop exit
+                // condition by reading stale flags from before the loop.
+                //
+                // Check both the precise target-specific function and the
+                // category-based check for defense in depth.
+                if reads_flags(inst.opcode) || category_reads_flags(cat) {
                     continue;
                 }
 

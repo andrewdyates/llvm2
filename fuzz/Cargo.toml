@@ -1,0 +1,87 @@
+# llvm2 cargo-fuzz crate
+#
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+# Copyright 2026 Andrew Yates | License: Apache-2.0
+#
+# Part of #448 (#387 follow-up) — corpus-based panic-fuzz targets for the
+# five properties already covered by the proptest harnesses:
+#   - fuzz_encode_instruction.rs  (panic_fuzz_encode)
+#   - fuzz_translate_function.rs  (panic_fuzz_lower)
+#   - fuzz_compile_function.rs    (panic_fuzz_compile)
+#   - fuzz_macho_fixup.rs         (panic_fuzz_macho_fixup)
+#   - fuzz_verify_module.rs       (panic_fuzz_verify)
+#
+# This crate is intentionally *not* a workspace member — cargo-fuzz builds
+# it as a standalone package so the libFuzzer runtime link flags do not
+# contaminate normal `cargo build` / `cargo test` invocations elsewhere.
+#
+# Run (requires `cargo install cargo-fuzz`):
+#   cargo fuzz list --fuzz-dir fuzz
+#   cargo fuzz run fuzz_encode_instruction --fuzz-dir fuzz -- -max_total_time=60
+#
+# Compile-check (what CI actually runs):
+#   cargo check --manifest-path fuzz/Cargo.toml
+
+[package]
+name = "llvm2-cargo-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+authors = ["Andrew Yates <andrewyates.name@gmail.com>"]
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+llvm2-ir = { path = "../crates/llvm2-ir" }
+llvm2-lower = { path = "../crates/llvm2-lower" }
+llvm2-codegen = { path = "../crates/llvm2-codegen" }
+llvm2-verify = { path = "../crates/llvm2-verify" }
+tmir = { git = "https://github.com/andrewdyates/tMIR", features = ["serde", "parser", "binary", "dialect-verif-example"] }
+
+# Prevent workspace auto-inclusion. The parent workspace explicitly lists
+# its members; keeping `fuzz/` out means it won't be built by a plain
+# `cargo build` at the repo root, which is important because libFuzzer
+# requires nightly + a special sanitizer-enabled link path.
+[workspace]
+
+# libFuzzer targets.
+
+[[bin]]
+name = "fuzz_encode_instruction"
+path = "fuzz_targets/fuzz_encode_instruction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_translate_function"
+path = "fuzz_targets/fuzz_translate_function.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_compile_function"
+path = "fuzz_targets/fuzz_compile_function.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_macho_fixup"
+path = "fuzz_targets/fuzz_macho_fixup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_verify_module"
+path = "fuzz_targets/fuzz_verify_module.rs"
+test = false
+doc = false
+bench = false

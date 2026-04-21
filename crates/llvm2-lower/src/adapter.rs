@@ -1,7 +1,7 @@
 // llvm2-lower/adapter.rs - tMIR to internal LIR adapter layer
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Reference: designs/2026-04-13-tmir-integration.md (adapter layer architecture)
 //
@@ -19,16 +19,16 @@
 //! Proof annotations from tMIR are extracted into a `ProofContext` for consumption
 //! by downstream optimization passes (llvm2-opt).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tmir::{
     Block as TmirBlock, Function as TmirFunction, Module as TmirModule,
     BinOp, CastOp, UnOp, OverflowOp, Inst, InstrNode, Constant,
     ICmpOp, FCmpOp, Ordering as TmirOrdering, AtomicRMWOp as TmirAtomicRmwOp,
-    SwitchCase, ProofAnnotation,
-    BlockId, FuncId, StructDef, Ty, ValueId,
+    ProofAnnotation,
+    BlockId, FuncId, FuncTyId, StructDef, Ty, ValueId,
 };
-use crate::tmir_compat::{CmpOp, MemoryOrdering};
+use crate::tmir_compat::MemoryOrdering;
 
 use crate::function::{BasicBlock, Function, Signature, StackSlotInfo};
 use crate::instructions::{AtomicOrdering, AtomicRmwOp, Block, FloatCC, Instruction, IntCC, Opcode, Value};
@@ -61,6 +61,29 @@ pub enum AdapterError {
 
     #[error("unsupported integer bit-width: {0}")]
     UnsupportedBitWidth(u16),
+
+    #[error("malformed tMIR: block {0} branch-arg count ({1}) does not match target params ({2})")]
+    BlockArgArityMismatch(u32, usize, usize),
+
+    #[error("malformed tMIR: block {0} has duplicate parameter Value {1}")]
+    DuplicateBlockParam(u32, u32),
+
+    /// Internal invariant violation: adapter was used without a module set.
+    ///
+    /// All public entry points (`translate_module`, `translate_function`, etc.)
+    /// set `adapter.module = Some(module)` before calling `translate()`. This
+    /// variant exists so the invariant is surfaced as a recoverable error
+    /// rather than a panic in release builds (#372: crash-free codegen).
+    #[error("internal error: adapter module not set before translation (call translate_module/translate_function)")]
+    ModuleNotSet,
+
+    /// A tMIR function references a `FuncTyId` that was never registered in
+    /// the enclosing module's `func_types` table. Previously the adapter
+    /// indexed the slice directly and panicked on an out-of-bounds access
+    /// (#447); now we return this variant so the caller can report the
+    /// offending id and continue.
+    #[error("tMIR function references unregistered FuncTyId({0})")]
+    InvalidFuncTyId(u32),
 }
 
 // ---------------------------------------------------------------------------
@@ -270,17 +293,41 @@ impl ProofContext {
 /// Signedness is lost in the conversion (tMIR `Int` vs `UInt` both map to `I*`).
 /// The signedness is preserved in the opcodes (e.g., `Sdiv` vs `Udiv`).
 ///
-/// For aggregate types (Struct, Array), pass the module's struct definitions
-/// via `translate_type_with_structs`.
+/// For aggregate types (Struct, Array, Tuple), pass the module's struct
+/// definitions and/or types table via `translate_type_with_structs` or
+/// `translate_type_with_tables`.
 pub fn translate_type(ty: &Ty) -> Result<Type, AdapterError> {
-    translate_type_with_structs(ty, &[])
+    translate_type_with_tables(ty, &[], &[])
 }
 
 /// Convert a tMIR `Ty` to an internal LIR `Type`, with struct definitions for
 /// resolving `Ty::Struct(StructId)` references.
+///
+/// `Ty::Array(TyId, _)` still requires the module's `types` table — use
+/// `translate_type_with_tables` instead when array element resolution is
+/// needed.
 pub fn translate_type_with_structs(
     ty: &Ty,
     structs: &[StructDef],
+) -> Result<Type, AdapterError> {
+    translate_type_with_tables(ty, structs, &[])
+}
+
+/// Convert a tMIR `Ty` to an internal LIR `Type`, with both struct definitions
+/// and the module `types` table available (#391 Phase 2a).
+///
+/// * `structs`: resolves `Ty::Struct(StructId)` into field types.
+/// * `types`:   resolves `Ty::Array(TyId, len)` element types. This is the
+///              `Module::types` table — indices into it come from `TyId`.
+///
+/// `Ty::Tuple(Vec<Ty>)` carries its element types inline, so it does not
+/// need the `types` table — but transitively its elements might (e.g., a
+/// tuple of arrays). Enums (`Ty::Enum`) remain unsupported and are tracked
+/// by issue #398.
+pub fn translate_type_with_tables(
+    ty: &Ty,
+    structs: &[StructDef],
+    types: &[Ty],
 ) -> Result<Type, AdapterError> {
     match ty {
         Ty::Bool => Ok(Type::B1),
@@ -291,8 +338,19 @@ pub fn translate_type_with_structs(
         Ty::I128 => Ok(Type::I128),
         Ty::F32 => Ok(Type::F32),
         Ty::F64 => Ok(Type::F64),
-        Ty::Void => Err(AdapterError::VoidValue),
+        Ty::Unit => Err(AdapterError::VoidValue),
+        Ty::Never => Err(AdapterError::VoidValue),
+        // Unsigned integers map to the same LIR types (signedness is in opcodes)
+        Ty::U8 => Ok(Type::I8),
+        Ty::U16 => Ok(Type::I16),
+        Ty::U32 => Ok(Type::I32),
+        Ty::U64 => Ok(Type::I64),
+        Ty::U128 => Ok(Type::I128),
         Ty::Ptr => Ok(Type::I64), // All pointers are 64-bit on AArch64
+        // Reference and pointer types all lower to 64-bit pointers
+        Ty::Ref(_) | Ty::RefMut(_) | Ty::PtrConst(_) | Ty::PtrMut(_) | Ty::Rc(_) => {
+            Ok(Type::I64)
+        }
         Ty::Struct(sid) => {
             // Look up the struct definition and translate each field type.
             let sdef = structs
@@ -302,17 +360,66 @@ pub fn translate_type_with_structs(
             let field_types: Vec<Type> = sdef
                 .fields
                 .iter()
-                .map(|f| translate_type_with_structs(&f.ty, structs))
+                .map(|f| translate_type_with_tables(&f.ty, structs, types))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Type::Struct(field_types))
         }
         Ty::Array(elem_ty_id, len) => {
-            // Array uses TyId — for now, treat as unsupported since we'd need the
-            // module's type table to resolve TyId. This can be extended later.
-            Err(AdapterError::UnsupportedType(format!("Array(TyId({}), {})", elem_ty_id.index(), len)))
+            // Resolve the element type through the module's `types` table.
+            // Without a types table we cannot resolve the TyId — return an
+            // informative error so callers know to thread the table through
+            // (pre-Phase-2a behaviour).
+            let idx = elem_ty_id.index() as usize;
+            let elem_ty = types.get(idx).ok_or_else(|| {
+                AdapterError::UnsupportedType(format!(
+                    "Array(TyId({}), {}) — types table {} entries, index out of range",
+                    elem_ty_id.index(),
+                    len,
+                    types.len(),
+                ))
+            })?;
+            let lir_elem = translate_type_with_tables(elem_ty, structs, types)?;
+            // Saturate length to u32 — the LIR `Type::Array` stores length as
+            // u32. Arrays longer than u32::MAX (2^32 elements) are rejected.
+            let lir_len: u32 = u32::try_from(*len).map_err(|_| {
+                AdapterError::UnsupportedType(format!(
+                    "Array length {} exceeds u32::MAX",
+                    len
+                ))
+            })?;
+            Ok(Type::Array(Box::new(lir_elem), lir_len))
         }
-        Ty::Func(_) => {
+        Ty::Tuple(elems) => {
+            // Tuples are structurally equivalent to anonymous structs: a
+            // positional, heterogeneous, C-layout aggregate. Represent them
+            // as `Type::Struct` with no name metadata — this reuses the
+            // existing field-offset / alignment / size code paths.
+            let field_types: Vec<Type> = elems
+                .iter()
+                .map(|t| translate_type_with_tables(t, structs, types))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Type::Struct(field_types))
+        }
+        // `Ty::Func(_)` is a function pointer — always 64-bit on AArch64,
+        // consistent with `compute_graph.rs:1432` (size = 8 bytes). This
+        // enables closure-style aggregates (#443 Phase 2c) where one field
+        // holds a function pointer. Callers that want to reject function
+        // types (e.g., as a top-level aggregate) must check explicitly.
+        Ty::Func(_) => Ok(Type::I64),
+        Ty::Enum(_) => {
             Err(AdapterError::UnsupportedType(format!("{:?}", ty)))
+        }
+        // tMIR#30 aggregate/closure additions — tla2-style records, sets,
+        // sequences, and first-class closures. LLVM2 CPU/SIMD lowering
+        // does not yet have layout rules for these; reject with a clear
+        // diagnostic. See the tMIR bump follow-up issue for the work
+        // required to lower them (will likely require a dispatch/boxing
+        // convention and runtime support routines).
+        Ty::Set(_, _) | Ty::Sequence(_) | Ty::Record(_) | Ty::Closure(_) => {
+            Err(AdapterError::UnsupportedType(format!(
+                "aggregate/closure type not yet lowered: {:?}",
+                ty
+            )))
         }
     }
 }
@@ -350,65 +457,29 @@ fn translate_atomic_rmw_op(op: &TmirAtomicRmwOp) -> AtomicRmwOp {
 ///
 /// Since the new tmir crate stores function types by FuncTyId reference,
 /// we need the module's func_types table to resolve the actual FuncTy.
+/// The module's `structs` and `types` tables are also threaded through so
+/// aggregate parameter/return types (`Ty::Struct`, `Ty::Array`, `Ty::Tuple`)
+/// can be translated (#391 Phase 2a).
 fn translate_signature(func: &TmirFunction, module: &TmirModule) -> Result<Signature, AdapterError> {
-    let func_ty = &module.func_types[func.ty.index() as usize];
+    // Use `.get(..).ok_or(..)?` so an unregistered FuncTyId (as produced by
+    // a buggy frontend or by the panic-fuzz harness) surfaces as a typed
+    // error rather than an index-out-of-bounds panic (#447).
+    let ty_idx = func.ty.index() as usize;
+    let func_ty = module
+        .func_types
+        .get(ty_idx)
+        .ok_or(AdapterError::InvalidFuncTyId(func.ty.index()))?;
     let params: Vec<Type> = func_ty
         .params
         .iter()
-        .map(translate_type)
+        .map(|t| translate_type_with_tables(t, &module.structs, &module.types))
         .collect::<Result<Vec<_>, _>>()?;
     let returns: Vec<Type> = func_ty
         .returns
         .iter()
-        .map(translate_type)
+        .map(|t| translate_type_with_tables(t, &module.structs, &module.types))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Signature { params, returns })
-}
-
-// ---------------------------------------------------------------------------
-// Comparison predicate translation
-// ---------------------------------------------------------------------------
-
-/// Map tMIR integer comparison predicates to internal `IntCC`.
-fn translate_int_cmp(op: &CmpOp) -> Option<IntCC> {
-    match op {
-        CmpOp::Eq => Some(IntCC::Equal),
-        CmpOp::Ne => Some(IntCC::NotEqual),
-        CmpOp::Slt => Some(IntCC::SignedLessThan),
-        CmpOp::Sle => Some(IntCC::SignedLessThanOrEqual),
-        CmpOp::Sgt => Some(IntCC::SignedGreaterThan),
-        CmpOp::Sge => Some(IntCC::SignedGreaterThanOrEqual),
-        CmpOp::Ult => Some(IntCC::UnsignedLessThan),
-        CmpOp::Ule => Some(IntCC::UnsignedLessThanOrEqual),
-        CmpOp::Ugt => Some(IntCC::UnsignedGreaterThan),
-        CmpOp::Uge => Some(IntCC::UnsignedGreaterThanOrEqual),
-        _ => None, // Float comparisons handled separately
-    }
-}
-
-/// Map tMIR float comparison predicates to internal `FloatCC`.
-///
-/// IEEE 754 ordered predicates return false for NaN; unordered predicates
-/// return true for NaN. Both categories are preserved through to the ISel,
-/// which emits the correct AArch64 condition codes for each.
-fn translate_float_cmp(op: &CmpOp) -> Option<FloatCC> {
-    match op {
-        // Ordered comparisons (false when NaN)
-        CmpOp::FOeq => Some(FloatCC::Equal),
-        CmpOp::FOne => Some(FloatCC::NotEqual),
-        CmpOp::FOlt => Some(FloatCC::LessThan),
-        CmpOp::FOle => Some(FloatCC::LessThanOrEqual),
-        CmpOp::FOgt => Some(FloatCC::GreaterThan),
-        CmpOp::FOge => Some(FloatCC::GreaterThanOrEqual),
-        // Unordered comparisons (true when NaN)
-        CmpOp::FUeq => Some(FloatCC::UnorderedEqual),
-        CmpOp::FUne => Some(FloatCC::UnorderedNotEqual),
-        CmpOp::FUlt => Some(FloatCC::UnorderedLessThan),
-        CmpOp::FUle => Some(FloatCC::UnorderedLessThanOrEqual),
-        CmpOp::FUgt => Some(FloatCC::UnorderedGreaterThan),
-        CmpOp::FUge => Some(FloatCC::UnorderedGreaterThanOrEqual),
-        _ => None, // Integer comparisons handled separately
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -422,6 +493,11 @@ struct TmirAdapter<'a> {
 
     /// Struct definitions from the module (for aggregate type translation).
     structs: &'a [StructDef],
+
+    /// Module-level types table (for resolving `Ty::Array(TyId, _)` element
+    /// types; #391 Phase 2a). Empty when the adapter is constructed without
+    /// a full module context.
+    types: &'a [Ty],
 
     /// tMIR ValueId -> internal LIR Value mapping.
     value_map: HashMap<ValueId, Value>,
@@ -454,19 +530,72 @@ struct TmirAdapter<'a> {
     /// Each entry: (predecessor tMIR BlockId, source Value, destination Value).
     pending_phi_copies: Vec<(BlockId, Value, Value)>,
 
+    /// Extra blocks created during instruction translation.
+    ///
+    /// When `translate_condbr` or the `Inst::Switch` handler encounters block arguments,
+    /// it creates intermediate "copy blocks" so that argument copies only
+    /// execute on the correct control-flow edge. These blocks are inserted
+    /// into the function after all tMIR blocks are translated.
+    ///
+    /// Each entry: (LIR Block id, BasicBlock).
+    pending_extra_blocks: Vec<(Block, BasicBlock)>,
+
     /// Stack slot metadata collected during translation.
     ///
     /// Each Alloc instruction and struct construction allocates a unique
     /// stack slot. The index into this Vec is the slot number used in
     /// `Opcode::StackAddr { slot }`.
     stack_slots: Vec<StackSlotInfo>,
+
+    /// Current function return types, used for terminator lowering decisions.
+    current_returns: Vec<Type>,
+
+    /// Type hints collected for LIR `Value`s whose producing opcode does
+    /// not carry type information (see #381).
+    ///
+    /// Currently populated for `Opcode::Call` and `Opcode::CallIndirect`
+    /// result values, using the callee's return type from the tMIR
+    /// function signature. Merged into `Function::value_types` by
+    /// `translate()` so the pipeline can seed ISel before selection.
+    value_types: HashMap<Value, Type>,
+
+    /// Set of tMIR `FuncId`s whose source function is `ProofAnnotation::Pure`.
+    ///
+    /// Precomputed from the tMIR module once so each `Inst::Call` translation
+    /// can record the callee name in `pure_callees` without re-scanning.
+    /// Populated by `seed_pure_function_ids` (called by `translate_module` /
+    /// `translate_function_with_names`). #456.
+    pure_func_ids: HashSet<FuncId>,
+
+    /// Names of direct-call callees known to be pure.
+    ///
+    /// Populated during `Inst::Call` translation when the resolved callee
+    /// `FuncId` is in `pure_func_ids`. Merged into `Function::pure_callees`
+    /// by `translate()` so the ISel pipeline can propagate
+    /// `ProofAnnotation::Pure` onto the emitted `Bl` MachInst (#456).
+    pure_callees: HashSet<String>,
 }
 
 impl<'a> TmirAdapter<'a> {
+    /// Test-only convenience constructor without a module-level `types` table.
+    /// Production code paths use `new_with_types` so `Ty::Array` element
+    /// resolution works; this shim keeps the legacy test signature alive.
+    #[cfg(test)]
     fn new(structs: &'a [StructDef], func_names: HashMap<FuncId, String>) -> Self {
+        Self::new_with_types(structs, &[], func_names)
+    }
+
+    /// Construct an adapter with both struct definitions and the module's
+    /// `types` table (for `Ty::Array(TyId, _)` element resolution).
+    fn new_with_types(
+        structs: &'a [StructDef],
+        types: &'a [Ty],
+        func_names: HashMap<FuncId, String>,
+    ) -> Self {
         Self {
             module: None,
             structs,
+            types,
             value_map: HashMap::new(),
             block_map: HashMap::new(),
             next_value: 0,
@@ -475,8 +604,32 @@ impl<'a> TmirAdapter<'a> {
             tmir_func: None,
             func_names,
             pending_phi_copies: Vec::new(),
+            pending_extra_blocks: Vec::new(),
             stack_slots: Vec::new(),
+            current_returns: Vec::new(),
+            value_types: HashMap::new(),
+            pure_func_ids: HashSet::new(),
+            pure_callees: HashSet::new(),
         }
+    }
+
+    /// Seed the set of tMIR `FuncId`s whose function bodies are proven pure.
+    ///
+    /// Called once per module before translating each function so `Inst::Call`
+    /// lowering can cheaply tag direct calls to pure callees (#456). The set
+    /// is keyed by `FuncId` rather than name because `FuncId` is the stable
+    /// identity used in `Inst::Call { callee: FuncId, .. }`.
+    fn seed_pure_function_ids(&mut self, ids: HashSet<FuncId>) {
+        self.pure_func_ids = ids;
+    }
+
+    /// Record a type hint for a LIR `Value`.
+    ///
+    /// Used by Call/CallIndirect translation to propagate the callee's
+    /// return type onto the LIR result `Value` so ISel does not default
+    /// the type to I64 (#381).
+    fn define_value_type(&mut self, val: Value, ty: Type) {
+        self.value_types.insert(val, ty);
     }
 
     /// Allocate a fresh internal Value.
@@ -517,6 +670,16 @@ impl<'a> TmirAdapter<'a> {
         b
     }
 
+    /// Allocate a fresh internal Block (not mapped to any tMIR block).
+    ///
+    /// Used when creating intermediate copy blocks for condbr/switch
+    /// edge-specific argument passing.
+    fn fresh_block(&mut self) -> Block {
+        let b = Block(self.next_block);
+        self.next_block += 1;
+        b
+    }
+
     /// Get the result Value for an instruction, or error if none.
     fn map_result(&mut self, results: &[ValueId]) -> Result<Value, AdapterError> {
         if results.is_empty() {
@@ -530,9 +693,53 @@ impl<'a> TmirAdapter<'a> {
         results.iter().map(|vid| self.map_value(*vid)).collect()
     }
 
-    /// Translate a tMIR type using the adapter's struct definitions.
+    /// Translate a tMIR type using the adapter's struct definitions and the
+    /// module's `types` table (#391 Phase 2a — enables `Ty::Array` /
+    /// `Ty::Tuple` translation end-to-end).
     fn translate_ty(&self, ty: &Ty) -> Result<Type, AdapterError> {
-        translate_type_with_structs(ty, self.structs)
+        translate_type_with_tables(ty, self.structs, self.types)
+    }
+
+    /// Resolve the return types for a direct `Call` to the given `FuncId`.
+    ///
+    /// Looks up the callee function in the module, follows its `FuncTyId`
+    /// into `module.func_types`, and translates each `Ty` return to a LIR
+    /// `Type`. Returns an empty vec (no type hints) if the callee is not
+    /// present in the module (e.g., an imported symbol) — ISel will then
+    /// fall back to `value_type()` defaults, matching pre-#381 behavior
+    /// for unknown externs.
+    fn lookup_callee_return_types(&self, callee: FuncId) -> Vec<Type> {
+        let Some(module) = self.module else {
+            return Vec::new();
+        };
+        let Some(callee_fn) = module.functions.iter().find(|f| f.id == callee) else {
+            return Vec::new();
+        };
+        self.lookup_func_type_returns(callee_fn.ty)
+    }
+
+    /// Resolve the return types for a function type by `FuncTyId`.
+    ///
+    /// Used by `CallIndirect`, where the instruction carries the callee
+    /// signature explicitly. Returns an empty vec if any return type
+    /// fails to translate (e.g., aggregate returns through opaque types),
+    /// preserving the pre-#381 fallback behavior for those cases.
+    fn lookup_func_type_returns(&self, sig: FuncTyId) -> Vec<Type> {
+        let Some(module) = self.module else {
+            return Vec::new();
+        };
+        let idx = sig.index() as usize;
+        let Some(func_ty) = module.func_types.get(idx) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(func_ty.returns.len());
+        for ty in &func_ty.returns {
+            match translate_type_with_tables(ty, self.structs, self.types) {
+                Ok(t) => out.push(t),
+                Err(_) => return Vec::new(),
+            }
+        }
+        out
     }
 
     // -----------------------------------------------------------------------
@@ -546,8 +753,9 @@ impl<'a> TmirAdapter<'a> {
     ) -> Result<(Function, ProofContext), AdapterError> {
         self.tmir_func = Some(func);
 
-        let module = self.module.expect("module must be set before translate()");
+        let module = self.module.ok_or(AdapterError::ModuleNotSet)?;
         let sig = translate_signature(func, module)?;
+        self.current_returns = sig.returns.clone();
         let entry = self.map_block(func.entry);
 
         let mut lir_func = Function::new(func.name.clone(), sig);
@@ -575,7 +783,7 @@ impl<'a> TmirAdapter<'a> {
             let pred_lir_block = self.map_block(pred_tmir_block);
             if let Some(pred_bb) = lir_func.blocks.get_mut(&pred_lir_block) {
                 let copy_inst = Instruction {
-                    opcode: Opcode::Iadd, // single-arg Iadd = COPY (same as resolve_block_args)
+                    opcode: Opcode::Copy,
                     args: vec![src],
                     results: vec![dst],
                 };
@@ -591,14 +799,42 @@ impl<'a> TmirAdapter<'a> {
                     )
                 });
                 match term_pos {
-                    Some(pos) => pred_bb.instructions.insert(pos, copy_inst),
-                    None => pred_bb.instructions.push(copy_inst),
+                    Some(pos) => {
+                        pred_bb.instructions.insert(pos, copy_inst);
+                        // Keep source_locs aligned (phi copies have no source loc).
+                        if !pred_bb.source_locs.is_empty() {
+                            pred_bb.source_locs.insert(pos, None);
+                        }
+                    }
+                    None => {
+                        pred_bb.instructions.push(copy_inst);
+                        if !pred_bb.source_locs.is_empty() {
+                            pred_bb.source_locs.push(None);
+                        }
+                    }
                 }
             }
         }
 
+        // Post-pass: insert extra blocks created by condbr/switch edge splitting.
+        //
+        // When translate_condbr or the Inst::Switch handler encountered block arguments,
+        // they created intermediate copy blocks to ensure copies only execute on
+        // the correct control-flow edge (fix for issue #302/#304).
+        for (block_id, basic_block) in std::mem::take(&mut self.pending_extra_blocks) {
+            lir_func.blocks.insert(block_id, basic_block);
+        }
+
         // Propagate stack slot metadata to the LIR function.
         lir_func.stack_slots = self.stack_slots.clone();
+
+        // Propagate Value->Type hints (Call/CallIndirect result types, #381)
+        // so the pipeline can seed ISel before instruction selection.
+        lir_func.value_types = self.value_types.clone();
+
+        // Propagate pure-callee names (#456) so ISel can stamp `Bl` MachInsts
+        // targeting these callees with `ProofAnnotation::Pure`.
+        lir_func.pure_callees = self.pure_callees.clone();
 
         Ok((lir_func, self.proof_ctx.clone()))
     }
@@ -613,7 +849,7 @@ impl<'a> TmirAdapter<'a> {
         // Translate block parameters (phi-like).
         for (vid, ty) in &tmir_block.params {
             let val = self.map_value(*vid);
-            let lir_ty = translate_type(ty)?;
+            let lir_ty = self.translate_ty(ty)?;
             bb.params.push((val, lir_ty));
         }
 
@@ -633,8 +869,23 @@ impl<'a> TmirAdapter<'a> {
                 }
             }
 
+            // Convert tMIR SourceSpan to SourceLoc for DWARF line numbers.
+            let source_loc = node.span.as_ref().map(|span| {
+                llvm2_ir::SourceLoc {
+                    file: span.file,
+                    line: span.line,
+                    col: span.col,
+                }
+            });
+
             let instrs = self.translate_instruction(node)?;
+            let instr_count = instrs.len();
             bb.instructions.extend(instrs);
+            // All LIR instructions generated from this tMIR node share
+            // the same source location (one tMIR node -> N LIR instrs).
+            for _ in 0..instr_count {
+                bb.source_locs.push(source_loc);
+            }
         }
 
         Ok(bb)
@@ -710,39 +961,10 @@ impl<'a> TmirAdapter<'a> {
 
             Inst::Overflow {
                 op,
-                ty: _,
+                ty,
                 lhs,
                 rhs,
-            } => {
-                let opcode = match op {
-                    OverflowOp::AddOverflow => Opcode::Iadd,
-                    OverflowOp::SubOverflow => Opcode::Isub,
-                    OverflowOp::MulOverflow => Opcode::Imul,
-                };
-
-                let lhs_val = self.map_value(*lhs);
-                let rhs_val = self.map_value(*rhs);
-                let result = self.map_result(&node.results)?;
-                let mut instrs = vec![Instruction {
-                    opcode,
-                    args: vec![lhs_val, rhs_val],
-                    results: vec![result],
-                }];
-
-                if let Some(flag_vid) = node.results.get(1) {
-                    let flag = self.map_value(*flag_vid);
-                    instrs.push(Instruction {
-                        opcode: Opcode::Iconst {
-                            ty: Type::B1,
-                            imm: 0,
-                        },
-                        args: vec![],
-                        results: vec![flag],
-                    });
-                }
-
-                Ok(instrs)
-            }
+            } => self.translate_overflow(op, ty, *lhs, *rhs, &node.results),
 
             Inst::ICmp { op, ty: _, lhs, rhs } => {
                 let cond = match op {
@@ -803,12 +1025,18 @@ impl<'a> TmirAdapter<'a> {
                 operand,
             } => self.translate_cast(op, src_ty, dst_ty, operand, &node.results),
 
-            Inst::Load { ty, ptr } => self.translate_load(ty, ptr, &node.results),
+            Inst::Load { ty, ptr, .. } => self.translate_load(ty, ptr, &node.results),
 
-            Inst::Store { ty: _, ptr, value } => self.translate_store(ptr, value),
+            Inst::Store { ptr, value, .. } => self.translate_store(ptr, value),
 
-            Inst::Alloca { ty, count } => self.translate_alloc(ty, count, &node.results),
+            Inst::Alloca { ty, count, .. } => self.translate_alloc(ty, count, &node.results),
 
+            // GEP stride contract (ABI-critical; see `llvm2-ir` crate docs
+            // and issue #475):
+            //   result = base + index * sizeof(pointee_ty)
+            // Empty `indices` => Copy (identity). Multi-index GEP is not yet
+            // lowered. External consumers (z4, tla2) depend on this stride
+            // convention — changing it is a P0 ABI break.
             Inst::GEP {
                 pointee_ty,
                 base,
@@ -818,7 +1046,7 @@ impl<'a> TmirAdapter<'a> {
                     let src = self.map_value(*base);
                     let dst = self.map_result(&node.results)?;
                     Ok(vec![Instruction {
-                        opcode: Opcode::Iadd,
+                        opcode: Opcode::Copy,
                         args: vec![src],
                         results: vec![dst],
                     }])
@@ -896,7 +1124,7 @@ impl<'a> TmirAdapter<'a> {
                 success,
                 failure: _,
             } => {
-                let lir_ty = translate_type(ty)?;
+                let lir_ty = self.translate_ty(ty)?;
                 let ptr_val = self.map_value(*ptr);
                 let exp_val = self.map_value(*expected);
                 let des_val = self.map_value(*desired);
@@ -944,23 +1172,55 @@ impl<'a> TmirAdapter<'a> {
                 default_args,
                 cases,
             } => {
-                let mut instrs = self.resolve_block_args(*default, default_args)?;
+                // BUG FIX (issue #304): Same pattern as condbr (#302) — copies
+                // for each case must only execute on the correct edge. Create
+                // intermediate copy blocks when block arguments are present.
 
-                for case in cases {
-                    instrs.extend(self.resolve_block_args(case.target, &case.args)?);
-                }
-
+                let mut instrs = Vec::new();
                 let selector = self.map_value(*value);
-                let default_block = self.map_block(*default);
+
+                // Default case: create copy block if there are args.
+                let default_block = if !default_args.is_empty() {
+                    let copy_block_id = self.fresh_block();
+                    let default_copies = self.resolve_block_args(*default, default_args)?;
+                    let real_default_dest = self.map_block(*default);
+                    let mut copy_bb = BasicBlock::default();
+                    copy_bb.instructions = default_copies;
+                    copy_bb.instructions.push(Instruction {
+                        opcode: Opcode::Jump { dest: real_default_dest },
+                        args: vec![],
+                        results: vec![],
+                    });
+                    self.pending_extra_blocks.push((copy_block_id, copy_bb));
+                    copy_block_id
+                } else {
+                    self.map_block(*default)
+                };
+
                 let mut lir_cases = Vec::with_capacity(cases.len());
 
                 for case in cases {
                     let case_value = match &case.value {
-                        Constant::Int(v) => *v as i64,
+                        Constant::Int(v) => i64::try_from(*v).map_err(|_| {
+                            // #339 Finding 3: reject silently-truncating
+                            // i128 switch case values rather than lower them
+                            // to a wrong i64 that would silently alias
+                            // another case.
+                            AdapterError::UnsupportedInstruction(format!(
+                                "switch case value {} does not fit in i64; \
+                                 wide-imm case values are not yet supported",
+                                v
+                            ))
+                        })?,
                         Constant::Bool(b) => {
                             if *b { 1 } else { 0 }
                         }
-                        Constant::Float(_) | Constant::Aggregate(_) => {
+                        Constant::Float(_)
+                        | Constant::Aggregate(_)
+                        | Constant::Sequence(_)
+                        | Constant::Set(_)
+                        | Constant::Record(_)
+                        | Constant::Closure { .. } => {
                             return Err(AdapterError::UnsupportedInstruction(format!(
                                 "non-integer switch case value: {:?}",
                                 case.value
@@ -968,7 +1228,25 @@ impl<'a> TmirAdapter<'a> {
                         }
                     };
 
-                    lir_cases.push((case_value, self.map_block(case.target)));
+                    // Each case: create copy block if there are args.
+                    let case_dest = if !case.args.is_empty() {
+                        let copy_block_id = self.fresh_block();
+                        let case_copies = self.resolve_block_args(case.target, &case.args)?;
+                        let real_case_dest = self.map_block(case.target);
+                        let mut copy_bb = BasicBlock::default();
+                        copy_bb.instructions = case_copies;
+                        copy_bb.instructions.push(Instruction {
+                            opcode: Opcode::Jump { dest: real_case_dest },
+                            args: vec![],
+                            results: vec![],
+                        });
+                        self.pending_extra_blocks.push((copy_block_id, copy_bb));
+                        copy_block_id
+                    } else {
+                        self.map_block(case.target)
+                    };
+
+                    lir_cases.push((case_value, case_dest));
                 }
 
                 instrs.push(Instruction {
@@ -992,6 +1270,50 @@ impl<'a> TmirAdapter<'a> {
                     .cloned()
                     .unwrap_or_else(|| format!("__func_{}", callee.index()));
 
+                // Detect memory intrinsics and emit specialized opcodes.
+                // These are recognized by name: bare libc names and LLVM
+                // intrinsic prefixes (e.g., "llvm.memcpy.p0.p0.i64").
+                if is_memcpy_intrinsic(&callee_name) {
+                    return Ok(vec![Instruction {
+                        opcode: Opcode::Memcpy,
+                        args: arg_vals,
+                        results: vec![],
+                    }]);
+                }
+                if is_memmove_intrinsic(&callee_name) {
+                    return Ok(vec![Instruction {
+                        opcode: Opcode::Memmove,
+                        args: arg_vals,
+                        results: vec![],
+                    }]);
+                }
+                if is_memset_intrinsic(&callee_name) {
+                    return Ok(vec![Instruction {
+                        opcode: Opcode::Memset,
+                        args: arg_vals,
+                        results: vec![],
+                    }]);
+                }
+
+                // Propagate callee return types onto the Call result Values
+                // so ISel's `value_type()` returns the true type instead of
+                // the I64 fallback (#381). The lookup yields an empty Vec
+                // for unknown/extern callees; in that case we leave the
+                // types unrecorded and preserve pre-#381 behavior.
+                let ret_tys = self.lookup_callee_return_types(*callee);
+                for (val, ty) in result_vals.iter().zip(ret_tys.iter()) {
+                    self.define_value_type(*val, ty.clone());
+                }
+
+                // Propagate callee purity onto the LIR Call name so ISel can
+                // tag the emitted `Bl` MachInst with `ProofAnnotation::Pure`.
+                // Extern/unknown callees (callee not in `pure_func_ids`)
+                // default to non-pure. Memory intrinsics above are handled
+                // separately and are never tagged pure. (#456)
+                if self.pure_func_ids.contains(callee) {
+                    self.pure_callees.insert(callee_name.clone());
+                }
+
                 Ok(vec![Instruction {
                     opcode: Opcode::Call { name: callee_name },
                     args: arg_vals,
@@ -1001,13 +1323,21 @@ impl<'a> TmirAdapter<'a> {
 
             Inst::CallIndirect {
                 callee,
-                sig: _,
+                sig,
                 args,
             } => {
                 let callee_val = self.map_value(*callee);
                 let mut arg_vals = vec![callee_val];
                 arg_vals.extend(args.iter().map(|vid| self.map_value(*vid)));
                 let result_vals = self.map_results(&node.results);
+
+                // Propagate callee return types onto the CallIndirect result
+                // Values using the explicit `sig` carried on the tMIR
+                // instruction (#381). Same fallback semantics as Call.
+                let ret_tys = self.lookup_func_type_returns(*sig);
+                for (val, ty) in result_vals.iter().zip(ret_tys.iter()) {
+                    self.define_value_type(*val, ty.clone());
+                }
 
                 Ok(vec![Instruction {
                     opcode: Opcode::CallIndirect,
@@ -1051,7 +1381,7 @@ impl<'a> TmirAdapter<'a> {
                         results: vec![],
                     },
                     Instruction {
-                        opcode: Opcode::Iadd,
+                        opcode: Opcode::Copy,
                         args: vec![base_ptr],
                         results: vec![dst],
                     },
@@ -1116,11 +1446,9 @@ impl<'a> TmirAdapter<'a> {
                 index,
                 value,
             } => {
-                let module = self
-                    .module
-                    .expect("module must be set before translate_instruction()");
+                let module = self.module.ok_or(AdapterError::ModuleNotSet)?;
                 let elem_ty = match ty {
-                    Ty::Array(elem_ty_id, _) => *module
+                    Ty::Array(elem_ty_id, _) => module
                         .types
                         .get(elem_ty_id.as_usize())
                         .ok_or_else(|| {
@@ -1128,7 +1456,8 @@ impl<'a> TmirAdapter<'a> {
                                 "unknown array element type id in insertelement: {:?}",
                                 ty
                             ))
-                        })?,
+                        })?
+                        .clone(),
                     _ => {
                         return Err(AdapterError::UnsupportedInstruction(format!(
                             "insertelement requires array aggregate type, got {:?}",
@@ -1186,7 +1515,7 @@ impl<'a> TmirAdapter<'a> {
                     results: vec![],
                 });
                 instrs.push(Instruction {
-                    opcode: Opcode::Iadd,
+                    opcode: Opcode::Copy,
                     args: vec![base_ptr],
                     results: vec![dst],
                 });
@@ -1195,28 +1524,50 @@ impl<'a> TmirAdapter<'a> {
             }
 
             Inst::Const { ty, value } => match value {
-                Constant::Int(v) => self.translate_const(ty, *v as i64, &node.results),
+                Constant::Int(v) => self.translate_int_const(ty, *v, &node.results),
                 Constant::Float(v) => self.translate_fconst(ty, *v, &node.results),
                 Constant::Bool(b) => {
                     self.translate_const(ty, if *b { 1 } else { 0 }, &node.results)
                 }
-                Constant::Aggregate(_) => Err(AdapterError::UnsupportedInstruction(format!(
-                    "aggregate const is not lowered yet: {:?}",
-                    value
-                ))),
+                Constant::Aggregate(elems) => {
+                    self.translate_aggregate_const(ty, elems, &node.results)
+                }
+                // tMIR#30 aggregate/closure constants — tla2-style records,
+                // sets, sequences, and closure values. LLVM2 CPU/SIMD
+                // lowering does not yet have layout rules for these; reject
+                // with a clear diagnostic. See the tMIR bump follow-up issue
+                // for lowering work required.
+                Constant::Sequence(_)
+                | Constant::Set(_)
+                | Constant::Record(_)
+                | Constant::Closure { .. } => {
+                    Err(AdapterError::UnsupportedInstruction(format!(
+                        "tMIR#30 aggregate/closure constant not yet lowered: {:?}",
+                        value
+                    )))
+                }
             },
 
             Inst::NullPtr => self.translate_const(&Ty::Ptr, 0, &node.results),
 
             Inst::Undef { ty } => match ty {
                 Ty::F32 | Ty::F64 => self.translate_fconst(ty, 0.0, &node.results),
-                Ty::Bool | Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::I128 | Ty::Ptr => {
+                Ty::Bool | Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::I128
+                | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128
+                | Ty::Ptr | Ty::Ref(_) | Ty::RefMut(_) | Ty::PtrConst(_) | Ty::PtrMut(_) | Ty::Rc(_) => {
                     self.translate_const(ty, 0, &node.results)
                 }
-                Ty::Void => Ok(vec![]),
-                Ty::Struct(_) | Ty::Array(_, _) | Ty::Func(_) => {
+                Ty::Unit | Ty::Never => Ok(vec![]),
+                Ty::Struct(_) | Ty::Array(_, _) | Ty::Tuple(_) | Ty::Enum(_) | Ty::Func(_) => {
                     Err(AdapterError::UnsupportedInstruction(format!(
                         "aggregate/function undef is not lowered yet: {:?}",
+                        ty
+                    )))
+                }
+                // tMIR#30 aggregate/closure additions — not lowered yet.
+                Ty::Set(_, _) | Ty::Sequence(_) | Ty::Record(_) | Ty::Closure(_) => {
+                    Err(AdapterError::UnsupportedInstruction(format!(
+                        "tMIR#30 aggregate/closure undef not yet lowered: {:?}",
                         ty
                     )))
                 }
@@ -1228,18 +1579,25 @@ impl<'a> TmirAdapter<'a> {
 
             Inst::Unreachable => {
                 // TODO(#283): lower to a dedicated trap/unreachable LIR opcode.
-                Ok(vec![Instruction {
-                    opcode: Opcode::Return,
-                    args: vec![],
-                    results: vec![],
-                }])
+                if self.current_returns.is_empty() {
+                    Ok(vec![Instruction {
+                        opcode: Opcode::Return,
+                        args: vec![],
+                        results: vec![],
+                    }])
+                } else {
+                    Err(AdapterError::UnsupportedInstruction(
+                        "Unreachable in non-void function not yet lowered - see #283".to_string(),
+                    ))
+                }
             }
 
             Inst::Copy { ty: _, operand } => {
+                // Direct 1:1 mapping: tMIR Copy -> LIR Copy.
                 let src = self.map_value(*operand);
                 let dst = self.map_result(&node.results)?;
                 Ok(vec![Instruction {
-                    opcode: Opcode::Iadd,
+                    opcode: Opcode::Copy,
                     args: vec![src],
                     results: vec![dst],
                 }])
@@ -1264,142 +1622,74 @@ impl<'a> TmirAdapter<'a> {
                     results: vec![dst],
                 }])
             }
+
+            // Borrow instructions (Rust ownership model) — lowered as no-ops
+            // at the machine level. Borrow semantics are verified by the proof
+            // system, not enforced by generated code.
+            Inst::Borrow { ptr } | Inst::BorrowMut { ptr } => {
+                let src = self.map_value(*ptr);
+                let dst = self.map_result(&node.results)?;
+                Ok(vec![Instruction {
+                    opcode: Opcode::Copy,
+                    args: vec![src],
+                    results: vec![dst],
+                }])
+            }
+            Inst::EndBorrow { .. } => Ok(vec![]),
+
+            // ARC instructions (Swift reference counting) — not yet lowered.
+            // These will need runtime calls when Swift ARC support lands.
+            Inst::Retain { .. } | Inst::Release { .. } => {
+                Err(AdapterError::UnsupportedInstruction(
+                    "ARC retain/release not yet lowered".to_string(),
+                ))
+            }
+            Inst::IsUnique { .. } => {
+                Err(AdapterError::UnsupportedInstruction(
+                    "ARC is_unique not yet lowered".to_string(),
+                ))
+            }
+
+            // Heap deallocation — not yet lowered.
+            Inst::Dealloc { .. } => {
+                Err(AdapterError::UnsupportedInstruction(
+                    "dealloc not yet lowered".to_string(),
+                ))
+            }
+
+            // Binding frames (tMIR#30 §R4) — typed SSA frames for quantifier
+            // lowering. Not yet lowered to machine code. These will need
+            // stack-slot (CPU) or per-lane register (GPU) allocation when
+            // we wire up TLA+ / Lean-style quantifier codegen.
+            Inst::OpenFrame { .. }
+            | Inst::BindSlot { .. }
+            | Inst::LoadSlot { .. }
+            | Inst::CloseFrame { .. } => {
+                Err(AdapterError::UnsupportedInstruction(
+                    "binding-frame ops (OpenFrame/BindSlot/LoadSlot/CloseFrame) \
+                     not yet lowered".to_string(),
+                ))
+            }
+
+            // Dialect ops — opaque namespaced operations from a tMIR
+            // dialect registry. The frontend must lower these to core
+            // tMIR before reaching the LLVM2 adapter.
+            Inst::DialectOp(_) => {
+                Err(AdapterError::UnsupportedInstruction(
+                    "DialectOp reached the LLVM2 adapter without prior \
+                     dialect lowering".to_string(),
+                ))
+            }
         }
     }
 
 
-    // -----------------------------------------------------------------------
-    // Binary operations
-    // -----------------------------------------------------------------------
-
-    fn translate_binop(
-        &mut self,
-        op: &BinOp,
-        _ty: &Ty,
-        lhs: &ValueId,
-        rhs: &ValueId,
-        results: &[ValueId],
-    ) -> Result<Vec<Instruction>, AdapterError> {
-        let opcode = match op {
-            BinOp::Add => Opcode::Iadd,
-            BinOp::Sub => Opcode::Isub,
-            BinOp::Mul => Opcode::Imul,
-            BinOp::SDiv => Opcode::Sdiv,
-            BinOp::UDiv => Opcode::Udiv,
-            BinOp::And => Opcode::Band,
-            BinOp::Or => Opcode::Bor,
-            BinOp::Xor => Opcode::Bxor,
-            BinOp::Shl => Opcode::Ishl,
-            BinOp::AShr => Opcode::Sshr,
-            BinOp::LShr => Opcode::Ushr,
-            BinOp::FAdd => Opcode::Fadd,
-            BinOp::FSub => Opcode::Fsub,
-            BinOp::FMul => Opcode::Fmul,
-            BinOp::FDiv => Opcode::Fdiv,
-            // Remainder: emitted as native LIR opcodes; ISel lowers to SDIV/UDIV + MSUB.
-            BinOp::SRem => Opcode::Srem,
-            BinOp::URem => Opcode::Urem,
-            BinOp::FRem => Opcode::Fdiv, // TODO(#283): add dedicated LIR Frem opcode
-        };
-
-        let lhs_val = self.map_value(*lhs);
-        let rhs_val = self.map_value(*rhs);
-        let result = self.map_result(results)?;
-
-        Ok(vec![Instruction {
-            opcode,
-            args: vec![lhs_val, rhs_val],
-            results: vec![result],
-        }])
-    }
-
-    // -----------------------------------------------------------------------
-    // Unary operations
-    // -----------------------------------------------------------------------
-
-    fn translate_unop(
-        &mut self,
-        op: &UnOp,
-        _ty: &Ty,
-        operand: &ValueId,
-        results: &[ValueId],
-    ) -> Result<Vec<Instruction>, AdapterError> {
-        let src = self.map_value(*operand);
-        let dst = self.map_result(results)?;
-
-        match op {
-            UnOp::Neg => {
-                // Neg: result = -operand
-                // Directly emit Ineg; ISel lowers to SUB Xd, XZR, Xn (NEG alias).
-                let neg_inst = Instruction {
-                    opcode: Opcode::Ineg,
-                    args: vec![src],
-                    results: vec![dst],
-                };
-                Ok(vec![neg_inst])
-            }
-            UnOp::Not => {
-                // Bitwise NOT: result = ~operand
-                // Directly emit Bnot; ISel lowers to ORN Xd, XZR, Xn (MVN alias).
-                let not_inst = Instruction {
-                    opcode: Opcode::Bnot,
-                    args: vec![src],
-                    results: vec![dst],
-                };
-                Ok(vec![not_inst])
-            }
-            UnOp::FNeg => {
-                // FNeg: result = -operand
-                // Directly emit Fneg; ISel lowers to FNEG Dd, Dn.
-                let fneg_inst = Instruction {
-                    opcode: Opcode::Fneg,
-                    args: vec![src],
-                    results: vec![dst],
-                };
-                Ok(vec![fneg_inst])
-            }
-            // NOTE: UnOp::FAbs and UnOp::FSqrt don't exist in real tmir.
-            // The new translate_instruction handles UnOp inline.
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Comparisons
-    // -----------------------------------------------------------------------
-
-    fn translate_cmp(
-        &mut self,
-        op: &CmpOp,
-        ty: &Ty,
-        lhs: &ValueId,
-        rhs: &ValueId,
-        results: &[ValueId],
-    ) -> Result<Vec<Instruction>, AdapterError> {
-        let lhs_val = self.map_value(*lhs);
-        let rhs_val = self.map_value(*rhs);
-        let result = self.map_result(results)?;
-
-        // Determine if this is an integer or float comparison.
-        if ty.is_float() {
-            let cond = translate_float_cmp(op).ok_or_else(|| {
-                AdapterError::UnsupportedInstruction(format!("float cmp {:?}", op))
-            })?;
-            Ok(vec![Instruction {
-                opcode: Opcode::Fcmp { cond },
-                args: vec![lhs_val, rhs_val],
-                results: vec![result],
-            }])
-        } else {
-            let cond = translate_int_cmp(op).ok_or_else(|| {
-                AdapterError::UnsupportedInstruction(format!("int cmp {:?}", op))
-            })?;
-            Ok(vec![Instruction {
-                opcode: Opcode::Icmp { cond },
-                args: vec![lhs_val, rhs_val],
-                results: vec![result],
-            }])
-        }
-    }
+    // Legacy per-kind translation helpers (`translate_binop`, `translate_unop`,
+    // `translate_cmp`) were removed during the 2026-04-19 zero-warnings
+    // cleanup. tMIR BinOp / UnOp / ICmp / FCmp are now lowered inline in
+    // `translate_instruction` above; the free `translate_int_cmp` /
+    // `translate_float_cmp` predicate mappers were removed for the same
+    // reason (they only served the deleted `translate_cmp`).
 
     // -----------------------------------------------------------------------
     // Cast operations
@@ -1415,8 +1705,8 @@ impl<'a> TmirAdapter<'a> {
     ) -> Result<Vec<Instruction>, AdapterError> {
         let src = self.map_value(*operand);
         let dst = self.map_result(results)?;
-        let from = translate_type(src_ty)?;
-        let to = translate_type(dst_ty)?;
+        let from = self.translate_ty(src_ty)?;
+        let to = self.translate_ty(dst_ty)?;
 
         let opcode = match op {
             CastOp::SExt => Opcode::Sextend {
@@ -1435,23 +1725,12 @@ impl<'a> TmirAdapter<'a> {
             CastOp::FPExt => Opcode::FPExt,
             CastOp::FPTrunc => Opcode::FPTrunc,
             CastOp::PtrToInt | CastOp::IntToPtr => {
-                // No-op: pointers are already I64.
-                // Emit a simple copy (add 0).
-                let zero = self.fresh_value();
-                let zero_inst = Instruction {
-                    opcode: Opcode::Iconst {
-                        ty: Type::I64,
-                        imm: 0,
-                    },
-                    args: vec![],
-                    results: vec![zero],
-                };
-                let add_inst = Instruction {
-                    opcode: Opcode::Iadd,
-                    args: vec![src, zero],
+                // No-op: pointers are already I64. Emit a single Copy pseudo.
+                return Ok(vec![Instruction {
+                    opcode: Opcode::Copy,
+                    args: vec![src],
                     results: vec![dst],
-                };
-                return Ok(vec![zero_inst, add_inst]);
+                }]);
             }
             CastOp::Bitcast => Opcode::Bitcast { to_ty: to },
         };
@@ -1473,7 +1752,7 @@ impl<'a> TmirAdapter<'a> {
         ptr: &ValueId,
         results: &[ValueId],
     ) -> Result<Vec<Instruction>, AdapterError> {
-        let lir_ty = translate_type(ty)?;
+        let lir_ty = self.translate_ty(ty)?;
         let ptr_val = self.map_value(*ptr);
         let dst = self.map_result(results)?;
 
@@ -1506,7 +1785,7 @@ impl<'a> TmirAdapter<'a> {
         ordering: &MemoryOrdering,
         results: &[ValueId],
     ) -> Result<Vec<Instruction>, AdapterError> {
-        let lir_ty = translate_type(ty)?;
+        let lir_ty = self.translate_ty(ty)?;
         let ptr_val = self.map_value(*ptr);
         let dst = self.map_result(results)?;
         let lir_ordering = translate_ordering(ordering);
@@ -1544,7 +1823,7 @@ impl<'a> TmirAdapter<'a> {
         ordering: &MemoryOrdering,
         results: &[ValueId],
     ) -> Result<Vec<Instruction>, AdapterError> {
-        let lir_ty = translate_type(ty)?;
+        let lir_ty = self.translate_ty(ty)?;
         let ptr_val = self.map_value(*ptr);
         let val = self.map_value(*value);
         let dst = self.map_result(results)?;
@@ -1558,28 +1837,8 @@ impl<'a> TmirAdapter<'a> {
         }])
     }
 
-    fn translate_cmpxchg(
-        &mut self,
-        ty: &Ty,
-        ptr: &ValueId,
-        expected: &ValueId,
-        desired: &ValueId,
-        ordering: &MemoryOrdering,
-        results: &[ValueId],
-    ) -> Result<Vec<Instruction>, AdapterError> {
-        let lir_ty = translate_type(ty)?;
-        let ptr_val = self.map_value(*ptr);
-        let exp_val = self.map_value(*expected);
-        let des_val = self.map_value(*desired);
-        let dst = self.map_result(results)?;
-        let lir_ordering = translate_ordering(ordering);
-
-        Ok(vec![Instruction {
-            opcode: Opcode::CmpXchg { ty: lir_ty, ordering: lir_ordering },
-            args: vec![exp_val, des_val, ptr_val],
-            results: vec![dst],
-        }])
-    }
+    // `translate_cmpxchg` was removed during the 2026-04-19 zero-warnings
+    // cleanup — CmpXchg is lowered inline in `translate_instruction` above.
 
     fn translate_fence(
         &mut self,
@@ -1597,14 +1856,68 @@ impl<'a> TmirAdapter<'a> {
     fn translate_alloc(
         &mut self,
         ty: &Ty,
-        _count: &Option<ValueId>,
+        count: &Option<ValueId>,
         results: &[ValueId],
     ) -> Result<Vec<Instruction>, AdapterError> {
         let lir_ty = self.translate_ty(ty)?;
         let dst = self.map_result(results)?;
 
-        // Allocate a unique stack slot for this Alloc instruction.
-        let size = lir_ty.bytes();
+        // Compute allocation size. For `count: None`, allocate one element.
+        // For `count: Some(vid)`, look up `vid`'s producer in the tMIR
+        // function: if it is an Inst::Const with a non-negative integer, fold
+        // it statically and allocate `count * element_size` bytes. Any other
+        // producer means the count is dynamic — we reject with
+        // UnsupportedInstruction for now rather than silently truncate.
+        //
+        // #339 Finding 2: the previous implementation always allocated exactly
+        // one element's worth of bytes, so a `count = 10` request received
+        // only 8 bytes. Storing to element 2+ stomped adjacent stack slots.
+        //
+        // tla-tmir always produces `count` as an Inst::Const immediately
+        // preceding the Alloca (see ~/tla2/crates/tla-tmir/src/lower/mod.rs
+        // alloc_aggregate), so the constant-folding path covers 100% of
+        // current usage.
+        let element_size = lir_ty.bytes();
+        let size = match count {
+            None => element_size,
+            Some(vid) => {
+                let n = self.lookup_const_int(*vid).ok_or_else(|| {
+                    AdapterError::UnsupportedInstruction(format!(
+                        "Alloca with dynamic count (ValueId {}) — static fold \
+                         required; follow-up issue needed for runtime-sized \
+                         stack allocation",
+                        vid.0
+                    ))
+                })?;
+                if n < 0 {
+                    return Err(AdapterError::UnsupportedInstruction(format!(
+                        "Alloca with negative count {}",
+                        n
+                    )));
+                }
+                // Hard cap at 1 MiB per static allocation. Anything larger
+                // should go through heap allocation; catching it here prevents
+                // runaway stack frame sizes from a mis-lowered tMIR program.
+                const MAX_ALLOCA_BYTES: u128 = 1 << 20;
+                let total = (element_size as u128)
+                    .checked_mul(n as u128)
+                    .ok_or_else(|| {
+                        AdapterError::UnsupportedInstruction(format!(
+                            "Alloca size overflow: {} * {}",
+                            element_size, n
+                        ))
+                    })?;
+                if total > MAX_ALLOCA_BYTES {
+                    return Err(AdapterError::UnsupportedInstruction(format!(
+                        "Alloca size {} exceeds {}-byte static limit",
+                        total, MAX_ALLOCA_BYTES
+                    )));
+                }
+                total as u32
+            }
+        };
+
+        // Alignment is always the element's natural alignment.
         let align = lir_ty.align();
         let slot = self.alloc_stack_slot(size, align);
 
@@ -1613,6 +1926,286 @@ impl<'a> TmirAdapter<'a> {
             args: vec![],
             results: vec![dst],
         }])
+    }
+
+    /// Look up the `Inst::Const` producer of a ValueId in the current tMIR
+    /// function. Returns `Some(value)` only when the producer is an integer
+    /// constant that fits in `i64`; otherwise returns `None` (producer is
+    /// dynamic, non-integer, or out of i64 range).
+    ///
+    /// Cost: linear scan over the function body. Acceptable because Alloca
+    /// counts are rare (one per aggregate construction) and `count` is always
+    /// defined immediately before.
+    fn lookup_const_int(&self, vid: ValueId) -> Option<i64> {
+        let func = self.tmir_func?;
+        for block in &func.blocks {
+            for inst in &block.body {
+                if inst.results.iter().any(|r| *r == vid) {
+                    if let Inst::Const {
+                        value: Constant::Int(v),
+                        ..
+                    } = &inst.inst
+                    {
+                        return i64::try_from(*v).ok();
+                    }
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    // -----------------------------------------------------------------------
+    // Overflow-checked arithmetic (Inst::Overflow)
+    // -----------------------------------------------------------------------
+
+    /// Translate `Inst::Overflow { op, ty, lhs, rhs }` to a value +
+    /// overflow-flag pair. The previous implementation hardcoded the flag to
+    /// `Iconst B1 imm=0`, silently dropping every TLA+ runtime overflow check
+    /// (issue #339). We now emit the actual overflow condition for signed
+    /// integer arithmetic.
+    ///
+    /// Supported widths: I8, I16, I32, I64. I128 is not yet supported.
+    ///
+    /// Semantics (produce true iff overflow occurred):
+    /// - Add: `overflow = (~(lhs ^ rhs) & (lhs ^ sum)) < 0`  (sign bit set)
+    /// - Sub: `overflow = ((lhs ^ rhs) & (lhs ^ diff)) < 0`
+    /// - Mul (narrow <=32-bit): sign-extend both operands to the next-wider
+    ///   type, multiply there, and check that the wide product equals the
+    ///   sign-extension of the narrow product.
+    /// - Mul (I64): use the SDIV identity
+    ///   `overflow = (rhs != 0 AND result / rhs != lhs) OR
+    ///              (lhs == I64::MIN AND rhs == -1)`.
+    ///   Relies on AArch64 SDIV-by-zero returning 0 (LIR matches this), so
+    ///   the `rhs != 0` guard is sufficient; AArch64 `I64::MIN / -1` returns
+    ///   `I64::MIN` (no trap), hence the special case. Reference: ARMv8
+    ///   SDIV instruction definition and LLVM CodeGen i64 smulo expansion.
+    fn translate_overflow(
+        &mut self,
+        op: &OverflowOp,
+        ty: &Ty,
+        lhs: ValueId,
+        rhs: ValueId,
+        results: &[ValueId],
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        let lir_ty = self.translate_ty(ty)?;
+        if lir_ty == Type::I128 {
+            return Err(AdapterError::UnsupportedInstruction(format!(
+                "Inst::Overflow on {:?} not yet supported (need 256-bit multiply)",
+                ty
+            )));
+        }
+        if !matches!(lir_ty, Type::I8 | Type::I16 | Type::I32 | Type::I64) {
+            return Err(AdapterError::UnsupportedInstruction(format!(
+                "Inst::Overflow on non-integer type {:?}",
+                ty
+            )));
+        }
+
+        let lhs_val = self.map_value(lhs);
+        let rhs_val = self.map_value(rhs);
+        let result = self.map_result(results)?;
+        let flag_vid = results.get(1).copied().ok_or(AdapterError::MissingResult)?;
+        let flag = self.map_value(flag_vid);
+
+        // Fast path (#474): I64 signed overflow maps directly to a single
+        // CheckedSadd/Ssub/Smul LIR op that ISel lowers to the canonical
+        // AArch64 flag-setting idiom:
+        //   sadd -> ADDS + CSET VS
+        //   ssub -> SUBS + CSET VS
+        //   smul -> MUL + SMULH + ASR + CMP + CSET NE
+        // The bit-pattern fallback below is retained for I8/I16/I32 (which
+        // the existing ISel patterns do not yet recognise for the native
+        // flag idiom).
+        if lir_ty == Type::I64 {
+            let checked_opcode = match op {
+                OverflowOp::AddOverflow => Opcode::CheckedSadd,
+                OverflowOp::SubOverflow => Opcode::CheckedSsub,
+                OverflowOp::MulOverflow => Opcode::CheckedSmul,
+            };
+            return Ok(vec![Instruction {
+                opcode: checked_opcode,
+                args: vec![lhs_val, rhs_val],
+                results: vec![result, flag],
+            }]);
+        }
+
+        let mut instrs = Vec::new();
+        let arith_opcode = match op {
+            OverflowOp::AddOverflow => Opcode::Iadd,
+            OverflowOp::SubOverflow => Opcode::Isub,
+            OverflowOp::MulOverflow => Opcode::Imul,
+        };
+
+        // 1. Emit the value result (wrapping arithmetic).
+        instrs.push(Instruction {
+            opcode: arith_opcode,
+            args: vec![lhs_val, rhs_val],
+            results: vec![result],
+        });
+
+        // 2. Emit the overflow flag using op-specific bit-pattern checks.
+        match op {
+            OverflowOp::AddOverflow => {
+                // tmp1 = lhs XOR rhs
+                let tmp1 = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Bxor,
+                    args: vec![lhs_val, rhs_val],
+                    results: vec![tmp1],
+                });
+                // tmp2 = NOT tmp1
+                let tmp2 = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Bnot,
+                    args: vec![tmp1],
+                    results: vec![tmp2],
+                });
+                // tmp3 = lhs XOR sum
+                let tmp3 = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Bxor,
+                    args: vec![lhs_val, result],
+                    results: vec![tmp3],
+                });
+                // tmp4 = tmp2 AND tmp3  (sign bit set iff overflow)
+                let tmp4 = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Band,
+                    args: vec![tmp2, tmp3],
+                    results: vec![tmp4],
+                });
+                // flag = Icmp Slt(tmp4, 0)  — produces B1
+                let zero = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Iconst { ty: lir_ty.clone(), imm: 0 },
+                    args: vec![],
+                    results: vec![zero],
+                });
+                instrs.push(Instruction {
+                    opcode: Opcode::Icmp { cond: IntCC::SignedLessThan },
+                    args: vec![tmp4, zero],
+                    results: vec![flag],
+                });
+            }
+            OverflowOp::SubOverflow => {
+                // tmp1 = lhs XOR rhs
+                let tmp1 = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Bxor,
+                    args: vec![lhs_val, rhs_val],
+                    results: vec![tmp1],
+                });
+                // tmp2 = lhs XOR diff
+                let tmp2 = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Bxor,
+                    args: vec![lhs_val, result],
+                    results: vec![tmp2],
+                });
+                // tmp3 = tmp1 AND tmp2  (sign bit set iff overflow)
+                let tmp3 = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Band,
+                    args: vec![tmp1, tmp2],
+                    results: vec![tmp3],
+                });
+                // flag = Icmp Slt(tmp3, 0)
+                let zero = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Iconst { ty: lir_ty.clone(), imm: 0 },
+                    args: vec![],
+                    results: vec![zero],
+                });
+                instrs.push(Instruction {
+                    opcode: Opcode::Icmp { cond: IntCC::SignedLessThan },
+                    args: vec![tmp3, zero],
+                    results: vec![flag],
+                });
+            }
+            OverflowOp::MulOverflow => {
+                // SDIV-based check:
+                //   q = result SDIV rhs        (well-defined: rhs=0 -> 0 on AArch64)
+                //   normal  = (rhs != 0) AND (q != lhs)
+                //   special = (lhs == INT_MIN) AND (rhs == -1)
+                //   flag    = normal OR special
+                let q = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Sdiv,
+                    args: vec![result, rhs_val],
+                    results: vec![q],
+                });
+                let zero_arg = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Iconst { ty: lir_ty.clone(), imm: 0 },
+                    args: vec![],
+                    results: vec![zero_arg],
+                });
+                let rhs_nonzero = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Icmp { cond: IntCC::NotEqual },
+                    args: vec![rhs_val, zero_arg],
+                    results: vec![rhs_nonzero],
+                });
+                let q_ne_lhs = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Icmp { cond: IntCC::NotEqual },
+                    args: vec![q, lhs_val],
+                    results: vec![q_ne_lhs],
+                });
+                let normal = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Band,
+                    args: vec![rhs_nonzero, q_ne_lhs],
+                    results: vec![normal],
+                });
+                // special = (lhs == INT_MIN) AND (rhs == -1)
+                let int_min_imm: i64 = match lir_ty {
+                    Type::I8 => i8::MIN as i64,
+                    Type::I16 => i16::MIN as i64,
+                    Type::I32 => i32::MIN as i64,
+                    Type::I64 => i64::MIN,
+                    _ => unreachable!(),
+                };
+                let int_min = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Iconst { ty: lir_ty.clone(), imm: int_min_imm },
+                    args: vec![],
+                    results: vec![int_min],
+                });
+                let neg_one = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Iconst { ty: lir_ty.clone(), imm: -1 },
+                    args: vec![],
+                    results: vec![neg_one],
+                });
+                let lhs_is_min = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Icmp { cond: IntCC::Equal },
+                    args: vec![lhs_val, int_min],
+                    results: vec![lhs_is_min],
+                });
+                let rhs_is_neg1 = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Icmp { cond: IntCC::Equal },
+                    args: vec![rhs_val, neg_one],
+                    results: vec![rhs_is_neg1],
+                });
+                let special = self.fresh_value();
+                instrs.push(Instruction {
+                    opcode: Opcode::Band,
+                    args: vec![lhs_is_min, rhs_is_neg1],
+                    results: vec![special],
+                });
+                instrs.push(Instruction {
+                    opcode: Opcode::Bor,
+                    args: vec![normal, special],
+                    results: vec![flag],
+                });
+            }
+        }
+
+        Ok(instrs)
     }
 
     // -----------------------------------------------------------------------
@@ -1648,16 +2241,55 @@ impl<'a> TmirAdapter<'a> {
         else_args: &[ValueId],
     ) -> Result<Vec<Instruction>, AdapterError> {
         let mut instrs = Vec::new();
-
-        // Emit copies for then-branch block arguments.
-        instrs.extend(self.resolve_block_args(*then_target, then_args)?);
-
-        // Emit copies for else-branch block arguments.
-        instrs.extend(self.resolve_block_args(*else_target, else_args)?);
-
         let cond_val = self.map_value(*cond);
-        let then_dest = self.map_block(*then_target);
-        let else_dest = self.map_block(*else_target);
+
+        let has_then_args = !then_args.is_empty();
+        let has_else_args = !else_args.is_empty();
+
+        // When block arguments are present, copies must only execute on the
+        // correct control-flow edge. We create intermediate "copy blocks"
+        // that perform the copies and then jump to the real target.
+        //
+        // BUG FIX (issue #302): Previously, copies for BOTH branches were
+        // emitted unconditionally before the Brif. When different values
+        // are passed to the same block parameter via different edges, the
+        // last copy always wins — producing wrong code.
+
+        let then_dest = if has_then_args {
+            // Create an intermediate block for then-branch copies.
+            let copy_block_id = self.fresh_block();
+            let then_copies = self.resolve_block_args(*then_target, then_args)?;
+            let real_then_dest = self.map_block(*then_target);
+            let mut copy_bb = BasicBlock::default();
+            copy_bb.instructions = then_copies;
+            copy_bb.instructions.push(Instruction {
+                opcode: Opcode::Jump { dest: real_then_dest },
+                args: vec![],
+                results: vec![],
+            });
+            self.pending_extra_blocks.push((copy_block_id, copy_bb));
+            copy_block_id
+        } else {
+            self.map_block(*then_target)
+        };
+
+        let else_dest = if has_else_args {
+            // Create an intermediate block for else-branch copies.
+            let copy_block_id = self.fresh_block();
+            let else_copies = self.resolve_block_args(*else_target, else_args)?;
+            let real_else_dest = self.map_block(*else_target);
+            let mut copy_bb = BasicBlock::default();
+            copy_bb.instructions = else_copies;
+            copy_bb.instructions.push(Instruction {
+                opcode: Opcode::Jump { dest: real_else_dest },
+                args: vec![],
+                results: vec![],
+            });
+            self.pending_extra_blocks.push((copy_block_id, copy_bb));
+            copy_block_id
+        } else {
+            self.map_block(*else_target)
+        };
 
         instrs.push(Instruction {
             opcode: Opcode::Brif {
@@ -1685,137 +2317,17 @@ impl<'a> TmirAdapter<'a> {
         }])
     }
 
-    fn translate_call(
-        &mut self,
-        func: &FuncId,
-        args: &[ValueId],
-        results: &[ValueId],
-    ) -> Result<Vec<Instruction>, AdapterError> {
-        let arg_vals: Vec<Value> = args.iter().map(|vid| self.map_value(*vid)).collect();
-        let result_vals = self.map_results(results);
-
-        // Resolve the callee function name from the FuncId.
-        // Fall back to a synthetic name if the function is not in the module
-        // (e.g., an external/imported function).
-        let callee_name = self
-            .func_names
-            .get(func)
-            .cloned()
-            .unwrap_or_else(|| format!("__func_{}", func.0));
-
-        Ok(vec![Instruction {
-            opcode: Opcode::Call { name: callee_name },
-            args: arg_vals,
-            results: result_vals,
-        }])
-    }
-
-    // -----------------------------------------------------------------------
-    // Phi / block parameters
-    // -----------------------------------------------------------------------
-
-    fn translate_phi(
-        &mut self,
-        _ty: &Ty,
-        incoming: &[(BlockId, ValueId)],
-        results: &[ValueId],
-    ) -> Result<Vec<Instruction>, AdapterError> {
-        // Phi nodes: tMIR uses block parameters for phis (the canonical form).
-        // Explicit Phi instructions are redundant with block params but may appear.
-        //
-        // We lower them the same way block parameters are handled: emit a copy
-        // instruction in each predecessor block that moves the incoming value
-        // into the phi result. This is collected in `pending_phi_copies` and
-        // inserted into predecessor blocks after all blocks are translated
-        // (since predecessors may not exist yet during forward translation).
-        let result = self.map_result(results)?;
-
-        for &(pred_block, vid) in incoming {
-            let src = self.map_value(vid);
-            self.pending_phi_copies.push((pred_block, src, result));
-        }
-
-        // No instructions emitted in the merge block itself — the copies
-        // go into predecessor blocks via the post-pass in translate().
-        Ok(vec![])
-    }
+    // Legacy helpers `translate_call` and `translate_phi` were removed during
+    // the 2026-04-19 zero-warnings cleanup — Call and Phi are lowered inline
+    // in `translate_instruction` above.
 
     // -----------------------------------------------------------------------
     // Aggregate operations
     // -----------------------------------------------------------------------
 
-    /// Translate `Struct { ty, fields }` — construct a struct value.
-    ///
-    /// Lowering: allocate a stack slot for the struct, store each field at
-    /// its computed offset, then produce a pointer (StackAddr) to the slot
-    /// as the result. The result represents the struct's memory location.
-    fn translate_struct_construct(
-        &mut self,
-        ty: &Ty,
-        fields: &[ValueId],
-        results: &[ValueId],
-    ) -> Result<Vec<Instruction>, AdapterError> {
-        let struct_ty = self.translate_ty(ty)?;
-        let dst = self.map_result(results)?;
-        let mut instrs = Vec::new();
-
-        // Allocate a unique stack slot for this struct.
-        let size = struct_ty.bytes();
-        let align = struct_ty.align();
-        let slot = self.alloc_stack_slot(size, align);
-        let base_ptr = self.fresh_value();
-        instrs.push(Instruction {
-            opcode: Opcode::StackAddr { slot },
-            args: vec![],
-            results: vec![base_ptr],
-        });
-
-        // Store each field at its offset from the base pointer.
-        for (i, field_vid) in fields.iter().enumerate() {
-            let field_val = self.map_value(*field_vid);
-            let offset = struct_ty.offset_of(i).unwrap_or(0);
-
-            if offset == 0 {
-                // Store directly to base pointer.
-                instrs.push(Instruction {
-                    opcode: Opcode::Store,
-                    args: vec![field_val, base_ptr],
-                    results: vec![],
-                });
-            } else {
-                // Compute field address: base_ptr + offset.
-                let offset_val = self.fresh_value();
-                instrs.push(Instruction {
-                    opcode: Opcode::Iconst {
-                        ty: Type::I64,
-                        imm: offset as i64,
-                    },
-                    args: vec![],
-                    results: vec![offset_val],
-                });
-                let field_ptr = self.fresh_value();
-                instrs.push(Instruction {
-                    opcode: Opcode::Iadd,
-                    args: vec![base_ptr, offset_val],
-                    results: vec![field_ptr],
-                });
-                instrs.push(Instruction {
-                    opcode: Opcode::Store,
-                    args: vec![field_val, field_ptr],
-                    results: vec![],
-                });
-            }
-        }
-
-        // Result is the base pointer (struct location).
-        instrs.push(Instruction {
-            opcode: Opcode::Iadd,
-            args: vec![base_ptr],
-            results: vec![dst],
-        });
-
-        Ok(instrs)
-    }
+    // `translate_struct_construct` was removed during the 2026-04-19
+    // zero-warnings cleanup — Struct construction is lowered inline in
+    // `translate_instruction` above.
 
     /// Translate `Field { ty, value, index }` — extract a struct field.
     ///
@@ -1886,264 +2398,10 @@ impl<'a> TmirAdapter<'a> {
         Ok(instrs)
     }
 
-    /// Translate `Index { ty, base, index }` — array element access (GEP-like).
-    ///
-    /// Lowering: compute element offset = index * element_size, add to base
-    /// pointer, produce the element address as the result. The caller uses
-    /// Load/Store on the result.
-    fn translate_array_index(
-        &mut self,
-        ty: &Ty,
-        base: &ValueId,
-        index: &ValueId,
-        results: &[ValueId],
-    ) -> Result<Vec<Instruction>, AdapterError> {
-        let array_ty = self.translate_ty(ty)?;
-        let base_ptr = self.map_value(*base);
-        let index_val = self.map_value(*index);
-        let dst = self.map_result(results)?;
-        let mut instrs = Vec::new();
-
-        // Determine element size.
-        let elem_size = match &array_ty {
-            Type::Array(elem, _) => elem.bytes(),
-            _ => {
-                // For pointer indexing (Ptr type), fall back to 1-byte elements.
-                // Real tmir has no Ty::Ref — pointers are opaque Ty::Ptr.
-                1
-            }
-        };
-
-        if elem_size == 1 {
-            // offset = index (no multiplication needed)
-            instrs.push(Instruction {
-                opcode: Opcode::Iadd,
-                args: vec![base_ptr, index_val],
-                results: vec![dst],
-            });
-        } else {
-            // offset = index * elem_size
-            let size_val = self.fresh_value();
-            instrs.push(Instruction {
-                opcode: Opcode::Iconst {
-                    ty: Type::I64,
-                    imm: elem_size as i64,
-                },
-                args: vec![],
-                results: vec![size_val],
-            });
-            let offset = self.fresh_value();
-            instrs.push(Instruction {
-                opcode: Opcode::Imul,
-                args: vec![index_val, size_val],
-                results: vec![offset],
-            });
-            instrs.push(Instruction {
-                opcode: Opcode::Iadd,
-                args: vec![base_ptr, offset],
-                results: vec![dst],
-            });
-        }
-
-        Ok(instrs)
-    }
-
-    // -----------------------------------------------------------------------
-    // Switch (multi-way branch)
-    // -----------------------------------------------------------------------
-
-    /// Translate a tMIR Switch to an internal LIR Switch instruction.
-    ///
-    /// Maps tMIR SwitchCase entries to (value, Block) pairs and resolves
-    /// the default target block.
-    fn translate_switch(
-        &mut self,
-        value: &ValueId,
-        cases: &[SwitchCase],
-        default: &BlockId,
-    ) -> Result<Vec<Instruction>, AdapterError> {
-        let selector = self.map_value(*value);
-        let default_block = self.map_block(*default);
-
-        let lir_cases: Vec<(i64, Block)> = cases
-            .iter()
-            .map(|c| {
-                let val = match &c.value {
-                    Constant::Int(v) => *v as i64,
-                    Constant::Bool(b) => if *b { 1 } else { 0 },
-                    _ => 0, // TODO(#283): handle other constant types in switch
-                };
-                (val, self.map_block(c.target))
-            })
-            .collect();
-
-        Ok(vec![Instruction {
-            opcode: Opcode::Switch {
-                cases: lir_cases,
-                default: default_block,
-            },
-            args: vec![selector],
-            results: vec![],
-        }])
-    }
-
-    // -----------------------------------------------------------------------
-    // Indirect function call
-    // -----------------------------------------------------------------------
-
-    /// Translate a tMIR CallIndirect to an internal LIR CallIndirect.
-    ///
-    /// The callee is a function pointer (first arg), followed by the call
-    /// arguments. Lowered to BLR on AArch64.
-    fn translate_call_indirect(
-        &mut self,
-        callee: &ValueId,
-        args: &[ValueId],
-        results: &[ValueId],
-    ) -> Result<Vec<Instruction>, AdapterError> {
-        let callee_val = self.map_value(*callee);
-        let mut arg_vals = vec![callee_val];
-        arg_vals.extend(args.iter().map(|vid| self.map_value(*vid)));
-        let result_vals = self.map_results(results);
-
-        Ok(vec![Instruction {
-            opcode: Opcode::CallIndirect,
-            args: arg_vals,
-            results: result_vals,
-        }])
-    }
-
-    // -----------------------------------------------------------------------
-    // Select (conditional value, branchless)
-    // -----------------------------------------------------------------------
-
-    /// Translate a tMIR Select to an internal LIR Select.
-    ///
-    /// `Select { cond, true_val, false_val }` produces a value without
-    /// branching. Lowered to CSEL on AArch64.
-    ///
-    /// We use `Icmp { cond: Equal }` to compare the boolean condition to 1,
-    /// then `Select { cond: Equal }` to pick between true_val and false_val.
-    fn translate_select(
-        &mut self,
-        cond: &ValueId,
-        true_val: &ValueId,
-        false_val: &ValueId,
-        results: &[ValueId],
-    ) -> Result<Vec<Instruction>, AdapterError> {
-        let cond_val = self.map_value(*cond);
-        let true_v = self.map_value(*true_val);
-        let false_v = self.map_value(*false_val);
-        let dst = self.map_result(results)?;
-
-        // ISel's select_csel does CMP cond, #0 then CSEL with the given CC.
-        // For a tMIR boolean (0=false, 1=true), we want: if cond != 0, pick
-        // true_val. So we use IntCC::NotEqual — after CMP cond, #0, NE means
-        // the condition was true (non-zero).
-        // ISel expects args order: [cond_val, true_val, false_val]
-        let inst = Instruction {
-            opcode: Opcode::Select {
-                cond: IntCC::NotEqual,
-            },
-            args: vec![cond_val, true_v, false_v],
-            results: vec![dst],
-        };
-
-        Ok(vec![inst])
-    }
-
-    // -----------------------------------------------------------------------
-    // GetElementPtr (typed pointer arithmetic)
-    // -----------------------------------------------------------------------
-
-    /// Translate a tMIR GetElementPtr to internal LIR pointer arithmetic.
-    ///
-    /// Computes: result = base + index * sizeof(elem_ty) + byte_offset
-    fn translate_gep(
-        &mut self,
-        elem_ty: &Ty,
-        base: &ValueId,
-        index: &ValueId,
-        offset: i32,
-        results: &[ValueId],
-    ) -> Result<Vec<Instruction>, AdapterError> {
-        let base_ptr = self.map_value(*base);
-        let index_val = self.map_value(*index);
-        let dst = self.map_result(results)?;
-        let mut instrs = Vec::new();
-
-        // Determine element size from the element type.
-        let elem_size = translate_type(elem_ty)
-            .map(|t| t.bytes())
-            .unwrap_or(1) as i64;
-
-        // Compute index * elem_size.
-        let scaled_index = if elem_size == 1 {
-            index_val
-        } else {
-            let size_val = self.fresh_value();
-            instrs.push(Instruction {
-                opcode: Opcode::Iconst {
-                    ty: Type::I64,
-                    imm: elem_size,
-                },
-                args: vec![],
-                results: vec![size_val],
-            });
-            let mul_result = self.fresh_value();
-            instrs.push(Instruction {
-                opcode: Opcode::Imul,
-                args: vec![index_val, size_val],
-                results: vec![mul_result],
-            });
-            mul_result
-        };
-
-        // Add to base.
-        let indexed_ptr = self.fresh_value();
-        instrs.push(Instruction {
-            opcode: Opcode::Iadd,
-            args: vec![base_ptr, scaled_index],
-            results: vec![indexed_ptr],
-        });
-
-        // Add byte offset if non-zero.
-        if offset != 0 {
-            let offset_val = self.fresh_value();
-            instrs.push(Instruction {
-                opcode: Opcode::Iconst {
-                    ty: Type::I64,
-                    imm: offset as i64,
-                },
-                args: vec![],
-                results: vec![offset_val],
-            });
-            instrs.push(Instruction {
-                opcode: Opcode::Iadd,
-                args: vec![indexed_ptr, offset_val],
-                results: vec![dst],
-            });
-        } else {
-            // No offset — directly alias the indexed pointer to the result.
-            // Use Iadd with a zero constant to produce a new value.
-            let zero = self.fresh_value();
-            instrs.push(Instruction {
-                opcode: Opcode::Iconst {
-                    ty: Type::I64,
-                    imm: 0,
-                },
-                args: vec![],
-                results: vec![zero],
-            });
-            instrs.push(Instruction {
-                opcode: Opcode::Iadd,
-                args: vec![indexed_ptr, zero],
-                results: vec![dst],
-            });
-        }
-
-        Ok(instrs)
-    }
+    // Legacy helpers `translate_array_index`, `translate_call_indirect`,
+    // `translate_select`, and `translate_gep` were removed during the
+    // 2026-04-19 zero-warnings cleanup — Index, CallIndirect, Select, and
+    // GetElementPtr are lowered inline in `translate_instruction` above.
 
     // -----------------------------------------------------------------------
     // Constants
@@ -2155,7 +2413,7 @@ impl<'a> TmirAdapter<'a> {
         value: i64,
         results: &[ValueId],
     ) -> Result<Vec<Instruction>, AdapterError> {
-        let lir_ty = translate_type(ty)?;
+        let lir_ty = self.translate_ty(ty)?;
         let dst = self.map_result(results)?;
 
         Ok(vec![Instruction {
@@ -2168,13 +2426,105 @@ impl<'a> TmirAdapter<'a> {
         }])
     }
 
+    /// Translate an `Inst::Const { value: Constant::Int(i128), ty }` while
+    /// validating that the value fits into the target type's representable
+    /// range. The previous implementation did `*v as i64`, silently
+    /// truncating any value outside `i64::MIN..=i64::MAX` — issue #339
+    /// Finding 3.
+    ///
+    /// Today the adapter emits a single `Opcode::Iconst { ty, imm: i64 }`;
+    /// the i64 `imm` is sign-extended to the target type's width at codegen
+    /// time. That is fine for I8..I64 in-range values, and fine for I128 /
+    /// U128 values that happen to fit in i64. For I128 / U128 values that
+    /// do not fit in i64 we return `UnsupportedInstruction` until a proper
+    /// two-word i128 constant materialization is wired through the isel.
+    fn translate_int_const(
+        &mut self,
+        ty: &Ty,
+        value: i128,
+        results: &[ValueId],
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        // Bounds check per target type. Signed types also accept the unsigned
+        // bit-pattern range because the backend treats `Iconst.imm` as a raw
+        // bit pattern (sign/zero extension happens at use sites based on
+        // per-instruction signedness), and tMIR frontends commonly emit
+        // u64-typed constants such as hash mixing primes via `Ty::I64`.
+        let (min, max): (i128, i128) = match ty {
+            Ty::Bool => (0, 1),
+            Ty::I8 => (i8::MIN as i128, u8::MAX as i128),
+            Ty::I16 => (i16::MIN as i128, u16::MAX as i128),
+            Ty::I32 => (i32::MIN as i128, u32::MAX as i128),
+            Ty::I64 => (i64::MIN as i128, u64::MAX as i128),
+            Ty::I128 => (i128::MIN, i128::MAX),
+            Ty::U8 => (0, u8::MAX as i128),
+            Ty::U16 => (0, u16::MAX as i128),
+            Ty::U32 => (0, u32::MAX as i128),
+            Ty::U64 => (0, u64::MAX as i128),
+            Ty::U128 => (0, u128::MAX as i128), // cast is lossy above i128::MAX; see below
+            Ty::Ptr | Ty::Ref(_) | Ty::RefMut(_) | Ty::PtrConst(_) | Ty::PtrMut(_)
+            | Ty::Rc(_) => (i64::MIN as i128, u64::MAX as i128),
+            _ => {
+                return Err(AdapterError::UnsupportedInstruction(format!(
+                    "Constant::Int on non-integer type {:?}",
+                    ty
+                )));
+            }
+        };
+        // U128 upper bound — the cast above saturates at i128::MAX. For any
+        // value > i128::MAX the Constant::Int container already cannot hold
+        // it (Constant::Int is i128), so we only need to disallow negatives.
+        if matches!(ty, Ty::U128) && value < 0 {
+            return Err(AdapterError::UnsupportedInstruction(format!(
+                "Constant::Int({}) does not fit in U128 (negative)",
+                value
+            )));
+        }
+        if value < min || (value > max && !matches!(ty, Ty::U128)) {
+            return Err(AdapterError::UnsupportedInstruction(format!(
+                "Constant::Int({}) does not fit in {:?} (range [{}, {}])",
+                value, ty, min, max
+            )));
+        }
+
+        // Materialize. For values that fit in i64 we pass through to the
+        // existing `Opcode::Iconst { imm: i64 }` path, which sign-extends
+        // (or for unsigned types, zero-extends at use sites — the backend
+        // treats the imm as a bit-pattern and width truncation applies).
+        // For values outside the i64 range but valid for I128 / U128, we
+        // currently error: LIR has no two-word Iconst materialization from
+        // the adapter. Follow-up needed.
+        match i64::try_from(value) {
+            Ok(v64) => self.translate_const(ty, v64, results),
+            Err(_) => {
+                // Value fits in neither i64 nor u64 (as signed). Check
+                // whether it fits as a u64 bit-pattern for 64-bit targets.
+                if matches!(ty, Ty::I64 | Ty::U64 | Ty::Ptr | Ty::PtrConst(_) | Ty::PtrMut(_)
+                            | Ty::Ref(_) | Ty::RefMut(_) | Ty::Rc(_))
+                    && (0..=(u64::MAX as i128)).contains(&value)
+                {
+                    // Reinterpret the u64 bit pattern as i64 so Iconst carries
+                    // the same 64 bits; the backend treats it as a raw
+                    // bit-pattern for address-space constants.
+                    let bits = value as u64;
+                    return self.translate_const(ty, bits as i64, results);
+                }
+                Err(AdapterError::UnsupportedInstruction(format!(
+                    "Constant::Int({}) outside i64 range and {:?} wide-imm \
+                     materialization not yet implemented (follow-up: emit \
+                     two-word i128 constant materialization)",
+                    value, ty
+                )))
+            }
+        }
+    }
+
     fn translate_fconst(
         &mut self,
         ty: &Ty,
         value: f64,
         results: &[ValueId],
     ) -> Result<Vec<Instruction>, AdapterError> {
-        let lir_ty = translate_type(ty)?;
+        let lir_ty = self.translate_ty(ty)?;
         let dst = self.map_result(results)?;
 
         Ok(vec![Instruction {
@@ -2182,6 +2532,327 @@ impl<'a> TmirAdapter<'a> {
                 ty: lir_ty,
                 imm: value,
             },
+            args: vec![],
+            results: vec![dst],
+        }])
+    }
+
+    /// Translate a tMIR `Constant::Aggregate` for struct, tuple, or array types.
+    ///
+    /// Materialises the aggregate as a stack-allocated buffer and returns a
+    /// pointer to it in the result value. Each field/element is lowered with
+    /// its corresponding scalar const, then written into the slot via a
+    /// `StructGep`/`ArrayGep` + `Store` sequence. Nested `Constant::Aggregate`
+    /// fields recurse into the same outer slot at the correct offset — no
+    /// per-nested-level stack allocation is emitted.
+    ///
+    /// Scope: struct / tuple / array of scalar (non-aggregate) fields, with
+    /// nested aggregate fields supported recursively (Phase 2c of #443), and
+    /// `Ty::Func` fields supported as 64-bit function-pointer scalars. Enum
+    /// types remain rejected (blocked on #398). Phase 2c of #443 — SROA
+    /// downstream scalarises the stack traffic at O1+ whenever the returned
+    /// pointer does not escape.
+    fn translate_aggregate_const(
+        &mut self,
+        ty: &Ty,
+        elems: &[Constant],
+        results: &[ValueId],
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        // Top-level entry: validate the type is something we can allocate,
+        // then delegate to the recursive helper.
+        match ty {
+            Ty::Struct(_) | Ty::Tuple(_) | Ty::Array(_, _) => {}
+            Ty::Enum(_) => {
+                // #398: enum discriminant representation is unresolved.
+                return Err(AdapterError::UnsupportedInstruction(format!(
+                    "Constant::Aggregate for Ty::Enum is blocked on #398 (ty = {:?})",
+                    ty
+                )));
+            }
+            Ty::Func(_) => {
+                return Err(AdapterError::UnsupportedInstruction(format!(
+                    "Constant::Aggregate cannot have Ty::Func as the top-level \
+                     aggregate type; a function pointer is scalar, not aggregate \
+                     (ty = {:?})",
+                    ty
+                )));
+            }
+            _ => {
+                return Err(AdapterError::UnsupportedInstruction(format!(
+                    "Constant::Aggregate with non-aggregate type {:?}",
+                    ty
+                )));
+            }
+        }
+
+        // Structs use C-layout alignment; `translate_ty` computes the correct
+        // total bytes and alignment. For tuples / arrays we compute from the
+        // same LIR type.
+        let lir_ty = self.translate_ty(ty)?;
+        let total_bytes = lir_ty.bytes();
+        let total_align = lir_ty.align();
+        let slot = self.alloc_stack_slot(total_bytes, total_align);
+
+        let dst = self.map_result(results)?;
+
+        let mut instrs: Vec<Instruction> = Vec::new();
+
+        // Base pointer: the result value. A downstream SROA run will
+        // eliminate this if the address never escapes.
+        instrs.push(Instruction {
+            opcode: Opcode::StackAddr { slot },
+            args: vec![],
+            results: vec![dst],
+        });
+
+        self.fill_aggregate_at_ptr(ty, elems, dst, &mut instrs)?;
+
+        Ok(instrs)
+    }
+
+    /// Recursive helper: write every field of `Constant::Aggregate(elems)`
+    /// (typed as `ty`) into the already-materialised base pointer `dst`.
+    ///
+    /// Used by [`translate_aggregate_const`] for the top-level slot and
+    /// recursively for nested aggregate fields — a nested aggregate field
+    /// becomes a `StructGep`/`ArrayGep` on the parent pointer followed by
+    /// the same per-field writes, sharing the parent's stack slot.
+    fn fill_aggregate_at_ptr(
+        &mut self,
+        ty: &Ty,
+        elems: &[Constant],
+        dst: Value,
+        instrs: &mut Vec<Instruction>,
+    ) -> Result<(), AdapterError> {
+        // Resolve field types in declaration order.
+        let field_tys: Vec<Ty> = match ty {
+            Ty::Struct(sid) => {
+                let sdef = self.structs.iter().find(|s| s.id == *sid).ok_or_else(|| {
+                    AdapterError::UnsupportedInstruction(format!(
+                        "Constant::Aggregate: struct id {:?} not found in module struct table",
+                        sid
+                    ))
+                })?;
+                sdef.fields.iter().map(|f| f.ty.clone()).collect()
+            }
+            Ty::Tuple(ts) => ts.clone(),
+            Ty::Array(elem_tyid, count) => {
+                let elem_ty = self.types.get(elem_tyid.0 as usize).ok_or_else(|| {
+                    AdapterError::UnsupportedInstruction(format!(
+                        "Constant::Aggregate: Ty::Array element TyId {:?} not in types table",
+                        elem_tyid
+                    ))
+                })?;
+                std::iter::repeat(elem_ty.clone())
+                    .take(*count as usize)
+                    .collect()
+            }
+            Ty::Enum(_) => {
+                return Err(AdapterError::UnsupportedInstruction(format!(
+                    "Constant::Aggregate: nested Ty::Enum is blocked on #398 (ty = {:?})",
+                    ty
+                )));
+            }
+            _ => {
+                return Err(AdapterError::UnsupportedInstruction(format!(
+                    "fill_aggregate_at_ptr: non-aggregate type {:?}",
+                    ty
+                )));
+            }
+        };
+
+        if field_tys.len() != elems.len() {
+            return Err(AdapterError::UnsupportedInstruction(format!(
+                "Constant::Aggregate arity mismatch: type expects {} fields, got {}",
+                field_tys.len(),
+                elems.len()
+            )));
+        }
+
+        let lir_ty = self.translate_ty(ty)?;
+
+        for (idx, (field_ty, field_const)) in field_tys.iter().zip(elems.iter()).enumerate() {
+            // Compute the field pointer (parent_ptr + field offset) once;
+            // both scalar-store and nested-aggregate paths consume it.
+            let field_ptr = self.fresh_value();
+            match ty {
+                Ty::Struct(_) | Ty::Tuple(_) => {
+                    instrs.push(Instruction {
+                        opcode: Opcode::StructGep {
+                            struct_ty: lir_ty.clone(),
+                            field_index: idx as u32,
+                        },
+                        args: vec![dst],
+                        results: vec![field_ptr],
+                    });
+                }
+                Ty::Array(_, _) => {
+                    // For arrays, element offsets are `idx * element_size`.
+                    // Use ArrayGep with a materialised index constant so the
+                    // isel can pick `ADD base, index, LSL #log2(size)` or
+                    // fold to an immediate when size is a power of two.
+                    let elem_lir_ty = self.aggregate_field_lir_ty(field_ty)?;
+                    let index_val = self.fresh_value();
+                    instrs.push(Instruction {
+                        opcode: Opcode::Iconst {
+                            ty: Type::I64,
+                            imm: idx as i64,
+                        },
+                        args: vec![],
+                        results: vec![index_val],
+                    });
+                    instrs.push(Instruction {
+                        opcode: Opcode::ArrayGep {
+                            elem_ty: elem_lir_ty,
+                        },
+                        args: vec![dst, index_val],
+                        results: vec![field_ptr],
+                    });
+                }
+                _ => unreachable!("guarded above"),
+            }
+
+            // Nested aggregate constants: recurse into the same stack slot,
+            // using the just-computed field pointer as the sub-aggregate's
+            // base. No nested StackAddr is emitted — this keeps a single
+            // slot per top-level aggregate literal, matching the Phase 2c
+            // design in #443.
+            if let Constant::Aggregate(inner_elems) = field_const {
+                self.fill_aggregate_at_ptr(field_ty, inner_elems, field_ptr, instrs)?;
+                continue;
+            }
+
+            // Scalar field: materialise, then store.
+            let scalar_val = self.fresh_value();
+            match field_const {
+                Constant::Int(v) => {
+                    let mut field_instrs =
+                        self.translate_int_const_into(field_ty, *v, scalar_val)?;
+                    instrs.append(&mut field_instrs);
+                }
+                Constant::Float(v) => {
+                    let lir_field_ty = self.aggregate_field_lir_ty(field_ty)?;
+                    instrs.push(Instruction {
+                        opcode: Opcode::Fconst {
+                            ty: lir_field_ty,
+                            imm: *v,
+                        },
+                        args: vec![],
+                        results: vec![scalar_val],
+                    });
+                }
+                Constant::Bool(b) => {
+                    let lir_field_ty = self.aggregate_field_lir_ty(field_ty)?;
+                    instrs.push(Instruction {
+                        opcode: Opcode::Iconst {
+                            ty: lir_field_ty,
+                            imm: if *b { 1 } else { 0 },
+                        },
+                        args: vec![],
+                        results: vec![scalar_val],
+                    });
+                }
+                Constant::Aggregate(_) => unreachable!("handled above"),
+                // tMIR#30 aggregate/closure constants cannot appear as scalar
+                // field values inside an aggregate literal without further
+                // lowering. Reject them explicitly — nested aggregate/closure
+                // fields will require recursive lowering (see tMIR bump
+                // follow-up issue).
+                Constant::Sequence(_)
+                | Constant::Set(_)
+                | Constant::Record(_)
+                | Constant::Closure { .. } => {
+                    return Err(AdapterError::UnsupportedInstruction(format!(
+                        "tMIR#30 aggregate/closure constant as field is not \
+                         yet lowered: {:?}",
+                        field_const
+                    )));
+                }
+            }
+
+            instrs.push(Instruction {
+                opcode: Opcode::Store,
+                args: vec![scalar_val, field_ptr],
+                results: vec![],
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Resolve a field `Ty` to a LIR `Type`, relaxing `Ty::Func(_)` to a
+    /// 64-bit pointer scalar.
+    ///
+    /// `translate_ty` (the general type translator) rejects `Ty::Func`
+    /// because function types aren't first-class values at every callsite,
+    /// but inside an aggregate literal a `Ty::Func` field is always a
+    /// function pointer (closure-style env[0]) — same layout as `Ty::Ptr`.
+    /// Keeping this relaxation local to aggregate lowering avoids surprising
+    /// callers of `translate_type*` elsewhere.
+    fn aggregate_field_lir_ty(&self, ty: &Ty) -> Result<Type, AdapterError> {
+        if matches!(ty, Ty::Func(_)) {
+            return Ok(Type::I64);
+        }
+        self.translate_ty(ty)
+    }
+
+    /// Like `translate_int_const` but writes into a pre-allocated Value
+    /// rather than looking up a `ValueId`. Used by
+    /// [`translate_aggregate_const`] for synthesised per-field scalars.
+    fn translate_int_const_into(
+        &mut self,
+        ty: &Ty,
+        value: i128,
+        dst: Value,
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        // Delegate bounds checking + type validation to the same logic as
+        // `translate_int_const`, but emit into `dst` directly.
+        let (min, max): (i128, i128) = match ty {
+            Ty::Bool => (0, 1),
+            Ty::I8 => (i8::MIN as i128, u8::MAX as i128),
+            Ty::I16 => (i16::MIN as i128, u16::MAX as i128),
+            Ty::I32 => (i32::MIN as i128, u32::MAX as i128),
+            Ty::I64 => (i64::MIN as i128, u64::MAX as i128),
+            Ty::I128 => (i128::MIN, i128::MAX),
+            Ty::U8 => (0, u8::MAX as i128),
+            Ty::U16 => (0, u16::MAX as i128),
+            Ty::U32 => (0, u32::MAX as i128),
+            Ty::U64 => (0, u64::MAX as i128),
+            Ty::U128 => (0, u128::MAX as i128),
+            Ty::Ptr | Ty::Ref(_) | Ty::RefMut(_) | Ty::PtrConst(_) | Ty::PtrMut(_)
+            | Ty::Rc(_) => (i64::MIN as i128, u64::MAX as i128),
+            // A `Ty::Func` field inside an aggregate literal is a
+            // function-pointer scalar (closure-style env[0] / vtable slot);
+            // same address range as `Ty::Ptr`.
+            Ty::Func(_) => (i64::MIN as i128, u64::MAX as i128),
+            _ => {
+                return Err(AdapterError::UnsupportedInstruction(format!(
+                    "Constant::Int on non-integer type {:?} in aggregate",
+                    ty
+                )));
+            }
+        };
+        if matches!(ty, Ty::U128) && value < 0 {
+            return Err(AdapterError::UnsupportedInstruction(format!(
+                "Constant::Int({}) does not fit in U128 (negative)",
+                value
+            )));
+        }
+        if value < min || (value > max && !matches!(ty, Ty::U128)) {
+            return Err(AdapterError::UnsupportedInstruction(format!(
+                "Constant::Int({}) does not fit in {:?} (range [{}, {}])",
+                value, ty, min, max
+            )));
+        }
+        let v64: i64 = i64::try_from(value).map_err(|_| {
+            AdapterError::UnsupportedInstruction(format!(
+                "Constant::Int({}) out of i64 range (aggregate field)",
+                value
+            ))
+        })?;
+        let lir_ty = self.aggregate_field_lir_ty(ty)?;
+        Ok(vec![Instruction {
+            opcode: Opcode::Iconst { ty: lir_ty, imm: v64 },
             args: vec![],
             results: vec![dst],
         }])
@@ -2195,7 +2866,7 @@ impl<'a> TmirAdapter<'a> {
     ///
     /// tMIR uses block parameters for phi semantics: `Br { target, args }`
     /// passes `args` to the target block's `params`. The adapter emits
-    /// Iadd-with-zero-arg copies (a single-arg Iadd acts as a move).
+    /// Copy pseudo-instructions (one per `(src, dst)` pair).
     fn resolve_block_args(
         &mut self,
         target: BlockId,
@@ -2205,8 +2876,6 @@ impl<'a> TmirAdapter<'a> {
             return Ok(vec![]);
         }
 
-        let mut copies = Vec::new();
-
         // Look up the target block's parameters from the tMIR function.
         let tmir_func = self
             .tmir_func
@@ -2215,23 +2884,165 @@ impl<'a> TmirAdapter<'a> {
             .blocks.iter().find(|b| b.id == target)
             .ok_or(AdapterError::UnknownBlock(target.0))?;
 
-        for (arg, (param_id, _param_ty)) in args.iter().zip(target_block.params.iter()) {
-            let src = self.map_value(*arg);
-            let dst = self.map_value(*param_id);
-            copies.push(Instruction {
-                opcode: Opcode::Iadd, // copy via single-arg add (placeholder for COPY pseudo)
-                args: vec![src],
-                results: vec![dst],
-            });
+        // Arity check: branch-arg count must equal target param count.
+        // Under-supplied args would silently truncate via zip, hiding bugs.
+        if args.len() != target_block.params.len() {
+            return Err(AdapterError::BlockArgArityMismatch(
+                target.0,
+                args.len(),
+                target_block.params.len(),
+            ));
         }
 
-        Ok(copies)
+        // Reject duplicate destination ValueIds in the target block's params.
+        // A well-formed tMIR block must have unique parameter ValueIds; a
+        // duplicate would make the parallel-copy set ill-defined (two
+        // different sources competing to write the same destination) and
+        // the scheduler would silently degrade to last-writer-wins.
+        {
+            let mut seen_params: std::collections::HashSet<ValueId> =
+                std::collections::HashSet::new();
+            for (param_id, _ty) in &target_block.params {
+                if !seen_params.insert(*param_id) {
+                    return Err(AdapterError::DuplicateBlockParam(
+                        target.0,
+                        param_id.index() as u32,
+                    ));
+                }
+            }
+        }
+
+        // Collect all (src, dst) pairs.
+        let pairs: Vec<(Value, Value)> = args
+            .iter()
+            .zip(target_block.params.iter())
+            .map(|(arg, (param_id, _param_ty))| {
+                (self.map_value(*arg), self.map_value(*param_id))
+            })
+            .collect();
+
+        self.schedule_parallel_copies(pairs)
+    }
+
+    /// Schedule a set of semantically-parallel copies `(src, dst)` into a
+    /// sequence of `Opcode::Copy` pseudo-instructions that preserves the
+    /// parallel semantics. This is the standard block-parameter SSA
+    /// deconstruction problem (issue #365).
+    ///
+    /// Algorithm (linear-time, Hack-Braun-Buchwald-style):
+    ///   1. Drop self-copies `x <- x`.
+    ///   2. Emit ready copies: a copy `dst <- src` is ready if no other
+    ///      pending copy reads `dst` as its source. Removing it may free up
+    ///      more ready copies.
+    ///   3. When no ready copies remain but pending copies exist, a cycle
+    ///      exists. Break it by introducing a fresh temp for the first
+    ///      cycle destination and rewriting any pending copy that reads
+    ///      that destination to read from the temp instead.
+    ///   4. Repeat until the pending set is empty.
+    ///
+    /// This correctly handles the loop back-edge swap pattern
+    /// (`header(a, b) { br header(b, a) }`) that produced miscompiles under
+    /// the previous naive sequential emission.
+    fn schedule_parallel_copies(
+        &mut self,
+        pairs: Vec<(Value, Value)>,
+    ) -> Result<Vec<Instruction>, AdapterError> {
+        // Step 1: drop self-copies.
+        let mut pending: Vec<(Value, Value)> =
+            pairs.into_iter().filter(|(s, d)| s != d).collect();
+
+        let mut out: Vec<Instruction> = Vec::new();
+
+        // Iterate until all pending copies have been scheduled.
+        while !pending.is_empty() {
+            // Compute the set of destinations that are ALSO sources of
+            // some other pending copy. A copy whose dst is NOT in this set
+            // is "ready" to emit.
+            let mut src_set: std::collections::HashSet<Value> =
+                std::collections::HashSet::new();
+            for &(s, _) in &pending {
+                src_set.insert(s);
+            }
+
+            // Drain all ready copies in this pass.
+            let mut made_progress = false;
+            let mut i = 0;
+            while i < pending.len() {
+                let (s, d) = pending[i];
+                if !src_set.contains(&d) {
+                    // `d` is not read by any other pending copy -> safe to emit.
+                    out.push(Instruction {
+                        opcode: Opcode::Copy,
+                        args: vec![s],
+                        results: vec![d],
+                    });
+                    pending.swap_remove(i);
+                    made_progress = true;
+                    // Recompute src_set on next outer loop iteration.
+                } else {
+                    i += 1;
+                }
+            }
+
+            if made_progress {
+                continue;
+            }
+
+            // No ready copies but pending is non-empty -> there is a cycle.
+            // Break the first cycle by saving the first dst to a temp and
+            // rewriting any pending copy that read that dst as its source.
+            //
+            // Example (swap a<->b):
+            //   pending = [(a, b), (b, a)]
+            //   src_set = {a, b}; no ready copy.
+            //   Take first copy (a, b): save `tmp = b` (the dst we're about
+            //   to overwrite). Then rewrite any other pending copy whose
+            //   src == b to src = tmp. Now (b, a) becomes (tmp, a).
+            //   Emit (a, b), and (tmp, a) becomes ready next iteration.
+            let (s0, d0) = pending[0];
+            let tmp = self.fresh_value();
+            out.push(Instruction {
+                opcode: Opcode::Copy, // tmp = d0
+                args: vec![d0],
+                results: vec![tmp],
+            });
+            // Rewrite any pending copy that reads d0 to read tmp.
+            for p in pending.iter_mut() {
+                if p.0 == d0 {
+                    p.0 = tmp;
+                }
+            }
+            // Emit the chosen copy now: d0 = s0.
+            out.push(Instruction {
+                opcode: Opcode::Copy,
+                args: vec![s0],
+                results: vec![d0],
+            });
+            pending.swap_remove(0);
+        }
+
+        Ok(out)
     }
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/// Collect tMIR `FuncId`s whose source functions are proven `Pure`.
+///
+/// Uses the tMIR-level `Function::is_pure()` helper (rev 1357fbd) which
+/// checks for `ProofAnnotation::Pure` in each function's proof list.
+/// Called once per module so each `Inst::Call` translation can cheaply
+/// tag direct calls to pure callees. #456.
+fn collect_pure_func_ids(module: &TmirModule) -> HashSet<FuncId> {
+    module
+        .functions
+        .iter()
+        .filter(|f| function_is_pure(f))
+        .map(|f| f.id)
+        .collect()
+}
 
 /// Translate a tMIR module into internal LIR functions with proof contexts.
 ///
@@ -2247,10 +3058,20 @@ pub fn translate_module(
         .map(|f| (f.id, f.name.clone()))
         .collect();
 
+    // Precompute the set of pure functions in the module. Each adapter
+    // instance is seeded with this set so Call translation can tag
+    // pure-callee names without re-scanning. #456.
+    let pure_func_ids = collect_pure_func_ids(module);
+
     let mut results = Vec::new();
     for func in &module.functions {
-        let mut adapter = TmirAdapter::new(&module.structs, func_names.clone());
+        let mut adapter = TmirAdapter::new_with_types(
+            &module.structs,
+            &module.types,
+            func_names.clone(),
+        );
         adapter.module = Some(module);
+        adapter.seed_pure_function_ids(pure_func_ids.clone());
         let (lir_func, proofs) = adapter.translate(func)?;
         results.push((lir_func, proofs));
     }
@@ -2267,8 +3088,16 @@ pub fn translate_function(
     module: &TmirModule,
 ) -> Result<(Function, ProofContext), AdapterError> {
     let func_names = HashMap::new();
-    let mut adapter = TmirAdapter::new(&module.structs, func_names);
+    let mut adapter = TmirAdapter::new_with_types(
+        &module.structs,
+        &module.types,
+        func_names,
+    );
     adapter.module = Some(module);
+    // Seed pure-callees from the module even when translating a single
+    // function; this lets tests exercise purity propagation without going
+    // through `translate_module`. #456.
+    adapter.seed_pure_function_ids(collect_pure_func_ids(module));
     adapter.translate(func)
 }
 
@@ -2278,8 +3107,13 @@ pub fn translate_function_with_names(
     module: &TmirModule,
     func_names: &HashMap<FuncId, String>,
 ) -> Result<(Function, ProofContext), AdapterError> {
-    let mut adapter = TmirAdapter::new(&module.structs, func_names.clone());
+    let mut adapter = TmirAdapter::new_with_types(
+        &module.structs,
+        &module.types,
+        func_names.clone(),
+    );
     adapter.module = Some(module);
+    adapter.seed_pure_function_ids(collect_pure_func_ids(module));
     adapter.translate(func)
 }
 
@@ -2310,6 +3144,133 @@ pub fn extract_function_proofs(func: &TmirFunction) -> Vec<Proof> {
         .iter()
         .filter_map(translate_tmir_proof)
         .collect()
+}
+
+/// Get the proof obligation summary for a tMIR module.
+///
+/// Returns the `ProofSummary` from tMIR's `Module::proof_summary()` API
+/// (added in tMIR rev 1357fbd). LLVM2 uses this to decide whether
+/// cross-target synthesis (GPU/ANE/SIMD) should be attempted. Modules
+/// with pending or failed proof obligations should be treated conservatively
+/// by the heterogeneous dispatch pipeline.
+pub fn module_proof_summary(module: &TmirModule) -> tmir::ProofSummary {
+    module.proof_summary()
+}
+
+/// Check if a tMIR function is annotated as pure (no side effects).
+///
+/// Delegates to tMIR's `Function::is_pure()` method (added in tMIR rev 1357fbd),
+/// which checks for `ProofAnnotation::Pure` in the function's proof annotations.
+/// Pure functions can be safely dispatched to GPU/ANE for cross-target synthesis.
+pub fn function_is_pure(func: &TmirFunction) -> bool {
+    func.is_pure()
+}
+
+/// Filter a tMIR instruction node's proof annotations to only GPU-relevant ones.
+///
+/// Uses tMIR's `ProofAnnotation::is_gpu_relevant()` classification method
+/// (added in tMIR rev 1357fbd) to identify proofs relevant for cross-target
+/// synthesis (GPU/ANE/SIMD). GPU-relevant annotations are: Pure, InBounds,
+/// NoOverflow, Commutative, Associative, Deterministic, ValidBorrow.
+///
+/// Returns translated `Proof` values (adapter-internal representation) for
+/// only the GPU-relevant subset of the instruction's proof annotations.
+pub fn gpu_relevant_proofs(node: &InstrNode) -> Vec<Proof> {
+    node.proofs
+        .iter()
+        .filter(|p| p.is_gpu_relevant())
+        .filter_map(translate_tmir_proof)
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Source debug info extraction
+// ---------------------------------------------------------------------------
+
+/// Debug information extracted from a tMIR function for DWARF emission.
+///
+/// This is a lightweight summary of source-level metadata that the adapter
+/// extracts from the tMIR representation. The compilation pipeline carries
+/// it through to the codegen for populating DWARF debug sections.
+#[derive(Debug, Clone, Default)]
+pub struct SourceDebugInfo {
+    /// Parameter names (generated as "arg0", "arg1", ... since tMIR
+    /// does not carry parameter names in the IR).
+    pub param_names: Vec<String>,
+    /// Source line where the function is declared (1-based, 0 = unknown).
+    /// Derived from the first instruction span in the entry block.
+    pub decl_line: u32,
+    /// Source spans collected from all instructions: (line, col, block_index, instr_index).
+    /// Used to generate DWARF line number program entries.
+    pub source_spans: Vec<SourceSpanEntry>,
+}
+
+/// A single source span entry from a tMIR instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceSpanEntry {
+    /// Source file index (from tMIR SourceSpan.file).
+    pub file: u32,
+    /// Source line number (1-based).
+    pub line: u32,
+    /// Source column number (0 = unknown).
+    pub col: u32,
+    /// Block index in the tMIR function's block list.
+    pub block_idx: usize,
+    /// Instruction index within the block.
+    pub instr_idx: usize,
+}
+
+/// Extract source debug information from a tMIR function.
+///
+/// Walks the tMIR function to collect:
+/// - Parameter names (generated from the function signature param count)
+/// - Declaration line (first span in the entry block)
+/// - All instruction source spans for line number program generation
+///
+/// This information is carried on [`llvm2_ir::function::FunctionDebugMeta`]
+/// through the pipeline and consumed by DWARF emission.
+pub fn extract_source_debug_info(
+    func: &TmirFunction,
+    module: &TmirModule,
+) -> SourceDebugInfo {
+    let mut info = SourceDebugInfo::default();
+
+    // Extract parameter names from the function signature.
+    // tMIR doesn't carry parameter names, so generate synthetic ones.
+    let func_ty_idx = func.ty.0 as usize;
+    if func_ty_idx < module.func_types.len() {
+        let func_ty = &module.func_types[func_ty_idx];
+        for i in 0..func_ty.params.len() {
+            info.param_names.push(format!("arg{}", i));
+        }
+    }
+
+    // Find the entry block and extract the declaration line from its first span.
+    if let Some(entry_block) = func.blocks.iter().find(|b| b.id == func.entry) {
+        for node in &entry_block.body {
+            if let Some(span) = &node.span {
+                info.decl_line = span.line;
+                break;
+            }
+        }
+    }
+
+    // Collect all source spans from all blocks.
+    for (block_idx, block) in func.blocks.iter().enumerate() {
+        for (instr_idx, node) in block.body.iter().enumerate() {
+            if let Some(span) = &node.span {
+                info.source_spans.push(SourceSpanEntry {
+                    file: span.file,
+                    line: span.line,
+                    col: span.col,
+                    block_idx,
+                    instr_idx,
+                });
+            }
+        }
+    }
+
+    info
 }
 
 /// Translate a single tmir ProofAnnotation to the adapter's Proof representation.
@@ -2354,8 +3315,47 @@ fn translate_tmir_proof(p: &ProofAnnotation) -> Option<Proof> {
             hi: hi.ceil() as i128,
         }),
         ProofAnnotation::Monotonic => None,
+        ProofAnnotation::NoAlias => None,
+        ProofAnnotation::Aligned(_) => None,
+        ProofAnnotation::NoPanic => None,
+        ProofAnnotation::NoUndef => None,
+        // tMIR#30 additions: GPU memory-role hints, parallel/bounded-loop
+        // annotations, and divergence classification. These are consumed by
+        // the heterogeneous compute planner (`target_analysis.rs` /
+        // `dispatch.rs`) rather than by the CPU Proof enum. The CPU adapter
+        // currently has no Proof variants to map them to, so drop them here;
+        // GPU-relevant lookups should go through `tmir::ProofAnnotation`
+        // directly (see `is_gpu_relevant`) not through this CPU adapter.
+        ProofAnnotation::ReadonlyTable
+        | ProofAnnotation::AppendOnlyBuffer
+        | ProofAnnotation::AtomicSetInsert
+        | ProofAnnotation::ParallelMap
+        | ProofAnnotation::BoundedLoop(_)
+        | ProofAnnotation::DivergenceClass(_) => None,
         ProofAnnotation::Custom(_) => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Memory intrinsic detection
+// ---------------------------------------------------------------------------
+
+/// Check if a function name is a memcpy intrinsic.
+///
+/// Recognizes both the bare libc name and LLVM intrinsic variants
+/// (e.g., `llvm.memcpy.p0.p0.i64`).
+fn is_memcpy_intrinsic(name: &str) -> bool {
+    name == "memcpy" || name.starts_with("llvm.memcpy")
+}
+
+/// Check if a function name is a memmove intrinsic.
+fn is_memmove_intrinsic(name: &str) -> bool {
+    name == "memmove" || name.starts_with("llvm.memmove")
+}
+
+/// Check if a function name is a memset intrinsic.
+fn is_memset_intrinsic(name: &str) -> bool {
+    name == "memset" || name.starts_with("llvm.memset")
 }
 
 // ---------------------------------------------------------------------------
@@ -2367,7 +3367,7 @@ mod tests {
     use super::*;
     use tmir::{
         Block as TmirBlockDef, Function as TmirFunc, Module,
-        BlockId, FuncId, FuncTy, FuncTyId, Ty, ValueId, TyId,
+        BlockId, CallingConv, FuncId, FuncTy, FuncTyId, Linkage, Ty, ValueId, TyId,
         Constant, StructId, StructDef as TmirStructDef, FieldDef,
     };
 
@@ -2406,7 +3406,7 @@ mod tests {
     fn make_module_for_func(func: &TmirFunc) -> Module {
         // Infer param types from entry block params
         let params: Vec<Ty> = func.blocks.first()
-            .map(|b| b.params.iter().map(|(_, ty)| *ty).collect())
+            .map(|b| b.params.iter().map(|(_, ty)| ty.clone()).collect())
             .unwrap_or_default();
 
         // Infer return types from first Return instruction
@@ -2419,7 +3419,7 @@ mod tests {
                         // For simplicity, use the first block param type if available
                         for _ in values {
                             if let Some(ty) = params.first() {
-                                returns.push(*ty);
+                                returns.push(ty.clone());
                             }
                         }
                     }
@@ -2436,19 +3436,6 @@ mod tests {
         });
         module.add_function(func.clone());
         module
-    }
-
-    /// Helper: translate function from old test style (inline FuncTy + struct defs).
-    fn translate_func_with_structs(
-        func: &TmirFunc,
-        module: &Module,
-        structs: &[TmirStructDef],
-    ) -> Result<(Function, ProofContext), AdapterError> {
-        let mut mod_with_structs = module.clone();
-        for s in structs {
-            mod_with_structs.add_struct(s.clone());
-        }
-        translate_function(func, &mod_with_structs)
     }
 
     /// Build a minimal tMIR module: fn add(a: i32, b: i32) -> i32 { a + b }
@@ -2514,7 +3501,7 @@ mod tests {
 
     #[test]
     fn test_translate_type_void_errors() {
-        assert!(translate_type(&Ty::Void).is_err());
+        assert!(translate_type(&Ty::Unit).is_err());
     }
 
     #[test]
@@ -2568,6 +3555,39 @@ mod tests {
     }
 
     #[test]
+    fn test_translate_unreachable_non_void_rejected() {
+        let (func, module) = make_func(
+            FuncId::new(0),
+            "unreachable_i32",
+            FuncTy {
+                params: vec![],
+                returns: vec![Ty::I32],
+                is_vararg: false,
+            },
+            BlockId::new(0),
+            vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![],
+                body: vec![InstrNode {
+                    inst: Inst::Unreachable,
+                    results: vec![],
+                    proofs: vec![],
+                    span: None,
+                }],
+            }],
+            vec![],
+        );
+
+        let err = translate_func_test(&func, &module).unwrap_err();
+
+        assert!(matches!(
+            err,
+            AdapterError::UnsupportedInstruction(msg)
+                if msg == "Unreachable in non-void function not yet lowered - see #283"
+        ));
+    }
+
+    #[test]
     fn test_translate_const() {
         let func = TmirFunc {
             id: FuncId::new(0),
@@ -2598,6 +3618,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -2650,6 +3672,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -2700,6 +3724,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -2747,6 +3773,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -2776,7 +3804,7 @@ mod tests {
                     InstrNode {
                         inst: Inst::Load {
                             ty: Ty::I32,
-                            ptr: ValueId::new(0),
+                            ptr: ValueId::new(0), volatile: false, align: None
                         },
                         results: vec![ValueId::new(1)],
                         proofs: vec![],
@@ -2787,6 +3815,8 @@ mod tests {
                             ty: Ty::I32,
                             ptr: ValueId::new(0),
                             value: ValueId::new(1),
+                            volatile: false,
+                            align: None,
                         },
                         results: vec![],
                         proofs: vec![],
@@ -2801,6 +3831,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -2849,6 +3881,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -2893,6 +3927,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -2941,6 +3977,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -2989,6 +4027,8 @@ mod tests {
                 },
             ],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -2999,8 +4039,8 @@ mod tests {
         let entry = &lir_func.blocks[&lir_func.entry_block];
         assert_eq!(entry.instructions.len(), 2); // copy + jump
 
-        // First is a copy (Iadd placeholder).
-        assert!(matches!(entry.instructions[0].opcode, Opcode::Iadd));
+        // First is a Copy pseudo.
+        assert!(matches!(entry.instructions[0].opcode, Opcode::Copy));
 
         // Second is the jump.
         assert!(matches!(entry.instructions[1].opcode, Opcode::Jump { .. }));
@@ -3060,6 +4100,8 @@ mod tests {
                 },
             ],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -3130,6 +4172,8 @@ mod tests {
                     ],
                 }],
                 proofs: vec![],
+                calling_conv: CallingConv::default(),
+                linkage: Linkage::default(),
             };
 
             let module = make_module_for_func(&func);
@@ -3193,6 +4237,8 @@ mod tests {
                     ],
                 }],
                 proofs: vec![],
+                calling_conv: CallingConv::default(),
+                linkage: Linkage::default(),
             };
 
             let module = make_module_for_func(&func);
@@ -3258,6 +4304,8 @@ mod tests {
                     ],
                 }],
                 proofs: vec![],
+                calling_conv: CallingConv::default(),
+                linkage: Linkage::default(),
             };
 
             let module = make_module_for_func(&func);
@@ -3340,7 +4388,7 @@ mod tests {
         let node = InstrNode {
             inst: Inst::Load {
                 ty: Ty::I32,
-                ptr: ValueId::new(0),
+                ptr: ValueId::new(0), volatile: false, align: None
             },
             results: vec![ValueId::new(1)],
             proofs: vec![ProofAnnotation::NotNull],
@@ -3390,6 +4438,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -3497,6 +4547,8 @@ mod tests {
                         }],
                     }],
                     proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
                 },
                 TmirFunc {
                     id: FuncId::new(1),
@@ -3516,14 +4568,20 @@ mod tests {
                         }],
                     }],
                     proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
                 },
             ],
             structs: vec![],
+            records: vec![],
+            closure_types: vec![],
             globals: vec![],
             func_types: vec![FuncTy { params: vec![Ty::F64], returns: vec![Ty::F64], is_vararg: false }],
             types: vec![],
             proof_obligations: vec![],
             proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
         };
 
         let results = translate_module(&module).unwrap();
@@ -3556,6 +4614,8 @@ mod tests {
                         }],
                     }],
                     proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
                 },
                 TmirFunc {
                     id: FuncId::new(1),
@@ -3586,14 +4646,20 @@ mod tests {
                         ],
                     }],
                     proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
                 },
             ],
             structs: vec![],
+            records: vec![],
+            closure_types: vec![],
             globals: vec![],
             func_types: vec![FuncTy { params: vec![Ty::I32], returns: vec![Ty::I32], is_vararg: false }],
             types: vec![],
             proof_obligations: vec![],
             proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
         };
 
         let results = translate_module(&module).unwrap();
@@ -3650,6 +4716,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         // translate_function (standalone) has empty func_names, so gets synthetic name.
@@ -3735,6 +4803,8 @@ mod tests {
                 },
             ],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -3795,6 +4865,8 @@ mod tests {
                         ],
                     }],
                     proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
                 },
                 TmirFunc {
                     id: FuncId::new(1),
@@ -3820,6 +4892,8 @@ mod tests {
                         ],
                     }],
                     proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
                 },
                 TmirFunc {
                     id: FuncId::new(2),
@@ -3857,14 +4931,20 @@ mod tests {
                         ],
                     }],
                     proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
                 },
             ],
             structs: vec![],
+            records: vec![],
+            closure_types: vec![],
             globals: vec![],
             func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
             types: vec![],
             proof_obligations: vec![],
             proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
         };
 
         let results = translate_module(&module).unwrap();
@@ -3900,15 +4980,18 @@ mod tests {
         // With nested enum representation, invalid bit widths are prevented by
         // construction (IntWidth/FloatWidth enums). Test that other unsupported
         // types produce errors.
-        assert!(translate_type(&Ty::Void).is_err());
-        assert!(translate_type(&Ty::Void).is_err());
-        assert!(translate_type(&Ty::Func(FuncTyId::new(0))).is_err());
+        assert!(translate_type(&Ty::Unit).is_err());
+        assert!(translate_type(&Ty::Never).is_err());
+        // `Ty::Enum` is blocked on #398 and must still reject.
+        // `Ty::Func` now lowers to I64 — see `test_translate_type_func_is_i64`.
     }
 
     #[test]
-    fn test_translate_type_func_errors() {
+    fn test_translate_type_func_is_i64() {
+        // #443 Phase 2c: function-pointer types lower to 64-bit scalars
+        // (AArch64 pointer width), enabling closure-style aggregates.
         let func_ty = Ty::Func(FuncTyId::new(0));
-        assert!(translate_type(&func_ty).is_err());
+        assert_eq!(translate_type(&func_ty).unwrap(), Type::I64);
     }
 
     #[test]
@@ -4083,6 +5166,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -4131,6 +5216,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -4211,6 +5298,8 @@ mod tests {
                 },
             ],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -4349,6 +5438,8 @@ mod tests {
                     ],
                 }],
                 proofs: vec![],
+                calling_conv: CallingConv::default(),
+                linkage: Linkage::default(),
             };
 
             let module = make_module_for_func(&func);
@@ -4390,6 +5481,8 @@ mod tests {
                 }],
             }],
             proofs: vec![ProofAnnotation::Pure],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -4439,6 +5532,8 @@ mod tests {
                 ProofAnnotation::Associative,
                 ProofAnnotation::Commutative,
             ],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -4468,6 +5563,8 @@ mod tests {
                 }],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -4521,6 +5618,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -4578,6 +5677,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -4634,6 +5735,8 @@ mod tests {
                 ],
             }],
             proofs: vec![ProofAnnotation::Pure],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -4735,7 +5838,7 @@ mod tests {
         let node = InstrNode {
             inst: Inst::Load {
                 ty: Ty::I32,
-                ptr: ValueId::new(0),
+                ptr: ValueId::new(0), volatile: false, align: None
             },
             results: vec![ValueId::new(1)],
             proofs: vec![ProofAnnotation::Pure],
@@ -4807,7 +5910,7 @@ mod tests {
                     InstrNode {
                         inst: Inst::Alloca {
                             ty: Ty::I32,
-                            count: None,
+                            count: None, align: None
                         },
                         results: vec![ValueId::new(0)],
                         proofs: vec![],
@@ -4816,7 +5919,7 @@ mod tests {
                     InstrNode {
                         inst: Inst::Alloca {
                             ty: Ty::I64,
-                            count: None,
+                            count: None, align: None
                         },
                         results: vec![ValueId::new(1)],
                         proofs: vec![],
@@ -4825,7 +5928,7 @@ mod tests {
                     InstrNode {
                         inst: Inst::Alloca {
                             ty: Ty::I8,
-                            count: None,
+                            count: None, align: None
                         },
                         results: vec![ValueId::new(2)],
                         proofs: vec![],
@@ -4840,6 +5943,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         }
     }
 
@@ -4916,7 +6021,7 @@ mod tests {
                     InstrNode {
                         inst: Inst::Alloca {
                             ty: Ty::I64,
-                            count: None,
+                            count: None, align: None
                         },
                         results: vec![ValueId::new(0)],
                         proofs: vec![],
@@ -4931,6 +6036,8 @@ mod tests {
                 ],
             }],
             proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
         };
 
         let module = make_module_for_func(&func);
@@ -4955,4 +6062,985 @@ mod tests {
         assert_eq!(slot, 0);
     }
 
+    // -----------------------------------------------------------------------
+    // Tests for new tMIR 1357fbd integration functions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_module_proof_summary_empty() {
+        let module = Module::new("empty");
+        let summary = module_proof_summary(&module);
+        assert_eq!(summary.total(), 0);
+        assert!(summary.is_fully_verified());
+    }
+
+    #[test]
+    fn test_module_proof_summary_mixed_obligations() {
+        use tmir::{ProofObligation, ProofId, ObligationKind, ProofStatus};
+
+        let mut module = Module::new("mixed");
+        module.proof_obligations.push(ProofObligation {
+            id: ProofId::new(0),
+            kind: ObligationKind::MemorySafety,
+            status: ProofStatus::Pending,
+            description: "bounds check".to_string(),
+        });
+        module.proof_obligations.push(ProofObligation {
+            id: ProofId::new(1),
+            kind: ObligationKind::PanicFreedom,
+            status: ProofStatus::Discharged,
+            description: "no panic".to_string(),
+        });
+        module.proof_obligations.push(ProofObligation {
+            id: ProofId::new(2),
+            kind: ObligationKind::Precondition,
+            status: ProofStatus::Failed,
+            description: "pre failed".to_string(),
+        });
+        module.proof_obligations.push(ProofObligation {
+            id: ProofId::new(3),
+            kind: ObligationKind::TranslationValidation,
+            status: ProofStatus::Trusted,
+            description: "trusted".to_string(),
+        });
+
+        let summary = module_proof_summary(&module);
+        assert_eq!(summary.pending, 1);
+        assert_eq!(summary.discharged, 1);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.trusted, 1);
+        assert_eq!(summary.total(), 4);
+        assert!(!summary.is_fully_verified());
+    }
+
+    #[test]
+    fn test_module_proof_summary_fully_verified() {
+        use tmir::{ProofObligation, ProofId, ObligationKind, ProofStatus};
+
+        let mut module = Module::new("verified");
+        module.proof_obligations.push(ProofObligation {
+            id: ProofId::new(0),
+            kind: ObligationKind::MemorySafety,
+            status: ProofStatus::Discharged,
+            description: "ok".to_string(),
+        });
+        module.proof_obligations.push(ProofObligation {
+            id: ProofId::new(1),
+            kind: ObligationKind::PanicFreedom,
+            status: ProofStatus::Trusted,
+            description: "trusted".to_string(),
+        });
+
+        let summary = module_proof_summary(&module);
+        assert!(summary.is_fully_verified());
+        assert_eq!(summary.total(), 2);
+    }
+
+    #[test]
+    fn test_function_is_pure_true() {
+        let (func, _) = make_func(
+            FuncId::new(0),
+            "pure_fn",
+            FuncTy { params: vec![], returns: vec![], is_vararg: false },
+            BlockId::new(0),
+            vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![],
+                body: vec![InstrNode::new(Inst::Return { values: vec![] })],
+            }],
+            vec![ProofAnnotation::Pure, ProofAnnotation::Deterministic],
+        );
+        assert!(function_is_pure(&func));
+    }
+
+    #[test]
+    fn test_function_is_pure_false() {
+        let (func, _) = make_func(
+            FuncId::new(0),
+            "not_pure",
+            FuncTy { params: vec![], returns: vec![], is_vararg: false },
+            BlockId::new(0),
+            vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![],
+                body: vec![InstrNode::new(Inst::Return { values: vec![] })],
+            }],
+            vec![ProofAnnotation::NoOverflow],
+        );
+        assert!(!function_is_pure(&func));
+    }
+
+    #[test]
+    fn test_function_is_pure_empty_proofs() {
+        let (func, _) = make_func(
+            FuncId::new(0),
+            "no_proofs",
+            FuncTy { params: vec![], returns: vec![], is_vararg: false },
+            BlockId::new(0),
+            vec![TmirBlockDef {
+                id: BlockId::new(0),
+                params: vec![],
+                body: vec![InstrNode::new(Inst::Return { values: vec![] })],
+            }],
+            vec![],
+        );
+        assert!(!function_is_pure(&func));
+    }
+
+    #[test]
+    fn test_gpu_relevant_proofs_filters_correctly() {
+        // Mix of GPU-relevant and non-GPU-relevant annotations.
+        // GPU-relevant: Pure, InBounds, NoOverflow, Commutative, Associative,
+        //               Deterministic, ValidBorrow
+        // Not GPU-relevant: DataRaceFree, Terminates, Monotonic, NotNull
+        let node = InstrNode {
+            inst: Inst::Return { values: vec![] },
+            results: vec![],
+            proofs: vec![
+                ProofAnnotation::Pure,          // GPU-relevant -> Proof::Pure
+                ProofAnnotation::DataRaceFree,   // NOT GPU-relevant
+                ProofAnnotation::InBounds,       // GPU-relevant -> Proof::InBounds
+                ProofAnnotation::Terminates,     // NOT GPU-relevant
+                ProofAnnotation::NoOverflow,     // GPU-relevant -> Proof::NoOverflow
+                ProofAnnotation::Commutative,    // GPU-relevant -> Proof::Commutative
+            ],
+            span: None,
+        };
+        let proofs = gpu_relevant_proofs(&node);
+        // Pure, InBounds, NoOverflow, Commutative = 4 GPU-relevant annotations
+        assert_eq!(proofs.len(), 4);
+        assert!(proofs.iter().any(|p| matches!(p, Proof::Pure)));
+        assert!(proofs.iter().any(|p| matches!(p, Proof::InBounds { .. })));
+        assert!(proofs.iter().any(|p| matches!(p, Proof::NoOverflow { .. })));
+        assert!(proofs.iter().any(|p| matches!(p, Proof::Commutative)));
+    }
+
+    #[test]
+    fn test_gpu_relevant_proofs_none_relevant() {
+        // Only non-GPU-relevant annotations.
+        let node = InstrNode {
+            inst: Inst::Return { values: vec![] },
+            results: vec![],
+            proofs: vec![
+                ProofAnnotation::DataRaceFree,
+                ProofAnnotation::Terminates,
+                ProofAnnotation::Monotonic,
+            ],
+            span: None,
+        };
+        let proofs = gpu_relevant_proofs(&node);
+        assert!(proofs.is_empty());
+    }
+
+    #[test]
+    fn test_gpu_relevant_proofs_all_relevant() {
+        // All GPU-relevant annotations.
+        let node = InstrNode {
+            inst: Inst::Return { values: vec![] },
+            results: vec![],
+            proofs: vec![
+                ProofAnnotation::Pure,
+                ProofAnnotation::InBounds,
+                ProofAnnotation::NoOverflow,
+                ProofAnnotation::Commutative,
+                ProofAnnotation::Associative,
+                ProofAnnotation::ValidBorrow,
+            ],
+            span: None,
+        };
+        let proofs = gpu_relevant_proofs(&node);
+        // All 6 are GPU-relevant, but Deterministic maps to None in translate_tmir_proof,
+        // so all 6 that translate should come through.
+        assert_eq!(proofs.len(), 6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #302: condbr block-arg copies must be edge-specific
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_condbr_different_args_per_edge() {
+        // Regression test for issue #302.
+        //
+        // Build a diamond CFG where the condbr passes DIFFERENT values
+        // to the SAME block parameter depending on which branch is taken:
+        //
+        //   entry(cond: bool, x: i32, y: i32):
+        //     condbr cond -> merge(x), merge(y)
+        //
+        //   merge(param: i32):
+        //     return param
+        //
+        // Before the fix, both "copy x -> param" and "copy y -> param"
+        // executed unconditionally before the branch, so param always
+        // got y (the last copy wins). The fix creates intermediate copy
+        // blocks so each copy only executes on its respective edge.
+
+        use tmir::FuncTyId;
+
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "condbr_diamond".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![
+                // entry block: condbr with different args per edge
+                TmirBlockDef {
+                    id: BlockId::new(0),
+                    params: vec![
+                        (ValueId::new(0), Ty::Bool),  // cond
+                        (ValueId::new(1), Ty::I32),    // x
+                        (ValueId::new(2), Ty::I32),    // y
+                    ],
+                    body: vec![InstrNode {
+                        inst: Inst::CondBr {
+                            cond: ValueId::new(0),
+                            then_target: BlockId::new(1),
+                            then_args: vec![ValueId::new(1)],   // pass x
+                            else_target: BlockId::new(1),
+                            else_args: vec![ValueId::new(2)],   // pass y
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
+                // merge block: receives param, returns it
+                TmirBlockDef {
+                    id: BlockId::new(1),
+                    params: vec![(ValueId::new(3), Ty::I32)],  // param
+                    body: vec![InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(3)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
+            ],
+            proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
+        };
+
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
+
+        // Should have 4 blocks: entry, merge, then-copy, else-copy.
+        assert_eq!(
+            lir_func.blocks.len(), 4,
+            "expected 4 blocks (entry + merge + 2 copy blocks), got {}",
+            lir_func.blocks.len()
+        );
+
+        let entry = &lir_func.blocks[&lir_func.entry_block];
+
+        // Entry block should have ONLY the Brif, no copy instructions.
+        assert_eq!(
+            entry.instructions.len(), 1,
+            "entry should have exactly 1 instruction (Brif), got {}",
+            entry.instructions.len()
+        );
+        match &entry.instructions[0].opcode {
+            Opcode::Brif { then_dest, else_dest, .. } => {
+                // Both destinations should point to copy blocks, NOT directly to merge.
+                // The copy blocks should be different from each other (different edges).
+                assert_ne!(
+                    then_dest, else_dest,
+                    "then and else copy blocks should be different"
+                );
+
+                // Verify each copy block has a copy + jump to merge.
+                let then_copy_block = &lir_func.blocks[then_dest];
+                assert_eq!(
+                    then_copy_block.instructions.len(), 2,
+                    "then-copy block should have copy + jump"
+                );
+                assert!(
+                    matches!(then_copy_block.instructions[0].opcode, Opcode::Copy),
+                    "first instruction in then-copy block should be a Copy pseudo"
+                );
+                assert!(
+                    matches!(then_copy_block.instructions[1].opcode, Opcode::Jump { .. }),
+                    "second instruction in then-copy block should be a Jump"
+                );
+
+                let else_copy_block = &lir_func.blocks[else_dest];
+                assert_eq!(
+                    else_copy_block.instructions.len(), 2,
+                    "else-copy block should have copy + jump"
+                );
+                assert!(
+                    matches!(else_copy_block.instructions[0].opcode, Opcode::Copy),
+                    "first instruction in else-copy block should be a Copy pseudo"
+                );
+                assert!(
+                    matches!(else_copy_block.instructions[1].opcode, Opcode::Jump { .. }),
+                    "second instruction in else-copy block should be a Jump"
+                );
+
+                // Both copy blocks should jump to the same merge block.
+                let then_jump_dest = match &then_copy_block.instructions[1].opcode {
+                    Opcode::Jump { dest } => *dest,
+                    _ => unreachable!(),
+                };
+                let else_jump_dest = match &else_copy_block.instructions[1].opcode {
+                    Opcode::Jump { dest } => *dest,
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    then_jump_dest, else_jump_dest,
+                    "both copy blocks should jump to the same merge block"
+                );
+
+                // The copy sources should be DIFFERENT (x vs y).
+                let then_copy_src = then_copy_block.instructions[0].args[0];
+                let else_copy_src = else_copy_block.instructions[0].args[0];
+                assert_ne!(
+                    then_copy_src, else_copy_src,
+                    "then-copy and else-copy should use different source values (x vs y)"
+                );
+
+                // Both copies should target the same destination (param).
+                let then_copy_dst = then_copy_block.instructions[0].results[0];
+                let else_copy_dst = else_copy_block.instructions[0].results[0];
+                assert_eq!(
+                    then_copy_dst, else_copy_dst,
+                    "both copies should target the same block parameter"
+                );
+            }
+            other => panic!("expected Brif in entry block, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_condbr_no_args_no_copy_blocks() {
+        // When neither branch has block arguments, no copy blocks should
+        // be created. Brif should branch directly to targets.
+        use tmir::FuncTyId;
+
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "condbr_no_args".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![
+                TmirBlockDef {
+                    id: BlockId::new(0),
+                    params: vec![
+                        (ValueId::new(0), Ty::Bool),
+                        (ValueId::new(1), Ty::I32),
+                        (ValueId::new(2), Ty::I32),
+                    ],
+                    body: vec![InstrNode {
+                        inst: Inst::CondBr {
+                            cond: ValueId::new(0),
+                            then_target: BlockId::new(1),
+                            then_args: vec![],
+                            else_target: BlockId::new(2),
+                            else_args: vec![],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
+                TmirBlockDef {
+                    id: BlockId::new(1),
+                    params: vec![],
+                    body: vec![InstrNode {
+                        inst: Inst::Return { values: vec![ValueId::new(1)] },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
+                TmirBlockDef {
+                    id: BlockId::new(2),
+                    params: vec![],
+                    body: vec![InstrNode {
+                        inst: Inst::Return { values: vec![ValueId::new(2)] },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
+            ],
+            proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
+        };
+
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
+
+        // Should have exactly 3 blocks: entry, then, else. No copy blocks.
+        assert_eq!(
+            lir_func.blocks.len(), 3,
+            "no copy blocks should be created when there are no block args"
+        );
+    }
+
+    #[test]
+    fn test_condbr_one_edge_has_args() {
+        // Only one edge has block arguments — only one copy block should
+        // be created. The other edge should branch directly.
+        use tmir::FuncTyId;
+
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "condbr_one_edge".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![
+                TmirBlockDef {
+                    id: BlockId::new(0),
+                    params: vec![
+                        (ValueId::new(0), Ty::Bool),
+                        (ValueId::new(1), Ty::I32),
+                    ],
+                    body: vec![InstrNode {
+                        inst: Inst::CondBr {
+                            cond: ValueId::new(0),
+                            then_target: BlockId::new(1),
+                            then_args: vec![ValueId::new(1)],  // has args
+                            else_target: BlockId::new(2),
+                            else_args: vec![],                  // no args
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
+                TmirBlockDef {
+                    id: BlockId::new(1),
+                    params: vec![(ValueId::new(2), Ty::I32)],
+                    body: vec![InstrNode {
+                        inst: Inst::Return { values: vec![ValueId::new(2)] },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
+                TmirBlockDef {
+                    id: BlockId::new(2),
+                    params: vec![],
+                    body: vec![InstrNode {
+                        inst: Inst::Return { values: vec![ValueId::new(1)] },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
+            ],
+            proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
+        };
+
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
+
+        // Should have 4 blocks: entry, block1, block2, + 1 copy block for then edge.
+        assert_eq!(
+            lir_func.blocks.len(), 4,
+            "expected 4 blocks (entry + 2 targets + 1 copy block)"
+        );
+
+        let entry = &lir_func.blocks[&lir_func.entry_block];
+        match &entry.instructions[0].opcode {
+            Opcode::Brif { then_dest, else_dest, .. } => {
+                // then_dest should be a copy block (not directly block 1).
+                // else_dest should directly be block 2 (no args).
+                let then_block = &lir_func.blocks[then_dest];
+                assert_eq!(
+                    then_block.instructions.len(), 2,
+                    "then copy block should have copy + jump"
+                );
+
+                // else_dest should go directly to the target (return block).
+                let else_block = &lir_func.blocks[else_dest];
+                assert_eq!(
+                    else_block.instructions.len(), 1,
+                    "else block should have just a return (no copies)"
+                );
+                assert!(
+                    matches!(else_block.instructions[0].opcode, Opcode::Return),
+                    "else block should be the direct target with a Return"
+                );
+            }
+            other => panic!("expected Brif, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #304: switch block-arg copies must be edge-specific
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_switch_different_args_per_case() {
+        // Regression test for issue #304: switch with different block args
+        // per case must create separate copy blocks per edge.
+        //
+        //   entry(selector: i32, x: i32, y: i32):
+        //     switch selector:
+        //       case 1 -> merge(x)
+        //       case 2 -> merge(y)
+        //       default -> merge(x)
+        //
+        //   merge(param: i32):
+        //     return param
+        use tmir::{FuncTyId, SwitchCase};
+
+        let func = TmirFunc {
+            id: FuncId::new(0),
+            name: "switch_diamond".to_string(),
+            ty: FuncTyId::new(0),
+            entry: BlockId::new(0),
+            blocks: vec![
+                TmirBlockDef {
+                    id: BlockId::new(0),
+                    params: vec![
+                        (ValueId::new(0), Ty::I32),  // selector
+                        (ValueId::new(1), Ty::I32),  // x
+                        (ValueId::new(2), Ty::I32),  // y
+                    ],
+                    body: vec![InstrNode {
+                        inst: Inst::Switch {
+                            value: ValueId::new(0),
+                            default: BlockId::new(1),
+                            default_args: vec![ValueId::new(1)],  // pass x
+                            cases: vec![
+                                SwitchCase {
+                                    value: Constant::Int(1),
+                                    target: BlockId::new(1),
+                                    args: vec![ValueId::new(1)],  // pass x
+                                },
+                                SwitchCase {
+                                    value: Constant::Int(2),
+                                    target: BlockId::new(1),
+                                    args: vec![ValueId::new(2)],  // pass y
+                                },
+                            ],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
+                TmirBlockDef {
+                    id: BlockId::new(1),
+                    params: vec![(ValueId::new(3), Ty::I32)],
+                    body: vec![InstrNode {
+                        inst: Inst::Return {
+                            values: vec![ValueId::new(3)],
+                        },
+                        results: vec![],
+                        proofs: vec![],
+                        span: None,
+                    }],
+                },
+            ],
+            proofs: vec![],
+            calling_conv: CallingConv::default(),
+            linkage: Linkage::default(),
+        };
+
+        let module = make_module_for_func(&func);
+        let (lir_func, _) = translate_func_test(&func, &module).unwrap();
+
+        // Should have 5 blocks: entry, merge, + 3 copy blocks (default + 2 cases).
+        assert_eq!(
+            lir_func.blocks.len(), 5,
+            "expected 5 blocks (entry + merge + 3 copy blocks), got {}",
+            lir_func.blocks.len()
+        );
+
+        let entry = &lir_func.blocks[&lir_func.entry_block];
+
+        // Entry should have exactly 1 instruction: the Switch.
+        assert_eq!(entry.instructions.len(), 1);
+        match &entry.instructions[0].opcode {
+            Opcode::Switch { cases, default } => {
+                // Default and all cases should point to copy blocks.
+                let default_block = &lir_func.blocks[default];
+                assert_eq!(
+                    default_block.instructions.len(), 2,
+                    "default copy block should have copy + jump"
+                );
+
+                for &(_val, case_dest) in cases {
+                    let case_block = &lir_func.blocks[&case_dest];
+                    assert_eq!(
+                        case_block.instructions.len(), 2,
+                        "case copy block should have copy + jump"
+                    );
+                }
+
+                // The two case copy blocks should copy different values
+                // (x for case 1, y for case 2).
+                let case1_block = &lir_func.blocks[&cases[0].1];
+                let case2_block = &lir_func.blocks[&cases[1].1];
+                let case1_src = case1_block.instructions[0].args[0];
+                let case2_src = case2_block.instructions[0].args[0];
+                assert_ne!(
+                    case1_src, case2_src,
+                    "case 1 and case 2 should copy different values (x vs y)"
+                );
+            }
+            other => panic!("expected Switch in entry block, got {:?}", other),
+        }
+    }
+
+    // =======================================================================
+    // Memory intrinsic detection (memcpy, memmove, memset) — issue #327
+    // =======================================================================
+
+    #[test]
+    fn is_memcpy_intrinsic_detection() {
+        assert!(super::is_memcpy_intrinsic("memcpy"));
+        assert!(super::is_memcpy_intrinsic("llvm.memcpy.p0.p0.i64"));
+        assert!(super::is_memcpy_intrinsic("llvm.memcpy.p0i8.p0i8.i32"));
+        assert!(!super::is_memcpy_intrinsic("memmove"));
+        assert!(!super::is_memcpy_intrinsic("memset"));
+        assert!(!super::is_memcpy_intrinsic("my_memcpy"));
+    }
+
+    #[test]
+    fn is_memmove_intrinsic_detection() {
+        assert!(super::is_memmove_intrinsic("memmove"));
+        assert!(super::is_memmove_intrinsic("llvm.memmove.p0.p0.i64"));
+        assert!(!super::is_memmove_intrinsic("memcpy"));
+        assert!(!super::is_memmove_intrinsic("memset"));
+    }
+
+    #[test]
+    fn is_memset_intrinsic_detection() {
+        assert!(super::is_memset_intrinsic("memset"));
+        assert!(super::is_memset_intrinsic("llvm.memset.p0.i64"));
+        assert!(!super::is_memset_intrinsic("memcpy"));
+        assert!(!super::is_memset_intrinsic("memmove"));
+    }
+
+    #[test]
+    fn adapter_detects_memcpy_call() {
+        // Build a tMIR module where one function calls another named "memcpy".
+        let module = Module {
+            name: "test_memcpy".to_string(),
+            functions: vec![
+                TmirFunc {
+                    id: FuncId::new(0),
+                    name: "memcpy".to_string(),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId::new(0),
+                        params: vec![],
+                        body: vec![
+                            InstrNode {
+                                inst: Inst::Return { values: vec![] },
+                                results: vec![],
+                                proofs: vec![],
+                                span: None,
+                            },
+                        ],
+                    }],
+                    proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
+                },
+                TmirFunc {
+                    id: FuncId::new(1),
+                    name: "caller".to_string(),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId::new(0),
+                        params: vec![],
+                        body: vec![
+                            // Create 3 i64 constants for the memcpy args
+                            InstrNode {
+                                inst: Inst::Const { ty: Ty::I64, value: Constant::Int(0x1000) },
+                                results: vec![ValueId::new(0)],
+                                proofs: vec![],
+                                span: None,
+                            },
+                            InstrNode {
+                                inst: Inst::Const { ty: Ty::I64, value: Constant::Int(0x2000) },
+                                results: vec![ValueId::new(1)],
+                                proofs: vec![],
+                                span: None,
+                            },
+                            InstrNode {
+                                inst: Inst::Const { ty: Ty::I64, value: Constant::Int(64) },
+                                results: vec![ValueId::new(2)],
+                                proofs: vec![],
+                                span: None,
+                            },
+                            // Call memcpy(dest, src, len)
+                            InstrNode {
+                                inst: Inst::Call {
+                                    callee: FuncId::new(0),
+                                    args: vec![ValueId::new(0), ValueId::new(1), ValueId::new(2)],
+                                },
+                                results: vec![],
+                                proofs: vec![],
+                                span: None,
+                            },
+                            InstrNode {
+                                inst: Inst::Return { values: vec![] },
+                                results: vec![],
+                                proofs: vec![],
+                                span: None,
+                            },
+                        ],
+                    }],
+                    proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
+                },
+            ],
+            structs: vec![],
+            records: vec![],
+            closure_types: vec![],
+            globals: vec![],
+            func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
+        };
+
+        let results = translate_module(&module).unwrap();
+        let (caller_func, _) = &results[1];
+        let entry = &caller_func.blocks[&caller_func.entry_block];
+
+        // The Call to "memcpy" should be translated to Opcode::Memcpy.
+        let memcpy_inst = entry.instructions.iter().find(|i| matches!(i.opcode, Opcode::Memcpy));
+        assert!(
+            memcpy_inst.is_some(),
+            "Call to 'memcpy' should be translated to Opcode::Memcpy, got opcodes: {:?}",
+            entry.instructions.iter().map(|i| &i.opcode).collect::<Vec<_>>()
+        );
+
+        // Verify the memcpy instruction has 3 args and no results.
+        let inst = memcpy_inst.unwrap();
+        assert_eq!(inst.args.len(), 3, "Memcpy should have 3 args (dest, src, len)");
+        assert!(inst.results.is_empty(), "Memcpy should have no results (void)");
+    }
+
+    #[test]
+    fn adapter_detects_memset_call() {
+        let module = Module {
+            name: "test_memset".to_string(),
+            functions: vec![
+                TmirFunc {
+                    id: FuncId::new(0),
+                    name: "memset".to_string(),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId::new(0),
+                        params: vec![],
+                        body: vec![
+                            InstrNode {
+                                inst: Inst::Return { values: vec![] },
+                                results: vec![],
+                                proofs: vec![],
+                                span: None,
+                            },
+                        ],
+                    }],
+                    proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
+                },
+                TmirFunc {
+                    id: FuncId::new(1),
+                    name: "caller".to_string(),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId::new(0),
+                        params: vec![],
+                        body: vec![
+                            InstrNode {
+                                inst: Inst::Const { ty: Ty::I64, value: Constant::Int(0x1000) },
+                                results: vec![ValueId::new(0)],
+                                proofs: vec![],
+                                span: None,
+                            },
+                            InstrNode {
+                                inst: Inst::Const { ty: Ty::I32, value: Constant::Int(0) },
+                                results: vec![ValueId::new(1)],
+                                proofs: vec![],
+                                span: None,
+                            },
+                            InstrNode {
+                                inst: Inst::Const { ty: Ty::I64, value: Constant::Int(256) },
+                                results: vec![ValueId::new(2)],
+                                proofs: vec![],
+                                span: None,
+                            },
+                            InstrNode {
+                                inst: Inst::Call {
+                                    callee: FuncId::new(0),
+                                    args: vec![ValueId::new(0), ValueId::new(1), ValueId::new(2)],
+                                },
+                                results: vec![],
+                                proofs: vec![],
+                                span: None,
+                            },
+                            InstrNode {
+                                inst: Inst::Return { values: vec![] },
+                                results: vec![],
+                                proofs: vec![],
+                                span: None,
+                            },
+                        ],
+                    }],
+                    proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
+                },
+            ],
+            structs: vec![],
+            records: vec![],
+            closure_types: vec![],
+            globals: vec![],
+            func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
+        };
+
+        let results = translate_module(&module).unwrap();
+        let (caller_func, _) = &results[1];
+        let entry = &caller_func.blocks[&caller_func.entry_block];
+
+        let memset_inst = entry.instructions.iter().find(|i| matches!(i.opcode, Opcode::Memset));
+        assert!(
+            memset_inst.is_some(),
+            "Call to 'memset' should be translated to Opcode::Memset"
+        );
+        let inst = memset_inst.unwrap();
+        assert_eq!(inst.args.len(), 3, "Memset should have 3 args (dest, val, len)");
+        assert!(inst.results.is_empty(), "Memset should have no results (void)");
+    }
+
+    #[test]
+    fn adapter_non_intrinsic_call_preserved() {
+        // A regular call should NOT be converted to an intrinsic opcode.
+        let module = Module {
+            name: "test_regular_call".to_string(),
+            functions: vec![
+                TmirFunc {
+                    id: FuncId::new(0),
+                    name: "regular_func".to_string(),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId::new(0),
+                        params: vec![],
+                        body: vec![
+                            InstrNode {
+                                inst: Inst::Return { values: vec![] },
+                                results: vec![],
+                                proofs: vec![],
+                                span: None,
+                            },
+                        ],
+                    }],
+                    proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
+                },
+                TmirFunc {
+                    id: FuncId::new(1),
+                    name: "caller".to_string(),
+                    ty: FuncTyId::new(0),
+                    entry: BlockId::new(0),
+                    blocks: vec![TmirBlockDef {
+                        id: BlockId::new(0),
+                        params: vec![],
+                        body: vec![
+                            InstrNode {
+                                inst: Inst::Call {
+                                    callee: FuncId::new(0),
+                                    args: vec![],
+                                },
+                                results: vec![],
+                                proofs: vec![],
+                                span: None,
+                            },
+                            InstrNode {
+                                inst: Inst::Return { values: vec![] },
+                                results: vec![],
+                                proofs: vec![],
+                                span: None,
+                            },
+                        ],
+                    }],
+                    proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
+                },
+            ],
+            structs: vec![],
+            records: vec![],
+            closure_types: vec![],
+            globals: vec![],
+            func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
+            types: vec![],
+            proof_obligations: vec![],
+            proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
+        };
+
+        let results = translate_module(&module).unwrap();
+        let (caller_func, _) = &results[1];
+        let entry = &caller_func.blocks[&caller_func.entry_block];
+
+        // Should be a regular Call, not an intrinsic.
+        let call_inst = entry.instructions.iter().find(|i| matches!(i.opcode, Opcode::Call { .. }));
+        assert!(
+            call_inst.is_some(),
+            "Regular function call should remain as Opcode::Call"
+        );
+        match &call_inst.unwrap().opcode {
+            Opcode::Call { name } => assert_eq!(name, "regular_func"),
+            other => panic!("expected Call, got {:?}", other),
+        }
+    }
+
+    /// Regression test for #372: the adapter must surface a structured
+    /// `ModuleNotSet` error rather than panicking when `translate()` is
+    /// called on an adapter whose `module` field was left unset. This
+    /// guards against future refactors introducing callers that forget
+    /// the `adapter.module = Some(module)` step.
+    #[test]
+    fn test_translate_without_module_returns_error() {
+        // Build a real tMIR module+function via the existing helper.
+        let module = build_add_module();
+        let func = &module.functions[0];
+
+        let structs: Vec<TmirStructDef> = vec![];
+        let func_names: HashMap<FuncId, String> = HashMap::new();
+        let mut adapter = TmirAdapter::new(&structs, func_names);
+        // Intentionally leave `adapter.module` as None.
+
+        let result = adapter.translate(func);
+        match result {
+            Err(AdapterError::ModuleNotSet) => {
+                // Correct: recoverable error, no panic.
+            }
+            Err(other) => panic!("expected ModuleNotSet, got {:?}", other),
+            Ok(_) => panic!("translate() without module set must fail"),
+        }
+    }
 }

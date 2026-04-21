@@ -1,7 +1,7 @@
 // llvm2-verify/memory_model.rs - SMT memory model for load/store verification
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Models byte-addressable memory as Array(BitVec64, BitVec8) for verification
 // of tMIR load/store lowering to AArch64 LDR/STR instructions.

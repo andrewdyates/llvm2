@@ -1,7 +1,7 @@
 // llvm2-verify/ext_trunc_proofs.rs - SMT proofs for extension and truncation
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proves correctness of sign-extension (SXTB, SXTH, SXTW), zero-extension
 // (UXTB, UXTH, UXTW via UBFM), and truncation (AND masking) lowering rules.
@@ -39,6 +39,7 @@
 //! | [`proof_trunc_to_i16`] | Trunc i32->i16: AND x, #0xFFFF preserves low 16 bits |
 //! | [`proof_trunc_to_i8_from_64`] | Trunc i64->i8: AND x, #0xFF preserves low 8 bits |
 //! | [`proof_trunc_to_i16_from_64`] | Trunc i64->i16: AND x, #0xFFFF preserves low 16 bits |
+//! | [`proof_trunc_to_i32_from_64`] | Trunc i64->i32: MOV Wd, Wn (implicit AND 0xFFFFFFFF) |
 //!
 //! ## Roundtrip Proofs
 //!
@@ -438,6 +439,34 @@ pub fn proof_trunc_to_i16_from_64() -> ProofObligation {
     }
 }
 
+/// Proof: Truncation to i32 via MOV Wd, Wn (64-bit source).
+///
+/// Theorem: forall x : BV64 .
+///   extract(x, 31, 0) == (x AND 0xFFFFFFFF)[31:0]
+///
+/// On AArch64, writing a W register implicitly clears the upper 32 bits of
+/// the X register (W-write zeroes top 32). The ISel emits `MOV Wd, Wn` for
+/// Trunc i64->i32 (see `select_trunc` default arm). This proves the tMIR
+/// truncation semantics (low-32 extract) match the AND-0xFFFFFFFF mask that
+/// the hardware performs implicitly.
+pub fn proof_trunc_to_i32_from_64() -> ProofObligation {
+    let width = 64;
+    let x = SmtExpr::var("x", width);
+
+    let tmir = trunc_semantics(&x, 32);
+    let aarch64 = and_mask_semantics(&x, 32, 64).extract(31, 0);
+
+    ProofObligation {
+        name: "Trunc_I64_to_I32 -> MOV Wd, Wn".to_string(),
+        tmir_expr: tmir,
+        aarch64_expr: aarch64,
+        inputs: vec![("x".to_string(), width)],
+        preconditions: vec![],
+        fp_inputs: vec![],
+            category: None,
+    }
+}
+
 // ===========================================================================
 // Roundtrip proofs: trunc(ext(x)) == x
 // ===========================================================================
@@ -641,10 +670,10 @@ pub fn proof_uxth_idempotent() -> ProofObligation {
 
 /// Collect all extension and truncation proof obligations.
 ///
-/// Returns 22 proof obligations covering:
+/// Returns 23 proof obligations covering:
 /// - 5 sign-extension lowering rules (SXTB 8->32, 8->64, SXTH 16->32, 16->64, SXTW 32->64)
 /// - 5 zero-extension lowering rules (UXTB 8->32, 8->64, UXTH 16->32, 16->64, UXTW 32->64)
-/// - 4 truncation rules (i32->i8, i32->i16, i64->i8, i64->i16)
+/// - 5 truncation rules (i32->i8, i32->i16, i64->i8, i64->i16, i64->i32)
 /// - 4 roundtrip identities (zext+trunc for 8/16-bit, sext+trunc for 8/16-bit)
 /// - 4 idempotence identities (sxtb, sxth, uxtb, uxth)
 pub fn all_ext_trunc_proofs() -> Vec<ProofObligation> {
@@ -666,6 +695,7 @@ pub fn all_ext_trunc_proofs() -> Vec<ProofObligation> {
         proof_trunc_to_i16(),
         proof_trunc_to_i8_from_64(),
         proof_trunc_to_i16_from_64(),
+        proof_trunc_to_i32_from_64(),
         // Roundtrip
         proof_roundtrip_zext_trunc_8(),
         proof_roundtrip_zext_trunc_16(),
@@ -779,6 +809,12 @@ mod tests {
         assert!(matches!(result, VerificationResult::Valid), "Trunc i64->i16 failed: {:?}", result);
     }
 
+    #[test]
+    fn verify_trunc_to_i32_from_64() {
+        let result = verify_by_evaluation(&proof_trunc_to_i32_from_64());
+        assert!(matches!(result, VerificationResult::Valid), "Trunc i64->i32 failed: {:?}", result);
+    }
+
     // -- Roundtrip --
 
     #[test]
@@ -836,7 +872,7 @@ mod tests {
     #[test]
     fn all_ext_trunc_proofs_count() {
         let proofs = all_ext_trunc_proofs();
-        assert_eq!(proofs.len(), 22, "Expected 22 ext/trunc proofs, got {}", proofs.len());
+        assert_eq!(proofs.len(), 23, "Expected 23 ext/trunc proofs, got {}", proofs.len());
     }
 
     #[test]

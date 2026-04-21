@@ -1,7 +1,7 @@
 // llvm2-opt - NEON/SIMD auto-vectorization pass
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Auto-vectorization pass: detects vectorizable loops and transforms
 //! scalar operations into NEON SIMD instructions.

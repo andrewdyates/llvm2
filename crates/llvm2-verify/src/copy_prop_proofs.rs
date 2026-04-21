@@ -1,7 +1,7 @@
 // llvm2-verify/copy_prop_proofs.rs - SMT proofs for Copy Propagation correctness
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proves that Copy Propagation in llvm2-opt/copy_prop.rs preserves semantics.
 // Copy propagation replaces uses of `y` with `x` where `y = MOV x` (a

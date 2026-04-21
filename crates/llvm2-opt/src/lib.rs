@@ -1,7 +1,7 @@
 // llvm2-opt - Verified optimizations
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Verified optimization passes for LLVM2.
 //!
@@ -33,6 +33,7 @@
 //! | [`IfConversion`] | General diamond/triangle CFG to CSEL/CSINC/CSNEG |
 //! | [`CmpBranchFusion`] | Fuse CMP/TST + BCond into CBZ/CBNZ/TBZ/TBNZ |
 //! | [`TailCallOptimization`] | Replace tail calls with branches to eliminate stack growth |
+//! | [`VectorizationPass`](vectorize::VectorizationPass) | NEON auto-vectorization: scalar loops to SIMD |
 //! | [`CfgSimplify`] | Simplify CFG: branch folding, empty block elim, unreachable removal |
 //! | [`const_materialize`] | Optimal constant materialization (MOVZ/MOVK, logical imm, MOVN) |
 //!
@@ -53,6 +54,7 @@
 //! ```
 
 pub mod addr_mode;
+pub mod cache;
 pub mod cfg_simplify;
 pub mod cmp_branch_fusion;
 pub mod cmp_select;
@@ -65,19 +67,37 @@ pub mod dce;
 pub mod dom;
 pub mod effects;
 pub mod gvn;
+pub mod inline;
+pub mod interfaces;
 pub mod licm;
 pub mod loop_unroll;
 pub mod loops;
 pub mod pass_manager;
 pub mod passes;
 pub mod peephole;
+pub mod pgo;
 pub mod pipeline;
 pub mod proof_opts;
+pub mod rewrite;
 pub mod scheduler;
+pub mod sroa;
 pub mod strength_reduce;
 pub mod tail_call;
 pub mod vectorize;
 
 // Re-export the most important types at crate root.
-pub use pass_manager::{MachinePass, PassManager, PassStats};
+pub use cache::{
+    CACHE_KEY_VERSION, CacheBackend, CacheKey, CacheStats, FileCache, InMemoryCache, STABLE_HASH_SEED,
+    STABLE_HASH_SEED_HI, StableHasher, StatsCache, stable_hash,
+};
+pub use interfaces::{DivergenceClass, OpInterfaces};
+pub use pass_manager::{AnalysisCache, MachinePass, PassManager, PassStats};
+pub use pgo::{
+    CounterInjectionPass, CounterMap, CounterSite, PipelineConfig, ProfData, ProfDataError,
+    build_profdata_from_counters, inject_block_counters,
+};
 pub use pipeline::{OptLevel, OptimizationPipeline};
+pub use rewrite::{
+    DeclarativeRewritePass, RewriteAction, RewriteEngine, RewriteStats, Rule, RuleBuilder,
+};
+pub use sroa::ScalarReplacementOfAggregates;

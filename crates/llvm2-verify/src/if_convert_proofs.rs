@@ -1,7 +1,7 @@
 // llvm2-verify/if_convert_proofs.rs - SMT proofs for IfConversion pass
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proves that the IfConversion optimization pass in llvm2-opt preserves
 // program semantics. The pass transforms diamond and triangle CFG patterns

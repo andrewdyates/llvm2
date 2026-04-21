@@ -1,7 +1,7 @@
 // llvm2-lower - tMIR to LIR lowering
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! tMIR to Low-level IR (LIR) lowering for LLVM2.
 //!
@@ -20,6 +20,9 @@ pub mod tmir_compat;
 pub mod target_analysis;
 pub mod compute_graph;
 pub mod dispatch;
+pub mod switch;
+pub mod overflow_idiom;
+pub mod smulh_idiom;
 pub mod x86_64_isel;
 
 pub use types::Type;
@@ -37,13 +40,19 @@ pub use isel::{InstructionSelector, ISelError, ISelFunction, ISelInst, ISelBlock
 pub use x86_64_isel::{
     X86InstructionSelector, X86ISelError, X86ISelFunction, X86ISelInst, X86ISelBlock,
     X86ISelOperand, x86cc_from_intcc, x86cc_from_floatcc,
+    X86FloatCmpStrategy, x86_float_cmp_strategy,
 };
 pub use adapter::{
-    translate_module, translate_function, translate_type, extract_proofs,
-    AdapterError, Proof, ProofContext,
+    translate_module, translate_function, translate_type,
+    translate_type_with_structs, translate_type_with_tables,
+    extract_proofs,
+    extract_source_debug_info, AdapterError, Proof, ProofContext,
+    SourceDebugInfo, SourceSpanEntry,
 };
+pub use tmir::SourceSpan;
 pub use target_analysis::{ComputeTarget, ProofAnalyzer, SubgraphProof, TargetLegality};
 pub use compute_graph::TargetRecommendation;
+pub use switch::{SwitchStrategy, choose_strategy, emit_linear_scan, emit_binary_search, emit_jump_table};
 pub use dispatch::{
     DispatchPlan, DispatchOp, DispatchError, VerificationReport, ProfitabilityMismatch,
     generate_dispatch_plan, generate_profitability_aware_dispatch_plan,

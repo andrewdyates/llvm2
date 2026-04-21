@@ -1,0 +1,55 @@
+---
+source: crates/llvm2-test/tests/cli.rs
+expression: "help_of(&[\"report\"])"
+---
+WS9 — Generate weekly report + dashboard
+
+Usage: llvm2-test report [OPTIONS]
+
+Options:
+  -f, --format <FORMAT>
+          Output format (human, json, junit)
+
+          Possible values:
+          - human: Pretty table + narrative, targeted at humans
+          - json:  Machine-readable JSON following the schemas in `evals/schema/`
+          - junit: JUnit XML for CI consumers
+          
+          [default: human]
+
+      --week <ISO-DATE>
+          ISO date for the report. Default: today (UTC)
+
+      --markdown-out <PATH>
+          Markdown target path (takes precedence over `--out`)
+
+  -o, --out <PATH>
+          Write machine-readable result artifact here. Default:
+          `evals/results/<cmd>/<iso-date>.json`
+
+      --config <PATH>
+          Config file (TOML). Default: `llvm2-test.toml` at repo root
+
+      --publish
+          Also write the dashboard pointer (`reports/dashboard.md`)
+
+      --timeout <SECS>
+          Per-unit timeout in seconds. Subcommands may apply per-unit defaults when this is unset
+
+      --parallel <N>
+          Worker count (honors cargo-serialization lock). Default: auto
+
+  -q, --quiet
+          Suppress progress bars; errors still go to stderr
+
+  -v, --verbose...
+          Show debug-level events. Repeat for more: -vv, -vvv
+
+      --no-cache
+          Ignore proof / corpus caches
+
+      --dry-run
+          Print what would run without executing external tools
+
+  -h, --help
+          Print help (see a summary with '-h')

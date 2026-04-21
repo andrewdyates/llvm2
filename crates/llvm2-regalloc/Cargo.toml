@@ -1,7 +1,7 @@
 # llvm2-regalloc - Register allocation for LLVM2
 #
-# Author: Andrew Yates <ayates@dropbox.com>
-# Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+# Copyright 2026 Andrew Yates | License: Apache-2.0
 
 [package]
 name = "llvm2-regalloc"
@@ -16,3 +16,6 @@ authors.workspace = true
 # Shared machine IR model (canonical type definitions)
 llvm2-ir = { workspace = true }
 thiserror = { workspace = true }
+
+[lints]
+workspace = true

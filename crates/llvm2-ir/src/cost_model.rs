@@ -1,7 +1,7 @@
 // llvm2-ir/cost_model.rs - AArch64 Apple Silicon instruction cost model
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Instruction latency and throughput cost model for AArch64 Apple Silicon.
 //!
@@ -111,20 +111,24 @@ impl AppleSiliconCostModel {
 
         // M4 has similar latencies to M1 for most instructions, with
         // slightly wider execution bandwidth for integer ALU.
-        let m4_int_tp = if self.generation == CostModelGen::M4 { 7.0 } else { 6.0 };
+        let m4_int_tp = if self.generation == CostModelGen::M4 {
+            7.0
+        } else {
+            6.0
+        };
 
         match opcode {
             // ===== Integer ALU (1-cycle latency, 6 execution units on M1) =====
             // Source: Firestorm has 4 simple integer ALU + 2 complex integer,
             // all can handle ADD/SUB/AND/ORR/EOR/shifts.
-            AddRR | AddRI => (1, m4_int_tp),
+            AddRR | AddRI | AddRIShift12 => (1, m4_int_tp),
             SubRR | SubRI => (1, m4_int_tp),
-            Neg           => (1, m4_int_tp),
+            Neg => (1, m4_int_tp),
             AndRR | AndRI => (1, m4_int_tp),
             OrrRR | OrrRI => (1, m4_int_tp),
             EorRR | EorRI => (1, m4_int_tp),
-            OrnRR         => (1, m4_int_tp),
-            BicRR         => (1, m4_int_tp),
+            OrnRR => (1, m4_int_tp),
+            BicRR => (1, m4_int_tp),
 
             // ===== Shifts (1-cycle, uses ALU units) =====
             LslRR | LsrRR | AsrRR => (1, m4_int_tp),
@@ -133,7 +137,7 @@ impl AppleSiliconCostModel {
             // ===== Integer multiply (3-cycle latency, 2 complex-integer units) =====
             // Source: Firestorm MUL latency is 3 cycles, throughput 2/cycle.
             MulRR => (3, 2.0),
-            Msub  => (3, 2.0),
+            Msub => (3, 2.0),
             Smull => (3, 2.0),
             Umull => (3, 2.0),
 
@@ -144,118 +148,131 @@ impl AppleSiliconCostModel {
             UDiv => (8, 0.5),
 
             // ===== Compare and conditional (1-cycle, uses ALU) =====
-            CmpRR | CmpRI       => (1, m4_int_tp),
-            CMPWrr | CMPXrr     => (1, m4_int_tp),
-            CMPWri | CMPXri     => (1, m4_int_tp),
-            Tst                 => (1, m4_int_tp),
-            Csel                => (1, m4_int_tp),
-            CSet                => (1, m4_int_tp),
-            Csinc               => (1, m4_int_tp),
-            Csinv               => (1, m4_int_tp),
-            Csneg               => (1, m4_int_tp),
+            CmpRR | CmpRI => (1, m4_int_tp),
+            CMPWrr | CMPXrr => (1, m4_int_tp),
+            CMPWri | CMPXri => (1, m4_int_tp),
+            Tst => (1, m4_int_tp),
+            Csel => (1, m4_int_tp),
+            CSet => (1, m4_int_tp),
+            Csinc => (1, m4_int_tp),
+            Csinv => (1, m4_int_tp),
+            Csneg => (1, m4_int_tp),
 
             // ===== Flag-setting arithmetic (1-cycle, uses ALU) =====
             AddsRR | AddsRI => (1, m4_int_tp),
             SubsRR | SubsRI => (1, m4_int_tp),
 
+            // ===== i128 multi-register arithmetic =====
+            // ADC/SBC: 1-cycle ALU, reads carry from preceding ADDS/SUBS.
+            Adc | Sbc => (1, m4_int_tp),
+            // UMULH: unsigned multiply high, 3-cycle latency (same as MUL).
+            Umulh => (3, 2.0),
+            // SMULH: signed multiply high, 3-cycle latency (same as MUL/UMULH).
+            Smulh => (3, 2.0),
+            // MADD: multiply-add, 3-cycle latency (same as MUL/MSUB).
+            Madd => (3, 2.0),
+
             // ===== Move / immediate (1-cycle, uses ALU) =====
-            MovR              => (1, m4_int_tp),
-            MovI              => (1, m4_int_tp),
-            Movz              => (1, m4_int_tp),
-            Movn              => (1, m4_int_tp),
-            Movk              => (1, m4_int_tp),
-            MOVWrr | MOVXrr   => (1, m4_int_tp),
-            MOVZWi | MOVZXi   => (1, m4_int_tp),
+            MovR => (1, m4_int_tp),
+            MovI => (1, m4_int_tp),
+            Movz => (1, m4_int_tp),
+            Movn => (1, m4_int_tp),
+            Movk => (1, m4_int_tp),
+            MOVWrr | MOVXrr => (1, m4_int_tp),
+            MOVZWi | MOVZXi => (1, m4_int_tp),
 
             // ===== Extension / bitfield (1-cycle, ALU) =====
             // SXTW, UXTW, SXTB, SXTH, UXTB, UXTH are aliases for SBFM/UBFM.
             Sxtw | Uxtw | Sxtb | Sxth | Uxtb | Uxth => (1, m4_int_tp),
-            Ubfm | Sbfm | Bfm         => (1, m4_int_tp),
+            Ubfm | Sbfm | Bfm => (1, m4_int_tp),
 
             // ===== Address generation (1-cycle) =====
-            Adrp     => (1, m4_int_tp),
+            Adrp => (1, m4_int_tp),
+            Adr => (1, m4_int_tp),
             AddPCRel => (1, m4_int_tp),
 
             // ===== Branches =====
             // Correctly-predicted branches: 0 effective latency for throughput.
             // Misprediction penalty: ~14 cycles on Firestorm, not modeled here.
             // Throughput: 1 branch per cycle (branch predictor is single-ported).
-            B    => (1, 1.0),
+            B => (1, 1.0),
             BCond | Bcc => (1, 1.0),
-            Cbz  => (1, 1.0),
+            Cbz => (1, 1.0),
             Cbnz => (1, 1.0),
-            Tbz  => (1, 1.0),
+            Tbz => (1, 1.0),
             Tbnz => (1, 1.0),
-            Br   => (1, 1.0),
+            Br => (1, 1.0),
 
             // ===== Calls / Return =====
             // BL/BLR: 1-cycle + link register write. Throughput limited by
             // branch predictor + call return stack.
-            Bl | BL   => (1, 1.0),
+            Bl | BL => (1, 1.0),
             Blr | BLR => (1, 1.0),
-            Ret       => (1, 1.0),
+            Ret => (1, 1.0),
 
             // ===== Load (L1 hit: 4 cycles, 2 load/store units) =====
             // Source: Firestorm has 4-cycle load latency for L1 hits.
             // Two load/store units can handle loads in parallel.
-            LdrRI      => (4, 2.0),
-            LdrbRI     => (4, 2.0),
-            LdrhRI     => (4, 2.0),
-            LdrsbRI    => (4, 2.0),
-            LdrshRI    => (4, 2.0),
-            LdrRO      => (4, 2.0),
+            LdrRI => (4, 2.0),
+            LdrbRI => (4, 2.0),
+            LdrhRI => (4, 2.0),
+            LdrsbRI => (4, 2.0),
+            LdrshRI => (4, 2.0),
+            LdrRO => (4, 2.0),
+            LdrswRO => (4, 2.0),
             LdrLiteral => (4, 2.0),
-            LdpRI      => (4, 2.0),
+            LdpRI => (4, 2.0),
             LdpPostIndex => (4, 2.0),
-            LdrGot     => (4, 2.0),
-            LdrTlvp    => (4, 2.0),
+            LdrGot => (4, 2.0),
+            LdrTlvp => (4, 2.0),
 
             // ===== Store (1-cycle dispatch, 2 load/store units) =====
             // Stores complete out of order; effective latency is 1 for dispatch.
-            StrRI      => (1, 2.0),
-            StrbRI     => (1, 2.0),
-            StrhRI     => (1, 2.0),
-            StrRO      => (1, 2.0),
-            StpRI      => (1, 2.0),
-            StpPreIndex  => (1, 2.0),
-            STRWui     => (1, 2.0),
-            STRXui     => (1, 2.0),
-            STRSui     => (1, 2.0),
-            STRDui     => (1, 2.0),
+            StrRI => (1, 2.0),
+            StrbRI => (1, 2.0),
+            StrhRI => (1, 2.0),
+            StrRO => (1, 2.0),
+            StpRI => (1, 2.0),
+            StpPreIndex => (1, 2.0),
+            STRWui => (1, 2.0),
+            STRXui => (1, 2.0),
+            STRSui => (1, 2.0),
+            STRDui => (1, 2.0),
 
             // ===== FP arithmetic =====
             // Source: Firestorm FP latency is typically 3 cycles for FADD/FSUB,
             // 4 cycles for FMUL, with 2 FADD and 2 FMUL/FMA units.
-            FaddRR  => (3, 2.0),
-            FsubRR  => (3, 2.0),
-            FmulRR  => (4, 2.0),
-            FdivRR  => (10, 0.5),  // Single: ~10, Double: ~15
-            FnegRR  => (1, 2.0),   // Simple bit flip, uses FP unit
-            FabsRR  => (1, 2.0),   // Simple bit clear, uses FP unit
+            FaddRR => (3, 2.0),
+            FsubRR => (3, 2.0),
+            FmulRR => (4, 2.0),
+            FdivRR => (10, 0.5),   // Single: ~10, Double: ~15
+            FnegRR => (1, 2.0),    // Simple bit flip, uses FP unit
+            FabsRR => (1, 2.0),    // Simple bit clear, uses FP unit
             FsqrtRR => (12, 0.25), // Single: ~9, Double: ~12-16 cycles, 1 unit
-            Fcmp    => (3, 2.0),
+            Fcmp => (3, 2.0),
             FmovImm => (2, 2.0),
 
             // ===== FP conversion =====
             // FCVTZS/FCVTZU: FP-to-int conversion, 3-4 cycle latency.
             // SCVTF/UCVTF: int-to-FP, 3-4 cycle latency.
             // FCVT (precision change): 3 cycles.
-            FcvtzsRR    => (4, 2.0),
-            FcvtzuRR    => (4, 2.0),
-            ScvtfRR     => (4, 2.0),
-            UcvtfRR     => (4, 2.0),
-            FcvtSD      => (3, 2.0),
-            FcvtDS      => (3, 2.0),
-            FmovGprFpr  => (3, 2.0),
-            FmovFprGpr  => (3, 2.0),
+            FcvtzsRR => (4, 2.0),
+            FcvtzuRR => (4, 2.0),
+            ScvtfRR => (4, 2.0),
+            UcvtfRR => (4, 2.0),
+            FcvtSD => (3, 2.0),
+            FcvtDS => (3, 2.0),
+            FmovGprFpr => (3, 2.0),
+            FmovFprGpr => (3, 2.0),
+            FmovFprFpr => (1, 2.0), // FP register-to-register move, 1-cycle
 
             // ===== NEON SIMD (vector) =====
             // Firestorm NEON: 2-cycle latency for integer ADD/SUB, 3-cycle MUL.
             // FP: 3-cycle FADD/FSUB, 4-cycle FMUL, ~10-cycle FDIV.
             // 2 NEON execution units, throughput ~2 vec ops/cycle.
-            NeonAddV  => (2, 2.0),
-            NeonSubV  => (2, 2.0),
-            NeonMulV  => (3, 2.0),
+            NeonAddV => (2, 2.0),
+            NeonSubV => (2, 2.0),
+            NeonMulV => (3, 2.0),
             NeonFaddV => (3, 2.0),
             NeonFsubV => (3, 2.0),
             NeonFmulV => (4, 2.0),
@@ -267,7 +284,7 @@ impl AppleSiliconCostModel {
             // DUP/INS/MOVI: 2-3 cycle latency
             NeonDupElem | NeonDupGen => (2, 2.0),
             NeonInsGen => (3, 1.0),
-            NeonMovi   => (2, 2.0),
+            NeonMovi => (2, 2.0),
             // SIMD loads: 4-cycle L1 hit, stores: 1-cycle dispatch
             NeonLd1Post => (4, 2.0),
             NeonSt1Post => (1, 2.0),
@@ -277,8 +294,7 @@ impl AppleSiliconCostModel {
 
             // ===== Trap pseudo-instructions =====
             // These are conditional branches to panic blocks; cost is branch cost.
-            TrapOverflow | TrapBoundsCheck | TrapNull
-            | TrapDivZero | TrapShiftRange => (1, 1.0),
+            TrapOverflow | TrapBoundsCheck | TrapNull | TrapDivZero | TrapShiftRange => (1, 1.0),
 
             // ===== Atomic memory operations =====
             // Load-acquire: same latency as regular load + ordering overhead.
@@ -301,9 +317,14 @@ impl AppleSiliconCostModel {
             Dsb => (8, 0.25),
             Isb => (12, 0.25),
 
+            // ===== System register read =====
+            // MRS (e.g., TPIDR_EL0): Apple Silicon reads the thread pointer
+            // register in ~3-4 cycles; single-issue on the int ALU pipe.
+            Mrs => (4, 1.0),
+
             // ===== Reference counting pseudo-instructions =====
             // Model as load+store pair (atomic RMW in practice).
-            Retain  => (6, 0.5),
+            Retain => (6, 0.5),
             Release => (6, 0.5),
         }
     }
@@ -330,11 +351,7 @@ impl CostModel for AppleSiliconCostModel {
         // For a basic block throughput estimate, we use the maximum single
         // instruction latency as a lower-bound on execution time, plus
         // account for the throughput bottleneck across execution units.
-        let max_latency = insts
-            .iter()
-            .map(|op| self.latency(*op))
-            .max()
-            .unwrap_or(1) as f64;
+        let max_latency = insts.iter().map(|op| self.latency(*op)).max().unwrap_or(1) as f64;
 
         // Throughput bottleneck: sum of per-instruction execution time.
         // Each instruction takes 1/throughput cycles on its unit.
@@ -446,11 +463,11 @@ impl NeonArrangement {
     /// ambiguous widths. Returns `None` for unsupported widths.
     pub fn from_width(width: u32) -> Option<Self> {
         match width {
-            8 => Some(Self::B8),     // single byte in 8B register
-            16 => Some(Self::H4),    // single halfword in 4H register
-            32 => Some(Self::S2),    // single word in 2S register
-            64 => Some(Self::D1),    // single double in 1D register
-            128 => Some(Self::S4),   // 4x32 (most common 128-bit arrangement)
+            8 => Some(Self::B8),   // single byte in 8B register
+            16 => Some(Self::H4),  // single halfword in 4H register
+            32 => Some(Self::S2),  // single word in 2S register
+            64 => Some(Self::D1),  // single double in 1D register
+            128 => Some(Self::S4), // 4x32 (most common 128-bit arrangement)
             _ => None,
         }
     }
@@ -800,10 +817,10 @@ impl MultiTargetCostModel {
 
         // NEON cost: pick the best arrangement for the element size.
         let neon_arr = match element_bits {
-            8 => NeonArrangement::B16,  // 16 lanes
-            16 => NeonArrangement::H8,  // 8 lanes
-            32 => NeonArrangement::S4,  // 4 lanes
-            64 => NeonArrangement::D2,  // 2 lanes
+            8 => NeonArrangement::B16,            // 16 lanes
+            16 => NeonArrangement::H8,            // 8 lanes
+            32 => NeonArrangement::S4,            // 4 lanes
+            64 => NeonArrangement::D2,            // 2 lanes
             _ => return ComputeTarget::CpuScalar, // unsupported element size
         };
         let neon_width = neon_arr.width_bits();
@@ -833,9 +850,8 @@ impl MultiTargetCostModel {
         // Map string op name to approximate scalar latency/throughput.
         let upper = op.to_ascii_uppercase();
         let (lat, tp) = match upper.as_str() {
-            "ADD" | "SUB" | "NEG" | "AND" | "ORR" | "OR"
-            | "EOR" | "XOR" | "BIC" | "SHL" | "LSL"
-            | "USHR" | "LSR" | "SSHR" | "ASR" => (1, 6.0),
+            "ADD" | "SUB" | "NEG" | "AND" | "ORR" | "OR" | "EOR" | "XOR" | "BIC" | "SHL"
+            | "LSL" | "USHR" | "LSR" | "SSHR" | "ASR" => (1, 6.0),
             "MUL" => (3, 2.0),
             "SDIV" | "UDIV" | "DIV" => (8, 0.5),
             "FADD" | "FSUB" => (3, 2.0),
@@ -852,10 +868,10 @@ impl MultiTargetCostModel {
         // M4 has slightly wider integer throughput
         let tp_adjusted = if self.generation == CostModelGen::M4 {
             match upper.as_str() {
-                "ADD" | "SUB" | "NEG" | "AND" | "ORR" | "OR"
-                | "EOR" | "XOR" | "BIC" | "SHL" | "LSL"
-                | "USHR" | "LSR" | "SSHR" | "ASR"
-                | "CMP" | "TST" | "MOV" => 7.0_f64.min(tp + 1.0),
+                "ADD" | "SUB" | "NEG" | "AND" | "ORR" | "OR" | "EOR" | "XOR" | "BIC" | "SHL"
+                | "LSL" | "USHR" | "LSR" | "SSHR" | "ASR" | "CMP" | "TST" | "MOV" => {
+                    7.0_f64.min(tp + 1.0)
+                }
                 _ => tp,
             }
         } else {
@@ -906,7 +922,11 @@ impl MultiTargetCostModel {
         // 128-bit operations use ~1.8x energy of scalar; 64-bit ~1.4x.
         // Normalize per-element: one NEON instruction's energy is shared
         // across all lanes.
-        let total_energy = if arrangement.width_bits() >= 128 { 1.8 } else { 1.4 };
+        let total_energy = if arrangement.width_bits() >= 128 {
+            1.8
+        } else {
+            1.4
+        };
         let per_element_energy = total_energy / lanes;
 
         CostEstimate {
@@ -932,13 +952,13 @@ impl MultiTargetCostModel {
         // accounting for GPU's lower clock rate but massive parallelism).
         let upper = op.to_ascii_uppercase();
         let gpu_ops_per_cycle = match upper.as_str() {
-            "ADD" | "SUB" | "NEG" | "AND" | "ORR" | "OR"
-            | "EOR" | "XOR" | "BIC" | "SHL" | "USHR" | "SSHR" => 512.0,
+            "ADD" | "SUB" | "NEG" | "AND" | "ORR" | "OR" | "EOR" | "XOR" | "BIC" | "SHL"
+            | "USHR" | "SSHR" => 512.0,
             "MUL" => 256.0,
             "FADD" | "FSUB" | "FMUL" | "FMA" | "FMLA" => 256.0,
             "FDIV" => 32.0,
             "GEMM" | "MATMUL" => 512.0, // matrix multiply is GPU's strength
-            _ => 128.0, // conservative
+            _ => 128.0,                 // conservative
         };
 
         // Elements implied by width (assume 32-bit elements)
@@ -1200,33 +1220,32 @@ impl ProfitabilityAnalyzer {
         let upper = op.to_ascii_uppercase();
         match upper.as_str() {
             // Elementwise arithmetic
-            "ADD" | "SUB" | "MUL" | "DIV" | "NEG"
-            | "FADD" | "FSUB" | "FMUL" | "FDIV" | "FMA" | "FMLA" | "FMADD"
-            | "FNEG" => OperationCategory::Elementwise,
+            "ADD" | "SUB" | "MUL" | "DIV" | "NEG" | "FADD" | "FSUB" | "FMUL" | "FDIV" | "FMA"
+            | "FMLA" | "FMADD" | "FNEG" => OperationCategory::Elementwise,
 
             // GEMM / matrix multiply
             "GEMM" | "MATMUL" | "BATCHED_MATMUL" => OperationCategory::Gemm,
 
             // Convolution
-            "CONV1D" | "CONV2D" | "DEPTHWISE_CONV2D" | "TRANSPOSED_CONV2D"
-            | "CONV" => OperationCategory::Convolution,
+            "CONV1D" | "CONV2D" | "DEPTHWISE_CONV2D" | "TRANSPOSED_CONV2D" | "CONV" => {
+                OperationCategory::Convolution
+            }
 
             // Reduction
-            "REDUCE_SUM" | "REDUCE_MEAN" | "REDUCE_MAX" | "REDUCE_MIN"
-            | "SUM" | "MEAN" | "REDUCE" => OperationCategory::Reduction,
+            "REDUCE_SUM" | "REDUCE_MEAN" | "REDUCE_MAX" | "REDUCE_MIN" | "SUM" | "MEAN"
+            | "REDUCE" => OperationCategory::Reduction,
 
             // Activation functions
-            "RELU" | "LEAKY_RELU" | "SIGMOID" | "TANH" | "GELU" | "SILU"
-            => OperationCategory::Activation,
+            "RELU" | "LEAKY_RELU" | "SIGMOID" | "TANH" | "GELU" | "SILU" => {
+                OperationCategory::Activation
+            }
 
             // Normalization
-            "BATCH_NORM" | "LAYER_NORM" | "GROUP_NORM"
-            => OperationCategory::Normalization,
+            "BATCH_NORM" | "LAYER_NORM" | "GROUP_NORM" => OperationCategory::Normalization,
 
             // Bitwise / logical
-            "AND" | "OR" | "ORR" | "XOR" | "EOR" | "BIC" | "ORN"
-            | "SHL" | "LSL" | "USHR" | "LSR" | "SSHR" | "ASR"
-            | "NOT" => OperationCategory::BitwiseLogic,
+            "AND" | "OR" | "ORR" | "XOR" | "EOR" | "BIC" | "ORN" | "SHL" | "LSL" | "USHR"
+            | "LSR" | "SSHR" | "ASR" | "NOT" => OperationCategory::BitwiseLogic,
 
             // Integer division (scalar-only in practice)
             "SDIV" | "UDIV" => OperationCategory::Other,
@@ -1252,10 +1271,7 @@ impl ProfitabilityAnalyzer {
             ComputeTarget::CpuScalar => true,
             ComputeTarget::Neon => {
                 // NEON does not support integer division
-                !matches!(
-                    upper.as_str(),
-                    "SDIV" | "UDIV" | "DIV"
-                )
+                !matches!(upper.as_str(), "SDIV" | "UDIV" | "DIV")
             }
             ComputeTarget::Gpu => {
                 // GPU supports all standard arithmetic and matrix ops via
@@ -1268,17 +1284,48 @@ impl ProfitabilityAnalyzer {
                 // ANE: fixed-function tensor operations only.
                 matches!(
                     upper.as_str(),
-                    "GEMM" | "MATMUL" | "BATCHED_MATMUL"
-                    | "CONV1D" | "CONV2D" | "DEPTHWISE_CONV2D" | "TRANSPOSED_CONV2D"
-                    | "MAXPOOL" | "AVGPOOL" | "GLOBAL_AVGPOOL" | "GLOBAL_MAXPOOL"
-                    | "BATCH_NORM" | "LAYER_NORM" | "GROUP_NORM"
-                    | "RELU" | "LEAKY_RELU" | "SIGMOID" | "TANH" | "GELU" | "SILU"
-                    | "ADD" | "SUB" | "MUL" | "DIV"
-                    | "FADD" | "FSUB" | "FMUL" | "FDIV"
-                    | "FMA" | "FMLA" | "FMADD"
-                    | "REDUCE_SUM" | "REDUCE_MEAN" | "REDUCE_MAX" | "REDUCE_MIN"
-                    | "RESHAPE" | "TRANSPOSE" | "PERMUTE" | "CONCAT" | "SPLIT"
-                    | "ATTENTION" | "SCALED_DOT_PRODUCT_ATTENTION"
+                    "GEMM"
+                        | "MATMUL"
+                        | "BATCHED_MATMUL"
+                        | "CONV1D"
+                        | "CONV2D"
+                        | "DEPTHWISE_CONV2D"
+                        | "TRANSPOSED_CONV2D"
+                        | "MAXPOOL"
+                        | "AVGPOOL"
+                        | "GLOBAL_AVGPOOL"
+                        | "GLOBAL_MAXPOOL"
+                        | "BATCH_NORM"
+                        | "LAYER_NORM"
+                        | "GROUP_NORM"
+                        | "RELU"
+                        | "LEAKY_RELU"
+                        | "SIGMOID"
+                        | "TANH"
+                        | "GELU"
+                        | "SILU"
+                        | "ADD"
+                        | "SUB"
+                        | "MUL"
+                        | "DIV"
+                        | "FADD"
+                        | "FSUB"
+                        | "FMUL"
+                        | "FDIV"
+                        | "FMA"
+                        | "FMLA"
+                        | "FMADD"
+                        | "REDUCE_SUM"
+                        | "REDUCE_MEAN"
+                        | "REDUCE_MAX"
+                        | "REDUCE_MIN"
+                        | "RESHAPE"
+                        | "TRANSPOSE"
+                        | "PERMUTE"
+                        | "CONCAT"
+                        | "SPLIT"
+                        | "ATTENTION"
+                        | "SCALED_DOT_PRODUCT_ATTENTION"
                 )
             }
         }
@@ -1289,12 +1336,7 @@ impl ProfitabilityAnalyzer {
     /// Returns `true` if the data size exceeds the GPU profitability threshold
     /// for the operation category. GPU dispatch has ~10K cycles of overhead,
     /// so small workloads are better served by NEON.
-    pub fn is_gpu_profitable(
-        &self,
-        op: &str,
-        data_size_bytes: u64,
-        element_count: u64,
-    ) -> bool {
+    pub fn is_gpu_profitable(&self, op: &str, data_size_bytes: u64, element_count: u64) -> bool {
         // Absolute minimum data size floor
         if data_size_bytes < self.gpu_thresholds.absolute_min_bytes {
             return false;
@@ -1332,12 +1374,7 @@ impl ProfitabilityAnalyzer {
     ///
     /// The `tensor_shape` slice represents the tensor dimensions (e.g., [batch, channels, H, W]).
     /// ANE requires large workloads due to ~100K cycle CoreML compilation overhead.
-    pub fn is_ane_profitable(
-        &self,
-        op: &str,
-        data_size_bytes: u64,
-        tensor_shape: &[u64],
-    ) -> bool {
+    pub fn is_ane_profitable(&self, op: &str, data_size_bytes: u64, tensor_shape: &[u64]) -> bool {
         // Absolute minimum data size floor
         if data_size_bytes < self.ane_thresholds.absolute_min_bytes {
             return false;
@@ -1371,8 +1408,7 @@ impl ProfitabilityAnalyzer {
                 // Fused conv patterns have lower thresholds
                 total_elements >= self.ane_thresholds.fused_conv_min_flops
             }
-            OperationCategory::Elementwise
-            | OperationCategory::Activation => {
+            OperationCategory::Elementwise | OperationCategory::Activation => {
                 total_elements >= self.ane_thresholds.elementwise_min_elements
             }
             OperationCategory::Reduction => {
@@ -1451,11 +1487,9 @@ impl ProfitabilityAnalyzer {
         if self.target_legality(op, ComputeTarget::Gpu)
             && self.is_gpu_profitable(op, data_size_bytes, total_elements)
         {
-            let gpu_est = self.cost_model.estimate_cost(
-                ComputeTarget::Gpu,
-                op,
-                width_bits.max(32),
-            );
+            let gpu_est = self
+                .cost_model
+                .estimate_cost(ComputeTarget::Gpu, op, width_bits.max(32));
             candidates.push((ComputeTarget::Gpu, gpu_est));
         }
 
@@ -1463,11 +1497,9 @@ impl ProfitabilityAnalyzer {
         if self.target_legality(op, ComputeTarget::Ane)
             && self.is_ane_profitable(op, data_size_bytes, tensor_shape)
         {
-            let ane_est = self.cost_model.estimate_cost(
-                ComputeTarget::Ane,
-                op,
-                width_bits.max(32),
-            );
+            let ane_est = self
+                .cost_model
+                .estimate_cost(ComputeTarget::Ane, op, width_bits.max(32));
             candidates.push((ComputeTarget::Ane, ane_est));
         }
 
@@ -1505,13 +1537,23 @@ mod tests {
     fn integer_alu_latency_is_1() {
         let model = m1();
         let ops = [
-            AArch64Opcode::AddRR, AArch64Opcode::AddRI,
-            AArch64Opcode::SubRR, AArch64Opcode::SubRI,
-            AArch64Opcode::AndRR, AArch64Opcode::OrrRR,
-            AArch64Opcode::EorRR, AArch64Opcode::Neg,
+            AArch64Opcode::AddRR,
+            AArch64Opcode::AddRI,
+            AArch64Opcode::AddRIShift12,
+            AArch64Opcode::SubRR,
+            AArch64Opcode::SubRI,
+            AArch64Opcode::AndRR,
+            AArch64Opcode::OrrRR,
+            AArch64Opcode::EorRR,
+            AArch64Opcode::Neg,
         ];
         for op in &ops {
-            assert_eq!(model.latency(*op), 1, "{:?} should have 1-cycle latency", op);
+            assert_eq!(
+                model.latency(*op),
+                1,
+                "{:?} should have 1-cycle latency",
+                op
+            );
         }
     }
 
@@ -1604,8 +1646,9 @@ mod tests {
         let m1_model = m1();
         let m4_model = m4();
         // M4 should have >= M1 integer throughput
-        assert!(m4_model.throughput(AArch64Opcode::AddRR)
-            >= m1_model.throughput(AArch64Opcode::AddRR));
+        assert!(
+            m4_model.throughput(AArch64Opcode::AddRR) >= m1_model.throughput(AArch64Opcode::AddRR)
+        );
     }
 
     #[test]
@@ -1708,85 +1751,148 @@ mod tests {
         // We test a representative from each category.
         let all_ops = [
             // Arithmetic
-            AArch64Opcode::AddRR, AArch64Opcode::AddRI,
-            AArch64Opcode::SubRR, AArch64Opcode::SubRI,
-            AArch64Opcode::MulRR, AArch64Opcode::Msub,
-            AArch64Opcode::Smull, AArch64Opcode::Umull,
-            AArch64Opcode::SDiv, AArch64Opcode::UDiv,
+            AArch64Opcode::AddRR,
+            AArch64Opcode::AddRI,
+            AArch64Opcode::AddRIShift12,
+            AArch64Opcode::SubRR,
+            AArch64Opcode::SubRI,
+            AArch64Opcode::MulRR,
+            AArch64Opcode::Msub,
+            AArch64Opcode::Smull,
+            AArch64Opcode::Umull,
+            AArch64Opcode::SDiv,
+            AArch64Opcode::UDiv,
             AArch64Opcode::Neg,
             // Logical
-            AArch64Opcode::AndRR, AArch64Opcode::AndRI,
-            AArch64Opcode::OrrRR, AArch64Opcode::OrrRI,
-            AArch64Opcode::EorRR, AArch64Opcode::EorRI,
-            AArch64Opcode::OrnRR, AArch64Opcode::BicRR,
+            AArch64Opcode::AndRR,
+            AArch64Opcode::AndRI,
+            AArch64Opcode::OrrRR,
+            AArch64Opcode::OrrRI,
+            AArch64Opcode::EorRR,
+            AArch64Opcode::EorRI,
+            AArch64Opcode::OrnRR,
+            AArch64Opcode::BicRR,
             // Shifts
-            AArch64Opcode::LslRR, AArch64Opcode::LsrRR, AArch64Opcode::AsrRR,
-            AArch64Opcode::LslRI, AArch64Opcode::LsrRI, AArch64Opcode::AsrRI,
+            AArch64Opcode::LslRR,
+            AArch64Opcode::LsrRR,
+            AArch64Opcode::AsrRR,
+            AArch64Opcode::LslRI,
+            AArch64Opcode::LsrRI,
+            AArch64Opcode::AsrRI,
             // Compare
-            AArch64Opcode::CmpRR, AArch64Opcode::CmpRI,
-            AArch64Opcode::CMPWrr, AArch64Opcode::CMPXrr,
-            AArch64Opcode::CMPWri, AArch64Opcode::CMPXri,
+            AArch64Opcode::CmpRR,
+            AArch64Opcode::CmpRI,
+            AArch64Opcode::CMPWrr,
+            AArch64Opcode::CMPXrr,
+            AArch64Opcode::CMPWri,
+            AArch64Opcode::CMPXri,
             AArch64Opcode::Tst,
             // Conditional
-            AArch64Opcode::Csel, AArch64Opcode::CSet,
-            AArch64Opcode::Csinc, AArch64Opcode::Csinv, AArch64Opcode::Csneg,
+            AArch64Opcode::Csel,
+            AArch64Opcode::CSet,
+            AArch64Opcode::Csinc,
+            AArch64Opcode::Csinv,
+            AArch64Opcode::Csneg,
             // Flag-setting
-            AArch64Opcode::AddsRR, AArch64Opcode::AddsRI,
-            AArch64Opcode::SubsRR, AArch64Opcode::SubsRI,
+            AArch64Opcode::AddsRR,
+            AArch64Opcode::AddsRI,
+            AArch64Opcode::SubsRR,
+            AArch64Opcode::SubsRI,
             // Move
-            AArch64Opcode::MovR, AArch64Opcode::MovI,
-            AArch64Opcode::Movz, AArch64Opcode::Movn, AArch64Opcode::Movk,
-            AArch64Opcode::MOVWrr, AArch64Opcode::MOVXrr,
-            AArch64Opcode::MOVZWi, AArch64Opcode::MOVZXi,
+            AArch64Opcode::MovR,
+            AArch64Opcode::MovI,
+            AArch64Opcode::Movz,
+            AArch64Opcode::Movn,
+            AArch64Opcode::Movk,
+            AArch64Opcode::MOVWrr,
+            AArch64Opcode::MOVXrr,
+            AArch64Opcode::MOVZWi,
+            AArch64Opcode::MOVZXi,
             // Extension
-            AArch64Opcode::Sxtw, AArch64Opcode::Uxtw,
-            AArch64Opcode::Sxtb, AArch64Opcode::Sxth,
-            AArch64Opcode::Uxtb, AArch64Opcode::Uxth,
-            AArch64Opcode::Ubfm, AArch64Opcode::Sbfm, AArch64Opcode::Bfm,
+            AArch64Opcode::Sxtw,
+            AArch64Opcode::Uxtw,
+            AArch64Opcode::Sxtb,
+            AArch64Opcode::Sxth,
+            AArch64Opcode::Uxtb,
+            AArch64Opcode::Uxth,
+            AArch64Opcode::Ubfm,
+            AArch64Opcode::Sbfm,
+            AArch64Opcode::Bfm,
             // Address
-            AArch64Opcode::Adrp, AArch64Opcode::AddPCRel,
+            AArch64Opcode::Adrp,
+            AArch64Opcode::AddPCRel,
             // Branch
-            AArch64Opcode::B, AArch64Opcode::BCond, AArch64Opcode::Bcc,
-            AArch64Opcode::Cbz, AArch64Opcode::Cbnz,
-            AArch64Opcode::Tbz, AArch64Opcode::Tbnz,
+            AArch64Opcode::B,
+            AArch64Opcode::BCond,
+            AArch64Opcode::Bcc,
+            AArch64Opcode::Cbz,
+            AArch64Opcode::Cbnz,
+            AArch64Opcode::Tbz,
+            AArch64Opcode::Tbnz,
             AArch64Opcode::Br,
             // Call/Return
-            AArch64Opcode::Bl, AArch64Opcode::BL,
-            AArch64Opcode::Blr, AArch64Opcode::BLR,
+            AArch64Opcode::Bl,
+            AArch64Opcode::BL,
+            AArch64Opcode::Blr,
+            AArch64Opcode::BLR,
             AArch64Opcode::Ret,
             // Load
-            AArch64Opcode::LdrRI, AArch64Opcode::LdrbRI,
-            AArch64Opcode::LdrhRI, AArch64Opcode::LdrsbRI,
-            AArch64Opcode::LdrshRI, AArch64Opcode::LdrRO,
-            AArch64Opcode::LdrLiteral, AArch64Opcode::LdpRI,
+            AArch64Opcode::LdrRI,
+            AArch64Opcode::LdrbRI,
+            AArch64Opcode::LdrhRI,
+            AArch64Opcode::LdrsbRI,
+            AArch64Opcode::LdrshRI,
+            AArch64Opcode::LdrRO,
+            AArch64Opcode::LdrLiteral,
+            AArch64Opcode::LdpRI,
             AArch64Opcode::LdpPostIndex,
-            AArch64Opcode::LdrGot, AArch64Opcode::LdrTlvp,
+            AArch64Opcode::LdrGot,
+            AArch64Opcode::LdrTlvp,
             // Store
-            AArch64Opcode::StrRI, AArch64Opcode::StrbRI,
-            AArch64Opcode::StrhRI, AArch64Opcode::StrRO,
-            AArch64Opcode::StpRI, AArch64Opcode::StpPreIndex,
-            AArch64Opcode::STRWui, AArch64Opcode::STRXui,
-            AArch64Opcode::STRSui, AArch64Opcode::STRDui,
+            AArch64Opcode::StrRI,
+            AArch64Opcode::StrbRI,
+            AArch64Opcode::StrhRI,
+            AArch64Opcode::StrRO,
+            AArch64Opcode::StpRI,
+            AArch64Opcode::StpPreIndex,
+            AArch64Opcode::STRWui,
+            AArch64Opcode::STRXui,
+            AArch64Opcode::STRSui,
+            AArch64Opcode::STRDui,
             // FP
-            AArch64Opcode::FaddRR, AArch64Opcode::FsubRR,
-            AArch64Opcode::FmulRR, AArch64Opcode::FdivRR,
-            AArch64Opcode::FnegRR, AArch64Opcode::FabsRR,
-            AArch64Opcode::FsqrtRR, AArch64Opcode::Fcmp,
+            AArch64Opcode::FaddRR,
+            AArch64Opcode::FsubRR,
+            AArch64Opcode::FmulRR,
+            AArch64Opcode::FdivRR,
+            AArch64Opcode::FnegRR,
+            AArch64Opcode::FabsRR,
+            AArch64Opcode::FsqrtRR,
+            AArch64Opcode::Fcmp,
             AArch64Opcode::FmovImm,
             // FP conversion
-            AArch64Opcode::FcvtzsRR, AArch64Opcode::FcvtzuRR,
-            AArch64Opcode::ScvtfRR, AArch64Opcode::UcvtfRR,
-            AArch64Opcode::FcvtSD, AArch64Opcode::FcvtDS,
-            AArch64Opcode::FmovGprFpr, AArch64Opcode::FmovFprGpr,
+            AArch64Opcode::FcvtzsRR,
+            AArch64Opcode::FcvtzuRR,
+            AArch64Opcode::ScvtfRR,
+            AArch64Opcode::UcvtfRR,
+            AArch64Opcode::FcvtSD,
+            AArch64Opcode::FcvtDS,
+            AArch64Opcode::FmovGprFpr,
+            AArch64Opcode::FmovFprGpr,
+            AArch64Opcode::FmovFprFpr,
             // Pseudo
-            AArch64Opcode::Phi, AArch64Opcode::StackAlloc,
-            AArch64Opcode::Copy, AArch64Opcode::Nop,
+            AArch64Opcode::Phi,
+            AArch64Opcode::StackAlloc,
+            AArch64Opcode::Copy,
+            AArch64Opcode::Nop,
             // Trap
-            AArch64Opcode::TrapOverflow, AArch64Opcode::TrapBoundsCheck,
-            AArch64Opcode::TrapNull, AArch64Opcode::TrapDivZero,
+            AArch64Opcode::TrapOverflow,
+            AArch64Opcode::TrapBoundsCheck,
+            AArch64Opcode::TrapNull,
+            AArch64Opcode::TrapDivZero,
             AArch64Opcode::TrapShiftRange,
             // Refcount
-            AArch64Opcode::Retain, AArch64Opcode::Release,
+            AArch64Opcode::Retain,
+            AArch64Opcode::Release,
         ];
         for op in &all_ops {
             let lat = model.latency(*op);
@@ -1920,14 +2026,26 @@ mod tests {
     #[test]
     fn neon_int_alu_latency_is_2() {
         let model = mt_m1();
-        let ops = [NeonOp::Add, NeonOp::Sub, NeonOp::Neg,
-                    NeonOp::And, NeonOp::Orr, NeonOp::Eor, NeonOp::Bic,
-                    NeonOp::Shl, NeonOp::Ushr, NeonOp::Sshr];
+        let ops = [
+            NeonOp::Add,
+            NeonOp::Sub,
+            NeonOp::Neg,
+            NeonOp::And,
+            NeonOp::Orr,
+            NeonOp::Eor,
+            NeonOp::Bic,
+            NeonOp::Shl,
+            NeonOp::Ushr,
+            NeonOp::Sshr,
+        ];
         for op in &ops {
             let (lat, tp) = model.neon_cost(*op, NeonArrangement::S4);
             assert_eq!(lat, 2, "{:?} should have 2-cycle NEON latency", op);
-            assert!((tp - 4.0).abs() < 0.01,
-                "{:?} should have 4.0 throughput", op);
+            assert!(
+                (tp - 4.0).abs() < 0.01,
+                "{:?} should have 4.0 throughput",
+                op
+            );
         }
     }
 
@@ -1992,12 +2110,18 @@ mod tests {
         // Scalar MUL: 3 cycles for 1 element
         assert!((scalar.latency_cycles - 3.0).abs() < 0.01);
         // NEON MUL.4S: 4 cycles / 4 lanes = 1.0 cycle per element
-        assert!((neon.latency_cycles - 1.0).abs() < 0.01,
-            "NEON MUL per-element latency should be 1.0, got {}", neon.latency_cycles);
+        assert!(
+            (neon.latency_cycles - 1.0).abs() < 0.01,
+            "NEON MUL per-element latency should be 1.0, got {}",
+            neon.latency_cycles
+        );
         // NEON per-element latency should be lower than scalar
-        assert!(neon.latency_cycles < scalar.latency_cycles,
+        assert!(
+            neon.latency_cycles < scalar.latency_cycles,
             "NEON per-element latency {} should beat scalar {}",
-            neon.latency_cycles, scalar.latency_cycles);
+            neon.latency_cycles,
+            scalar.latency_cycles
+        );
         // NEON has higher per-element throughput (4 units * 4 lanes = 16 vs 2)
         assert!(neon.throughput_per_cycle > scalar.throughput_per_cycle);
     }
@@ -2011,12 +2135,18 @@ mod tests {
         // Scalar ADD: 1 cycle per element
         assert!((scalar.latency_cycles - 1.0).abs() < 0.01);
         // NEON ADD.4S: 2 cycles / 4 lanes = 0.5 cycles per element
-        assert!((neon.latency_cycles - 0.5).abs() < 0.01,
-            "NEON ADD per-element latency should be 0.5, got {}", neon.latency_cycles);
+        assert!(
+            (neon.latency_cycles - 0.5).abs() < 0.01,
+            "NEON ADD per-element latency should be 0.5, got {}",
+            neon.latency_cycles
+        );
         // NEON per-element latency should be lower than scalar
-        assert!(neon.latency_cycles < scalar.latency_cycles,
+        assert!(
+            neon.latency_cycles < scalar.latency_cycles,
             "NEON ADD per-element {} should beat scalar ADD {}",
-            neon.latency_cycles, scalar.latency_cycles);
+            neon.latency_cycles,
+            scalar.latency_cycles
+        );
     }
 
     #[test]
@@ -2051,10 +2181,18 @@ mod tests {
         let ane_mul = model.estimate_cost(ComputeTarget::Ane, "MUL", large_width);
 
         // Unsupported ops should have much worse energy and efficiency
-        assert!(ane_div.energy_relative > ane_mul.energy_relative,
-            "DIV energy {} should exceed MUL energy {}", ane_div.energy_relative, ane_mul.energy_relative);
-        assert!(ane_div.efficiency() < ane_mul.efficiency(),
-            "DIV efficiency {} should be worse than MUL efficiency {}", ane_div.efficiency(), ane_mul.efficiency());
+        assert!(
+            ane_div.energy_relative > ane_mul.energy_relative,
+            "DIV energy {} should exceed MUL energy {}",
+            ane_div.energy_relative,
+            ane_mul.energy_relative
+        );
+        assert!(
+            ane_div.efficiency() < ane_mul.efficiency(),
+            "DIV efficiency {} should be worse than MUL efficiency {}",
+            ane_div.efficiency(),
+            ane_mul.efficiency()
+        );
     }
 
     #[test]
@@ -2126,12 +2264,18 @@ mod tests {
         let scalar = model.estimate_cost(ComputeTarget::CpuScalar, "ADD", 32);
         let neon = model.estimate_cost(ComputeTarget::Neon, "ADD", 128);
 
-        assert!(neon.energy_relative < scalar.energy_relative,
+        assert!(
+            neon.energy_relative < scalar.energy_relative,
             "NEON per-element energy {} should be lower than scalar {} (amortized across 4 lanes)",
-            neon.energy_relative, scalar.energy_relative);
+            neon.energy_relative,
+            scalar.energy_relative
+        );
         // 128-bit 4S: 1.8 / 4 = 0.45
-        assert!((neon.energy_relative - 0.45).abs() < 0.01,
-            "NEON 4S per-element energy should be ~0.45, got {}", neon.energy_relative);
+        assert!(
+            (neon.energy_relative - 0.45).abs() < 0.01,
+            "NEON 4S per-element energy should be ~0.45, got {}",
+            neon.energy_relative
+        );
     }
 
     // ---- ANE energy efficient for supported ops ----
@@ -2143,8 +2287,10 @@ mod tests {
         let scalar = model.estimate_cost(ComputeTarget::CpuScalar, "MUL", 32);
 
         // ANE per-element energy should be lower than scalar
-        assert!(ane.energy_relative < scalar.energy_relative,
-            "ANE should be more energy-efficient per element");
+        assert!(
+            ane.energy_relative < scalar.energy_relative,
+            "ANE should be more energy-efficient per element"
+        );
     }
 
     // ---- All NEON ops return valid costs ----
@@ -2153,24 +2299,47 @@ mod tests {
     fn all_neon_ops_return_valid_costs() {
         let model = mt_m1();
         let ops = [
-            NeonOp::Add, NeonOp::Sub, NeonOp::Mul, NeonOp::Neg,
-            NeonOp::And, NeonOp::Orr, NeonOp::Eor, NeonOp::Bic,
-            NeonOp::Shl, NeonOp::Ushr, NeonOp::Sshr,
-            NeonOp::Fadd, NeonOp::Fmul, NeonOp::Fmla,
+            NeonOp::Add,
+            NeonOp::Sub,
+            NeonOp::Mul,
+            NeonOp::Neg,
+            NeonOp::And,
+            NeonOp::Orr,
+            NeonOp::Eor,
+            NeonOp::Bic,
+            NeonOp::Shl,
+            NeonOp::Ushr,
+            NeonOp::Sshr,
+            NeonOp::Fadd,
+            NeonOp::Fmul,
+            NeonOp::Fmla,
         ];
         let arrangements = [
-            NeonArrangement::B8, NeonArrangement::B16,
-            NeonArrangement::H4, NeonArrangement::H8,
-            NeonArrangement::S2, NeonArrangement::S4,
-            NeonArrangement::D1, NeonArrangement::D2,
+            NeonArrangement::B8,
+            NeonArrangement::B16,
+            NeonArrangement::H4,
+            NeonArrangement::H8,
+            NeonArrangement::S2,
+            NeonArrangement::S4,
+            NeonArrangement::D1,
+            NeonArrangement::D2,
         ];
         for op in &ops {
             for arr in &arrangements {
                 let (lat, tp) = model.neon_cost(*op, *arr);
-                assert!(lat > 0 && lat <= 10,
-                    "{:?} on {:?} has unreasonable latency {}", op, arr, lat);
-                assert!(tp > 0.0,
-                    "{:?} on {:?} has non-positive throughput", op, arr);
+                assert!(
+                    lat > 0 && lat <= 10,
+                    "{:?} on {:?} has unreasonable latency {}",
+                    op,
+                    arr,
+                    lat
+                );
+                assert!(
+                    tp > 0.0,
+                    "{:?} on {:?} has non-positive throughput",
+                    op,
+                    arr
+                );
             }
         }
     }
@@ -2186,17 +2355,30 @@ mod tests {
             ComputeTarget::Gpu,
             ComputeTarget::Ane,
         ];
-        let ops = ["ADD", "SUB", "MUL", "NEG", "AND", "ORR", "EOR",
-                    "BIC", "SHL", "USHR", "SSHR"];
+        let ops = [
+            "ADD", "SUB", "MUL", "NEG", "AND", "ORR", "EOR", "BIC", "SHL", "USHR", "SSHR",
+        ];
         for target in &targets {
             for op in &ops {
                 let est = model.estimate_cost(*target, op, 128);
-                assert!(est.latency_cycles > 0.0,
-                    "{:?}/{} has non-positive latency", target, op);
-                assert!(est.throughput_per_cycle > 0.0,
-                    "{:?}/{} has non-positive throughput", target, op);
-                assert!(est.energy_relative > 0.0,
-                    "{:?}/{} has non-positive energy", target, op);
+                assert!(
+                    est.latency_cycles > 0.0,
+                    "{:?}/{} has non-positive latency",
+                    target,
+                    op
+                );
+                assert!(
+                    est.throughput_per_cycle > 0.0,
+                    "{:?}/{} has non-positive throughput",
+                    target,
+                    op
+                );
+                assert!(
+                    est.energy_relative > 0.0,
+                    "{:?}/{} has non-positive energy",
+                    target,
+                    op
+                );
             }
         }
     }
@@ -2222,16 +2404,22 @@ mod tests {
         let neon_4s = model.estimate_cost(ComputeTarget::Neon, "ADD", 128); // 4S
 
         // Scalar: 1.0 cycle/element, NEON 4S: 2 cycles / 4 lanes = 0.5 cycles/element
-        assert!(neon_4s.latency_cycles < scalar.latency_cycles,
+        assert!(
+            neon_4s.latency_cycles < scalar.latency_cycles,
             "NEON 4S ADD per-element latency {} should be cheaper than scalar {}",
-            neon_4s.latency_cycles, scalar.latency_cycles);
+            neon_4s.latency_cycles,
+            scalar.latency_cycles
+        );
 
         // For 4 elements: scalar total = 4 * 1.0 = 4.0, NEON total = 4 * 0.5 = 2.0
         let scalar_total = scalar.latency_cycles * 4.0;
         let neon_total = neon_4s.latency_cycles * 4.0;
-        assert!(neon_total < scalar_total,
+        assert!(
+            neon_total < scalar_total,
             "NEON 4S total {} should be less than scalar total {} for 4 elements",
-            neon_total, scalar_total);
+            neon_total,
+            scalar_total
+        );
     }
 
     #[test]
@@ -2248,12 +2436,19 @@ mod tests {
         let per_element_lat = lat as f64 / d2_lanes;
 
         // Scalar: 1 cycle for 64-bit ADD, NEON D2: 2 cycles / 2 lanes = 1.0
-        assert!((per_element_lat - 1.0).abs() < 0.01,
-            "NEON D2 per-element latency should be 1.0, got {}", per_element_lat);
+        assert!(
+            (per_element_lat - 1.0).abs() < 0.01,
+            "NEON D2 per-element latency should be 1.0, got {}",
+            per_element_lat
+        );
         // For 2 elements: scalar = 2 * 1.0 = 2.0, NEON = 2 * 1.0 = 2.0
         // D2 matches scalar (tie) — NEON needs 3+ elements to clearly win for 64-bit
-        assert!(per_element_lat <= scalar.latency_cycles,
-            "NEON D2 per-element {} should not exceed scalar {}", per_element_lat, scalar.latency_cycles);
+        assert!(
+            per_element_lat <= scalar.latency_cycles,
+            "NEON D2 per-element {} should not exceed scalar {}",
+            per_element_lat,
+            scalar.latency_cycles
+        );
     }
 
     #[test]
@@ -2270,30 +2465,42 @@ mod tests {
         let scalar = model.estimate_cost(ComputeTarget::CpuScalar, "ADD", 64);
 
         // NEON D1 = 2 cycles / 1 lane = 2.0 per element, scalar = 1.0
-        assert!(scalar.latency_cycles < d1_per_element,
+        assert!(
+            scalar.latency_cycles < d1_per_element,
             "Scalar {} should beat NEON D1 {} for single element",
-            scalar.latency_cycles, d1_per_element);
+            scalar.latency_cycles,
+            d1_per_element
+        );
     }
 
     #[test]
     fn lane_count_all_arrangements() {
         // Verify lane_count() returns correct values for all arrangements.
         let cases: [(NeonArrangement, u32); 8] = [
-            (NeonArrangement::B8,  8),
+            (NeonArrangement::B8, 8),
             (NeonArrangement::B16, 16),
-            (NeonArrangement::H4,  4),
-            (NeonArrangement::H8,  8),
-            (NeonArrangement::S2,  2),
-            (NeonArrangement::S4,  4),
-            (NeonArrangement::D1,  1),
-            (NeonArrangement::D2,  2),
+            (NeonArrangement::H4, 4),
+            (NeonArrangement::H8, 8),
+            (NeonArrangement::S2, 2),
+            (NeonArrangement::S4, 4),
+            (NeonArrangement::D1, 1),
+            (NeonArrangement::D2, 2),
         ];
         for (arr, expected_lanes) in &cases {
-            assert_eq!(arr.lane_count(), *expected_lanes,
-                "{:?} should have {} lanes", arr, expected_lanes);
+            assert_eq!(
+                arr.lane_count(),
+                *expected_lanes,
+                "{:?} should have {} lanes",
+                arr,
+                expected_lanes
+            );
             // Verify lane_count = width_bits / element_bits
-            assert_eq!(arr.lane_count(), arr.width_bits() / arr.element_bits(),
-                "{:?} lane_count should equal width/element", arr);
+            assert_eq!(
+                arr.lane_count(),
+                arr.width_bits() / arr.element_bits(),
+                "{:?} lane_count should equal width/element",
+                arr
+            );
         }
     }
 
@@ -2304,12 +2511,15 @@ mod tests {
         let model = mt_m1();
         let neon_4s = model.estimate_cost(ComputeTarget::Neon, "ADD", 128); // 4S
         // D1 is width=64 → from_width(64) = D1
-        let neon_d1 = model.estimate_cost(ComputeTarget::Neon, "ADD", 64);  // D1
+        let neon_d1 = model.estimate_cost(ComputeTarget::Neon, "ADD", 64); // D1
 
         // 4S: tp = 4.0 * 4 = 16.0, D1: tp = 4.0 * 1 = 4.0
-        assert!((neon_4s.throughput_per_cycle / neon_d1.throughput_per_cycle - 4.0).abs() < 0.01,
+        assert!(
+            (neon_4s.throughput_per_cycle / neon_d1.throughput_per_cycle - 4.0).abs() < 0.01,
             "4S throughput {} should be 4x D1 throughput {}",
-            neon_4s.throughput_per_cycle, neon_d1.throughput_per_cycle);
+            neon_4s.throughput_per_cycle,
+            neon_d1.throughput_per_cycle
+        );
     }
 
     // ---- recommend_target tests ----
@@ -2323,8 +2533,11 @@ mod tests {
         // 36.0 < 48.0 → NEON wins
         let model = mt_m1();
         let target = model.recommend_target("MUL", 32, 16);
-        assert_eq!(target, ComputeTarget::Neon,
-            "NEON should be recommended for 16x 32-bit MUL");
+        assert_eq!(
+            target,
+            ComputeTarget::Neon,
+            "NEON should be recommended for 16x 32-bit MUL"
+        );
     }
 
     #[test]
@@ -2334,8 +2547,11 @@ mod tests {
         // exceeds any compute savings.
         let model = mt_m1();
         let target = model.recommend_target("MUL", 32, 1);
-        assert_eq!(target, ComputeTarget::CpuScalar,
-            "Scalar should be recommended for 1x 32-bit MUL");
+        assert_eq!(
+            target,
+            ComputeTarget::CpuScalar,
+            "Scalar should be recommended for 1x 32-bit MUL"
+        );
     }
 
     #[test]
@@ -2349,8 +2565,11 @@ mod tests {
         // 28.0 < 64.0 → NEON wins decisively
         let model = mt_m1();
         let target = model.recommend_target("ADD", 8, 64);
-        assert_eq!(target, ComputeTarget::Neon,
-            "NEON should be recommended for 64x 8-bit ADD");
+        assert_eq!(
+            target,
+            ComputeTarget::Neon,
+            "NEON should be recommended for 64x 8-bit ADD"
+        );
     }
 
     #[test]
@@ -2367,8 +2586,11 @@ mod tests {
         // total = 112 < 256 → NEON wins
         let model = mt_m1();
         let target = model.recommend_target("ADD", 8, 256);
-        assert_eq!(target, ComputeTarget::Neon,
-            "NEON should be recommended for 256x 8-bit ADD");
+        assert_eq!(
+            target,
+            ComputeTarget::Neon,
+            "NEON should be recommended for 256x 8-bit ADD"
+        );
     }
 
     // ==== Profitability threshold tests (issue #171) ====
@@ -2508,7 +2730,8 @@ mod tests {
         for op in &["ADD", "MUL", "FADD", "FMUL", "GEMM", "SDIV", "AND", "SHL"] {
             assert!(
                 pa.target_legality(op, ComputeTarget::Gpu),
-                "GPU should support {}", op
+                "GPU should support {}",
+                op
             );
         }
     }
@@ -2519,7 +2742,8 @@ mod tests {
         for op in &["ADD", "MUL", "SDIV", "GEMM", "AND", "UNKNOWN_OP", "FMLA"] {
             assert!(
                 pa.target_legality(op, ComputeTarget::CpuScalar),
-                "CPU Scalar should support {}", op
+                "CPU Scalar should support {}",
+                op
             );
         }
     }
@@ -2643,7 +2867,10 @@ mod tests {
     fn classify_op_convolution() {
         let pa = pa_m1();
         assert_eq!(pa.classify_op("CONV2D"), OperationCategory::Convolution);
-        assert_eq!(pa.classify_op("DEPTHWISE_CONV2D"), OperationCategory::Convolution);
+        assert_eq!(
+            pa.classify_op("DEPTHWISE_CONV2D"),
+            OperationCategory::Convolution
+        );
     }
 
     #[test]
@@ -2692,8 +2919,14 @@ mod tests {
     #[test]
     fn precision_variants_distinct() {
         let precisions = [
-            Precision::FP16, Precision::FP32, Precision::FP64, Precision::BF16,
-            Precision::INT8, Precision::INT16, Precision::INT32, Precision::INT64,
+            Precision::FP16,
+            Precision::FP32,
+            Precision::FP64,
+            Precision::BF16,
+            Precision::INT8,
+            Precision::INT16,
+            Precision::INT32,
+            Precision::INT64,
         ];
         for (i, p) in precisions.iter().enumerate() {
             for (j, q) in precisions.iter().enumerate() {

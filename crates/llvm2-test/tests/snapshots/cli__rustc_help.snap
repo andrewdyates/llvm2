@@ -1,0 +1,52 @@
+---
+source: crates/llvm2-test/tests/cli.rs
+expression: "help_of(&[\"rustc\"])"
+---
+WS4 — Drive `rustc_codegen_llvm2` + rustc UI tests
+
+Usage: llvm2-test rustc [OPTIONS] <COMMAND>
+
+Commands:
+  smoke             Compile and run a trivial hello-world via LLVM2
+  ui                Run the full rustc UI harness against LLVM2
+  feature-coverage  Print rustc-MIR opcode coverage of the `tmir-from-rustc-mir` adapter
+  help              Print this message or the help of the given subcommand(s)
+
+Options:
+  -f, --format <FORMAT>
+          Output format (human, json, junit)
+
+          Possible values:
+          - human: Pretty table + narrative, targeted at humans
+          - json:  Machine-readable JSON following the schemas in `evals/schema/`
+          - junit: JUnit XML for CI consumers
+          
+          [default: human]
+
+  -o, --out <PATH>
+          Write machine-readable result artifact here. Default:
+          `evals/results/<cmd>/<iso-date>.json`
+
+      --config <PATH>
+          Config file (TOML). Default: `llvm2-test.toml` at repo root
+
+      --timeout <SECS>
+          Per-unit timeout in seconds. Subcommands may apply per-unit defaults when this is unset
+
+      --parallel <N>
+          Worker count (honors cargo-serialization lock). Default: auto
+
+  -q, --quiet
+          Suppress progress bars; errors still go to stderr
+
+  -v, --verbose...
+          Show debug-level events. Repeat for more: -vv, -vvv
+
+      --no-cache
+          Ignore proof / corpus caches
+
+      --dry-run
+          Print what would run without executing external tools
+
+  -h, --help
+          Print help (see a summary with '-h')

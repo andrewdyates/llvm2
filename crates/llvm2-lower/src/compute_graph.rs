@@ -1,7 +1,7 @@
 // llvm2-lower/compute_graph.rs - Computation graph analysis for heterogeneous compute
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Reference: designs/2026-04-13-heterogeneous-compute.md (Computation Graph Analysis)
 //
@@ -48,6 +48,7 @@ use crate::target_analysis::{
     ComputeTarget, ProofAnalyzer, SubgraphDescriptor, SubgraphId, TargetLegality,
     TargetProofContext,
 };
+use crate::types::Type as LirType;
 
 use llvm2_ir::cost_model::{
     CostModelGen,
@@ -174,6 +175,59 @@ impl fmt::Display for NodeKind {
 }
 
 // ---------------------------------------------------------------------------
+// MatMul shape (issue #404)
+// ---------------------------------------------------------------------------
+
+/// Explicit shape for a `NodeKind::MatrixHeavy` compute node.
+///
+/// For C = A * B where:
+///   * A is `m` rows by `k` columns,
+///   * B is `k` rows by `n` columns,
+///   * C is `m` rows by `n` columns.
+///
+/// Issue #404: Replaces the `data_size_bytes / 3 / sqrt` heuristic that
+/// silently assumed a square matmul. With `MatMulShape`, the Metal emitter
+/// consumes M, K, N directly, enabling non-square matmul lowering and
+/// surviving `data_size_bytes` redefinition (e.g. under #391 aggregate
+/// lowering).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MatMulShape {
+    /// Rows of A (and C).
+    pub m: u64,
+    /// Columns of A / rows of B (contracted dimension).
+    pub k: u64,
+    /// Columns of B (and C).
+    pub n: u64,
+    /// Element type (used to compute buffer sizes and choose MSL scalar).
+    pub elem_type: LirType,
+}
+
+impl MatMulShape {
+    /// Create a new MatMulShape.
+    pub fn new(m: u64, k: u64, n: u64, elem_type: LirType) -> Self {
+        Self { m, k, n, elem_type }
+    }
+
+    /// Returns the total number of elements across A, B, C: `m*k + k*n + m*n`.
+    pub fn total_elements(&self) -> u64 {
+        self.m.saturating_mul(self.k)
+            .saturating_add(self.k.saturating_mul(self.n))
+            .saturating_add(self.m.saturating_mul(self.n))
+    }
+
+    /// Returns the total byte footprint of A + B + C given this shape's
+    /// `elem_type`.
+    pub fn total_bytes(&self) -> u64 {
+        self.total_elements().saturating_mul(self.elem_type.bytes() as u64)
+    }
+
+    /// Returns `true` if this is a square matmul (M == K == N).
+    pub fn is_square(&self) -> bool {
+        self.m == self.k && self.k == self.n
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core graph types
 // ---------------------------------------------------------------------------
 
@@ -206,6 +260,17 @@ pub struct ComputeNode {
     /// `None` for manually constructed nodes that bypass proof analysis.
     #[serde(skip)]
     pub target_legality: Option<TargetLegality>,
+    /// Explicit matmul shape for `NodeKind::MatrixHeavy` nodes (issue #404).
+    ///
+    /// For MatrixHeavy nodes this SHOULD be `Some` whenever M, K, N can be
+    /// recovered from the tMIR (e.g. loop-nest bounds). When `None`, the
+    /// Metal emitter falls back to the legacy
+    /// `data_size_bytes / 3 / sqrt` heuristic — that fallback path is
+    /// deprecated and gated by a `debug_assert!` in debug builds.
+    ///
+    /// For non-MatrixHeavy nodes this is always `None`.
+    #[serde(default)]
+    pub matmul_shape: Option<MatMulShape>,
 }
 
 /// A data dependency edge between two computation nodes.
@@ -232,6 +297,12 @@ pub struct ComputeGraph {
     /// Uses proper thresholds from the cost model instead of ad-hoc checks.
     #[serde(skip)]
     pub(crate) profitability: Option<ProfitabilityAnalyzer>,
+    /// Whether the source tMIR module's proof obligations are fully verified.
+    ///
+    /// Populated from `tmir::Module::proof_summary().is_fully_verified()` during
+    /// graph construction. When false, downstream dispatch should be conservative
+    /// (prefer CPU targets over GPU/ANE since proof status is incomplete).
+    pub module_fully_verified: bool,
 }
 
 impl ComputeGraph {
@@ -241,6 +312,7 @@ impl ComputeGraph {
             nodes: Vec::new(),
             edges: Vec::new(),
             profitability: None,
+            module_fully_verified: false,
         }
     }
 
@@ -250,6 +322,7 @@ impl ComputeGraph {
             nodes: Vec::new(),
             edges: Vec::new(),
             profitability: Some(ProfitabilityAnalyzer::new(generation)),
+            module_fully_verified: false,
         }
     }
 
@@ -649,7 +722,7 @@ impl ComputeGraph {
                 let val = Value(i as u32);
                 lir_values.push(val);
                 if let Some(ty) = value_types_map.get(vid)
-                    && let Ok(lir_ty) = crate::adapter::translate_type(ty) {
+                    && let Some(lir_ty) = tmir_ty_to_lir_type_for_analyzer(ty) {
                         desc.value_types.insert(val, lir_ty);
                     }
             }
@@ -1034,6 +1107,12 @@ impl GraphBuilder {
     pub fn build_from_module(&mut self, module: &TmirModule) -> ComputeGraph {
         let mut graph = ComputeGraph::new();
 
+        // Check module verification status using tMIR's proof summary API.
+        // Record this in the graph so downstream dispatch can be conservative
+        // when proof obligations are incomplete (pending or failed).
+        let proof_summary = module.proof_summary();
+        graph.module_fully_verified = proof_summary.is_fully_verified();
+
         // Track which ValueId is produced by which node
         let mut value_to_node: HashMap<ValueId, ComputeNodeId> = HashMap::new();
 
@@ -1258,7 +1337,7 @@ impl GraphBuilder {
             let val = Value(i as u32);
             lir_values.push(val);
             if let Some(ty) = value_types.get(vid)
-                && let Ok(lir_ty) = crate::adapter::translate_type(ty) {
+                && let Some(lir_ty) = tmir_ty_to_lir_type_for_analyzer(ty) {
                     subgraph_desc.value_types.insert(val, lir_ty);
                 }
         }
@@ -1283,6 +1362,20 @@ impl GraphBuilder {
         // Derive dominant operation name from instructions for profitability queries.
         let dominant_op = derive_dominant_op(body, kind);
 
+        // For MatrixHeavy nodes, derive a best-effort square shape from
+        // `data_size_bytes` so the Metal emitter has an explicit shape to
+        // consume (issue #404). This preserves the historical square
+        // assumption for callers that have not yet been migrated, but does
+        // so explicitly (and logged) instead of silently in the emitter.
+        //
+        // Future work: once tMIR loop-nest analysis is wired into
+        // `GraphBuilder`, populate M, K, N from the loop bounds directly.
+        let matmul_shape = if kind == NodeKind::MatrixHeavy {
+            derive_square_matmul_shape(data_size_bytes, &dominant_op, node_id)
+        } else {
+            None
+        };
+
         vec![ComputeNode {
             id: node_id,
             instructions,
@@ -1294,6 +1387,7 @@ impl GraphBuilder {
             consumed_values,
             dominant_op,
             target_legality: Some(legality),
+            matmul_shape,
         }]
     }
 
@@ -1336,9 +1430,91 @@ fn estimate_type_bytes(ty: &Ty) -> u32 {
         Ty::Struct(_) => 8, // rough estimate
         Ty::Array(_, len) => 8 * (*len as u32), // rough: 8 bytes per element
         Ty::Func(_) => 8,
-        Ty::Void => 0,
+        Ty::Unit | Ty::Never => 0,
         _ => 8,
     })
+}
+
+/// Pick a plausible LIR element type for a MatrixHeavy node, based on the
+/// dominant operation name (a string like `"FMUL"`, `"GEMM"`, `"ADD"`).
+///
+/// This mirrors the heuristic in `metal_emitter::infer_element_type` but
+/// returns an `LirType` instead of an `MslElementType` so `MatMulShape`
+/// can be populated without a codegen dependency. If the op name starts
+/// with `F` it is treated as `F32`; otherwise it is treated as `I32`.
+fn infer_matmul_elem_type(dominant_op: &str) -> LirType {
+    let op = dominant_op.to_uppercase();
+    if op.starts_with('F') || op.contains("FLOAT") || op.contains("FP") {
+        LirType::F32
+    } else {
+        LirType::I32
+    }
+}
+
+/// Derive a square `MatMulShape` from `data_size_bytes` (issue #404).
+///
+/// This is the legacy "square matmul, A+B+C combined" heuristic, lifted
+/// out of the Metal emitter and into the graph builder where it belongs.
+/// For `total_elements = data_size_bytes / elem_bytes` and
+/// `total_elements = 3 * dim^2`, we solve `dim = sqrt(total / 3)`.
+///
+/// Returns `None` for zero-byte nodes and for byte counts that round down
+/// to `dim == 0` (the emitter would reject these with
+/// `MatMulDimensionError` anyway). Logs a warning via `eprintln!` on the
+/// deprecated square-derivation path so stragglers are visible during
+/// migration to real tMIR loop-nest-driven shape inference.
+pub(crate) fn derive_square_matmul_shape(
+    data_size_bytes: u64,
+    dominant_op: &str,
+    node_id: ComputeNodeId,
+) -> Option<MatMulShape> {
+    if data_size_bytes == 0 {
+        return None;
+    }
+    let elem_type = infer_matmul_elem_type(dominant_op);
+    let elem_bytes = elem_type.bytes() as u64;
+    if elem_bytes == 0 {
+        return None;
+    }
+    let total_elements = data_size_bytes / elem_bytes;
+    let dim_sq = total_elements / 3;
+    let dim = (dim_sq as f64).sqrt() as u64;
+    if dim == 0 {
+        return None;
+    }
+    eprintln!(
+        "[llvm2-lower] warning: ComputeNode {node_id} MatrixHeavy shape \
+         derived from data_size_bytes={data_size_bytes} via square-matmul \
+         heuristic (dominant_op={dominant_op}, elem_type={elem_type:?}, \
+         dim={dim}); migrate construction site to populate \
+         `matmul_shape` explicitly (issue #404)."
+    );
+    Some(MatMulShape::new(dim, dim, dim, elem_type))
+}
+
+/// Translate a tMIR `Ty` into an LIR `Type` for the proof analyzer's
+/// `SubgraphDescriptor::value_types` map.
+///
+/// This differs from [`crate::adapter::translate_type`] in that it produces
+/// a best-effort `Type::Array` for `Ty::Array` inputs instead of erroring.
+/// The analyzer only inspects the top-level variant (e.g., via
+/// `operates_on_arrays()`), so using a scalar placeholder (I64) for the
+/// element type is sufficient when the tMIR type table has not resolved
+/// the element's `TyId`. This keeps heterogeneous-compute target
+/// recommendations (GPU/ANE) working regardless of type-table resolution.
+///
+/// Returns `None` for types that `translate_type` rejects AND are not
+/// `Ty::Array` (e.g., `Ty::Tuple`, `Ty::Enum`, `Ty::Func`, `Ty::Unit`,
+/// `Ty::Never`). Returning `None` preserves the prior conservative
+/// behavior of simply not inserting into `value_types` for those cases.
+fn tmir_ty_to_lir_type_for_analyzer(ty: &Ty) -> Option<LirType> {
+    if let Ok(lir_ty) = crate::adapter::translate_type(ty) {
+        return Some(lir_ty);
+    }
+    match ty {
+        Ty::Array(_, len) => Some(LirType::Array(Box::new(LirType::I64), *len as u32)),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1383,7 +1559,7 @@ impl ComputeGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tmir::{Block as TmirBlock, Function as TmirFunction, Module, BlockId, FuncId, FuncTy, FuncTyId, Ty, TyId, ValueId, Constant, InstrNode, Inst, BinOp, ProofAnnotation};
+    use tmir::{Block as TmirBlock, CallingConv, Function as TmirFunction, Linkage, Module, BlockId, FuncId, FuncTy, FuncTyId, Ty, TyId, ValueId, InstrNode, Inst, BinOp};
 
     // -------------------------------------------------------------------
     // Test helpers
@@ -1427,13 +1603,19 @@ mod tests {
                     ],
                 }],
                 proofs: vec![],
+                calling_conv: CallingConv::default(),
+                linkage: Linkage::default(),
             }],
             structs: vec![],
+            records: vec![],
+            closure_types: vec![],
             globals: vec![],
             func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
             types: vec![],
             proof_obligations: vec![],
             proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
         }
     }
 
@@ -1475,13 +1657,19 @@ mod tests {
                     ],
                 }],
                 proofs: vec![],
+                calling_conv: CallingConv::default(),
+                linkage: Linkage::default(),
             }],
             structs: vec![],
+            records: vec![],
+            closure_types: vec![],
             globals: vec![],
             func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
             types: vec![],
             proof_obligations: vec![],
             proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
         }
     }
 
@@ -1536,13 +1724,19 @@ mod tests {
                     ],
                 }],
                 proofs: vec![],
+                calling_conv: CallingConv::default(),
+                linkage: Linkage::default(),
             }],
             structs: vec![],
+            records: vec![],
+            closure_types: vec![],
             globals: vec![],
             func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
             types: vec![],
             proof_obligations: vec![],
             proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
         }
     }
 
@@ -1585,13 +1779,19 @@ mod tests {
                     ],
                 }],
                 proofs: vec![],
+                calling_conv: CallingConv::default(),
+                linkage: Linkage::default(),
             }],
             structs: vec![],
+            records: vec![],
+            closure_types: vec![],
             globals: vec![],
             func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
             types: vec![],
             proof_obligations: vec![],
             proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
         }
     }
 
@@ -1647,13 +1847,19 @@ mod tests {
                     ],
                 }],
                 proofs: vec![],
+                calling_conv: CallingConv::default(),
+                linkage: Linkage::default(),
             }],
             structs: vec![],
+            records: vec![],
+            closure_types: vec![],
             globals: vec![],
             func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
             types: vec![],
             proof_obligations: vec![],
             proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
         }
     }
 
@@ -1724,13 +1930,19 @@ mod tests {
                     },
                 ],
                 proofs: vec![],
+                calling_conv: CallingConv::default(),
+                linkage: Linkage::default(),
             }],
             structs: vec![],
+            records: vec![],
+            closure_types: vec![],
             globals: vec![],
             func_types: vec![FuncTy { params: vec![Ty::I32, Ty::I32], returns: vec![Ty::I32], is_vararg: false }],
             types: vec![],
             proof_obligations: vec![],
             proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
         }
     }
 
@@ -2163,6 +2375,53 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // Issue #404: MatMulShape
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_matmul_shape_square_and_nonsquare() {
+        // Non-square
+        let shape = MatMulShape::new(128, 64, 32, LirType::F32);
+        assert!(!shape.is_square());
+        assert_eq!(shape.m, 128);
+        assert_eq!(shape.k, 64);
+        assert_eq!(shape.n, 32);
+        // total = M*K + K*N + M*N = 128*64 + 64*32 + 128*32 = 8192+2048+4096 = 14336
+        assert_eq!(shape.total_elements(), 14336);
+        // F32 = 4 bytes, so 14336 * 4 = 57344 bytes
+        assert_eq!(shape.total_bytes(), 57344);
+
+        // Square
+        let square = MatMulShape::new(64, 64, 64, LirType::F32);
+        assert!(square.is_square());
+        assert_eq!(square.total_elements(), 3 * 64 * 64);
+        assert_eq!(square.total_bytes(), 3 * 64 * 64 * 4);
+    }
+
+    #[test]
+    fn test_derive_square_matmul_shape_recovers_dim() {
+        // 3 * 64^2 * 4 = 49152 -> dim = 64
+        let shape = derive_square_matmul_shape(49152, "FMUL", ComputeNodeId(0));
+        let shape = shape.expect("expected some shape");
+        assert_eq!(shape.m, 64);
+        assert_eq!(shape.k, 64);
+        assert_eq!(shape.n, 64);
+        assert_eq!(shape.elem_type, LirType::F32);
+
+        // Integer path (dominant_op = ADD -> I32)
+        let shape_i = derive_square_matmul_shape(49152, "ADD", ComputeNodeId(1));
+        let shape_i = shape_i.expect("expected some shape");
+        assert_eq!(shape_i.elem_type, LirType::I32);
+    }
+
+    #[test]
+    fn test_derive_square_matmul_shape_zero_bytes_is_none() {
+        assert!(derive_square_matmul_shape(0, "FMUL", ComputeNodeId(0)).is_none());
+        // Too small to round up to dim>=1: total_elements = 0/4 = 0
+        assert!(derive_square_matmul_shape(4, "FMUL", ComputeNodeId(0)).is_none());
+    }
+
+    // -------------------------------------------------------------------
     // Test: ComputeGraph manual construction
     // -------------------------------------------------------------------
 
@@ -2191,6 +2450,7 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         });
 
         let mut costs_b = HashMap::new();
@@ -2214,6 +2474,7 @@ mod tests {
             consumed_values: vec![],
             dominant_op: "ADD".to_string(),
             target_legality: None,
+            matmul_shape: None,
         });
 
         graph.add_edge(DataEdge {
@@ -2345,6 +2606,8 @@ mod tests {
                         }],
                     }],
                     proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
                 },
                 TmirFunction {
                     id: FuncId::new(1),
@@ -2362,14 +2625,20 @@ mod tests {
                         }],
                     }],
                     proofs: vec![],
+                    calling_conv: CallingConv::default(),
+                    linkage: Linkage::default(),
                 },
             ],
             structs: vec![],
+            records: vec![],
+            closure_types: vec![],
             globals: vec![],
             func_types: vec![FuncTy { params: vec![Ty::I64], returns: vec![Ty::I64], is_vararg: false }],
             types: vec![],
             proof_obligations: vec![],
             proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
         };
 
         let graph = ComputeGraph::from_module(&module);
@@ -3064,13 +3333,19 @@ mod tests {
                     ],
                 }],
                 proofs: vec![],
+                calling_conv: CallingConv::default(),
+                linkage: Linkage::default(),
             }],
             structs: vec![],
+            records: vec![],
+            closure_types: vec![],
             globals: vec![],
             func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
             types: vec![],
             proof_obligations: vec![],
             proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
         };
 
         let graph = ComputeGraph::from_module(&module);
@@ -3181,13 +3456,19 @@ mod tests {
                     ],
                 }],
                 proofs: vec![],
+                calling_conv: CallingConv::default(),
+                linkage: Linkage::default(),
             }],
             structs: vec![],
+            records: vec![],
+            closure_types: vec![],
             globals: vec![],
             func_types: vec![FuncTy { params: vec![], returns: vec![], is_vararg: false }],
             types: vec![],
             proof_obligations: vec![],
             proof_certificates: vec![],
+            enums: vec![],
+            target_info: None,
         };
 
         // Give full proofs so GPU/ANE are at least proof-legal.

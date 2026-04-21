@@ -1,7 +1,7 @@
 // llvm2-codegen/aarch64/encoding_mem.rs - AArch64 load/store and address encoding
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! AArch64 load/store instruction encoding.
 //!
@@ -413,6 +413,66 @@ pub fn encode_adrp(imm21: i32, rd: u8) -> Result<u32, EncodeError> {
     inst |= 0b10000 << 24;
     inst |= immhi << 5;
     inst |= rd as u32;
+    Ok(inst)
+}
+
+/// Encode `ADR Xd, label` — form PC-relative address.
+///
+/// ADR uses the same encoding as ADRP but with `op=0` (bit 31 clear).
+///
+/// ```text
+/// 0 | immlo(2) | 10000 | immhi(19) | Rd(5)
+/// ```
+///
+/// * `imm21` — signed 21-bit byte offset (-1048576..1048575)
+/// * `rd` — destination register (0..30)
+pub fn encode_adr(imm21: i32, rd: u8) -> Result<u32, EncodeError> {
+    check_reg(rd, 31)?;
+    check_imm21(imm21)?;
+
+    let bits = (imm21 as u32) & 0x1F_FFFF; // mask to 21 bits
+    let immlo = bits & 0x3;
+    let immhi = bits >> 2;
+
+    let mut inst: u32 = 0;
+    // op = 0 (ADR, not ADRP) — bit 31 stays clear
+    inst |= immlo << 29;
+    inst |= 0b10000 << 24;
+    inst |= immhi << 5;
+    inst |= rd as u32;
+    Ok(inst)
+}
+
+/// Encode `LDRSW Xt, [Xn, Xm, LSL #2]` — load signed word with register offset.
+///
+/// ARM ARM encoding: Load/store register (register offset)
+///
+/// ```text
+/// size(2) | 111 | V(1) | 00 | opc(2) | 1 | Rm(5) | option(3) | S(1) | 10 | Rn(5) | Rt(5)
+/// ```
+///
+/// For LDRSW: size=10, V=0, opc=10, option=011 (LSL), S=1 (shift by 2)
+///
+/// * `rm` — index register (0..30)
+/// * `rn` — base register (0..31, 31 = SP)
+/// * `rt` — destination register (0..30)
+pub fn encode_ldrsw_register(rm: u8, rn: u8, rt: u8) -> Result<u32, EncodeError> {
+    check_reg(rm, 31)?;
+    check_reg(rn, 31)?;
+    check_reg(rt, 31)?;
+
+    let mut inst: u32 = 0;
+    inst |= 0b10 << 30;           // size = 10 (Word)
+    inst |= 0b111 << 27;          // load/store register class
+    // V = 0 (bit 26 clear — GPR, not SIMD)
+    inst |= 0b10 << 22;           // opc = 10 (LDRSW)
+    inst |= 1 << 21;              // register-offset marker
+    inst |= (rm as u32) << 16;
+    inst |= 0b011 << 13;          // option = LSL
+    inst |= 1 << 12;              // S = 1 (shift by access size = 2)
+    inst |= 0b10 << 10;
+    inst |= (rn as u32) << 5;
+    inst |= rt as u32;
     Ok(inst)
 }
 

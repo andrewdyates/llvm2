@@ -1,6 +1,6 @@
 // llvm2-ir - Shared machine IR model
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Machine instruction types: AArch64Opcode, InstFlags, MachInst.
 
@@ -20,6 +20,10 @@ pub enum AArch64Opcode {
     // -- Arithmetic --
     AddRR,
     AddRI,
+    /// ADD (immediate, shift by 12) — `Xd = Xn + (imm12 << 12)`.
+    /// Operands: `[PReg(Rd), PReg(Rn), Imm(imm12)]`.
+    /// Used by the TLS local-exec sequence for the hi12 offset.
+    AddRIShift12,
     SubRR,
     SubRI,
     MulRR,
@@ -195,6 +199,10 @@ pub enum AArch64Opcode {
     FmovGprFpr,
     /// FMOV between FPR and GPR (e.g., FMOV Wn, Sd or FMOV Xn, Dd).
     FmovFprGpr,
+    /// FMOV between FPR registers (e.g., FMOV Dd, Dn or FMOV Ss, Sn).
+    /// Encoded as FP data-processing 1-source with opcode=00 (FmovReg).
+    /// Operands: [Rd, Rn] where both are FPR.
+    FmovFprFpr,
 
     // -- NEON SIMD (vector) --
     /// ADD Vd.T, Vn.T, Vm.T — integer vector add.
@@ -248,7 +256,6 @@ pub enum AArch64Opcode {
     NeonSt1Post,
 
     // -- Atomic memory operations (ARMv8.1-a LSE + legacy LL/SC) --
-
     /// LDAR Xt, [Xn] — load-acquire (sequential consistency load).
     /// size: 32-bit (Wt) or 64-bit (Xt) from register class.
     /// Operands: [Rt, Rn]
@@ -336,7 +343,17 @@ pub enum AArch64Opcode {
 
     // -- Address --
     Adrp,
+    /// ADR Xd, label — form PC-relative address (used for jump table base).
+    /// Operands (at ISel level): [Xd, JumpTable{...}]
+    /// Operands (at codegen level): [Xd, Imm(offset)]
+    Adr,
     AddPCRel,
+
+    // -- Jump table support --
+    /// LDRSW Xt, [Xn, Xm, LSL #2] — load signed word with register offset.
+    /// Used to load 32-bit relative offsets from jump tables.
+    /// Operands: [Xt (dst), Xn (base), Xm (index)]
+    LdrswRO,
 
     // -- Checked arithmetic (set flags for overflow detection) --
     /// ADDS: add and set flags (used for overflow-checked addition).
@@ -347,6 +364,24 @@ pub enum AArch64Opcode {
     SubsRR,
     /// SUBS immediate: subtract immediate and set flags.
     SubsRI,
+
+    // -- i128 multi-register arithmetic --
+    /// ADC Xd, Xn, Xm — add with carry (for i128 high-half addition).
+    /// Reads carry flag from previous ADDS. Always 64-bit.
+    Adc,
+    /// SBC Xd, Xn, Xm — subtract with carry/borrow (for i128 high-half subtraction).
+    /// Reads carry/borrow flag from previous SUBS. Always 64-bit.
+    Sbc,
+    /// UMULH Xd, Xn, Xm — unsigned multiply high (upper 64 bits of 64x64->128 product).
+    /// Always 64-bit (no 32-bit variant).
+    Umulh,
+    /// SMULH Xd, Xn, Xm — signed multiply high (upper 64 bits of signed 64x64->128 product).
+    /// Always 64-bit (no 32-bit variant). Used for the aarch64 overflow-safe
+    /// signed-mul idiom: `MUL lo; SMULH hi; CMP hi, lo, ASR #63; B.NE overflow`.
+    Smulh,
+    /// MADD Xd, Xn, Xm, Xa — multiply-add: Xd = Xa + Xn * Xm.
+    /// Used for i128 multiplication middle-term accumulation.
+    Madd,
 
     // -- Trap / panic pseudo-instructions --
     /// Trap on overflow: conditional branch to trap block after ADDS/SUBS.
@@ -403,6 +438,30 @@ pub enum AArch64Opcode {
     /// B.cond label — conditional branch (LLVM-style alias for BCond).
     Bcc,
 
+    // -- System register access --
+    /// MRS Xd, (sysreg) — move from system register.
+    ///
+    /// Reads an AArch64 system register into a GPR. Used by the thread-local
+    /// storage local-exec sequence (MRS Xd, TPIDR_EL0) and other system-level
+    /// accesses. The destination is always 64-bit.
+    ///
+    /// Operands: `[PReg(Xd), Imm(sysreg_encoding)]`
+    ///
+    /// `sysreg_encoding` packs op0/op1/CRn/CRm/op2 into the 16-bit
+    /// "systemreg" field used by the A64 instruction encoding (bits[20:5]):
+    ///   bits [15:14] = op0  (always 0b11 for EL0/EL1 sysregs MRS/MSR can access)
+    ///   bits [13:11] = op1
+    ///   bits [10:7]  = CRn
+    ///   bits [6:3]   = CRm
+    ///   bits [2:0]   = op2
+    /// For TPIDR_EL0 (op0=11, op1=011, CRn=1101, CRm=0000, op2=010) the
+    /// packed value is `0xDE82`, and the full instruction word is
+    /// `0xD53BD040 | Rd`.
+    ///
+    /// See the MRS encoder in `aarch64/encode.rs`, ARM ARM C6.2.169, and
+    /// LLVM `AArch64SystemOperands.td` `class SysReg`.
+    Mrs,
+
     // -- Pseudo-instructions (no hardware encoding) --
     Phi,
     StackAlloc,
@@ -436,14 +495,20 @@ impl AArch64Opcode {
             Ret => InstFlags::IS_RETURN.union(InstFlags::IS_TERMINATOR),
 
             // Memory loads
-            LdrRI | LdrbRI | LdrhRI | LdrsbRI | LdrshRI | LdrRO => InstFlags::READS_MEMORY,
+            LdrRI | LdrbRI | LdrhRI | LdrsbRI | LdrshRI | LdrRO | LdrswRO => {
+                InstFlags::READS_MEMORY
+            }
             LdrLiteral | LdrGot | LdrTlvp => InstFlags::READS_MEMORY,
             LdpRI | LdpPostIndex => InstFlags::READS_MEMORY,
             NeonLd1Post => InstFlags::READS_MEMORY,
 
             // Memory stores
-            StrRI | StrbRI | StrhRI | StrRO => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
-            STRWui | STRXui | STRSui | STRDui => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
+            StrRI | StrbRI | StrhRI | StrRO => {
+                InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS)
+            }
+            STRWui | STRXui | STRSui | STRDui => {
+                InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS)
+            }
             StpRI | StpPreIndex => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
             NeonSt1Post => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
 
@@ -454,22 +519,15 @@ impl AArch64Opcode {
             Stlr | Stlrb | Stlrh => InstFlags::WRITES_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Atomic read-modify-write (LSE): read AND write memory, always side-effecting
-            Ldadd | Ldadda | Ldaddal
-            | Ldclr | Ldclral
-            | Ldeor | Ldeoral
-            | Ldset | Ldsetal
-            | Swp | Swpal => {
-                InstFlags::READS_MEMORY
-                    .union(InstFlags::WRITES_MEMORY)
-                    .union(InstFlags::HAS_SIDE_EFFECTS)
-            }
+            Ldadd | Ldadda | Ldaddal | Ldclr | Ldclral | Ldeor | Ldeoral | Ldset | Ldsetal
+            | Swp | Swpal => InstFlags::READS_MEMORY
+                .union(InstFlags::WRITES_MEMORY)
+                .union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Compare-and-swap (LSE): read AND write memory, always side-effecting
-            Cas | Casa | Casal => {
-                InstFlags::READS_MEMORY
-                    .union(InstFlags::WRITES_MEMORY)
-                    .union(InstFlags::HAS_SIDE_EFFECTS)
-            }
+            Cas | Casa | Casal => InstFlags::READS_MEMORY
+                .union(InstFlags::WRITES_MEMORY)
+                .union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Exclusive load/store (LL/SC legacy path)
             Ldaxr => InstFlags::READS_MEMORY.union(InstFlags::HAS_SIDE_EFFECTS),
@@ -478,6 +536,15 @@ impl AArch64Opcode {
             // Memory barriers: pure side effects (enforce ordering)
             Dmb | Dsb | Isb => InstFlags::HAS_SIDE_EFFECTS,
 
+            // System register read: treat as side-effecting so optimization
+            // passes never reorder it across memory ops or speculate it. The
+            // opcode covers all sysregs; only some (e.g. TPIDR_EL0) are
+            // thread-stable, and the optimizer has no way to know which.
+            Mrs => InstFlags::HAS_SIDE_EFFECTS,
+
+            // Shifted immediate arithmetic: same default semantics as AddRI.
+            AddRIShift12 => InstFlags::EMPTY,
+
             // Pseudo-instructions
             Phi => InstFlags::IS_PSEUDO,
             StackAlloc => InstFlags::IS_PSEUDO.union(InstFlags::HAS_SIDE_EFFECTS),
@@ -485,21 +552,40 @@ impl AArch64Opcode {
             Nop => InstFlags::IS_PSEUDO,
 
             // Compare/test (set condition flags = side effect)
-            CmpRR | CmpRI | CMPWrr | CMPXrr | CMPWri | CMPXri | Tst | Fcmp => InstFlags::HAS_SIDE_EFFECTS,
+            CmpRR | CmpRI | CMPWrr | CMPXrr | CMPWri | CMPXri | Tst | Fcmp => {
+                InstFlags::HAS_SIDE_EFFECTS
+            }
 
             // Checked arithmetic: produce a result AND set flags (side effect)
             AddsRR | AddsRI | SubsRR | SubsRI => InstFlags::HAS_SIDE_EFFECTS,
 
+            // i128 multi-register: ADC/SBC read NZCV flags from preceding ADDS/SUBS
+            Adc | Sbc => InstFlags::HAS_SIDE_EFFECTS,
+
             // Trap pseudo-instructions: conditional branches to panic blocks
-            TrapOverflow => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR).union(InstFlags::HAS_SIDE_EFFECTS),
-            TrapBoundsCheck => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR).union(InstFlags::HAS_SIDE_EFFECTS),
-            TrapNull => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR).union(InstFlags::HAS_SIDE_EFFECTS),
-            TrapDivZero => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR).union(InstFlags::HAS_SIDE_EFFECTS),
-            TrapShiftRange => InstFlags::IS_BRANCH.union(InstFlags::IS_TERMINATOR).union(InstFlags::HAS_SIDE_EFFECTS),
+            TrapOverflow => InstFlags::IS_BRANCH
+                .union(InstFlags::IS_TERMINATOR)
+                .union(InstFlags::HAS_SIDE_EFFECTS),
+            TrapBoundsCheck => InstFlags::IS_BRANCH
+                .union(InstFlags::IS_TERMINATOR)
+                .union(InstFlags::HAS_SIDE_EFFECTS),
+            TrapNull => InstFlags::IS_BRANCH
+                .union(InstFlags::IS_TERMINATOR)
+                .union(InstFlags::HAS_SIDE_EFFECTS),
+            TrapDivZero => InstFlags::IS_BRANCH
+                .union(InstFlags::IS_TERMINATOR)
+                .union(InstFlags::HAS_SIDE_EFFECTS),
+            TrapShiftRange => InstFlags::IS_BRANCH
+                .union(InstFlags::IS_TERMINATOR)
+                .union(InstFlags::HAS_SIDE_EFFECTS),
 
             // Reference counting: side effects (modify refcount in memory)
-            Retain => InstFlags::HAS_SIDE_EFFECTS.union(InstFlags::READS_MEMORY).union(InstFlags::WRITES_MEMORY),
-            Release => InstFlags::HAS_SIDE_EFFECTS.union(InstFlags::READS_MEMORY).union(InstFlags::WRITES_MEMORY),
+            Retain => InstFlags::HAS_SIDE_EFFECTS
+                .union(InstFlags::READS_MEMORY)
+                .union(InstFlags::WRITES_MEMORY),
+            Release => InstFlags::HAS_SIDE_EFFECTS
+                .union(InstFlags::READS_MEMORY)
+                .union(InstFlags::WRITES_MEMORY),
 
             // Everything else: pure computation, no flags
             _ => InstFlags::EMPTY,
@@ -549,7 +635,7 @@ impl AArch64Opcode {
     pub fn is_move(self) -> bool {
         matches!(
             self,
-            Self::MovR | Self::Copy | Self::MOVWrr | Self::MOVXrr
+            Self::MovR | Self::Copy | Self::MOVWrr | Self::MOVXrr | Self::FmovFprFpr
         )
     }
 
@@ -592,10 +678,20 @@ impl AArch64Opcode {
     pub fn is_commutative(self) -> bool {
         matches!(
             self,
-            Self::AddRR | Self::MulRR | Self::AndRR | Self::OrrRR | Self::EorRR
-            | Self::FaddRR | Self::FmulRR
-            | Self::NeonAddV | Self::NeonMulV | Self::NeonFaddV | Self::NeonFmulV
-            | Self::NeonAndV | Self::NeonOrrV | Self::NeonEorV
+            Self::AddRR
+                | Self::MulRR
+                | Self::AndRR
+                | Self::OrrRR
+                | Self::EorRR
+                | Self::FaddRR
+                | Self::FmulRR
+                | Self::NeonAddV
+                | Self::NeonMulV
+                | Self::NeonFaddV
+                | Self::NeonFmulV
+                | Self::NeonAndV
+                | Self::NeonOrrV
+                | Self::NeonEorV
         )
     }
 
@@ -609,8 +705,8 @@ impl AArch64Opcode {
             // Compare/test: set flags, no register def
             CmpRR | CmpRI | Tst | Fcmp | CMPWrr | CMPXrr | CMPWri | CMPXri => false,
             // Stores: write to memory, no register def
-            StrRI | StrbRI | StrhRI | StpRI | StpPreIndex | StrRO
-            | STRWui | STRXui | STRSui | STRDui | NeonSt1Post => false,
+            StrRI | StrbRI | StrhRI | StpRI | StpPreIndex | StrRO | STRWui | STRXui | STRSui
+            | STRDui | NeonSt1Post => false,
             // Branches and returns: control flow, no register def
             B | BCond | Bcc | Cbz | Cbnz | Tbz | Tbnz | Br | Ret => false,
             // Trap pseudo-instructions: control flow, no register def
@@ -914,6 +1010,25 @@ impl ProofAnnotation {
 }
 
 // ---------------------------------------------------------------------------
+// SourceLoc — source location for debug info
+// ---------------------------------------------------------------------------
+
+/// Source location for DWARF debug info.
+///
+/// Tracks the original source file, line, and column for a machine instruction.
+/// Populated from tMIR `SourceSpan` during instruction selection and preserved
+/// through optimization/regalloc for DWARF line number program emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SourceLoc {
+    /// Source file index (0-based, matches tMIR SourceSpan.file).
+    pub file: u32,
+    /// Source line number (1-based).
+    pub line: u32,
+    /// Source column number (0 = unknown).
+    pub col: u32,
+}
+
+// ---------------------------------------------------------------------------
 // MachInst
 // ---------------------------------------------------------------------------
 
@@ -935,6 +1050,10 @@ pub struct MachInst {
     /// the tMIR frontend has formally verified a property about this
     /// instruction's operands, enabling proof-consuming optimizations.
     pub proof: Option<ProofAnnotation>,
+    /// Optional source location from tMIR for DWARF debug info.
+    /// Populated from tMIR `SourceSpan` during ISel, preserved through
+    /// optimization and register allocation for line number program emission.
+    pub source_loc: Option<SourceLoc>,
 }
 
 impl MachInst {
@@ -947,15 +1066,12 @@ impl MachInst {
             implicit_defs: &[],
             implicit_uses: &[],
             proof: None,
+            source_loc: None,
         }
     }
 
     /// Create a new instruction with explicit flags.
-    pub fn with_flags(
-        opcode: AArch64Opcode,
-        operands: Vec<MachOperand>,
-        flags: InstFlags,
-    ) -> Self {
+    pub fn with_flags(opcode: AArch64Opcode, operands: Vec<MachOperand>, flags: InstFlags) -> Self {
         Self {
             opcode,
             operands,
@@ -963,12 +1079,19 @@ impl MachInst {
             implicit_uses: &[],
             flags,
             proof: None,
+            source_loc: None,
         }
     }
 
     /// Attach a proof annotation to this instruction.
     pub fn with_proof(mut self, proof: ProofAnnotation) -> Self {
         self.proof = Some(proof);
+        self
+    }
+
+    /// Attach a source location for DWARF debug info.
+    pub fn with_source_loc(mut self, loc: SourceLoc) -> Self {
+        self.source_loc = Some(loc);
         self
     }
 
@@ -1095,11 +1218,13 @@ mod tests {
             let flags = op.default_flags();
             assert!(
                 flags.contains(InstFlags::IS_BRANCH),
-                "{:?} should have IS_BRANCH", op
+                "{:?} should have IS_BRANCH",
+                op
             );
             assert!(
                 flags.contains(InstFlags::IS_TERMINATOR),
-                "{:?} should have IS_TERMINATOR", op
+                "{:?} should have IS_TERMINATOR",
+                op
             );
         }
     }
@@ -1111,15 +1236,18 @@ mod tests {
             let flags = op.default_flags();
             assert!(
                 flags.contains(InstFlags::IS_CALL),
-                "{:?} should have IS_CALL", op
+                "{:?} should have IS_CALL",
+                op
             );
             assert!(
                 flags.contains(InstFlags::HAS_SIDE_EFFECTS),
-                "{:?} should have HAS_SIDE_EFFECTS", op
+                "{:?} should have HAS_SIDE_EFFECTS",
+                op
             );
             assert!(
                 !flags.contains(InstFlags::IS_BRANCH),
-                "{:?} should NOT have IS_BRANCH", op
+                "{:?} should NOT have IS_BRANCH",
+                op
             );
         }
     }
@@ -1145,27 +1273,35 @@ mod tests {
             let flags = op.default_flags();
             assert!(
                 flags.contains(InstFlags::READS_MEMORY),
-                "{:?} should have READS_MEMORY", op
+                "{:?} should have READS_MEMORY",
+                op
             );
             assert!(
                 !flags.contains(InstFlags::WRITES_MEMORY),
-                "{:?} should NOT have WRITES_MEMORY", op
+                "{:?} should NOT have WRITES_MEMORY",
+                op
             );
         }
     }
 
     #[test]
     fn store_opcodes_have_writes_memory_and_side_effects() {
-        let store_ops = [AArch64Opcode::StrRI, AArch64Opcode::StpRI, AArch64Opcode::StpPreIndex];
+        let store_ops = [
+            AArch64Opcode::StrRI,
+            AArch64Opcode::StpRI,
+            AArch64Opcode::StpPreIndex,
+        ];
         for op in &store_ops {
             let flags = op.default_flags();
             assert!(
                 flags.contains(InstFlags::WRITES_MEMORY),
-                "{:?} should have WRITES_MEMORY", op
+                "{:?} should have WRITES_MEMORY",
+                op
             );
             assert!(
                 flags.contains(InstFlags::HAS_SIDE_EFFECTS),
-                "{:?} should have HAS_SIDE_EFFECTS", op
+                "{:?} should have HAS_SIDE_EFFECTS",
+                op
             );
         }
     }
@@ -1181,7 +1317,8 @@ mod tests {
             let flags = op.default_flags();
             assert!(
                 flags.contains(InstFlags::IS_PSEUDO),
-                "{:?} should have IS_PSEUDO", op
+                "{:?} should have IS_PSEUDO",
+                op
             );
         }
     }
@@ -1208,6 +1345,7 @@ mod tests {
         let pure_ops = [
             AArch64Opcode::AddRR,
             AArch64Opcode::AddRI,
+            AArch64Opcode::AddRIShift12,
             AArch64Opcode::SubRR,
             AArch64Opcode::SubRI,
             AArch64Opcode::MulRR,
@@ -1226,7 +1364,9 @@ mod tests {
             let flags = op.default_flags();
             assert!(
                 flags.is_empty(),
-                "{:?} should have EMPTY flags but has {:?}", op, flags
+                "{:?} should have EMPTY flags but has {:?}",
+                op,
+                flags
             );
         }
     }
@@ -1243,7 +1383,8 @@ mod tests {
             let flags = op.default_flags();
             assert!(
                 flags.contains(InstFlags::HAS_SIDE_EFFECTS),
-                "{:?} should have HAS_SIDE_EFFECTS", op
+                "{:?} should have HAS_SIDE_EFFECTS",
+                op
             );
         }
     }
@@ -1386,8 +1527,11 @@ mod tests {
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_ne!(
-                    flags[i].bits(), flags[j].bits(),
-                    "flags {:?} and {:?} have same bits", flags[i], flags[j]
+                    flags[i].bits(),
+                    flags[j].bits(),
+                    "flags {:?} and {:?} have same bits",
+                    flags[i],
+                    flags[j]
                 );
             }
         }
@@ -1430,10 +1574,7 @@ mod tests {
 
     #[test]
     fn machinst_new_branch_has_correct_flags() {
-        let inst = MachInst::new(
-            AArch64Opcode::B,
-            vec![MachOperand::Block(BlockId(1))],
-        );
+        let inst = MachInst::new(AArch64Opcode::B, vec![MachOperand::Block(BlockId(1))]);
         assert!(inst.is_branch());
         assert!(inst.is_terminator());
         assert!(!inst.is_call());
@@ -1451,11 +1592,7 @@ mod tests {
 
     #[test]
     fn machinst_with_flags_overrides_defaults() {
-        let inst = MachInst::with_flags(
-            AArch64Opcode::AddRR,
-            vec![],
-            InstFlags::HAS_SIDE_EFFECTS,
-        );
+        let inst = MachInst::with_flags(AArch64Opcode::AddRR, vec![], InstFlags::HAS_SIDE_EFFECTS);
         assert!(inst.has_side_effects());
         assert!(!inst.is_call());
     }
@@ -1463,8 +1600,7 @@ mod tests {
     #[test]
     fn machinst_with_implicit_defs() {
         static DEFS: &[PReg] = &[X0, X1];
-        let inst = MachInst::new(AArch64Opcode::Bl, vec![])
-            .with_implicit_defs(DEFS);
+        let inst = MachInst::new(AArch64Opcode::Bl, vec![]).with_implicit_defs(DEFS);
         assert_eq!(inst.implicit_defs, DEFS);
         assert!(inst.implicit_uses.is_empty());
     }
@@ -1472,8 +1608,7 @@ mod tests {
     #[test]
     fn machinst_with_implicit_uses() {
         static USES: &[PReg] = &[X0];
-        let inst = MachInst::new(AArch64Opcode::Ret, vec![])
-            .with_implicit_uses(USES);
+        let inst = MachInst::new(AArch64Opcode::Ret, vec![]).with_implicit_uses(USES);
         assert_eq!(inst.implicit_uses, USES);
         assert!(inst.implicit_defs.is_empty());
     }
@@ -1538,10 +1673,7 @@ mod tests {
 
     #[test]
     fn machinst_clone() {
-        let inst = MachInst::new(
-            AArch64Opcode::AddRR,
-            vec![MachOperand::Imm(42)],
-        );
+        let inst = MachInst::new(AArch64Opcode::AddRR, vec![MachOperand::Imm(42)]);
         let inst2 = inst.clone();
         assert_eq!(inst2.opcode, inst.opcode);
         assert_eq!(inst2.operands.len(), inst.operands.len());
@@ -1608,8 +1740,50 @@ mod tests {
             assert_eq!(
                 ProofAnnotation::merge(Some(*v), Some(*v)),
                 Some(*v),
-                "{:?} merged with itself should be Some({:?})", v, v,
+                "{:?} merged with itself should be Some({:?})",
+                v,
+                v,
             );
         }
+    }
+
+    // --- SourceLoc tests ---
+
+    #[test]
+    fn test_source_loc_on_mach_inst() {
+        let inst = MachInst::new(AArch64Opcode::AddRR, vec![]).with_source_loc(SourceLoc {
+            file: 0,
+            line: 42,
+            col: 5,
+        });
+        assert!(inst.source_loc.is_some());
+        let loc = inst.source_loc.unwrap();
+        assert_eq!(loc.file, 0);
+        assert_eq!(loc.line, 42);
+        assert_eq!(loc.col, 5);
+    }
+
+    #[test]
+    fn test_source_loc_default_none() {
+        let inst = MachInst::new(AArch64Opcode::Ret, vec![]);
+        assert!(inst.source_loc.is_none());
+    }
+
+    #[test]
+    fn test_source_loc_preserved_through_clone() {
+        let inst = MachInst::new(AArch64Opcode::SubRR, vec![]).with_source_loc(SourceLoc {
+            file: 1,
+            line: 100,
+            col: 0,
+        });
+        let cloned = inst.clone();
+        assert_eq!(
+            cloned.source_loc,
+            Some(SourceLoc {
+                file: 1,
+                line: 100,
+                col: 0
+            })
+        );
     }
 }

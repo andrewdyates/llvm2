@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_riscv_elf.rs - E2E RISC-V ELF linking integration test
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 //
 // Proves the RISC-V RV64GC backend works end-to-end:
 //   RISC-V ISel function -> regalloc -> frame lowering -> encode -> ELF .o

@@ -1,7 +1,7 @@
 // llvm2-regalloc/split.rs - Live interval splitting
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Live interval splitting for the register allocator.
 //!
@@ -266,6 +266,82 @@ fn insert_copy_at_point(func: &mut MachFunction, copy_id: InstId, point: u32) {
     if let Some(last_block) = func.blocks.last_mut() {
         last_block.insts.push(copy_id);
     }
+}
+
+/// Find the best split point near an interference region.
+///
+/// Given an interval and the point where interference starts, find
+/// the best split point that separates the interval into a part that
+/// can be allocated and a part that can be re-enqueued.
+///
+/// Strategy: split just after the last use/def before the interference
+/// point, so the first half is as long as possible while still
+/// fitting in a register.
+pub fn find_split_near_interference(
+    interval: &LiveInterval,
+    interference_start: u32,
+) -> Option<u32> {
+    let mut positions: Vec<u32> = interval
+        .use_positions
+        .iter()
+        .chain(interval.def_positions.iter())
+        .copied()
+        .filter(|&p| p < interference_start)
+        .collect();
+    positions.sort_unstable();
+
+    if positions.is_empty() {
+        return None;
+    }
+
+    let last_before = *positions.last().unwrap();
+    let split_point = last_before + 1;
+
+    if split_point <= interval.start() || split_point >= interval.end() {
+        return None;
+    }
+
+    Some(split_point)
+}
+
+/// Find split points between consecutive use/def positions.
+///
+/// This is the most aggressive splitting strategy. Each resulting
+/// interval covers only a small region around its uses, making it
+/// easy to allocate. The cost is more spill/reload traffic.
+///
+/// Returns a list of `(split_point, weight)` pairs for each viable
+/// split, sorted by descending weight (most beneficial first).
+/// Weight equals the gap size between the consecutive positions,
+/// so larger gaps are preferred.
+pub fn find_per_use_split_points(interval: &LiveInterval) -> Vec<(u32, f64)> {
+    let mut positions: Vec<u32> = interval
+        .use_positions
+        .iter()
+        .chain(interval.def_positions.iter())
+        .copied()
+        .collect();
+    positions.sort_unstable();
+    positions.dedup();
+
+    if positions.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut splits = Vec::new();
+
+    for window in positions.windows(2) {
+        let gap = window[1].saturating_sub(window[0]);
+        if gap >= 2 {
+            let split_point = window[0] + 1;
+            if split_point > interval.start() && split_point < interval.end() {
+                splits.push((split_point, gap as f64));
+            }
+        }
+    }
+
+    splits.sort_by(|a, b| b.1.total_cmp(&a.1));
+    splits
 }
 
 #[cfg(test)]
@@ -702,5 +778,128 @@ mod tests {
         assert_eq!(result.new_vreg.class, RegClass::Fpr64);
         assert_eq!(result.original_interval.vreg.class, RegClass::Fpr64);
         assert_eq!(result.new_interval.vreg.class, RegClass::Fpr64);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for interference-aware and per-use splitting (issue #332)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_find_split_near_interference_basic() {
+        // Interval [0, 20) with uses at 2, 8, 15 and def at 0.
+        // Interference starts at position 10.
+        // Should split after the last use before interference (use at 8) -> position 9.
+        let mut iv = LiveInterval::new(vreg(0));
+        iv.add_range(0, 20);
+        iv.use_positions = vec![2, 8, 15];
+        iv.def_positions = vec![0];
+
+        let split = find_split_near_interference(&iv, 10);
+        assert!(split.is_some());
+        assert_eq!(split.unwrap(), 9);
+    }
+
+    #[test]
+    fn test_find_split_near_interference_no_uses_before() {
+        // All uses/defs are after the interference point.
+        let mut iv = LiveInterval::new(vreg(0));
+        iv.add_range(0, 20);
+        iv.use_positions = vec![12, 18];
+        iv.def_positions = vec![10];
+
+        let split = find_split_near_interference(&iv, 5);
+        assert!(split.is_none(), "no uses before interference, can't split usefully");
+    }
+
+    #[test]
+    fn test_find_split_near_interference_at_boundary() {
+        let mut iv = LiveInterval::new(vreg(0));
+        iv.add_range(0, 10);
+        iv.use_positions = vec![0, 9];
+        iv.def_positions = vec![0];
+
+        // Interference at position 5.
+        let split = find_split_near_interference(&iv, 5);
+        assert!(split.is_some());
+        let sp = split.unwrap();
+        assert!(sp > iv.start() && sp < iv.end());
+    }
+
+    #[test]
+    fn test_find_split_near_interference_def_only_before() {
+        // Only a def before interference, no uses.
+        let mut iv = LiveInterval::new(vreg(0));
+        iv.add_range(0, 20);
+        iv.use_positions = vec![15];
+        iv.def_positions = vec![0];
+
+        let split = find_split_near_interference(&iv, 10);
+        assert!(split.is_some());
+        // Should split after def at 0 -> position 1.
+        assert_eq!(split.unwrap(), 1);
+    }
+
+    #[test]
+    fn test_find_per_use_split_points_basic() {
+        let mut iv = LiveInterval::new(vreg(0));
+        iv.add_range(0, 30);
+        iv.use_positions = vec![3, 7, 15, 25];
+        iv.def_positions = vec![0];
+
+        let splits = find_per_use_split_points(&iv);
+        assert!(!splits.is_empty(), "should find split points between uses");
+
+        // All split points should be within the interval.
+        for (sp, _weight) in &splits {
+            assert!(*sp > iv.start());
+            assert!(*sp < iv.end());
+        }
+
+        // The first split should have the highest weight (largest gap).
+        if splits.len() >= 2 {
+            assert!(
+                splits[0].1 >= splits[1].1,
+                "splits should be sorted by weight descending"
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_per_use_split_points_empty() {
+        let mut iv = LiveInterval::new(vreg(0));
+        iv.add_range(0, 10);
+        // Only one use -- can't split.
+        iv.use_positions = vec![5];
+
+        let splits = find_per_use_split_points(&iv);
+        assert!(splits.is_empty());
+    }
+
+    #[test]
+    fn test_find_per_use_split_points_consecutive_uses() {
+        let mut iv = LiveInterval::new(vreg(0));
+        iv.add_range(0, 10);
+        // Uses at 3, 4, 5 -- gaps of 1, too small between uses.
+        iv.use_positions = vec![3, 4, 5];
+        iv.def_positions = vec![0];
+
+        let splits = find_per_use_split_points(&iv);
+        // Gap between def at 0 and use at 3 is 3, which is >= 2.
+        assert!(
+            !splits.is_empty(),
+            "should find at least one split from def to first use"
+        );
+    }
+
+    #[test]
+    fn test_find_per_use_split_points_all_adjacent() {
+        // All positions are adjacent -- no gaps >= 2.
+        let mut iv = LiveInterval::new(vreg(0));
+        iv.add_range(0, 5);
+        iv.use_positions = vec![0, 1, 2, 3, 4];
+        iv.def_positions = vec![];
+
+        let splits = find_per_use_split_points(&iv);
+        assert!(splits.is_empty(), "no gaps >= 2 means no viable split points");
     }
 }

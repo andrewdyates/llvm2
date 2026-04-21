@@ -1,7 +1,7 @@
 // llvm2-opt - Instruction scheduling
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Pre-register-allocation instruction scheduling for AArch64.
 //!
@@ -44,7 +44,7 @@ use std::collections::{HashMap, HashSet};
 
 use llvm2_ir::{AArch64Opcode, BlockId, InstFlags, InstId, MachFunction, MachOperand, RegClass};
 
-use crate::effects::inst_produces_value;
+use crate::effects::{has_tied_def_use, inst_produces_value, reads_flags, writes_flags};
 use crate::pass_manager::MachinePass;
 
 // ---------------------------------------------------------------------------
@@ -79,21 +79,20 @@ pub fn opcode_latency(opcode: AArch64Opcode) -> (u32, ExecutionPort) {
     use AArch64Opcode::*;
     match opcode {
         // Integer ALU: 1 cycle
-        AddRR | AddRI | SubRR | SubRI | Neg => (1, ExecutionPort::IntAlu),
-        AndRR | AndRI | OrrRR | OrrRI | EorRR | EorRI | OrnRR | BicRR => {
-            (1, ExecutionPort::IntAlu)
-        }
+        AddRR | AddRI | AddRIShift12 | SubRR | SubRI | Neg => (1, ExecutionPort::IntAlu),
+        AndRR | AndRI | OrrRR | OrrRI | EorRR | EorRI | OrnRR | BicRR => (1, ExecutionPort::IntAlu),
         LslRR | LsrRR | AsrRR | LslRI | LsrRI | AsrRI => (1, ExecutionPort::IntAlu),
-        CmpRR | CmpRI | CMPWrr | CMPXrr | CMPWri | CMPXri | Tst => {
-            (1, ExecutionPort::IntAlu)
-        }
+        CmpRR | CmpRI | CMPWrr | CMPXrr | CMPWri | CMPXri | Tst => (1, ExecutionPort::IntAlu),
         Csel | CSet | Csinc | Csinv | Csneg => (1, ExecutionPort::IntAlu),
         MovR | MovI | Movz | Movn | Movk | MOVWrr | MOVXrr | MOVZWi | MOVZXi => {
             (1, ExecutionPort::IntAlu)
         }
         Sxtw | Uxtw | Sxtb | Sxth | Uxtb | Uxth | Ubfm | Sbfm | Bfm => (1, ExecutionPort::IntAlu),
-        Adrp | AddPCRel => (1, ExecutionPort::IntAlu),
+        Adrp | Adr | AddPCRel => (1, ExecutionPort::IntAlu),
         AddsRR | AddsRI | SubsRR | SubsRI => (1, ExecutionPort::IntAlu),
+        // i128 multi-register: ADC/SBC are 1-cycle ALU, UMULH/MADD are 3-cycle multiply
+        Adc | Sbc => (1, ExecutionPort::IntAlu),
+        Umulh | Smulh | Madd => (3, ExecutionPort::IntMul),
 
         // Integer multiply: 3 cycles
         MulRR | Msub | Smull | Umull => (3, ExecutionPort::IntMul),
@@ -102,12 +101,12 @@ pub fn opcode_latency(opcode: AArch64Opcode) -> (u32, ExecutionPort) {
         SDiv | UDiv => (10, ExecutionPort::IntDiv),
 
         // Loads: 4 cycles (L1 hit)
-        LdrRI | LdrbRI | LdrhRI | LdrsbRI | LdrshRI | LdrRO | LdrLiteral | LdpRI
+        LdrRI | LdrbRI | LdrhRI | LdrsbRI | LdrshRI | LdrRO | LdrswRO | LdrLiteral | LdpRI
         | LdpPostIndex | LdrGot | LdrTlvp => (4, ExecutionPort::LoadStore),
 
         // Stores: 1 cycle (non-blocking dispatch)
-        StrRI | StrbRI | StrhRI | StrRO | StpRI | StpPreIndex | STRWui | STRXui
-        | STRSui | STRDui => (1, ExecutionPort::LoadStore),
+        StrRI | StrbRI | StrhRI | StrRO | StpRI | StpPreIndex | STRWui | STRXui | STRSui
+        | STRDui => (1, ExecutionPort::LoadStore),
 
         // Stack allocation pseudo
         StackAlloc => (1, ExecutionPort::IntAlu),
@@ -123,7 +122,7 @@ pub fn opcode_latency(opcode: AArch64Opcode) -> (u32, ExecutionPort) {
         FsqrtRR => (12, ExecutionPort::FpAlu),
         FcvtzsRR | FcvtzuRR | ScvtfRR | UcvtfRR => (3, ExecutionPort::FpAlu),
         FcvtSD | FcvtDS => (3, ExecutionPort::FpAlu),
-        FmovGprFpr | FmovFprGpr | FmovImm => (1, ExecutionPort::FpAlu),
+        FmovGprFpr | FmovFprGpr | FmovFprFpr | FmovImm => (1, ExecutionPort::FpAlu),
 
         // NEON SIMD: uses FP/NEON ALU units
         NeonAddV | NeonSubV => (2, ExecutionPort::FpAlu),
@@ -153,11 +152,8 @@ pub fn opcode_latency(opcode: AArch64Opcode) -> (u32, ExecutionPort) {
         Stlr | Stlrb | Stlrh | Stlxr => (2, ExecutionPort::LoadStore),
 
         // Atomic RMW (LSE): 6 cycles
-        Ldadd | Ldadda | Ldaddal
-        | Ldclr | Ldclral
-        | Ldeor | Ldeoral
-        | Ldset | Ldsetal
-        | Swp | Swpal => (6, ExecutionPort::LoadStore),
+        Ldadd | Ldadda | Ldaddal | Ldclr | Ldclral | Ldeor | Ldeoral | Ldset | Ldsetal | Swp
+        | Swpal => (6, ExecutionPort::LoadStore),
 
         // Compare-and-swap: 8 cycles
         Cas | Casa | Casal => (8, ExecutionPort::LoadStore),
@@ -166,6 +162,12 @@ pub fn opcode_latency(opcode: AArch64Opcode) -> (u32, ExecutionPort) {
         Dmb => (4, ExecutionPort::LoadStore),
         Dsb => (8, ExecutionPort::LoadStore),
         Isb => (12, ExecutionPort::LoadStore),
+
+        // System register read: modeled as 4-cycle ALU op. TPIDR_EL0 on
+        // Apple Silicon (Firestorm/Icestorm) is effectively ~3-4 cycles; the
+        // broader MRS family varies, but 4 is a safe, scheduler-friendly
+        // default.
+        Mrs => (4, ExecutionPort::IntAlu),
 
         // Pseudo-instructions
         Phi | Copy | Nop => (1, ExecutionPort::IntAlu),
@@ -285,25 +287,231 @@ pub fn build_dag(func: &MachFunction, block_id: BlockId) -> ScheduleDAG {
         }
     };
 
-    // Build VReg def map: vreg_id -> node index that defines it.
-    let mut def_map: HashMap<u32, usize> = HashMap::new();
+    // Build VReg def list: vreg_id -> sorted list of node indices where the
+    // vreg is defined (via operand[0] for value-producing instructions).
+    //
+    // A VReg may be defined multiple times in the same block when:
+    //  - Copy-based phi resolution redefines block parameter VRegs at the end
+    //    of the block. For example, after lowering tMIR block arguments:
+    //
+    //        v7 = add v3, v4      ← uses v3/v4 from block params (previous iter)
+    //        v3 = mov v7          ← redefines v3 for the next iteration
+    //        v4 = mov v9          ← redefines v4 for the next iteration
+    //        b loop_header
+    //
+    //  - The instruction is a tied def-use (MOVK): the destination is both
+    //    the def AND an implicit source. A MOVZ+MOVK chain looks like:
+    //
+    //        v38 = movz imm_lo
+    //        v38 = movk imm_mid, 16    ← implicit read of v38 (tied)
+    //        v38 = movk imm_hi, 32     ← implicit read of v38 (tied)
+    //        v38 = movk imm_vhi, 48    ← implicit read of v38 (tied)
+    //
+    //    A subsequent use of v38 must read the FULL 64-bit value, i.e., it
+    //    must be ordered AFTER the last MOVK, not just after the initial MOVZ.
+    //    See issue #382: xxh3 O2 miscompile caused by the scheduler reordering
+    //    readers of v38 between MOVZ and MOVK.
+    //
+    // We store all defs in program order, then use `latest_def_before` below
+    // to pick the most recent prior def for each use. This correctly handles
+    // both multi-def patterns without breaking the phi-resolution case (uses
+    // that appear BEFORE any in-block def have no latest_def and read from
+    // outside the block).
+    let mut vreg_def_list: HashMap<u32, Vec<usize>> = HashMap::new();
     for (idx, &inst_id) in inst_ids.iter().enumerate() {
         let inst = func.inst(inst_id);
         if inst_produces_value(inst)
-            && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
-                def_map.insert(vreg.id, idx);
-            }
+            && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg())
+        {
+            vreg_def_list.entry(vreg.id).or_default().push(idx);
+        }
     }
 
-    // 1. Data dependencies (RAW): for each use operand, add edge from def.
+    // Legacy def_map: FIRST definition per vreg. Retained for the WAR step
+    // below which uses it to decide whether a use reads from outside the
+    // block.
+    let def_map: HashMap<u32, usize> = vreg_def_list
+        .iter()
+        .filter_map(|(vid, defs)| defs.first().map(|d| (*vid, *d)))
+        .collect();
+
+    // Return the latest def index of `vreg` that is strictly less than `idx`,
+    // or None if there is no in-block def prior to `idx` (i.e., the vreg is
+    // read from outside the block — a block parameter / phi input).
+    let latest_def_before = |vreg_id: u32, idx: usize| -> Option<usize> {
+        let defs = vreg_def_list.get(&vreg_id)?;
+        // defs is sorted by construction; find the last def strictly < idx.
+        defs.iter().rev().find(|&&d| d < idx).copied()
+    };
+
+    // 1. Data dependencies (RAW): for each use operand, add edge from the
+    // latest prior def in the same block.
+    //
+    // A use whose vreg has NO in-block def before it reads from outside the
+    // block (block parameter); no within-block RAW edge needed. Similarly,
+    // skip adding self-loops (add_edge already does from != to).
+    //
+    // For tied def-use opcodes (MOVK), operand[0] is ALSO a use: the
+    // destination register's prior value is an implicit input. Without this
+    // edge, the scheduler can reorder a MOVK before the MOVZ (or an earlier
+    // MOVK in the chain) that established the prior value, producing wrong
+    // results. See issue #382.
     for (idx, &inst_id) in inst_ids.iter().enumerate() {
         let inst = func.inst(inst_id);
-        let use_start = if inst_produces_value(inst) { 1 } else { 0 };
+        let produces = inst_produces_value(inst);
+        let use_start = if produces { 1 } else { 0 };
         for operand in &inst.operands[use_start..] {
             if let MachOperand::VReg(vreg) = operand
-                && let Some(&def_idx) = def_map.get(&vreg.id) {
-                    add_edge(def_idx, idx, &mut edges);
+                && let Some(def_idx) = latest_def_before(vreg.id, idx)
+            {
+                add_edge(def_idx, idx, &mut edges);
+            }
+        }
+        // Tied def-use: operand[0] is an implicit read as well as the def.
+        if produces
+            && has_tied_def_use(inst.opcode)
+            && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg())
+            && let Some(def_idx) = latest_def_before(vreg.id, idx)
+        {
+            add_edge(def_idx, idx, &mut edges);
+        }
+    }
+
+    // 1b. VReg WAW (write-after-write) dependencies: when the same VReg is
+    //     defined multiple times in one block (phi-resolution copies),
+    //     the second definition must be ordered after the first.
+    //
+    // 1c. VReg WAR (write-after-read / anti-dependencies): when an instruction
+    //     reads a VReg and a later instruction defines (or redefines) that same
+    //     VReg within the block, the read must complete before the write.
+    //     Without this, the scheduler can move the definition before the read,
+    //     causing the read to see the new value instead of the old one.
+    //
+    //     This is critical for phi-resolution copies at loop back-edges:
+    //       v_tmp = sdiv v10, v11   ← reads v10 and v11
+    //       v_res = msub v_tmp, v11, v10
+    //       v10 = mov v11           ← redefines v10 (copy b to a)
+    //       v11 = mov v_res         ← redefines v11 (copy result to b)
+    //       b loop_header
+    //
+    //     Without WAR edges, the scheduler may reorder `v11 = mov v_res`
+    //     before the sdiv/msub/mov that read v11, breaking the loop.
+    //
+    //     This was the root cause of issue #308 (O1 breaks SRem-based loops).
+    {
+        let mut vreg_defs: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut vreg_uses: HashMap<u32, Vec<usize>> = HashMap::new();
+
+        for (idx, &inst_id) in inst_ids.iter().enumerate() {
+            let inst = func.inst(inst_id);
+            // Collect defs (operand[0] for value-producing instructions).
+            if inst_produces_value(inst)
+                && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg())
+            {
+                vreg_defs.entry(vreg.id).or_default().push(idx);
+            }
+            // Collect uses (source operands).
+            let use_start = if inst_produces_value(inst) { 1 } else { 0 };
+            for operand in &inst.operands[use_start..] {
+                if let MachOperand::VReg(vreg) = operand {
+                    vreg_uses.entry(vreg.id).or_default().push(idx);
                 }
+            }
+        }
+
+        // WAW: chain multiple definitions of the same vreg in program order.
+        for (_vreg_id, defs) in &vreg_defs {
+            for window in defs.windows(2) {
+                add_edge(window[0], window[1], &mut edges);
+            }
+        }
+
+        // WAR: for each instruction that defines a VReg, add edges from ALL
+        // prior uses of that VReg in the same block. This ensures reads of
+        // the old value complete before the new definition overwrites it.
+        //
+        // This handles both cases:
+        // - VReg defined once in the block (e.g., phi-resolution copy redefining
+        //   a block parameter VReg that is also used as a source earlier)
+        // - VReg defined multiple times in the block
+        for (vreg_id, defs) in &vreg_defs {
+            if let Some(uses) = vreg_uses.get(vreg_id) {
+                for &def_idx in defs {
+                    for &use_idx in uses {
+                        // Use must precede the definition in program order.
+                        if use_idx < def_idx {
+                            add_edge(use_idx, def_idx, &mut edges);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 1c. VReg WAR (write-after-read / anti-) dependencies: when an instruction
+    //     at index `j` defines a VReg `v` that is used by an earlier instruction
+    //     at index `i < j`, the write at `j` must not be reordered before the
+    //     read at `i`. This is critical for phi-resolution copy blocks where
+    //     parallel assignments are lowered to sequential copies:
+    //
+    //       [0] v20 = mov v21      ← reads old v21 (from predecessor)
+    //       [1] v21 = mov v23      ← redefines v21
+    //
+    //     Without the WAR edge 0→1, the scheduler could place [1] before [0],
+    //     causing [0] to read the new v21 instead of the old one.
+    //
+    //     We only add WAR edges when the use reads a value from OUTSIDE the
+    //     block (i.e., the vreg is not defined in the block before the use,
+    //     or is defined by the same instruction that is being written later).
+    //     If the use reads a within-block definition, the RAW edge from step 1
+    //     already provides the necessary ordering.
+    {
+        // Collect all uses: vreg_id -> list of (user_idx, use_operand_idx).
+        let mut vreg_uses: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (idx, &inst_id) in inst_ids.iter().enumerate() {
+            let inst = func.inst(inst_id);
+            let use_start = if inst_produces_value(inst) { 1 } else { 0 };
+            for operand in &inst.operands[use_start..] {
+                if let MachOperand::VReg(vreg) = operand {
+                    vreg_uses.entry(vreg.id).or_default().push(idx);
+                }
+            }
+        }
+
+        // For each vreg defined in the block, check if any earlier instruction
+        // uses the same vreg with a value from outside the block.
+        for (idx, &inst_id) in inst_ids.iter().enumerate() {
+            let inst = func.inst(inst_id);
+            if inst_produces_value(inst)
+                && let Some(def_vreg) = inst.operands.first().and_then(|op| op.as_vreg())
+            {
+                if let Some(users) = vreg_uses.get(&def_vreg.id) {
+                    for &user_idx in users {
+                        if user_idx < idx {
+                            // user_idx reads def_vreg.id BEFORE idx defines it.
+                            // Check if the read comes from outside the block
+                            // (no prior in-block definition covers this use).
+                            let prior_def = def_map.get(&def_vreg.id).copied();
+                            let read_is_external = match prior_def {
+                                // The first in-block def IS this instruction (idx),
+                                // so the use at user_idx reads from outside.
+                                Some(first_def) if first_def >= user_idx => true,
+                                // The first in-block def is before user_idx,
+                                // so the RAW edge from step 1 already orders them.
+                                Some(_) => false,
+                                // No in-block def at all (shouldn't happen since
+                                // we're iterating over defs, but be safe).
+                                None => true,
+                            };
+                            if read_is_external {
+                                // WAR: the use at user_idx must execute before
+                                // the def at idx.
+                                add_edge(user_idx, idx, &mut edges);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -319,8 +527,8 @@ pub fn build_dag(func: &MachFunction, block_id: BlockId) -> ScheduleDAG {
         let inst = func.inst(inst_id);
         let flags = inst.flags;
 
-        let is_load = flags.contains(InstFlags::READS_MEMORY)
-            && !flags.contains(InstFlags::WRITES_MEMORY);
+        let is_load =
+            flags.contains(InstFlags::READS_MEMORY) && !flags.contains(InstFlags::WRITES_MEMORY);
         let is_store = flags.contains(InstFlags::WRITES_MEMORY);
         let is_call = flags.contains(InstFlags::IS_CALL);
 
@@ -353,6 +561,40 @@ pub fn build_dag(func: &MachFunction, block_id: BlockId) -> ScheduleDAG {
         }
     }
 
+    // 2b. NZCV flag dependencies: flag-reading instructions (CSet, Csel,
+    //     Csinc, Csinv, Csneg) have an implicit dependency on the most recent
+    //     flag-writing instruction (CMP, TST, ADDS, SUBS, etc.).
+    //
+    //     This dependency is NOT captured in explicit operands — CSet's only
+    //     explicit operand is the condition code selector (e.g., LE=13), not
+    //     the flag values themselves. Without this edge, the scheduler can
+    //     reorder CSet before the CMP that sets the flags it reads, producing
+    //     wrong results (stale flags from a previous comparison) or infinite
+    //     loops (loop exit condition reads flags from outside the loop body).
+    //
+    //     We also chain flag-writers: each flag-writer depends on the previous
+    //     one, ensuring CMP instructions maintain their relative order. Flag
+    //     readers depend on the most recent flag-writer at the time they appear
+    //     in program order.
+    {
+        let mut last_flag_writer: Option<usize> = None;
+        for (idx, &inst_id) in inst_ids.iter().enumerate() {
+            let inst = func.inst(inst_id);
+            if writes_flags(inst.opcode) {
+                // Chain flag-writers in program order.
+                if let Some(prev) = last_flag_writer {
+                    add_edge(prev, idx, &mut edges);
+                }
+                last_flag_writer = Some(idx);
+            } else if reads_flags(inst.opcode) {
+                // Flag-reader depends on the most recent flag-writer.
+                if let Some(writer) = last_flag_writer {
+                    add_edge(writer, idx, &mut edges);
+                }
+            }
+        }
+    }
+
     // 3. Side-effect ordering: instructions with HAS_SIDE_EFFECTS that are not
     //    already covered by memory deps are ordered relative to each other.
     let mut last_side_effect: Option<usize> = None;
@@ -363,6 +605,62 @@ pub fn build_dag(func: &MachFunction, block_id: BlockId) -> ScheduleDAG {
                 add_edge(prev, idx, &mut edges);
             }
             last_side_effect = Some(idx);
+        }
+    }
+
+    // 3b. Condition flag dependencies: instructions that implicitly read
+    //     condition flags (CSEL, CSET, CSINC, CSINV, CSNEG) must be ordered
+    //     after the most recent flag-setting instruction (CMP, TST, ADDS, SUBS,
+    //     FCMP). Without this, the scheduler can move a flag-consuming instruction
+    //     before the flag-setter, reading stale/wrong condition codes.
+    //
+    //     BCond/Bcc also read flags but already have IS_TERMINATOR set, which
+    //     makes them depend on all prior instructions (section 4). We still add
+    //     them here for explicitness.
+    //
+    //     Flag-reading instructions also act as barriers for flag reordering:
+    //     a second flag-setter after a flag-reader must not be moved before it,
+    //     because that would change which flags the reader sees. This is already
+    //     handled by the side-effect chain (section 3) since flag-setters have
+    //     HAS_SIDE_EFFECTS.
+    {
+        let mut last_flag_setter: Option<usize> = None;
+        for (idx, &inst_id) in inst_ids.iter().enumerate() {
+            let inst = func.inst(inst_id);
+            let is_flag_setter = inst.flags.contains(InstFlags::HAS_SIDE_EFFECTS)
+                && matches!(
+                    inst.opcode,
+                    AArch64Opcode::CmpRR
+                        | AArch64Opcode::CmpRI
+                        | AArch64Opcode::CMPWrr
+                        | AArch64Opcode::CMPXrr
+                        | AArch64Opcode::CMPWri
+                        | AArch64Opcode::CMPXri
+                        | AArch64Opcode::Tst
+                        | AArch64Opcode::Fcmp
+                        | AArch64Opcode::AddsRR
+                        | AArch64Opcode::AddsRI
+                        | AArch64Opcode::SubsRR
+                        | AArch64Opcode::SubsRI
+                );
+            let is_flag_reader = matches!(
+                inst.opcode,
+                AArch64Opcode::Csel
+                    | AArch64Opcode::CSet
+                    | AArch64Opcode::Csinc
+                    | AArch64Opcode::Csinv
+                    | AArch64Opcode::Csneg
+                    | AArch64Opcode::BCond
+                    | AArch64Opcode::Bcc
+            );
+            if is_flag_setter {
+                last_flag_setter = Some(idx);
+            }
+            if is_flag_reader {
+                if let Some(setter) = last_flag_setter {
+                    add_edge(setter, idx, &mut edges);
+                }
+            }
         }
     }
 
@@ -467,8 +765,7 @@ impl PressureTracker {
     pub fn define_vreg(&mut self, vreg_id: u32, class: RegClass) {
         let is_fpr = matches!(
             class,
-            RegClass::Fpr128 | RegClass::Fpr64 | RegClass::Fpr32
-                | RegClass::Fpr16 | RegClass::Fpr8
+            RegClass::Fpr128 | RegClass::Fpr64 | RegClass::Fpr32 | RegClass::Fpr16 | RegClass::Fpr8
         );
         if is_fpr {
             self.live_fprs.insert(vreg_id);
@@ -512,10 +809,7 @@ struct NodePressureInfo {
 /// For each instruction, we determine which VRegs it defines and uses,
 /// and which uses are the last use in the block (kills). This is computed
 /// from the function's instruction data and the DAG node mapping.
-fn compute_pressure_info(
-    func: &MachFunction,
-    dag: &ScheduleDAG,
-) -> Vec<NodePressureInfo> {
+fn compute_pressure_info(func: &MachFunction, dag: &ScheduleDAG) -> Vec<NodePressureInfo> {
     let n = dag.nodes.len();
 
     // Collect defs and uses per node.
@@ -527,10 +821,9 @@ fn compute_pressure_info(
         let mut defs = Vec::new();
         let mut uses = Vec::new();
 
-        if produces
-            && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
-                defs.push((vreg.id, vreg.class));
-            }
+        if produces && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
+            defs.push((vreg.id, vreg.class));
+        }
 
         let use_start = if produces { 1 } else { 0 };
         for operand in &inst.operands[use_start..] {
@@ -594,7 +887,10 @@ pub fn schedule_list(dag: &mut ScheduleDAG) -> Vec<InstId> {
         // Collect ready nodes: all deps satisfied and earliest_start <= cycle.
         let mut ready: Vec<usize> = Vec::new();
         for i in 0..n {
-            if !dag.nodes[i].scheduled && remaining_deps[i] == 0 && dag.nodes[i].earliest_start <= cycle {
+            if !dag.nodes[i].scheduled
+                && remaining_deps[i] == 0
+                && dag.nodes[i].earliest_start <= cycle
+            {
                 ready.push(i);
             }
         }
@@ -770,11 +1066,7 @@ pub fn schedule_list_pressure_aware(
                 net_a
                     .cmp(&net_b)
                     // Then: among equal net pressure, prefer higher critical-path priority.
-                    .then_with(|| {
-                        dag.nodes[b]
-                            .priority
-                            .cmp(&dag.nodes[a].priority)
-                    })
+                    .then_with(|| dag.nodes[b].priority.cmp(&dag.nodes[a].priority))
                     // Finally: original order for stability.
                     .then_with(|| a.cmp(&b))
             } else {
@@ -831,6 +1123,49 @@ pub fn schedule_list_pressure_aware(
 // Block and function scheduling
 // ---------------------------------------------------------------------------
 
+/// Find scheduling regions within a block by splitting at internal terminators.
+///
+/// A scheduling region is a maximal contiguous range of instructions that can
+/// be reordered relative to each other. Conditional branches (BCond, Bcc, Cbz,
+/// etc.) end a region because instructions after them should only execute if
+/// the branch is not taken. The branch itself is part of the region it ends.
+///
+/// Returns a list of (start_index, end_index) pairs (inclusive).
+///
+/// For a normal block with one terminator at the end, this returns a single
+/// region spanning the entire block. For blocks created by CfgSimplify that
+/// merge a conditional-branch block with its fallthrough block, this returns
+/// multiple regions.
+fn find_scheduling_regions(func: &MachFunction, block_id: BlockId) -> Vec<(usize, usize)> {
+    let block = func.block(block_id);
+    let insts = &block.insts;
+
+    if insts.is_empty() {
+        return vec![];
+    }
+
+    let mut regions = Vec::new();
+    let mut region_start = 0;
+
+    for (i, &inst_id) in insts.iter().enumerate() {
+        let inst = func.inst(inst_id);
+        // A conditional branch ends a region (and is part of it).
+        // Only split at conditional branches that are NOT the last instruction
+        // in the block — the last terminator is always at the end and doesn't
+        // need splitting.
+        if i < insts.len() - 1 && inst.is_branch() && inst.flags.contains(InstFlags::IS_TERMINATOR)
+        {
+            regions.push((region_start, i));
+            region_start = i + 1;
+        }
+    }
+
+    // Final region: from the last split point to the end.
+    regions.push((region_start, insts.len() - 1));
+
+    regions
+}
+
 /// Schedule one basic block: build DAG, run list scheduling, reorder instructions.
 ///
 /// Returns true if the instruction order changed.
@@ -840,16 +1175,61 @@ pub fn schedule_block(func: &mut MachFunction, block_id: BlockId) -> bool {
         return false;
     }
 
-    let original_order: Vec<InstId> = block.insts.clone();
-    let mut dag = build_dag(func, block_id);
-    let new_order = schedule_list(&mut dag);
+    // Split the block into scheduling regions at internal terminators.
+    // CfgSimplify can merge blocks, creating blocks where a BCond appears
+    // in the middle followed by the fallthrough path. The scheduler must
+    // NOT reorder instructions across such internal terminators, because
+    // instructions after a conditional branch only execute if the branch
+    // is not taken.
+    let regions = find_scheduling_regions(func, block_id);
 
-    if new_order == original_order {
+    if regions.len() <= 1 {
+        // Single region: schedule the whole block as before.
+        let original_order: Vec<InstId> = block.insts.clone();
+        let mut dag = build_dag(func, block_id);
+        let new_order = schedule_list(&mut dag);
+
+        if new_order == original_order {
+            return false;
+        }
+
+        let block_mut = func.block_mut(block_id);
+        block_mut.insts = new_order;
+        return true;
+    }
+
+    // Multiple regions: schedule each independently and concatenate.
+    let original_order: Vec<InstId> = block.insts.clone();
+    let mut new_full_order: Vec<InstId> = Vec::with_capacity(original_order.len());
+
+    for (start, end) in &regions {
+        let region_insts: Vec<InstId> = original_order[*start..=*end].to_vec();
+        if region_insts.len() <= 1 {
+            new_full_order.extend(&region_insts);
+            continue;
+        }
+
+        // Schedule this region by creating a temporary block with only
+        // the region's instructions.
+        let temp_block = func.create_block();
+        func.block_mut(temp_block).insts = region_insts.clone();
+
+        let mut dag = build_dag(func, temp_block);
+        let scheduled = schedule_list(&mut dag);
+
+        // Remove temp block from layout (it was only for scheduling).
+        func.block_mut(temp_block).insts.clear();
+        func.block_order.retain(|b| *b != temp_block);
+
+        new_full_order.extend(scheduled);
+    }
+
+    if new_full_order == original_order {
         return false;
     }
 
     let block_mut = func.block_mut(block_id);
-    block_mut.insts = new_order;
+    block_mut.insts = new_full_order;
     true
 }
 
@@ -866,17 +1246,58 @@ pub fn schedule_block_pressure_aware(
         return (false, PressureTracker::new());
     }
 
-    let original_order: Vec<InstId> = block.insts.clone();
-    let mut dag = build_dag(func, block_id);
-    let (new_order, tracker) = schedule_list_pressure_aware(func, &mut dag);
+    // Split the block into scheduling regions at internal terminators,
+    // same as schedule_block. See find_scheduling_regions for rationale.
+    let regions = find_scheduling_regions(func, block_id);
 
-    if new_order == original_order {
-        return (false, tracker);
+    if regions.len() <= 1 {
+        // Single region: schedule the whole block as before.
+        let original_order: Vec<InstId> = block.insts.clone();
+        let mut dag = build_dag(func, block_id);
+        let (new_order, tracker) = schedule_list_pressure_aware(func, &mut dag);
+
+        if new_order == original_order {
+            return (false, tracker);
+        }
+
+        let block_mut = func.block_mut(block_id);
+        block_mut.insts = new_order;
+        return (true, tracker);
+    }
+
+    // Multiple regions: schedule each independently.
+    let original_order: Vec<InstId> = block.insts.clone();
+    let mut new_full_order: Vec<InstId> = Vec::with_capacity(original_order.len());
+    let mut combined_tracker = PressureTracker::new();
+
+    for (start, end) in &regions {
+        let region_insts: Vec<InstId> = original_order[*start..=*end].to_vec();
+        if region_insts.len() <= 1 {
+            new_full_order.extend(&region_insts);
+            continue;
+        }
+
+        let temp_block = func.create_block();
+        func.block_mut(temp_block).insts = region_insts.clone();
+
+        let mut dag = build_dag(func, temp_block);
+        let (scheduled, tracker) = schedule_list_pressure_aware(func, &mut dag);
+
+        func.block_mut(temp_block).insts.clear();
+        func.block_order.retain(|b| *b != temp_block);
+
+        // Accumulate pressure from the last region (approximation).
+        combined_tracker = tracker;
+        new_full_order.extend(scheduled);
+    }
+
+    if new_full_order == original_order {
+        return (false, combined_tracker);
     }
 
     let block_mut = func.block_mut(block_id);
-    block_mut.insts = new_order;
-    (true, tracker)
+    block_mut.insts = new_full_order;
+    (true, combined_tracker)
 }
 
 /// Schedule all basic blocks in a function.
@@ -1038,18 +1459,12 @@ pub enum HazardKind {
         wait_cycles: u32,
     },
     /// Structural hazard: all execution units for a port were busy at a cycle.
-    StructuralHazard {
-        port: ExecutionPort,
-        cycle: u32,
-    },
+    StructuralHazard { port: ExecutionPort, cycle: u32 },
     /// Load-use hazard: a load result is consumed in the very next instruction
     /// in program order, causing a pipeline bubble. This is a special case of
     /// data hazard common on in-order cores and still costly on OoO cores
     /// when the load misses cache.
-    LoadUseHazard {
-        load_node: usize,
-        use_node: usize,
-    },
+    LoadUseHazard { load_node: usize, use_node: usize },
 }
 
 /// Detect pipeline hazards in a scheduled DAG.
@@ -1186,9 +1601,8 @@ pub fn find_dual_issue_hints(dag: &ScheduleDAG) -> Vec<DualIssueHint> {
     }
 
     // Build schedule order sorted by (earliest_start, node_index).
-    let mut schedule_order: Vec<(u32, usize)> = (0..n)
-        .map(|i| (dag.nodes[i].earliest_start, i))
-        .collect();
+    let mut schedule_order: Vec<(u32, usize)> =
+        (0..n).map(|i| (dag.nodes[i].earliest_start, i)).collect();
     schedule_order.sort_by_key(|&(cycle, idx)| (cycle, idx));
 
     // Check consecutive pairs: if both were ready within 1 cycle and are
@@ -1281,11 +1695,10 @@ pub fn compute_register_pressure(
         let produces = inst_produces_value(inst);
 
         // First operand is def if instruction produces a value.
-        if produces
-            && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
-                def_pos.entry(vreg.id).or_insert(pos);
-                vreg_class.insert(vreg.id, vreg.class);
-            }
+        if produces && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
+            def_pos.entry(vreg.id).or_insert(pos);
+            vreg_class.insert(vreg.id, vreg.class);
+        }
 
         // All other operands are uses.
         let use_start = if produces { 1 } else { 0 };
@@ -1308,18 +1721,22 @@ pub fn compute_register_pressure(
 
         // Add def to live set.
         if inst_produces_value(inst)
-            && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg()) {
-                let is_fpr = matches!(
-                    vreg.class,
-                    RegClass::Fpr128 | RegClass::Fpr64 | RegClass::Fpr32
-                        | RegClass::Fpr16 | RegClass::Fpr8
-                );
-                if is_fpr {
-                    live_fprs.insert(vreg.id);
-                } else {
-                    live_gprs.insert(vreg.id);
-                }
+            && let Some(vreg) = inst.operands.first().and_then(|op| op.as_vreg())
+        {
+            let is_fpr = matches!(
+                vreg.class,
+                RegClass::Fpr128
+                    | RegClass::Fpr64
+                    | RegClass::Fpr32
+                    | RegClass::Fpr16
+                    | RegClass::Fpr8
+            );
+            if is_fpr {
+                live_fprs.insert(vreg.id);
+            } else {
+                live_gprs.insert(vreg.id);
             }
+        }
 
         // Update max pressure.
         max_gpr = max_gpr.max(live_gprs.len() as u32);
@@ -1419,7 +1836,9 @@ pub fn compute_schedule_metrics(
     }
 
     // Total cycles: max(earliest_start + latency) across all nodes.
-    let total_cycles = dag.nodes.iter()
+    let total_cycles = dag
+        .nodes
+        .iter()
         .map(|node| node.earliest_start + node.latency)
         .max()
         .unwrap_or(0);
@@ -1437,7 +1856,9 @@ pub fn compute_schedule_metrics(
     for node in &dag.nodes {
         issue_cycles.insert(node.earliest_start);
     }
-    let max_issue_cycle = dag.nodes.iter()
+    let max_issue_cycle = dag
+        .nodes
+        .iter()
         .map(|node| node.earliest_start)
         .max()
         .unwrap_or(0);
@@ -1447,7 +1868,9 @@ pub fn compute_schedule_metrics(
 
     // Critical path length: the maximum priority in the DAG
     // (which is the longest path from any node to any exit).
-    let critical_path_length = dag.nodes.iter()
+    let critical_path_length = dag
+        .nodes
+        .iter()
         .map(|node| node.priority)
         .max()
         .unwrap_or(0);
@@ -1536,9 +1959,7 @@ pub fn schedule_block_with_metrics(
 mod tests {
     use super::*;
     use crate::pass_manager::MachinePass;
-    use llvm2_ir::{
-        AArch64Opcode, MachFunction, MachInst, MachOperand, RegClass, Signature, VReg,
-    };
+    use llvm2_ir::{AArch64Opcode, MachFunction, MachInst, MachOperand, RegClass, Signature, VReg};
 
     fn vreg(id: u32) -> MachOperand {
         MachOperand::VReg(VReg::new(id, RegClass::Gpr64))
@@ -1549,10 +1970,7 @@ mod tests {
     }
 
     fn make_func_with_insts(insts: Vec<MachInst>) -> MachFunction {
-        let mut func = MachFunction::new(
-            "test_sched".to_string(),
-            Signature::new(vec![], vec![]),
-        );
+        let mut func = MachFunction::new("test_sched".to_string(), Signature::new(vec![], vec![]));
         let block = func.entry;
         for inst in insts {
             let id = func.push_inst(inst);
@@ -1616,10 +2034,7 @@ mod tests {
 
     #[test]
     fn test_empty_block() {
-        let mut func = MachFunction::new(
-            "empty".to_string(),
-            Signature::new(vec![], vec![]),
-        );
+        let mut func = MachFunction::new("empty".to_string(), Signature::new(vec![], vec![]));
         let mut sched = InstructionScheduler;
         assert!(!sched.run(&mut func));
     }
@@ -1660,11 +2075,7 @@ mod tests {
         );
 
         // ret must be last.
-        assert_eq!(
-            *order.last().unwrap(),
-            InstId(2),
-            "ret must be last"
-        );
+        assert_eq!(*order.last().unwrap(), InstId(2), "ret must be last");
     }
 
     // ---- Independent instructions reordering test ----
@@ -1877,6 +2288,128 @@ mod tests {
         assert!(dag.nodes[0].rev_deps.contains(&1));
     }
 
+    /// Regression test for #382: the scheduler must treat MOVK's operand[0]
+    /// as an implicit read (tied def-use) and emit a RAW edge from the
+    /// prior def of that vreg to the MOVK. Without this, a MOVZ+MOVK chain
+    /// looks like three independent defs of v1 (so only MOVZ has an outgoing
+    /// RAW edge to readers) and the scheduler is free to place readers of
+    /// v1 between the MOVZ and the trailing MOVK(s) — reading a partial
+    /// constant.
+    #[test]
+    fn test_build_dag_movk_tied_def_use() {
+        // v1 = movz #0x835a                 (node 0, first def of v1)
+        // v1 = movk v1, #0xb9ea, lsl 16      (node 1, tied: reads prior v1)
+        // v1 = movk v1, #0x82e2, lsl 32      (node 2, tied)
+        // v1 = movk v1, #0x717c, lsl 48      (node 3, tied)
+        // v3 = eor v2, v1                   (node 4, reads v1)
+        // ret                                (node 5)
+        //
+        // Without the tied def-use edge, node 4 only has a RAW edge to
+        // node 0 (the first def), so the scheduler can place node 4 before
+        // nodes 1/2/3 and read the partial constant. This caused issue #382.
+        let movz = MachInst::new(AArch64Opcode::Movz, vec![vreg(1), imm(0x835a), imm(0)]);
+        let movk1 = MachInst::new(AArch64Opcode::Movk, vec![vreg(1), imm(0xb9ea), imm(16)]);
+        let movk2 = MachInst::new(AArch64Opcode::Movk, vec![vreg(1), imm(0x82e2), imm(32)]);
+        let movk3 = MachInst::new(AArch64Opcode::Movk, vec![vreg(1), imm(0x717c), imm(48)]);
+        let eor = MachInst::new(AArch64Opcode::EorRR, vec![vreg(3), vreg(2), vreg(1)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![movz, movk1, movk2, movk3, eor, ret]);
+
+        let dag = build_dag(&func, func.entry);
+        assert_eq!(dag.nodes.len(), 6);
+
+        // Each MOVK (nodes 1, 2, 3) must depend on its immediate predecessor
+        // via the tied-def-use RAW edge (plus WAW chain ordering).
+        assert!(
+            dag.nodes[1].deps.contains(&0),
+            "movk1 must have RAW edge from movz (tied def-use on v1)"
+        );
+        assert!(
+            dag.nodes[2].deps.contains(&1),
+            "movk2 must have RAW edge from movk1 (tied def-use on v1)"
+        );
+        assert!(
+            dag.nodes[3].deps.contains(&2),
+            "movk3 must have RAW edge from movk2 (tied def-use on v1)"
+        );
+
+        // The reader of v1 (eor at node 4) must depend on the LAST MOVK
+        // (node 3), not just the initial MOVZ (node 0). This is the
+        // essential fix for #382: without this edge, the reader could be
+        // scheduled between nodes 0 and 3.
+        assert!(
+            dag.nodes[4].deps.contains(&3),
+            "reader of v1 must depend on the LAST MOVK (node 3), not just MOVZ"
+        );
+    }
+
+    /// Regression for #408: BFM has a tied def-use (preserves uncovered
+    /// bits of Rd). The scheduler must add a RAW edge from the instruction
+    /// that produced the prior Rd value to the BFM, otherwise the BFM can
+    /// be scheduled past a setter and read the wrong "background" bits.
+    #[test]
+    fn test_build_dag_bfm_tied_def_use() {
+        // v1 = movz #0x1111           (node 0, def of v1)
+        // v1 = bfm  v1, v2, #0, #7    (node 1, tied: reads prior v1)
+        // v3 = eor v4, v1             (node 2, reads v1)
+        // ret                          (node 3)
+        let movz = MachInst::new(AArch64Opcode::Movz, vec![vreg(1), imm(0x1111), imm(0)]);
+        let bfm = MachInst::new(AArch64Opcode::Bfm, vec![vreg(1), vreg(2), imm(0), imm(7)]);
+        let eor = MachInst::new(AArch64Opcode::EorRR, vec![vreg(3), vreg(4), vreg(1)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![movz, bfm, eor, ret]);
+
+        let dag = build_dag(&func, func.entry);
+        assert_eq!(dag.nodes.len(), 4);
+        assert!(
+            dag.nodes[1].deps.contains(&0),
+            "bfm must have RAW edge from movz (tied def-use on v1) — #408"
+        );
+        assert!(
+            dag.nodes[2].deps.contains(&1),
+            "reader of v1 must depend on the BFM, not just the prior MOVZ"
+        );
+    }
+
+    /// Regression for #409: ADC reads the carry flag implicitly. The
+    /// scheduler must add an edge from the most recent flag writer to
+    /// each ADC so that reordering ADC past the flag writer is disallowed.
+    #[test]
+    fn test_build_dag_adc_reads_flags() {
+        // v10 = adds v0, v1    (node 0, flag writer)
+        // v2  = adc  v4, v5    (node 1, reads carry)
+        // v3  = mov  v6        (node 2, no flag dep — could have been
+        //                        scheduled before adc if carry were free)
+        // ret                   (node 3)
+        let adds = MachInst::new(AArch64Opcode::AddsRR, vec![vreg(10), vreg(0), vreg(1)]);
+        let adc = MachInst::new(AArch64Opcode::Adc, vec![vreg(2), vreg(4), vreg(5)]);
+        let movv = MachInst::new(AArch64Opcode::MovR, vec![vreg(3), vreg(6)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![adds, adc, movv, ret]);
+
+        let dag = build_dag(&func, func.entry);
+        assert_eq!(dag.nodes.len(), 4);
+        assert!(
+            dag.nodes[1].deps.contains(&0),
+            "adc must depend on prior flag writer (adds) — #409"
+        );
+    }
+
+    /// Symmetry: SBC reads the borrow flag the same way ADC reads carry.
+    #[test]
+    fn test_build_dag_sbc_reads_flags() {
+        let subs = MachInst::new(AArch64Opcode::SubsRR, vec![vreg(10), vreg(0), vreg(1)]);
+        let sbc = MachInst::new(AArch64Opcode::Sbc, vec![vreg(2), vreg(4), vreg(5)]);
+        let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
+        let func = make_func_with_insts(vec![subs, sbc, ret]);
+
+        let dag = build_dag(&func, func.entry);
+        assert!(
+            dag.nodes[1].deps.contains(&0),
+            "sbc must depend on prior flag writer (subs) — #409"
+        );
+    }
+
     #[test]
     fn test_call_is_memory_barrier() {
         // v0 = ldr [v1, #0]   (inst0, load)
@@ -2002,9 +2535,19 @@ mod tests {
         let hazards = detect_hazards(&dag);
 
         let has_data_hazard = hazards.iter().any(|h| {
-            matches!(h, HazardKind::DataHazard { producer: 0, consumer: 1, .. })
+            matches!(
+                h,
+                HazardKind::DataHazard {
+                    producer: 0,
+                    consumer: 1,
+                    ..
+                }
+            )
         });
-        assert!(has_data_hazard, "mul->add chain should produce a data hazard");
+        assert!(
+            has_data_hazard,
+            "mul->add chain should produce a data hazard"
+        );
     }
 
     #[test]
@@ -2052,7 +2595,9 @@ mod tests {
         // The scheduler correctly places add at cycle 4 (not cycle 1),
         // so there should be no load-use hazard but there IS a data hazard
         // (the 3-cycle wait).
-        let has_data = hazards.iter().any(|h| matches!(h, HazardKind::DataHazard { .. }));
+        let has_data = hazards
+            .iter()
+            .any(|h| matches!(h, HazardKind::DataHazard { .. }));
         assert!(has_data, "load->add should produce a data hazard");
     }
 
@@ -2072,8 +2617,14 @@ mod tests {
         let hazards = detect_hazards(&dag);
 
         // No structural hazards (6 ALU units), no data hazards (independent).
-        let structural = hazards.iter().filter(|h| matches!(h, HazardKind::StructuralHazard { .. })).count();
-        assert_eq!(structural, 0, "independent ALU ops should have no structural hazards");
+        let structural = hazards
+            .iter()
+            .filter(|h| matches!(h, HazardKind::StructuralHazard { .. }))
+            .count();
+        assert_eq!(
+            structural, 0,
+            "independent ALU ops should have no structural hazards"
+        );
     }
 
     // ---- Phase 2: Dual-issue hint tests ----
@@ -2116,7 +2667,10 @@ mod tests {
         let hints = find_dual_issue_hints(&dag);
 
         let has_alu_alu = hints.iter().any(|h| h.reason == "ALU + ALU");
-        assert!(has_alu_alu, "two independent ALU ops should hint ALU + ALU dual-issue");
+        assert!(
+            has_alu_alu,
+            "two independent ALU ops should hint ALU + ALU dual-issue"
+        );
     }
 
     #[test]
@@ -2137,7 +2691,10 @@ mod tests {
 
         // add1 at cycle 0, add2 at cycle 1 (data dep): no dual-issue possible.
         let alu_alu = hints.iter().filter(|h| h.reason == "ALU + ALU").count();
-        assert_eq!(alu_alu, 0, "dependent chain should not produce dual-issue hint");
+        assert_eq!(
+            alu_alu, 0,
+            "dependent chain should not produce dual-issue hint"
+        );
     }
 
     // ---- Phase 2: Register pressure tests ----
@@ -2156,8 +2713,14 @@ mod tests {
         let pressure = compute_register_pressure(&func, func.entry, &schedule);
 
         // v1 is live from pos 0 to pos 1, v2 is live from pos 1. Max GPR = 2.
-        assert!(pressure.max_gpr_pressure <= 3, "basic chain should have low pressure");
-        assert!(!pressure.pressure_exceeded(), "should not exceed pressure limit");
+        assert!(
+            pressure.max_gpr_pressure <= 3,
+            "basic chain should have low pressure"
+        );
+        assert!(
+            !pressure.pressure_exceeded(),
+            "should not exceed pressure limit"
+        );
     }
 
     #[test]
@@ -2171,10 +2734,16 @@ mod tests {
         // ret
         let mut insts: Vec<MachInst> = Vec::new();
         for i in 1..=30 {
-            insts.push(MachInst::new(AArch64Opcode::MovI, vec![vreg(i), imm(i as i64)]));
+            insts.push(MachInst::new(
+                AArch64Opcode::MovI,
+                vec![vreg(i), imm(i as i64)],
+            ));
         }
         // Use v1 and v2 to keep them live through the block.
-        insts.push(MachInst::new(AArch64Opcode::AddRR, vec![vreg(31), vreg(1), vreg(2)]));
+        insts.push(MachInst::new(
+            AArch64Opcode::AddRR,
+            vec![vreg(31), vreg(1), vreg(2)],
+        ));
         insts.push(MachInst::new(AArch64Opcode::Ret, vec![]));
         let func = make_func_with_insts(insts);
 
@@ -2187,7 +2756,10 @@ mod tests {
             "30 independent defs should produce high pressure, got {}",
             pressure.max_gpr_pressure
         );
-        assert!(pressure.pressure_exceeded(), "30 live GPRs should exceed 28 limit");
+        assert!(
+            pressure.pressure_exceeded(),
+            "30 live GPRs should exceed 28 limit"
+        );
     }
 
     #[test]
@@ -2223,7 +2795,10 @@ mod tests {
             "FPR ops should register FPR pressure, got {}",
             pressure.max_fpr_pressure
         );
-        assert_eq!(pressure.max_gpr_pressure, 0, "FPR-only code should have no GPR pressure");
+        assert_eq!(
+            pressure.max_gpr_pressure, 0,
+            "FPR-only code should have no GPR pressure"
+        );
     }
 
     // ---- Phase 2: Schedule metrics tests ----
@@ -2243,7 +2818,10 @@ mod tests {
         assert_eq!(metrics.total_instructions, 3);
         assert!(metrics.total_cycles > 0, "should have at least 1 cycle");
         assert!(metrics.ipc_estimate > 0.0, "IPC should be positive");
-        assert!(metrics.critical_path_length >= 2, "critical path >= 2 (ALU + ret)");
+        assert!(
+            metrics.critical_path_length >= 2,
+            "critical path >= 2 (ALU + ret)"
+        );
     }
 
     #[test]
@@ -2320,7 +2898,10 @@ mod tests {
         let (changed, metrics) = schedule_block_with_metrics(&mut func, entry);
 
         // The scheduler should reorder: load, mov, add, ret (mov during load latency).
-        assert!(changed, "scheduler should reorder load-add-mov to load-mov-add");
+        assert!(
+            changed,
+            "scheduler should reorder load-add-mov to load-mov-add"
+        );
         assert_eq!(metrics.total_instructions, 4);
         assert!(metrics.total_cycles > 0);
         assert!(metrics.ipc_estimate > 0.0);
@@ -2329,10 +2910,7 @@ mod tests {
 
     #[test]
     fn test_schedule_block_with_metrics_empty() {
-        let mut func = MachFunction::new(
-            "empty".to_string(),
-            Signature::new(vec![], vec![]),
-        );
+        let mut func = MachFunction::new("empty".to_string(), Signature::new(vec![], vec![]));
         let entry = func.entry;
         let (changed, metrics) = schedule_block_with_metrics(&mut func, entry);
         assert!(!changed);
@@ -2503,7 +3081,10 @@ mod tests {
 
         // 25 independent movs: v1..v25.
         for i in 1..=(num_producers as u32) {
-            insts.push(MachInst::new(AArch64Opcode::MovI, vec![vreg(i), imm(i as i64)]));
+            insts.push(MachInst::new(
+                AArch64Opcode::MovI,
+                vec![vreg(i), imm(i as i64)],
+            ));
         }
 
         // 12 consumers: pair up v1+v2, v3+v4, ... v23+v24, and v25 unused.
@@ -2628,10 +3209,7 @@ mod tests {
     #[test]
     fn test_pressure_aware_empty_and_single() {
         // Empty block.
-        let mut func = MachFunction::new(
-            "empty".to_string(),
-            Signature::new(vec![], vec![]),
-        );
+        let mut func = MachFunction::new("empty".to_string(), Signature::new(vec![], vec![]));
         let entry = func.entry;
         let (changed, tracker) = schedule_block_pressure_aware(&mut func, entry);
         assert!(!changed);
@@ -2676,7 +3254,10 @@ mod tests {
         let changed = pass.run(&mut func);
         let order2: Vec<InstId> = func.block(func.entry).insts.clone();
 
-        assert_eq!(order1, order2, "pressure-aware scheduler should be idempotent");
+        assert_eq!(
+            order1, order2,
+            "pressure-aware scheduler should be idempotent"
+        );
         assert!(!changed, "second run should report no change");
     }
 
@@ -2686,14 +3267,8 @@ mod tests {
         // v1 = fadd v0, v0   (FPR def)
         // v2 = fadd v1, v1   (FPR def, uses v1)
         // ret
-        let fadd1 = MachInst::new(
-            AArch64Opcode::FaddRR,
-            vec![fpreg(1), fpreg(0), fpreg(0)],
-        );
-        let fadd2 = MachInst::new(
-            AArch64Opcode::FaddRR,
-            vec![fpreg(2), fpreg(1), fpreg(1)],
-        );
+        let fadd1 = MachInst::new(AArch64Opcode::FaddRR, vec![fpreg(1), fpreg(0), fpreg(0)]);
+        let fadd2 = MachInst::new(AArch64Opcode::FaddRR, vec![fpreg(2), fpreg(1), fpreg(1)]);
         let ret = MachInst::new(AArch64Opcode::Ret, vec![]);
         let mut func = make_func_with_insts(vec![fadd1, fadd2, ret]);
 
@@ -2702,6 +3277,9 @@ mod tests {
 
         // Should track FPR pressure, not GPR.
         assert!(tracker.peak_fpr >= 1, "FPR ops should track FPR pressure");
-        assert_eq!(tracker.peak_gpr, 0, "FPR-only code should have no GPR pressure");
+        assert_eq!(
+            tracker.peak_gpr, 0,
+            "FPR-only code should have no GPR pressure"
+        );
     }
 }

@@ -1,7 +1,7 @@
 // llvm2-regalloc/coalesce.rs - Copy coalescing for register allocation
 //
-// Author: Andrew Yates <ayates@dropbox.com>
-// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Copyright 2026 Andrew Yates | License: Apache-2.0
 
 //! Copy coalescing for phi-elimination copies.
 //!
