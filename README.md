@@ -17,7 +17,7 @@ LLVM2 is the final stage of the t\* verified compilation pipeline. Not a fork of
 > **Honest assessment:** LLVM2 is a real compiler backend for integer-heavy
 > programs, with end-to-end code generation, differential testing against clang,
 > proof infrastructure, and native object-file emission. It is **not** a
-> production compiler yet: aggregate types remain incomplete, optimization above
+> production compiler yet: aggregate support remains incomplete, optimization above
 > O0 still has known regressions, and the non-AArch64 targets are behind the
 > primary path. See [Current Status](#current-status) for details.
 
@@ -106,16 +106,21 @@ triple-oracle validation (`tmir` interpreter + LLVM2 + clang).
 
 ### What does NOT work yet
 
-- **No aggregate types.** Structs, arrays, unions — cannot compile code that uses them
+- **Aggregate support is still partial.** Arrays, tuples, aggregate constants,
+  and aggregate alloca patterns have real lowering coverage, but unions, enums,
+  and full-language aggregate ABI coverage are still incomplete.
 - **Optimization above O0 still has known regressions.** The backend has real
   optimization infrastructure, but higher optimization levels are not yet in the
   same confidence band as O0.
 - **AArch64 is still substantially incomplete as a full ISA implementation.**
   There is real coverage, but not anywhere near full production-target breadth.
-- **No dynamic linking, no TLS, no exception handling**
+- **No dynamic linking or exception handling yet.** TLS exists in partial,
+  JIT-first form, but it is not a complete public AOT story.
 - **x86-64 and RISC-V are not at AArch64 maturity.** They are real backends, not
   just placeholders, but they remain secondary and experimental.
-- **tMIR bridge is scalar-only.** No vector types, no aggregate passing through the bridge
+- **The tMIR bridge is not fully general yet.** It now handles real aggregate
+  shapes in several paths, but vector types and some aggregate ABI paths are
+  still incomplete.
 - **No serious public performance story yet.** The optimization and benchmark
   story is not ready to compete with mature production compilers.
 
@@ -207,7 +212,7 @@ The programmer writes pure math. The compiler maps it to the best hardware. With
 
 **Status:** Computation graph analysis, dispatch planning, Metal MSL emission, CoreML MIL emission, and Apple Silicon cost model implemented. NEON auto-vectorization pass functional. End-to-end heterogeneous dispatch not yet wired up.
 
-**Design docs:** designs/2026-04-13-superoptimization.md, designs/2026-04-13-debugging-transparency.md, designs/2026-04-13-ai-native-compilation.md, designs/2026-04-13-heterogeneous-compute.md
+**Design docs:** `designs/2026-04-13-superoptimization.md`, `designs/2026-04-13-debugging-transparency.md`, `designs/2026-04-13-ai-native-compilation.md`, `designs/2026-04-13-heterogeneous-compute.md`
 
 ## Workspace Crates
 
@@ -228,14 +233,18 @@ The programmer writes pure math. The compiler maps it to the best hardware. With
 
 ## Installation
 
+Clone the repository into a directory named `llvm2`, then build and test:
+
 ```bash
-git clone https://github.com/andrewdyates/LLVM2
-cd LLVM2
+cd llvm2
 cargo build
 cargo test
 ```
 
-See designs/2026-04-12-aarch64-backend.md for the full backend design (AI Model-reviewed).
+This repo now builds against pinned public mirrors of `tMIR` and `z4`; no
+machine-local path dependencies are required for the default build.
+
+See `designs/2026-04-12-aarch64-backend.md` for the full backend design (codex-reviewed).
 
 ## The t\* Stack
 
@@ -268,9 +277,9 @@ See designs/2026-04-12-aarch64-backend.md for the full backend design (AI Model-
 | Project | Role |
 |---------|------|
 | [tMIR](https://github.com/andrewdyates/tMIR) | Input IR (proof-carrying) |
-| [tRust](https://github.com/andrewdyates/tRust) | Rust frontend |
-| [tSwift](https://github.com/andrewdyates/tSwift) | Swift frontend |
-| [tC](https://github.com/andrewdyates/tC) | C verification |
+| `tRust` | Rust frontend |
+| `tSwift` | Swift frontend |
+| `tC` | C verification |
 | [z4](https://github.com/andrewdyates/z4) | SMT solver backend |
 
 ## License

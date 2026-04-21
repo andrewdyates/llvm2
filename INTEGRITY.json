@@ -11,23 +11,23 @@
     "rustc_version": "rustc 1.93.1 (01f6ddf75 2026-02-11)",
     "target_triple": "aarch64-apple-macos"
   },
-  "created_at": "2026-04-21T05:20:20Z",
+  "created_at": "2026-04-21T10:09:41Z",
   "directories": {
-    "": "93551cc8fc3f0c1ef4949cabfaa41d16f60e5f40c4151b1cf6e6831b7ddb8c25",
-    "crates/": "d5a2dbb7de6a2ea3f3f3ff9059351ecb52990b5deafdde28e62458914541f4b6",
-    "crates/llvm2-cli/": "58e07afe243b34bf5046e9203b8195f97afd9909a694ac140ac7ecf818c7aa9b",
+    "": "761dde3f025b321f8d120df6219966cc5b6b8a395e29ae6144cdcf7ac14a2197",
+    "crates/": "1b36c1280a477f1d36ee4a70c19d54222e29c35578c15cece4817687c9ca7a5d",
+    "crates/llvm2-cli/": "de0f45ca8f8e7b257db4707d270eb1aaf83e60e1ea1abbd8be1c717344d2816b",
     "crates/llvm2-cli/src/": "8701aea9a01353175859f20351dcf0690c942591d5c6b787113d678e4112f87f",
-    "crates/llvm2-cli/tests/": "5e87efbb19957e63e294c83c725037a342d591d0fb64099afd3a25f84573cc67",
-    "crates/llvm2-codegen/": "b28786a0a73a48162a8e24eb033746d1bd1584e72818ce0e708d2397b43df06e",
+    "crates/llvm2-cli/tests/": "1c3266036a0521bcf87ec5558c7e0e36e32bace2502fd90795e384a43640a34e",
+    "crates/llvm2-codegen/": "53cb936650afc21bd9813415bb74f86014388465105991547f3d272cd9a280b2",
     "crates/llvm2-codegen/benches/": "ecc373123808c0eac1c4ea4236412197145fac688411cc7af3bd413000f42668",
     "crates/llvm2-codegen/benches/compare_inputs/": "729336cf730d95bfbdef56320ce7692d5c99e204083f26fa9da30c3e8ddf9703",
-    "crates/llvm2-codegen/src/": "6808f2376740b68c68e572e03a7fc4b68784e94be5def42bb978428eea0df6aa",
+    "crates/llvm2-codegen/src/": "7183c5c6ff0a2931f37bc35ca3162b04418010812f090adb5eb24923c419c3ba",
     "crates/llvm2-codegen/src/aarch64/": "38f928c1fa99a636da5b80586a58d91844dca1a80ad5bad68953020991e38afd",
     "crates/llvm2-codegen/src/elf/": "6d44aadccaad794f3812a922f985caf7897613a4aef020948aff8031a1bb5b0b",
     "crates/llvm2-codegen/src/macho/": "60dafebbac7d97b5083e925a05d04be97141c045c6ceab7a43956e7949b95a4c",
     "crates/llvm2-codegen/src/riscv/": "88283f89f66eacd94859edcf301b48523314e54b484fe94c2dc2dfd12b883042",
-    "crates/llvm2-codegen/src/x86_64/": "9cb88a6133bd5977443ee93b26489b916d8e8b9b498b7b3395160f3c596c309e",
-    "crates/llvm2-codegen/tests/": "eb7837a9e09df567914d87ab26911a7ccad4c8feaa3a1b90e79fc7ed3125b698",
+    "crates/llvm2-codegen/src/x86_64/": "0cf50f13d2a55286bd1692e7a3b2247f40e3223d165a1636f430248e27652d36",
+    "crates/llvm2-codegen/tests/": "44a30338af9f96490e2a0884dc916db60a82760bdb7c29197df42bedc477d282",
     "crates/llvm2-dialect/": "e6138f0bb91ed1741623284db64d7580a7c49a4618cee210d5501d1376cf2cf1",
     "crates/llvm2-dialect/src/": "136362bbdb095da0838d7b9cf263bda677d00436aadaa8ad6127b3b4ec65abc8",
     "crates/llvm2-dialect/src/dialects/": "9c511df5578c05aa6113d3803b93877ec61fe57093918a3a8ae40d019b5f8568",
@@ -53,16 +53,16 @@
     "crates/llvm2-opt/src/pgo/": "6df7aee40c91388f1a7117327c24ff7d6b128dc8b48c450986df558ef7c74f96",
     "crates/llvm2-opt/src/rewrite/": "dfe67c4014695e2c2b7412af7cc518231906dfc36b715f069f60094759733086",
     "crates/llvm2-opt/tests/": "22f07b32721ad53c93f2d0270d0805a90fc75cea95bdeb15e9843eeac773c76f",
-    "crates/llvm2-regalloc/": "62d88cf7fcba7152e16ea0fffad505a2ed2dd9b212613e49d8fb7459815df3b3",
-    "crates/llvm2-regalloc/src/": "b78546b3575bb4e44b9e08c7771e36c1bfd48541a454aa22cf342fa5376fb408",
+    "crates/llvm2-regalloc/": "8d40bd8960f67feac0d85e75a097f2dbf582b06be5ba99c236b618765d999e52",
+    "crates/llvm2-regalloc/src/": "e2a57d0ac4b532e37117d14066c07f8c8911de56d535d5d62ba614ed6c0e7182",
     "crates/llvm2-test/": "b02b00c76da5a293cbabddcf3298025e23f01d663c15151ca77d36419247fc10",
     "crates/llvm2-test/src/": "9b0abee47daa2dbad8bfb6d4cd616a9d2a9ed252a7bd2911f92c67f9c5532211",
     "crates/llvm2-test/src/cmd/": "c2c829760cb6779d77d888f6eaa0cff7aeef4ba97f6c5641b4c2306d8f957671",
     "crates/llvm2-test/tests/": "cdf1933f8fa29c6ce07a0c1d047c3739695b5c7db9f3c8ccc6306ca88140a1b4",
     "crates/llvm2-test/tests/snapshots/": "4dba2f2a9ffa123b9278a87b69cc2e45e82366343739b203020a1e377e1907cb",
-    "crates/llvm2-verify/": "293b8b83ecd1b97559e28408e816a5445db597f1bc4186e5e677bc498ac3e94f",
-    "crates/llvm2-verify/src/": "3b3a508efaed06f0085da2c6880ae1c97b3eb4da8f4504dc5601311e971e74b6",
-    "crates/llvm2-verify/tests/": "b6df018d7931827bfae22f06b488b0c36560403a7089230cc864927b88394b58",
+    "crates/llvm2-verify/": "4844e61553544294d57010817db1cd6919830886a6ee590e3ff72d35e698f6b3",
+    "crates/llvm2-verify/src/": "6d86fbceaa65d91eb64106c9b999c0adc7a61690595b0956e6d2a9d6f59ec5bf",
+    "crates/llvm2-verify/tests/": "6d8e4b182a1018e9df909cfcf42cdea77ce3d330bce909c09b9b66a7700fd74c",
     "crates/rustc_codegen_llvm2/": "bf9d80e4b85ad6a71a57fe514a8bc6cd02cce95f74a8cbb35d4c26ae58fbc586",
     "crates/rustc_codegen_llvm2/examples/": "d70bf57d5d5c7800fbca4d179d062439f849ad4ef9982f5ceb5096370ac93b2f",
     "crates/rustc_codegen_llvm2/src/": "805c05ac9be2e72495677845639e4ed81b5c8b89d59bcd52c5dee14d9c9374b6",
@@ -80,20 +80,20 @@
       "size_bytes": 1263
     },
     "Cargo.lock": {
-      "sha256": "574433c6bd372c9522e0adb55869a969663611fe7baac16dd33a8a09cd243373",
-      "size_bytes": 63382
+      "sha256": "3935648199810fefd91a8766b17f33f6f902079a6ded8e3a229521942c99927f",
+      "size_bytes": 61783
     },
     "Cargo.toml": {
-      "sha256": "1e2258fc88066e6599d9fc33990d9aae523971ff1e3d00f18c2a1c6da352ecd3",
-      "size_bytes": 2443
+      "sha256": "57a8f229157010fde0ca81ddbbd07719d0a5a815a19721b4d48f12116c35be6b",
+      "size_bytes": 2517
     },
     "LICENSE": {
       "sha256": "27955ae9a657fb00072aa172075636a3778fbe579b7b9cc981af889533fec0de",
       "size_bytes": 10795
     },
     "README.md": {
-      "sha256": "9c737fa47a9f06455cfd38f6cd2e09e6af4acd98f2137e71f12a8e9bb4b0e3b1",
-      "size_bytes": 14688
+      "sha256": "49910503068e73a22fb3e677771a117b989710bc13ad58c38190320e4721321d",
+      "size_bytes": 15052
     },
     "crates/llvm2-cli/Cargo.toml": {
       "sha256": "320a26fd1c8088057dff6200f9b53a8747d4c1ef364b8b772af7cc7b0018e48c",
@@ -116,8 +116,8 @@
       "size_bytes": 8806
     },
     "crates/llvm2-cli/tests/tmir_text_format.rs": {
-      "sha256": "32c3e396ddf073327afbfe9496b843dec83269a5b8041e15e514edadcb188422",
-      "size_bytes": 10534
+      "sha256": "8155e35e9b7cc864739675b4f7b14fa24bb2cf6188a3ae889612221c710665d8",
+      "size_bytes": 10485
     },
     "crates/llvm2-codegen/Cargo.toml": {
       "sha256": "24c4dd41d7cd3f9de7b5657b74302877fc7280498b24d0afaadda297a983579b",
@@ -352,8 +352,8 @@
       "size_bytes": 2316
     },
     "crates/llvm2-codegen/src/x86_64/pipeline.rs": {
-      "sha256": "e1870c7e4f6ec7a9b497cbb823f4d3f4601b46ed287c274a3e3981f7427546c0",
-      "size_bytes": 151991
+      "sha256": "1b05e484812141a5a1c1e367e89f01d94cd8ccc35b1b24a9b3adfd618d39466d",
+      "size_bytes": 153969
     },
     "crates/llvm2-codegen/tests/aarch64_encoding.rs": {
       "sha256": "fc89bfb501bf4ac0ca706f4413aa61884e59ff243abc02e05156cf92f4b846c9",
@@ -492,8 +492,8 @@
       "size_bytes": 18800
     },
     "crates/llvm2-codegen/tests/jit_block_counters_and_timing.rs": {
-      "sha256": "c1100685e540df56d7b34c6759296c657e5e3279f3b44dc80a5646aa48670dd6",
-      "size_bytes": 12012
+      "sha256": "4402abdce95a9dfee985d9b83a962f84b4b83df3e698a6a1492b3307160f723b",
+      "size_bytes": 11275
     },
     "crates/llvm2-codegen/tests/jit_calling_convention_contract.rs": {
       "sha256": "3f9897b4771baa6d2b9e9c2d64cc77c40b0aa9a2fad0442fc00da617d6fa4647",
@@ -1172,8 +1172,8 @@
       "size_bytes": 44577
     },
     "crates/llvm2-regalloc/src/liveness.rs": {
-      "sha256": "b75e8d9fe12ff986873cf720df989ae64a12f893a8c832ea27990ce8d5905530",
-      "size_bytes": 71389
+      "sha256": "f91d3c2a07dcca9b95147845a7ae477dfa3df7269013407aeca15103905eb039",
+      "size_bytes": 76246
     },
     "crates/llvm2-regalloc/src/machine_types.rs": {
       "sha256": "8aeed9c0ae5870b970926d03b126c3561854c7c08c4d44a0b5c4896ba3e471be",
@@ -1508,8 +1508,8 @@
       "size_bytes": 39847
     },
     "crates/llvm2-verify/src/proof_database.rs": {
-      "sha256": "3fbc5c2dcbfe11281fb098e53eb96de2406e09cd2c53993040d2b422dd852d5f",
-      "size_bytes": 45520
+      "sha256": "ee19c486a7123b985ce27ca4d0477e0827bad190d899071786d5cf78e27b66e2",
+      "size_bytes": 47279
     },
     "crates/llvm2-verify/src/regalloc_proofs.rs": {
       "sha256": "6fb98ed9b7130e6a2b4e8b5105efa7042aafcc4590ce20cf0575e191365e561e",
@@ -1584,8 +1584,8 @@
       "size_bytes": 23365
     },
     "crates/llvm2-verify/src/z4_bridge.rs": {
-      "sha256": "205882dd9858e5687a43c1a79c9e483140d93004f1a6c85b4ee0c5d891336e1e",
-      "size_bytes": 246205
+      "sha256": "3554035b93b780c32636934638cbd2aa63342051ff24c34f4562dfa2dbf0e95d",
+      "size_bytes": 263849
     },
     "crates/llvm2-verify/src/z4_cache.rs": {
       "sha256": "62b14a4d744e636522466dc7d0424b575fec14ca1a8dbba276ac3ced62e8811b",
@@ -1608,8 +1608,8 @@
       "size_bytes": 13587
     },
     "crates/llvm2-verify/tests/full_proof_suite.rs": {
-      "sha256": "9a1af73b83660a83443ed1772fdf0eaf595d6a473a6579b5179ac9ef693ee1df",
-      "size_bytes": 15507
+      "sha256": "b9d65028e3db85b9e16f8d8682a44ad12e78f9a1e79e5d06b0ecbb64c8876a53",
+      "size_bytes": 15823
     },
     "crates/llvm2-verify/tests/panic_fuzz_verify.rs": {
       "sha256": "d4d1a1f4bbe59f46dd2c32ed1bd950982afda4a211e75170fa05ce6141545393",
@@ -1696,8 +1696,8 @@
       "size_bytes": 2734
     }
   },
-  "root_hash": "93551cc8fc3f0c1ef4949cabfaa41d16f60e5f40c4151b1cf6e6831b7ddb8c25",
+  "root_hash": "761dde3f025b321f8d120df6219966cc5b6b8a395e29ae6144cdcf7ac14a2197",
   "scanner_version": "integrity-scanner",
-  "total_size_bytes": 12647939,
+  "total_size_bytes": 12672546,
   "version": 1
 }

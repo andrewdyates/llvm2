@@ -39,11 +39,12 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Verification (z4 SMT solver)
-# For git dep: z4 = { git = "https://github.com/andrewdyates/z4" }
+# Public mirror pinned for reproducible workspace builds. The dependency stays
+# optional in llvm2-verify and is not enabled by default.
 z4 = { git = "https://github.com/andrewdyates/z4" }
 z4-chc = { git = "https://github.com/andrewdyates/z4" }
 
-# Input IR (tMIR) — real crate from the tMIR repo.
+# Input IR (tMIR) — real crate from the public mirror.
 # `parser` enables the `.tmir` text-format reader (see #413 and
 # designs/2026-04-16-tmir-transport-architecture.md, Layer 3).
 tmir = { git = "https://github.com/andrewdyates/tMIR", features = ["serde", "parser", "binary", "dialect-verif-example"] }

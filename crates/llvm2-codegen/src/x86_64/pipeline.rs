@@ -1550,11 +1550,26 @@ fn opcode_has_def(opcode: X86Opcode) -> bool {
     }
 }
 
-/// Returns `true` if the opcode is a unary in-place operation where the
-/// first operand is both read and written (def + use).
-fn is_unary_inplace(opcode: X86Opcode) -> bool {
+/// Returns `true` if the instruction's first operand is both read and written.
+///
+/// This covers:
+/// - Unary in-place ops like `NEG dst`
+/// - RI/RM/shift forms like `ADD dst, imm` where operand 0 is always live-in
+///
+/// RR/SSE three-address forms do not need special handling here because a
+/// two-address-safe instruction already carries the live-in value explicitly
+/// as operand 1 (`ADD v0, v0, v1`).
+fn first_operand_is_def_and_use(inst: &X86ISelInst) -> bool {
     use X86Opcode::*;
-    matches!(opcode, Neg | Not | Inc | Dec)
+
+    match inst.opcode {
+        Neg | Not | Inc | Dec
+        | AddRI | SubRI | AndRI | OrRI | XorRI
+        | AddRM | SubRM | ImulRM
+        | ShlRI | ShrRI | SarRI
+        | ShlRR | ShrRR | SarRR => true,
+        _ => false,
+    }
 }
 
 /// Convert an [`X86ISelFunction`] to a [`RegAllocFunction`] for the full
@@ -1593,7 +1608,7 @@ fn x86_isel_to_regalloc(func: &X86ISelFunction) -> Result<RegAllocFunction, X86P
             let opcode = isel_inst.opcode;
             let flags = opcode.default_flags();
             let has_def = opcode_has_def(opcode);
-            let unary_inplace = is_unary_inplace(opcode);
+            let first_operand_def_and_use = first_operand_is_def_and_use(isel_inst);
 
             let mut defs: Vec<RegAllocOperand> = Vec::new();
             let mut uses: Vec<RegAllocOperand> = Vec::new();
@@ -1606,8 +1621,8 @@ fn x86_isel_to_regalloc(func: &X86ISelFunction) -> Result<RegAllocFunction, X86P
                         let ra_op = RegAllocOperand::VReg(*v);
                         if i == 0 && has_def {
                             defs.push(ra_op.clone());
-                            // Unary in-place: first operand is also a use.
-                            if unary_inplace {
+                            // x86 in-place ops read and write operand 0.
+                            if first_operand_def_and_use {
                                 uses.push(ra_op);
                             }
                         } else {
@@ -3405,6 +3420,45 @@ mod tests {
         // add function: MOV, MOV, ADD, MOV, RET = 5 instructions
         assert_eq!(ra_func.insts.len(), 5);
         assert_eq!(ra_func.blocks.len(), 1);
+    }
+
+    #[test]
+    fn test_isel_to_regalloc_addri_marks_operand0_live_in() {
+        let sig = Signature {
+            params: vec![llvm2_lower::types::Type::I64, llvm2_lower::types::Type::I64],
+            returns: vec![llvm2_lower::types::Type::I64],
+        };
+        let mut func = X86ISelFunction::new("add_imm_inplace".to_string(), sig);
+        let entry = Block(0);
+        func.ensure_block(entry);
+
+        let v0 = VReg::new(0, RegClass::Gpr64);
+        func.next_vreg = 1;
+
+        func.push_inst(entry, X86ISelInst::new(
+            X86Opcode::MovRR,
+            vec![X86ISelOperand::VReg(v0), X86ISelOperand::PReg(x86_64_regs::RDI)],
+        ));
+        func.push_inst(entry, X86ISelInst::new(
+            X86Opcode::AddRI,
+            vec![X86ISelOperand::VReg(v0), X86ISelOperand::Imm(7)],
+        ));
+        func.push_inst(entry, X86ISelInst::new(
+            X86Opcode::MovRR,
+            vec![X86ISelOperand::PReg(x86_64_regs::RAX), X86ISelOperand::VReg(v0)],
+        ));
+        func.push_inst(entry, X86ISelInst::new(X86Opcode::Ret, vec![]));
+
+        let ra_func = x86_isel_to_regalloc(&func).unwrap();
+        let add = &ra_func.insts[1];
+        assert_eq!(add.defs, vec![RegAllocOperand::VReg(VReg::new(0, RegClass::Gpr64))]);
+        assert_eq!(
+            add.uses,
+            vec![
+                RegAllocOperand::VReg(VReg::new(0, RegClass::Gpr64)),
+                RegAllocOperand::Imm(7),
+            ]
+        );
     }
 
     #[test]

@@ -72,14 +72,15 @@ fn llvm2_bin() -> PathBuf {
 // Case 1: `.tmir` input under `--format=text` is loaded by the parser.
 //
 // End-to-end compilation of a parsed `.tmir` module is currently blocked
-// on an upstream limitation: `tmir::Module`'s `Display` impl does not
-// emit the `func_types` table, and the parser does not rebuild it, so
-// `llvm2-lower::adapter::translate_signature` panics on `func_types[0]`.
+// on an upstream limitation: `tmir::parser::parse_module` still drops the
+// module's `func_types` table. LLVM2 no longer panics here; the adapter now
+// reports an explicit `InvalidFuncTyId`-style error instead.
+//
 // What we CAN verify today is that the CLI wires the loader correctly:
 // the parse itself succeeds (we do not see the "failed to read tMIR
-// module" error path), and the failure happens in the downstream
-// lowering pass. Once upstream emits+parses `func_types`, this test
-// can be tightened to `status.success()`.
+// module" error path), and any failure happens at the known downstream
+// signature-translation boundary. Once upstream emits+parses `func_types`,
+// this test can be tightened to `status.success()`.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -109,15 +110,15 @@ fn cli_format_text_reaches_lowering_pass() {
         "--format=text must NOT fail at the parser. stderr:\n{}",
         stderr
     );
-    // Belt-and-braces: the observed downstream panic sits in adapter.rs
-    // and will go away once upstream emits+parses the func_types table
-    // in `.tmir` text. Verifying the message here keeps this test a
-    // stable indicator of "we're at the upstream limit, not a new bug".
-    // We tolerate either success (future upstream fix) or the specific
-    // known panic. Any other failure mode is surfaced.
+    // Belt-and-braces: the observed downstream failure is the known
+    // missing-`func_types` blocker. Older LLVM2 builds surfaced this as a
+    // panic; current LLVM2 returns an explicit adapter error. We tolerate
+    // either success (future upstream fix) or that specific blocker. Any
+    // other failure mode is surfaced.
     if !output.status.success() {
         assert!(
-            stderr.contains("adapter.rs") || stderr.contains("func_types") ||
+            stderr.contains("func_types") ||
+            stderr.contains("FuncTyId") ||
             stderr.contains("index out of bounds"),
             "unexpected --format=text failure (not the upstream blocker). stderr:\n{}",
             stderr

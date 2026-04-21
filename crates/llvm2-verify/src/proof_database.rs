@@ -371,7 +371,11 @@ impl std::fmt::Display for ProofSummary {
         writeln!(f, "By max input width:")?;
         for (width, count) in &self.by_width {
             if *count > 0 {
-                let label = if *width == 0 { "FP-only".to_string() } else { format!("{}-bit", width) };
+                let label = if *width == 0 {
+                    "FP-only".to_string()
+                } else {
+                    format!("{}-bit", width)
+                };
                 writeln!(f, "  {:25} {:>4}", label, count)?;
             }
         }
@@ -416,214 +420,340 @@ pub struct ProofDatabase {
 #[inline(never)]
 fn register_arithmetic_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::lowering_proof::all_division_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Division });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::Division,
+        });
     }
     let all_arith = crate::lowering_proof::all_arithmetic_proofs();
     let div_count = crate::lowering_proof::all_division_proofs().len();
     let arith_take = all_arith.len().saturating_sub(div_count);
     for p in all_arith.into_iter().take(arith_take) {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Arithmetic });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::Arithmetic,
+        });
     }
     // Remainder lowering proofs (issue #435). Categorized as Division since
     // Urem/Srem compose UDIV/SDIV + MSUB and share the div-by-zero
     // precondition.
     for p in crate::lowering_proof::all_remainder_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Division });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::Division,
+        });
     }
     // Bitcast lowering proofs (issue #435). Categorized as Arithmetic since
     // `Bitcast` is a scalar opcode with no dedicated category and lowers to
     // MOV/FMOV -- a pure arithmetic identity at the bitvector level.
     for p in crate::lowering_proof::all_bitcast_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Arithmetic });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::Arithmetic,
+        });
     }
     for p in crate::lowering_proof::all_bitwise_shift_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::BitwiseShift });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::BitwiseShift,
+        });
     }
     // Bitfield lowering proofs (issue #452). ExtractBits / SextractBits /
     // InsertBits compose shifts, masks, and sign-extends; categorized as
     // BitwiseShift since they share the underlying shift+mask structure.
     for p in crate::lowering_proof::all_bitfield_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::BitwiseShift });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::BitwiseShift,
+        });
     }
 }
 
 #[inline(never)]
 fn register_fp_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::lowering_proof::all_fp_lowering_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::FloatingPoint });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::FloatingPoint,
+        });
     }
     for p in crate::lowering_proof::all_nzcv_flag_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::NzcvFlags });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::NzcvFlags,
+        });
     }
 }
 
 #[inline(never)]
 fn register_comparison_branch_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::lowering_proof::all_comparison_proofs_i32() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Comparison });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::Comparison,
+        });
     }
     for p in crate::lowering_proof::all_comparison_proofs_i64() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Comparison });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::Comparison,
+        });
     }
     for p in crate::lowering_proof::all_branch_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Branch });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::Branch,
+        });
     }
 }
 
 #[inline(never)]
 fn register_peephole_opt_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::peephole_proofs::all_peephole_proofs_all_widths() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Peephole });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::Peephole,
+        });
     }
     for p in crate::opt_proofs::all_opt_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Optimization });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::Optimization,
+        });
     }
     for p in crate::const_fold_proofs::all_const_fold_proofs_with_variants() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::ConstantFolding });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::ConstantFolding,
+        });
     }
     for p in crate::copy_prop_proofs::all_copy_prop_proofs_with_variants() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::CopyPropagation });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::CopyPropagation,
+        });
     }
 }
 
 #[inline(never)]
 fn register_analysis_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::cse_licm_proofs::all_cse_licm_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::CseLicm });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::CseLicm,
+        });
     }
     for p in crate::dce_proofs::all_dce_proofs_with_variants() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::DeadCodeElimination });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::DeadCodeElimination,
+        });
     }
     for p in crate::cfg_proofs::all_cfg_proofs_with_variants() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::CfgSimplification });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::CfgSimplification,
+        });
     }
     for p in crate::memory_proofs::all_memory_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Memory });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::Memory,
+        });
     }
     for p in crate::lowering_proof::all_load_store_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::LoadStoreLowering });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::LoadStoreLowering,
+        });
     }
 }
 
 #[inline(never)]
 fn register_backend_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::const_materialize_proofs::all_const_materialize_proofs_with_variants() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::ConstantMaterialization });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::ConstantMaterialization,
+        });
     }
     for p in crate::addr_mode_proofs::all_addr_mode_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::AddressMode });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::AddressMode,
+        });
     }
     for p in crate::frame_proofs::all_frame_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::FrameLayout });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::FrameLayout,
+        });
     }
     for p in crate::scheduler_proofs::all_scheduler_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::InstructionScheduling });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::InstructionScheduling,
+        });
     }
     for p in crate::regalloc_proofs::all_regalloc_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::RegAlloc });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::RegAlloc,
+        });
     }
 }
 
 #[inline(never)]
 fn register_target_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::neon_lowering_proofs::all_neon_lowering_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::NeonLowering });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::NeonLowering,
+        });
     }
     for p in crate::neon_encoding_proofs::all_neon_encoding_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::NeonEncoding });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::NeonEncoding,
+        });
     }
     for p in crate::vectorization_proofs::all_vectorization_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Vectorization });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::Vectorization,
+        });
     }
     for p in crate::ane_precision_proofs::all_ane_precision_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::AnePrecision });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::AnePrecision,
+        });
     }
 }
 
 #[inline(never)]
 fn register_emission_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::macho_proofs::all_macho_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::MachOEmission });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::MachOEmission,
+        });
     }
     for p in crate::loop_opt_proofs::all_loop_opt_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::LoopOptimization });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::LoopOptimization,
+        });
     }
 }
 
 #[inline(never)]
 fn register_strength_reduce_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::strength_reduce_proofs::all_strength_reduce_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::StrengthReduction });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::StrengthReduction,
+        });
     }
 }
 
 #[inline(never)]
 fn register_cmp_combine_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::cmp_combine_proofs::all_cmp_combine_proofs_with_variants() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::CmpCombine });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::CmpCombine,
+        });
     }
 }
 
 #[inline(never)]
 fn register_gvn_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::gvn_proofs::all_gvn_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::Gvn });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::Gvn,
+        });
     }
 }
 
 #[inline(never)]
 fn register_tco_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::tco_proofs::all_tco_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::TailCallOptimization });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::TailCallOptimization,
+        });
     }
 }
 
 #[inline(never)]
 fn register_if_convert_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::if_convert_proofs::all_if_convert_proofs_with_variants() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::IfConversion });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::IfConversion,
+        });
     }
 }
 
 #[inline(never)]
 fn register_fp_convert_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::fp_convert_proofs::all_fp_convert_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::FpConversion });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::FpConversion,
+        });
     }
 }
 
 #[inline(never)]
 fn register_ext_trunc_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::ext_trunc_proofs::all_ext_trunc_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::ExtensionTruncation });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::ExtensionTruncation,
+        });
     }
 }
 
 #[inline(never)]
 fn register_atomic_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::atomic_proofs::all_atomic_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::AtomicOperations });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::AtomicOperations,
+        });
     }
 }
 
 #[inline(never)]
 fn register_call_lowering_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::call_lowering_proofs::all_call_lowering_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::CallLowering });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::CallLowering,
+        });
     }
 }
 
 #[inline(never)]
 fn register_x86_64_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::x86_64_lowering_proofs::all_x86_64_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::X8664Lowering });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::X8664Lowering,
+        });
     }
 }
 
 #[inline(never)]
 fn register_switch_proofs(proofs: &mut Vec<CategorizedProof>) {
     for p in crate::switch_proofs::all_switch_proofs() {
-        proofs.push(CategorizedProof { obligation: p, category: ProofCategory::SwitchLowering });
+        proofs.push(CategorizedProof {
+            obligation: p,
+            category: ProofCategory::SwitchLowering,
+        });
     }
 }
 
@@ -727,7 +857,11 @@ impl ProofDatabase {
 
     /// Return all distinct proof names (sorted).
     pub fn names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.proofs.iter().map(|p| p.obligation.name.as_str()).collect();
+        let mut names: Vec<&str> = self
+            .proofs
+            .iter()
+            .map(|p| p.obligation.name.as_str())
+            .collect();
         names.sort();
         names
     }
@@ -761,12 +895,7 @@ impl Default for ProofDatabase {
 ///
 /// Returns 0 for FP-only proofs (no bitvector inputs).
 fn max_input_width(obligation: &ProofObligation) -> u32 {
-    obligation
-        .inputs
-        .iter()
-        .map(|(_, w)| *w)
-        .max()
-        .unwrap_or(0)
+    obligation.inputs.iter().map(|(_, w)| *w).max().unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -810,15 +939,21 @@ mod tests {
         let db = ProofDatabase::new();
         let count = db.count_by_category(ProofCategory::Arithmetic);
         // 4 ops x 4 widths = 16 (excluding division)
-        assert!(count >= 16, "expected >= 16 arithmetic proofs, got {}", count);
+        assert!(
+            count >= 16,
+            "expected >= 16 arithmetic proofs, got {}",
+            count
+        );
     }
 
     #[test]
     fn test_division_proofs_count() {
         let db = ProofDatabase::new();
         let count = db.count_by_category(ProofCategory::Division);
-        // sdiv/udiv x I32/I64 = 4, plus urem/srem at I8 (issue #435) = 6.
-        assert_eq!(count, 6, "expected 6 division proofs, got {}", count);
+        // Coverage floor: sdiv/udiv x I32/I64 = 4, plus urem/srem at I8/I16 = 8.
+        // This category can grow as new remainder/division widths land, so guard
+        // against regressions without freezing the exact total.
+        assert!(count >= 8, "expected >= 8 division proofs, got {}", count);
     }
 
     #[test]
@@ -876,7 +1011,11 @@ mod tests {
         let db = ProofDatabase::new();
         let count = db.count_by_category(ProofCategory::Vectorization);
         // 11 arithmetic + 14 bitwise + 6 shifts = 31 (may grow with new proofs)
-        assert!(count >= 31, "expected >= 31 vectorization proofs, got {}", count);
+        assert!(
+            count >= 31,
+            "expected >= 31 vectorization proofs, got {}",
+            count
+        );
     }
 
     #[test]
@@ -927,10 +1066,7 @@ mod tests {
     fn test_summary_fp_proofs_exist() {
         let db = ProofDatabase::new();
         let summary = db.summary();
-        assert!(
-            summary.fp_proof_count > 0,
-            "expected at least one FP proof"
-        );
+        assert!(summary.fp_proof_count > 0, "expected at least one FP proof");
     }
 
     #[test]
@@ -960,7 +1096,11 @@ mod tests {
         let db = ProofDatabase::new();
         let upper = db.search("NEON");
         let lower = db.search("neon");
-        assert_eq!(upper.len(), lower.len(), "search should be case-insensitive");
+        assert_eq!(
+            upper.len(),
+            lower.len(),
+            "search should be case-insensitive"
+        );
     }
 
     #[test]
@@ -1122,7 +1262,10 @@ mod tests {
         let summary = db.summary();
         let text = format!("{}", summary);
         assert!(text.contains("Total proofs:"), "display should show total");
-        assert!(text.contains("By category:"), "display should show categories");
+        assert!(
+            text.contains("By category:"),
+            "display should show categories"
+        );
     }
 
     // =======================================================================

@@ -28,11 +28,10 @@
 // For cycle timing, the attribution model (see `TimingState` docs) is
 // "first block entered under buffer contributes 0 cycles; each subsequent
 // block attributes the delta from its entry back to the previous block's
-// total_cycles". On a diamond run N times that means the `entry` block,
-// `else` block, and `then` block each accumulate nonzero cycles (each has
-// a next-block attribution chain). We assert >0 rather than pinning a
-// specific value because CNTVCT_EL0 rates vary and scheduling jitter
-// dominates small deltas.
+// total_cycles". On a diamond run N times, the timing surface as a whole
+// must accumulate nonzero cycles. Individual short blocks may still land
+// on the same virtual-counter tick and report 0 on a fast core, so the
+// stable invariant is aggregate timing, not per-cell `> 0`.
 //
 // Part of #364
 
@@ -203,57 +202,37 @@ fn block_timing_diamond_alternating_inputs() {
     // skips attribution when prev_ts=0). Every subsequent block entry
     // attributes `now - prev_ts` back to the PREVIOUSLY-ENTERED cell.
     //
-    // For each of the four blocks, total_cycles must therefore be
-    // nonzero after N=100 alternating calls: every block is both
-    // entered-after-another-block and exited-before-another-block
-    // multiple times.
-    //
-    // We deliberately assert `> 0` rather than pinning a specific cycle
-    // count: `CNTVCT_EL0` frequency differs across cores (e.g. Apple
-    // Silicon exposes 24 MHz virtual counter) and scheduling jitter
-    // dominates small deltas. The structural "each cell accumulates
-    // something" invariant is what matters for correctness.
+    // Aggregate timing across the diamond must be nonzero after N=100
+    // alternating calls. We deliberately do not require every individual
+    // cell to be nonzero: `CNTVCT_EL0` frequency differs across cores and
+    // very short blocks can legitimately collapse to a zero delta.
     let entry_tim = buf
         .block_timing("diamond_t", BlockId(0))
         .expect("entry block timing must be present in Phase 3");
     assert_eq!(entry_tim.0, N, "timing cell count must match block_count");
-    assert!(
-        entry_tim.1 > 0,
-        "entry block must accumulate cycles across N={} alternating calls (got {})",
-        N,
-        entry_tim.1
-    );
 
     let else_tim = buf
         .block_timing("diamond_t", BlockId(1))
         .expect("else block timing must be present");
     assert_eq!(else_tim.0, odd_calls);
-    assert!(
-        else_tim.1 > 0,
-        "else block must accumulate cycles (got {})",
-        else_tim.1
-    );
 
     let then_tim = buf
         .block_timing("diamond_t", BlockId(2))
         .expect("then block timing must be present");
     assert_eq!(then_tim.0, even_calls);
-    assert!(
-        then_tim.1 > 0,
-        "then block must accumulate cycles (got {})",
-        then_tim.1
-    );
 
-    // `join` is always followed by the next call's `entry`, so on every
-    // call but the very first it gets attributed cycles. After N=100
-    // calls that's 99 attributions => must be >0.
     let join_tim = buf
         .block_timing("diamond_t", BlockId(3))
         .expect("join block timing must be present");
     assert_eq!(join_tim.0, N);
+    let total_cycles = entry_tim.1 + else_tim.1 + then_tim.1 + join_tim.1;
     assert!(
-        join_tim.1 > 0,
-        "join block must accumulate cycles across inter-call attributions (got {})",
+        total_cycles > 0,
+        "timing surface must accumulate cycles across N={} alternating calls (entry={}, else={}, then={}, join={})",
+        N,
+        entry_tim.1,
+        else_tim.1,
+        then_tim.1,
         join_tim.1
     );
 
@@ -269,14 +248,11 @@ fn block_timing_diamond_alternating_inputs() {
     assert_eq!(all_tim[2].1, even_calls);
     assert_eq!(all_tim[3].0, 3);
     assert_eq!(all_tim[3].1, N);
-    for (bid, _, cyc) in &all_tim {
-        assert!(
-            *cyc > 0,
-            "block {} must have >0 cycles after {} calls",
-            bid,
-            N
-        );
-    }
+    assert_eq!(
+        all_tim.iter().map(|(_, _, cyc)| *cyc).sum::<u64>(),
+        total_cycles,
+        "iterator surface must match direct block_timing queries"
+    );
 }
 
 #[cfg(target_arch = "aarch64")]

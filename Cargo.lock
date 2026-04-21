@@ -2132,7 +2132,7 @@ dependencies = [
 [[package]]
 name = "z4"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "anyhow",
  "clap",
@@ -2168,7 +2168,7 @@ dependencies = [
 [[package]]
 name = "z4-allsat"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "tracing",
  "z4-sat",
@@ -2177,7 +2177,7 @@ dependencies = [
 [[package]]
 name = "z4-arrays"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "num-bigint",
@@ -2189,7 +2189,7 @@ dependencies = [
 [[package]]
 name = "z4-bench"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "rayon",
  "rusqlite",
@@ -2202,7 +2202,7 @@ dependencies = [
 [[package]]
 name = "z4-bisect"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "anyhow",
  "clap",
@@ -2215,7 +2215,7 @@ dependencies = [
 [[package]]
 name = "z4-bv"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "num-bigint",
@@ -2229,7 +2229,7 @@ dependencies = [
 [[package]]
 name = "z4-chc"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "num-bigint",
@@ -2257,7 +2257,7 @@ dependencies = [
 [[package]]
 name = "z4-core"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "foldhash",
  "hashbrown 0.15.5",
@@ -2273,7 +2273,7 @@ dependencies = [
 [[package]]
 name = "z4-cp"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "rustc-hash",
  "smallvec",
@@ -2285,7 +2285,7 @@ dependencies = [
 [[package]]
 name = "z4-dispatch"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "rustc-hash",
 ]
@@ -2293,7 +2293,7 @@ dependencies = [
 [[package]]
 name = "z4-dpll"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "num-bigint",
@@ -2326,7 +2326,7 @@ dependencies = [
 [[package]]
 name = "z4-drat-check"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "thiserror",
  "z4-proof-common",
@@ -2335,7 +2335,7 @@ dependencies = [
 [[package]]
 name = "z4-dt"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "tracing",
@@ -2346,7 +2346,7 @@ dependencies = [
 [[package]]
 name = "z4-euf"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "num-bigint",
@@ -2357,7 +2357,7 @@ dependencies = [
 [[package]]
 name = "z4-flatzinc-parser"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "thiserror",
 ]
@@ -2365,7 +2365,7 @@ dependencies = [
 [[package]]
 name = "z4-flatzinc-smt"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "num-traits",
  "thiserror",
@@ -2377,7 +2377,7 @@ dependencies = [
 [[package]]
 name = "z4-fp"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "num-bigint",
@@ -2391,7 +2391,7 @@ dependencies = [
 [[package]]
 name = "z4-frontend"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "logos",
@@ -2406,7 +2406,7 @@ dependencies = [
 [[package]]
 name = "z4-fzn2smt"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "thiserror",
  "z4-cp",
@@ -2417,7 +2417,7 @@ dependencies = [
 [[package]]
 name = "z4-intsat"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "num-bigint",
@@ -2430,7 +2430,7 @@ dependencies = [
 [[package]]
 name = "z4-jit"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "rayon",
  "serde",
@@ -2443,7 +2443,7 @@ dependencies = [
 [[package]]
 name = "z4-lia"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "num-bigint",
@@ -2459,7 +2459,7 @@ dependencies = [
 [[package]]
 name = "z4-lp"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "thiserror",
 ]
@@ -2467,7 +2467,7 @@ dependencies = [
 [[package]]
 name = "z4-lra"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "num-bigint",
@@ -2484,7 +2484,7 @@ dependencies = [
 [[package]]
 name = "z4-lrat-check"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "thiserror",
  "z4-proof-common",
@@ -2493,7 +2493,7 @@ dependencies = [
 [[package]]
 name = "z4-nia"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "num-bigint",
@@ -2511,7 +2511,7 @@ dependencies = [
 [[package]]
 name = "z4-nonlinear-common"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "num-rational",
  "num-traits",
@@ -2520,7 +2520,7 @@ dependencies = [
 [[package]]
 name = "z4-nra"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "num-bigint",
@@ -2536,7 +2536,7 @@ dependencies = [
 [[package]]
 name = "z4-pb"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "thiserror",
  "z4-sat",
@@ -2545,12 +2545,12 @@ dependencies = [
 [[package]]
 name = "z4-prefetch"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 
 [[package]]
 name = "z4-proof"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "num-bigint",
@@ -2562,7 +2562,7 @@ dependencies = [
 [[package]]
 name = "z4-proof-common"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "thiserror",
 ]
@@ -2570,7 +2570,7 @@ dependencies = [
 [[package]]
 name = "z4-proof-complexity"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "rand 0.8.6",
  "rand_chacha 0.3.1",
@@ -2582,7 +2582,7 @@ dependencies = [
 [[package]]
 name = "z4-sat"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "bytemuck",
  "fixedbitset",
@@ -2604,7 +2604,7 @@ dependencies = [
 [[package]]
 name = "z4-seq"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "num-bigint",
@@ -2615,7 +2615,7 @@ dependencies = [
 [[package]]
 name = "z4-strings"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "num-bigint",
@@ -2627,7 +2627,7 @@ dependencies = [
 [[package]]
 name = "z4-sys"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "libc",
 ]
@@ -2635,7 +2635,7 @@ dependencies = [
 [[package]]
 name = "z4-translate"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "z4-dpll",
 ]
@@ -2643,7 +2643,7 @@ dependencies = [
 [[package]]
 name = "z4-xor"
 version = "0.9.0"
-source = "git+https://github.com/andrewdyates/z4#3e19d8ab29f2af41754cea7877c388065688bce2"
+source = "git+https://github.com/andrewdyates/z4"
 dependencies = [
  "hashbrown 0.15.5",
  "z4-core",

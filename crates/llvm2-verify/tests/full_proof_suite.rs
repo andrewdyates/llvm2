@@ -100,7 +100,7 @@ fn full_proof_suite_every_category_populated() {
     let db = ProofDatabase::new();
     let categories = ProofCategory::all_categories();
 
-    // 36 categories: Arithmetic, Division, FloatingPoint, NzcvFlags,
+    // 38 categories: Arithmetic, Division, FloatingPoint, NzcvFlags,
     // Comparison, Branch, Peephole, Optimization, ConstantFolding,
     // CopyPropagation, CseLicm, DeadCodeElimination, CfgSimplification,
     // Memory, LoadStoreLowering (#422), NeonLowering, NeonEncoding,
@@ -109,11 +109,11 @@ fn full_proof_suite_every_category_populated() {
     // InstructionScheduling, MachOEmission, LoopOptimization,
     // StrengthReduction, CmpCombine, Gvn, TailCallOptimization,
     // IfConversion, FpConversion, ExtensionTruncation, AtomicOperations,
-    // CallLowering.
+    // CallLowering, x86-64 Lowering, Switch Lowering.
     assert_eq!(
         categories.len(),
-        36,
-        "Expected 36 proof categories, got {}",
+        38,
+        "Expected 38 proof categories, got {}",
         categories.len()
     );
 
@@ -209,8 +209,11 @@ fn full_proof_suite_known_category_counts() {
     let arith = db.count_by_category(ProofCategory::Arithmetic);
     assert!(arith >= 16, "Arithmetic: expected >= 16, got {}", arith);
 
-    // Division: sdiv/udiv x I32/I64 = 4
-    assert_eq!(db.count_by_category(ProofCategory::Division), 4);
+    // Division: historic baseline 8 after i8/i16 remainder/division proofs
+    // were added. Keep this as a floor so future proof growth does not
+    // churn the integration suite.
+    let division = db.count_by_category(ProofCategory::Division);
+    assert!(division >= 8, "Division: expected >= 8, got {}", division);
 
     // FP: historic baseline 38 (fadd/fsub/fmul/fdiv/fneg x F32/F64 = 10, plus 14
     // fcmp conditions x 2 sizes = 28; total 38). Relaxed to floor so new FP
@@ -243,8 +246,11 @@ fn full_proof_suite_known_category_counts() {
     // Memory: 62 (6 load + 6 store + 4 roundtrip + 8 non-interference + 3 endianness
     // + 4 alignment + 3 forwarding + 4 subword + 3 write combining + 10 array axiom
     // + 11 array range)
-    assert!(db.count_by_category(ProofCategory::Memory) >= 41,
-        "expected >= 41 memory proofs, got {}", db.count_by_category(ProofCategory::Memory));
+    assert!(
+        db.count_by_category(ProofCategory::Memory) >= 41,
+        "expected >= 41 memory proofs, got {}",
+        db.count_by_category(ProofCategory::Memory)
+    );
 
     // Vectorization: historic baseline 31. Relaxed to floor so new vectorization
     // proofs don't break this suite (#418). Matches surrounding pattern.
@@ -252,8 +258,11 @@ fn full_proof_suite_known_category_counts() {
     assert!(vect >= 31, "Vectorization: expected >= 31, got {}", vect);
 
     // RegAlloc: 43 proofs (16 Phase 1 + 15 Phase 2 + 12 Phase 3/greedy)
-    assert!(db.count_by_category(ProofCategory::RegAlloc) >= 16,
-        "expected >= 16 regalloc proofs, got {}", db.count_by_category(ProofCategory::RegAlloc));
+    assert!(
+        db.count_by_category(ProofCategory::RegAlloc) >= 16,
+        "expected >= 16 regalloc proofs, got {}",
+        db.count_by_category(ProofCategory::RegAlloc)
+    );
 }
 
 // ===========================================================================
@@ -281,8 +290,14 @@ fn full_proof_suite_has_exhaustive_and_statistical() {
     // Print distribution for documentation.
     println!();
     println!("Verification strength distribution:");
-    println!("  Exhaustive:  {} proofs (small-width, complete)", exhaustive);
-    println!("  Statistical: {} proofs (large-width, 100K+ samples)", statistical);
+    println!(
+        "  Exhaustive:  {} proofs (small-width, complete)",
+        exhaustive
+    );
+    println!(
+        "  Statistical: {} proofs (large-width, 100K+ samples)",
+        statistical
+    );
     println!("  Total:       {} proofs", report.total());
 }
 
@@ -363,7 +378,7 @@ fn full_proof_suite_auto_mode_selects_backend() {
 fn full_proof_suite_z4_native_api_arithmetic_subset() {
     // Verify a small subset of proofs using the z4 native Rust API directly.
     // This exercises the z4 feature gate being enabled.
-    use llvm2_verify::z4_bridge::{verify_with_z4_api, Z4Config};
+    use llvm2_verify::z4_bridge::{Z4Config, verify_with_z4_api};
 
     let db = ProofDatabase::new();
     let config = Z4Config::default().with_timeout(10_000);
@@ -395,10 +410,7 @@ fn full_proof_suite_z4_native_api_arithmetic_subset() {
         );
     }
 
-    println!(
-        "z4 native API verified {} arithmetic proofs",
-        subset.len()
-    );
+    println!("z4 native API verified {} arithmetic proofs", subset.len());
 }
 
 #[test]

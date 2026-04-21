@@ -283,15 +283,15 @@ pub fn compute_live_intervals(func: &MachFunction) -> LivenessResult {
         let block_start = inst_numbering[&block.insts[0]];
         let block_end = inst_numbering[block.insts.last().unwrap()] + 1;
 
-        // First pass: find all local definitions in this block.
-        // We need to know where each vreg was defined so that uses can
-        // extend the range back to the def point.
-        let mut local_defs: HashMap<u32, u32> = HashMap::new(); // vreg_id -> def position
+        // First pass: record the LAST definition of each vreg in this block.
+        // Live-out intervals should extend from that last local def (if any)
+        // to block_end.
+        let mut last_defs_in_block: HashMap<u32, u32> = HashMap::new(); // vreg_id -> def position
         for &inst_id in &block.insts {
             let inst = &func.insts[inst_id.0 as usize];
             let idx = inst_numbering[&inst_id];
             for vreg in inst.vreg_defs() {
-                local_defs.insert(vreg.id, idx);
+                last_defs_in_block.insert(vreg.id, idx);
             }
         }
 
@@ -303,7 +303,7 @@ pub fn compute_live_intervals(func: &MachFunction) -> LivenessResult {
                     class: RegClass::Gpr64,
                 })
             });
-            if let Some(&def_pos) = local_defs.get(&vreg_id) {
+            if let Some(&def_pos) = last_defs_in_block.get(&vreg_id) {
                 // Defined in this block and live-out: [def_pos, block_end).
                 interval.add_range(def_pos, block_end);
             } else {
@@ -342,20 +342,19 @@ pub fn compute_live_intervals(func: &MachFunction) -> LivenessResult {
         }
 
         // Second pass: record def/use positions and build continuous ranges.
+        //
+        // Track the most recent reaching def at each program point. This is
+        // distinct from `last_defs_in_block`: a use must extend back to the
+        // closest preceding def, not the final def that happens later in the
+        // block. Otherwise in-place updates like `v0 = add v0, v1` appear dead
+        // between the original def and the use, which is the weighted-stack-arg
+        // failure from issue #300/#306 combined.
+        let mut reaching_defs: HashMap<u32, u32> = HashMap::new();
         for &inst_id in &block.insts {
             let inst = &func.insts[inst_id.0 as usize];
             let idx = inst_numbering[&inst_id];
 
-            for vreg in inst.vreg_defs() {
-                let interval = intervals.entry(vreg.id).or_insert_with(|| {
-                    LiveInterval::new(vreg)
-                });
-                interval.vreg.class = vreg.class;
-                interval.def_positions.push(idx);
-                // Ensure at minimum a point range for the def.
-                interval.add_range(idx, idx + 1);
-            }
-
+            // Uses must see the reaching def BEFORE this instruction's defs.
             for vreg in inst.vreg_uses() {
                 let interval = intervals.entry(vreg.id).or_insert_with(|| {
                     LiveInterval::new(vreg)
@@ -366,12 +365,23 @@ pub fn compute_live_intervals(func: &MachFunction) -> LivenessResult {
                 // live-in) through this use. This ensures that a vreg
                 // defined at D and used at U gets a continuous range
                 // [D, U+1), not two point ranges with a hole.
-                if let Some(&def_pos) = local_defs.get(&vreg.id) {
+                if let Some(&def_pos) = reaching_defs.get(&vreg.id) {
                     interval.add_range(def_pos, idx + 1);
                 } else {
                     // Live-in: extend from block_start to this use.
                     interval.add_range(block_start, idx + 1);
                 }
+            }
+
+            for vreg in inst.vreg_defs() {
+                let interval = intervals.entry(vreg.id).or_insert_with(|| {
+                    LiveInterval::new(vreg)
+                });
+                interval.vreg.class = vreg.class;
+                interval.def_positions.push(idx);
+                // Ensure at minimum a point range for the def.
+                interval.add_range(idx, idx + 1);
+                reaching_defs.insert(vreg.id, idx);
             }
         }
     }
@@ -1908,6 +1918,118 @@ mod tests {
             v0.overlaps(v2),
             "v0 (range {:?}) must overlap v2 (range {:?})",
             v0.ranges, v2.ranges
+        );
+    }
+
+    #[test]
+    fn test_issue_300_reaching_def_handles_multiple_inplace_updates() {
+        // Regression for block-local reaching-def tracking:
+        //
+        //   v0 = ...
+        //   v1 = ...
+        //   v2 = ...
+        //   v0 = add v0, v1
+        //   v3 = ...
+        //   v0 = add v0, v2
+        //
+        // v0 must stay live across instruction 4, because the value defined by
+        // the first in-place update at 3 is used again by the second update at 5.
+        // Using the LAST def in the block for every use incorrectly creates a
+        // hole at instruction 4 and allows v0/v3 to share a register.
+        use crate::machine_types::*;
+
+        let mut insts = Vec::new();
+
+        let i0 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(1)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i1 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(2)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i2 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(3)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i3 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 2,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 }),
+                MachOperand::VReg(VReg { id: 1, class: RegClass::Gpr64 }),
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i4 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 1,
+            defs: vec![MachOperand::VReg(VReg { id: 3, class: RegClass::Gpr64 })],
+            uses: vec![MachOperand::Imm(4)],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+        let i5 = InstId(insts.len() as u32);
+        insts.push(MachInst {
+            opcode: 2,
+            defs: vec![MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 })],
+            uses: vec![
+                MachOperand::VReg(VReg { id: 0, class: RegClass::Gpr64 }),
+                MachOperand::VReg(VReg { id: 2, class: RegClass::Gpr64 }),
+            ],
+            implicit_defs: Vec::new(),
+            implicit_uses: Vec::new(),
+            flags: InstFlags::default(),
+        });
+
+        let func = MachFunction {
+            name: "reaching_def_inplace".into(),
+            insts,
+            blocks: vec![MachBlock {
+                insts: vec![i0, i1, i2, i3, i4, i5],
+                preds: Vec::new(),
+                succs: Vec::new(),
+                loop_depth: 0,
+            }],
+            block_order: vec![BlockId(0)],
+            entry_block: BlockId(0),
+            next_vreg: 4,
+            next_stack_slot: 0,
+            stack_slots: std::collections::HashMap::new(),
+        };
+
+        let result = compute_live_intervals(&func);
+        let v0 = result.intervals.get(&0).expect("v0 should have an interval");
+        let v3 = result.intervals.get(&3).expect("v3 should have an interval");
+
+        assert!(
+            v0.is_live_at(4),
+            "v0 must stay live across inst 4 between in-place updates; ranges: {:?}",
+            v0.ranges
+        );
+        assert!(
+            v0.overlaps(v3),
+            "v0 (range {:?}) must overlap v3 (range {:?})",
+            v0.ranges, v3.ranges
         );
     }
 }
