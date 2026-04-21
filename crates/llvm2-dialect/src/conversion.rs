@@ -1,7 +1,7 @@
 // llvm2-dialect - ConversionPattern + Rewriter + Driver
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! One-op-in / N-ops-out conversion patterns and the greedy [`ConversionDriver`]
 //! that runs them over a module.

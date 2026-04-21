@@ -1,7 +1,7 @@
 // llvm2-codegen - DWARF debug information emission
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: DWARF 4 spec (http://dwarfstd.org/doc/DWARF4.pdf)
 // Reference: ~/llvm-project-ref/llvm/lib/CodeGen/AsmPrinter/DwarfDebug.cpp

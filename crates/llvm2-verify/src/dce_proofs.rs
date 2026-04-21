@@ -1,7 +1,7 @@
 // llvm2-verify/dce_proofs.rs - SMT proofs for Dead Code Elimination correctness
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Proves that Dead Code Elimination (DCE) in llvm2-opt/dce.rs preserves
 // program semantics. DCE removes instructions whose outputs are never used,

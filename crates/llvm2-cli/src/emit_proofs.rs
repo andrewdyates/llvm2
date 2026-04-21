@@ -1,7 +1,7 @@
 // llvm2-cli/emit_proofs.rs - Per-proof SMT-LIB2 + certificate emission (#421)
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Implements the `--emit-proofs=<dir>` CLI flag introduced in issue #421
 // (epic #407, task 6). For every verified lowering rule produced by the

@@ -1,7 +1,7 @@
 // llvm2-verify/switch_proofs.rs - SMT proofs for Switch lowering correctness
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Proves that switch lowering in llvm2-lower/src/switch.rs preserves program
 // semantics. Switch lowering selects one of three strategies based on density

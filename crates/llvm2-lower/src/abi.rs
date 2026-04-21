@@ -1,7 +1,7 @@
 // llvm2-lower/abi.rs - Apple AArch64 calling convention
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: LLVM AArch64CallingConvention.td, AArch64ISelLowering.cpp
 // Reference: ARM AAPCS64 + Apple arm64 ABI delta (DarwinPCS)

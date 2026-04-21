@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/xxh3_tmir.rs - xxh3 hash algorithm expressed as tMIR
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Implements the xxh3 64-bit hash algorithm as tMIR instructions compiled
 // through the LLVM2 pipeline. This demonstrates that:

@@ -1,7 +1,7 @@
 // llvm2-codegen/macho/section.rs - Mach-O section and segment definitions
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Mach-O 64-bit section and segment command structures.
 

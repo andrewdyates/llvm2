@@ -1,7 +1,7 @@
 // llvm2-codegen/benches/compile_bench.rs - Compilation throughput benchmarks
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Benchmark framework for LLVM2 compilation pipeline.
 // Measures throughput (instructions/second) and per-phase timing.

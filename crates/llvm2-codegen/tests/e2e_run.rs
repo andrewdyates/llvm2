@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_run.rs - End-to-end compile, link, and run tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // These tests compile functions through the LLVM2 pipeline, write .o files,
 // link them with C drivers using the system compiler (cc), execute the

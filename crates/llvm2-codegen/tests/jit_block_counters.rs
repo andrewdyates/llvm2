@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/jit_block_counters.rs — Per-basic-block JIT counters.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Covers the public API landed for issue #364, Phase 2 `BlockCounts`:
 // - `ProfileHookMode::BlockCounts` enables one `AtomicU64` per basic block.

@@ -3,7 +3,7 @@
 // Part of #301 — O2 optimization hangs on loop-based tMIR functions
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 use tmir::{Block as TmirBlock, Function as TmirFunction, Module as TmirModule, FuncTy, Ty};
 use tmir::{Inst, InstrNode, BinOp, ICmpOp};

@@ -1,7 +1,7 @@
 // llvm2-llvm-import / tests / fp_e2e.rs
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // End-to-end test for expansion item #3 (floating-point types + ops):
 // take clang-O0-shaped LL snippets that use `float` / `double` and

@@ -1,7 +1,7 @@
 // llvm2-lower/dispatch.rs - Dispatch codegen for heterogeneous compute
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Generates dispatch plans from compute graph target recommendations.
 // A dispatch plan is a sequence of operations: data transfers between

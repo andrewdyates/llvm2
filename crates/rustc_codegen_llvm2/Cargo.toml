@@ -5,7 +5,7 @@
 # the nightly pinned by this crate's `rust-toolchain.toml`.
 #
 # Author: Andrew Yates <andrewyates.name@gmail.com>
-# Copyright 2026 Andrew Yates
+# Copyright 2026 Dropbox, Inc.
 # License: Apache-2.0
 [package]
 name = "rustc_codegen_llvm2"

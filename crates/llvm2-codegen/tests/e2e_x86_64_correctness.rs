@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_x86_64_correctness.rs - x86-64 computed result verification
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // End-to-end tests that compile x86-64 functions through the LLVM2 pipeline,
 // link them with C drivers, run under Rosetta 2, and verify COMPUTED RESULTS

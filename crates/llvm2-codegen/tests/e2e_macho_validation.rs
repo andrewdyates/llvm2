@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_macho_validation.rs - End-to-end Mach-O validation
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // These tests exercise the COMPLETE compilation pipeline starting from tMIR,
 // through ISel, optimization, register allocation, frame lowering, encoding,

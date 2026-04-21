@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/abi_many_args_e2e.rs - AAPCS64 >8-arg ABI E2E test
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Verifies the stack-slot overflow path in crates/llvm2-lower/src/abi.rs::classify_params.
 // Apple AArch64 ABI (AAPCS64):

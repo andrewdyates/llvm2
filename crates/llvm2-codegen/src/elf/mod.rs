@@ -1,7 +1,7 @@
 // llvm2-codegen/elf/mod.rs - ELF64 object file support
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! ELF64 object file writer for Linux AArch64 and x86-64.
 //!

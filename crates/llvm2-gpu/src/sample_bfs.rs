@@ -1,7 +1,7 @@
 // llvm2-gpu/sample_bfs.rs - End-to-end BFS-style parallel_map sample
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: designs/2026-04-18-gpu-passes-pipeline.md
 // Issue: andrewdyates/LLVM2#394 (Part of #390)

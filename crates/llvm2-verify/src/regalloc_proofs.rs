@@ -1,7 +1,7 @@
 // llvm2-verify/regalloc_proofs.rs - SMT proofs for Register Allocation correctness
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Proves that register allocation in llvm2-regalloc preserves program
 // semantics. Register allocation replaces virtual registers with physical

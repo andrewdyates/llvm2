@@ -1,7 +1,7 @@
 // Integration test: .profdata round-trip through the filesystem.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: designs/2026-04-18-pgo-workflow.md
 // Issue: #396

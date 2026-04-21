@@ -1,7 +1,7 @@
 // WS4 — rustc_codegen_llvm2 + rustc UI harness.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! `llvm2-test rustc` — drive `rustc_codegen_llvm2`.
 //!

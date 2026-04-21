@@ -1,7 +1,7 @@
 // llvm2-codegen/x86_64/encode.rs - x86-64 instruction binary encoder
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: ~/llvm-project-ref/llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp
 // Reference: Intel 64 and IA-32 Architectures SDM, Volume 2

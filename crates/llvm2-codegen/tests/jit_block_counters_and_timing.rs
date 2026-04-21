@@ -2,7 +2,7 @@
 // Per-basic-block JIT counters + cycle timing (AArch64, issue #364 Phase 3).
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Covers the public API landed for issue #364, Phase 3
 // `BlockCountsAndTiming`:

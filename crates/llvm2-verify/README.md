@@ -1,7 +1,7 @@
 # llvm2-verify
 
 <!-- Andrew Yates <andrewyates.name@gmail.com> -->
-<!-- Copyright 2026 Andrew Yates | License: Apache-2.0 -->
+<!-- Copyright 2026 Dropbox, Inc. | License: Apache-2.0 -->
 
 Verification testing for the LLVM2 compiler backend. Every tMIR-to-machine
 lowering rule, every optimization pass, and every instruction encoder has a

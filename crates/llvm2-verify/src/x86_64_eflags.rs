@@ -1,7 +1,7 @@
 // llvm2-verify/x86_64_eflags.rs - x86-64 EFLAGS model and condition code evaluation
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Models the subset of x86-64 EFLAGS needed for integer CMP/Jcc/SETcc
 // verification. This is the x86-64 analogue of `nzcv.rs`.

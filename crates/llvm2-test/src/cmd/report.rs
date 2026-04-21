@@ -1,7 +1,7 @@
 // WS9 — weekly report generator.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // The template literal in this file IS the source of truth for the weekly
 // report format. Never hand-edit `reports/weekly/TEMPLATE.md` — it is

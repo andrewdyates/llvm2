@@ -1,7 +1,7 @@
 // llvm2-regalloc/remat.rs - Rematerialization for the register allocator
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Rematerialization: recompute cheap values instead of loading from spill slots.
 //!

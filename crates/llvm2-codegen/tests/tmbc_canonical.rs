@@ -2,7 +2,7 @@
 // Canonical encoding determinism tests for the `.tmbc` binary format (#416).
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: `designs/2026-04-16-tmir-transport-architecture.md`, section
 // "Verification of the Format", property 2:

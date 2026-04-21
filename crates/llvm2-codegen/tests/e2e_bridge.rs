@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_bridge.rs - trust-llvm2-bridge integration tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // These tests validate that the LIR format produced by trust-llvm2-bridge
 // (in tRust) is valid input for LLVM2's compilation pipeline. Rather than

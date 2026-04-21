@@ -2,7 +2,7 @@
 // Round-trip tests for the `.tmir` text format (#413).
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Verifies that the pipeline helpers `encode_tmir_text` /
 // `parse_tmir_text` / `save_module_to_tmir_text` / `load_module_as(..,

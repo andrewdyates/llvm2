@@ -1,7 +1,7 @@
 // E2E integration tests: tMIR -> LLVM2 pipeline -> Mach-O .o -> link -> run
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // These tests verify the complete compilation pipeline produces runnable
 // AArch64 binaries on macOS (Apple Silicon). This is the most important

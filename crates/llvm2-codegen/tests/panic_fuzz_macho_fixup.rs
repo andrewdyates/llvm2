@@ -2,7 +2,7 @@
 // Property-based panic-fuzz harness for the Mach-O fixup + relocation layer.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Part of #448 (#387 follow-up) / Part of #372 (Crash-free codegen).
 //

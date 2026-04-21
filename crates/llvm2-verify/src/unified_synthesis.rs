@@ -1,7 +1,7 @@
 // llvm2-verify/unified_synthesis.rs - Unified CEGIS synthesis across multiple targets
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Extends the single-target CEGIS loop to search across multiple compute
 // targets simultaneously. For a given tMIR operation, the unified loop

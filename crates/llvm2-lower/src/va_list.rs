@@ -1,7 +1,7 @@
 // llvm2-lower/va_list.rs - Apple AArch64 va_list intrinsic lowering
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: Apple ARM64 Function Calling Conventions ("Variadic Functions")
 // Reference: LLVM AArch64ISelLowering.cpp (LowerVASTART, LowerVAARG)

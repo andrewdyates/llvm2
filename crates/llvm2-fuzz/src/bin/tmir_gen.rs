@@ -1,7 +1,7 @@
 // llvm2-fuzz/src/bin/tmir_gen.rs - tMIR differential fuzzing driver
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // For each iteration:
 //   1. Pick a seed.

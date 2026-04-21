@@ -1,7 +1,7 @@
 # llvm2-llvm-import
 #
 # Author: Andrew Yates <andrewyates.name@gmail.com>
-# Copyright 2026 Andrew Yates | License: Apache-2.0
+# Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 #
 # Minimal textual LLVM IR (.ll) -> tMIR importer. Used by Workstream 2
 # (issue #439) as the bridge between the llvm/llvm-test-suite SingleSource

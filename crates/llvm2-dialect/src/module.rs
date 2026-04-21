@@ -1,7 +1,7 @@
 // llvm2-dialect - DialectModule / DialectFunction / DialectBlock
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Top-level module containers: [`DialectModule`], [`DialectFunction`], and
 //! [`DialectBlock`]. Storage is flat `Vec<DialectOp>` + typed indices, matching

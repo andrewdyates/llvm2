@@ -1,7 +1,7 @@
 // llvm2-regalloc/phi_elim.rs - Phi elimination and critical edge splitting
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Phi elimination: lowers SSA phi nodes to parallel copies.
 //!

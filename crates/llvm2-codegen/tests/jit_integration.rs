@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/jit_integration.rs - JIT end-to-end integration tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Tests that compile IR functions through the full JIT pipeline and execute
 // them in-process via JitCompiler::compile_raw(). Exercises:

@@ -1,7 +1,7 @@
 // llvm2-codegen/macho/symbol.rs - Mach-O symbol table and string table emission
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: LLVM MachObjectWriter.cpp writeNlist(), <mach-o/nlist.h>
 // nlist_64 struct layout (16 bytes):

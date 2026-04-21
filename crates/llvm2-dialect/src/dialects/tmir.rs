@@ -1,7 +1,7 @@
 // llvm2-dialect - Sample `tmir` dialect (facade over real tMIR)
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Minimal `tmir` dialect used by the PoC lowering pipeline.
 //!

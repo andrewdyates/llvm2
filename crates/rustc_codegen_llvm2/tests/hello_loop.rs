@@ -1,7 +1,7 @@
 // Integration test for the rustc_codegen_llvm2 M0 skeleton.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates
+// Copyright 2026 Dropbox, Inc.
 // License: Apache-2.0
 //
 // Status: WS4 milestone M0.

@@ -1,7 +1,7 @@
 // aggregate_types.rs — Phase 2a aggregate type translation tests (#391)
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Phase 2a aggregate-type translation tests.
 //!

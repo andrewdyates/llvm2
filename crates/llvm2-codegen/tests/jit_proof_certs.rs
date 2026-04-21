@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/jit_proof_certs.rs - End-to-end JIT proof certificate tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Exercises the Phase-1 cut of issue #348: proof certificates for
 // JIT-compiled code. Each test compiles a minimal MachFunction through

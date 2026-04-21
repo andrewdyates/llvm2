@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_x86_64_macho.rs - End-to-end x86-64 Mach-O validation
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Integration tests for the x86-64 Mach-O object file emission pipeline.
 // Validates that the pipeline produces structurally correct Mach-O .o files

@@ -1,7 +1,7 @@
 // llvm2-cli/tests/format_flag.rs - Integration tests for the --format flag (#414)
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Per `designs/2026-04-16-tmir-transport-architecture.md` Layer 4 and
 // issue #414, the CLI defaults to binary `.tmbc` input. JSON is retained

@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_x86_64_dispatcher.rs - #340 x86-64 dispatcher wiring
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Verifies that `Compiler::compile` honors `config.target` and routes to
 // the x86-64 backend (X86Pipeline) when `Target::X86_64` is selected.

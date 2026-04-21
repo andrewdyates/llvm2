@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/pipeline_integration.rs - End-to-end pipeline tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Integration tests for the LLVM2 compilation pipeline.
 //!

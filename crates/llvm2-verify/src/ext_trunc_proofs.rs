@@ -1,7 +1,7 @@
 // llvm2-verify/ext_trunc_proofs.rs - SMT proofs for extension and truncation
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Proves correctness of sign-extension (SXTB, SXTH, SXTW), zero-extension
 // (UXTB, UXTH, UXTW via UBFM), and truncation (AND masking) lowering rules.

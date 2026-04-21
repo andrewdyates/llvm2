@@ -1,7 +1,7 @@
 // llvm2-lower/tmir_compat.rs - Compatibility layer for tMIR API
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // This module provides re-exports and compatibility types that bridge the
 // unified tmir crate API with LLVM2-internal types. The old 4-crate tMIR

@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/jit_integration_x86_64.rs - x86-64 JIT smoke test
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Smoke test for the x86-64 JIT path: compile a trivial `const42()` and
 // `add(i64, i64) -> i64` function through the x86-64 pipeline (`X86Pipeline`),

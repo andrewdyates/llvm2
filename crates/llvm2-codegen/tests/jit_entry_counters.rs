@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/jit_entry_counters.rs - Public entry-counter API tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Covers the stable public API for the function-entry counter slice of #364:
 // - `JitConfig::emit_entry_counters`

@@ -1,7 +1,7 @@
 // llvm2-lower/x86_64_isel.rs - x86-64 instruction selection
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: LLVM X86ISelLowering.cpp
 // Reference: Intel 64 and IA-32 Architectures Software Developer's Manual

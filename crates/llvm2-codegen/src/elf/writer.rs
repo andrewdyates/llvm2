@@ -1,7 +1,7 @@
 // llvm2-codegen/elf/writer.rs - ELF64 object file writer
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Assembles a complete ELF64 relocatable object file (.o).
 //!

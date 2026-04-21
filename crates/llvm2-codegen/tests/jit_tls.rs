@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/jit_tls.rs - TLS-via-pointer JIT convention test
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Part of #361 — JIT needs thread-local storage (TLS) access for tla2 model checker
 //

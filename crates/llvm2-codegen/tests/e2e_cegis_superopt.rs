@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_cegis_superopt.rs - CEGIS superopt pipeline wiring tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Regression coverage for issue #395: wire the CEGIS superopt pass into the
 // pipeline and expose direct observability for integration tests.

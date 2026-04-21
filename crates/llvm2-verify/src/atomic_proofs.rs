@@ -1,7 +1,7 @@
 // llvm2-verify/atomic_proofs.rs - Atomic memory operation correctness proofs
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Verifies tMIR atomic memory operations lowering to AArch64 LSE instructions.
 // Atomic operations are modeled over the SMT array memory model (QF_ABV) with

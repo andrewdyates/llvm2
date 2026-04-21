@@ -1,7 +1,7 @@
 // llvm2-codegen integration test: Compact unwind emission
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Verifies that the compact unwind section is emitted correctly in Mach-O
 // object files and can be parsed by macOS system tools (otool, llvm-objdump).

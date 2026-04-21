@@ -1,7 +1,7 @@
 // llvm2-codegen/dialect_pipeline.rs - Pre-adapter dialect lowering
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: issue #433, tMIR #428. Wires tMIR's dialect framework into
 // the LLVM2 compilation pipeline so that upstream dialects (currently the

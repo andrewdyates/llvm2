@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_cse_movz_movn.rs — regression test for #432
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // End-to-end regression for issue #432: CSE collapsed `Movz Xd, #imm16`
 // (materializes +imm16) and `Movn Xd, #imm16` (materializes ~imm16) when

@@ -2,7 +2,7 @@
 // Property-based panic-fuzz harness for `X86Encoder::encode_instruction` (x86-64).
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 //! Part of #473 (x86-64 encoder panic-fuzz) / Part of #445 (per-target
 //! harness gap) / Lineage: #387 (proptest panic-fuzz), #447 (panic-fix

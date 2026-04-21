@@ -3,7 +3,7 @@
 // AArch64 Mach-O bytes.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Part of #439 (WS2). Covers expansion-plan item #4 from
 // crates/llvm2-llvm-import/README.md.

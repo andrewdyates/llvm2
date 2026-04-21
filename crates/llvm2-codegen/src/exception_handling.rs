@@ -1,7 +1,7 @@
 // llvm2-codegen - Exception handling LSDA table generation
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: Itanium C++ ABI Exception Handling
 //            (https://itanium-cxx-abi.github.io/cxx-abi/abi-eh.html)

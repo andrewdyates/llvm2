@@ -1,7 +1,7 @@
 // llvm2-verify/ane_semantics.rs - Apple Neural Engine semantic encoding
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Encodes Apple Neural Engine (ANE) operation semantics as SMT expressions
 // using array theory for tensor representation and floating-point theory for

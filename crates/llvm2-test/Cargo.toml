@@ -1,7 +1,7 @@
 # llvm2-test — the unified LLVM2 test & verification CLI
 #
 # Author: Andrew Yates <andrewyates.name@gmail.com>
-# Copyright 2026 Andrew Yates | License: Apache-2.0
+# Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 #
 # See designs/2026-04-19-proving-llvm2-replaces-llvm.md for the binding design.
 # Every workstream (WS1-WS9) writes into `src/cmd/<ws>.rs`. No loose scripts.

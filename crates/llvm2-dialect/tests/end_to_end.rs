@@ -1,7 +1,7 @@
 // llvm2-dialect - End-to-end progressive lowering test
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Proof-of-concept end-to-end test: build a `verif.*` function, lower it
 //! through `tmir.*` and `machir.*`, and emit a `MachFunction`.

@@ -1,7 +1,7 @@
 // llvm2-fuzz/src/bin/csmith_driver.rs - csmith differential driver
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Wraps external `csmith` to generate a random C program per iteration,
 // compiles it with clang -O0 -S -emit-llvm (oracle producing LLVM IR),

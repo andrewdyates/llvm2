@@ -1,7 +1,7 @@
 // llvm2-codegen/benches/compile_speed.rs - Compilation speed benchmark suite
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Comprehensive compilation speed benchmarks measuring all pipeline phases:
 //   - ISel throughput (tMIR -> LIR via translate_module)

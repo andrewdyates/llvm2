@@ -1,7 +1,7 @@
 // fuzz/fuzz_targets/fuzz_compile_function.rs
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // libFuzzer target shadowing `panic_fuzz_compile.rs`. Derives a tMIR
 // function from `data`, lowers it, and compiles it via the full pipeline

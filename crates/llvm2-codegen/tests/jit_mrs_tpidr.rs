@@ -1,6 +1,6 @@
 // llvm2-codegen/tests/jit_mrs_tpidr.rs
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Part of #383 — first end-to-end exercise of the AArch64 TLS local-exec
 // primitive (MRS Xd, TPIDR_EL0). Compiles a MachFunction that reads

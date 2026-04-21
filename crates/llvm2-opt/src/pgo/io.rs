@@ -1,7 +1,7 @@
 // llvm2-opt/pgo/io.rs - .profdata writer + reader
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // v0 serializes as JSON via serde_json. When we upgrade to a binary wire
 // format, bump `PROFDATA_VERSION` in schema.rs; readers gated on the

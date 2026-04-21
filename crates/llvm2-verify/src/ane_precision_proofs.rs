@@ -1,7 +1,7 @@
 // llvm2-verify/ane_precision_proofs.rs - ANE FP16 precision verification proofs
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Proof obligations verifying that FP32-to-FP16 lowering on the Apple Neural
 // Engine preserves bounded precision. Each proof constructs a ProofObligation

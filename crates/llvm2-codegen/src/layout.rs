@@ -1,7 +1,7 @@
 // llvm2-codegen/layout.rs - Basic block layout pass
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Basic block layout pass for AArch64.
 //!

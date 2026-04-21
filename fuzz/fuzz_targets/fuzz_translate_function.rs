@@ -1,7 +1,7 @@
 // fuzz/fuzz_targets/fuzz_translate_function.rs
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // libFuzzer target shadowing `panic_fuzz_lower.rs`. Derives a minimal
 // well-formed tMIR function from the fuzzer's byte stream (any shape

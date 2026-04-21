@@ -1,7 +1,7 @@
 // llvm2-verify/tmir_semantics.rs - tMIR instruction semantics as SMT formulas
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Encodes tMIR instruction semantics as bitvector SMT expressions.
 // Each tMIR instruction maps to a pure function from input bitvectors

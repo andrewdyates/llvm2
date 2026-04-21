@@ -1,7 +1,7 @@
 // llvm2-verify/tco_proofs.rs - SMT proofs for tail call optimization correctness
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Proves that the tail call optimization pass (crates/llvm2-opt/src/tail_call.rs)
 // preserves program semantics. TCO replaces `BL target + RET` with `B target`

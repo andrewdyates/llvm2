@@ -1,7 +1,7 @@
 // llvm2-llvm-import / parser.rs
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Hand-written line-oriented LLVM IR text parser. See the crate README
 // for the supported subset and rationale for writing this instead of

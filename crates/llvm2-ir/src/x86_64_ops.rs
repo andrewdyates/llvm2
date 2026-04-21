@@ -1,7 +1,7 @@
 // llvm2-ir - x86-64 opcode definitions
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: ~/llvm-project-ref/llvm/lib/Target/X86/X86InstrInfo.td
 // Reference: Intel 64 and IA-32 Architectures Software Developer's Manual

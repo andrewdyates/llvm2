@@ -1,7 +1,7 @@
 // llvm2-codegen/x86_64/mod.rs - x86-64 target encoding modules
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! x86-64 (AMD64) instruction encoding and compilation pipeline.
 //!

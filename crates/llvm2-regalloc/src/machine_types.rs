@@ -1,7 +1,7 @@
 // llvm2-regalloc/machine_types.rs - Machine-level types for register allocation
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Machine-level type definitions used by the register allocator.
 //!

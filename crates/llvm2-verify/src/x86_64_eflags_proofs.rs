@@ -1,7 +1,7 @@
 // llvm2-verify/x86_64_eflags_proofs.rs - x86-64 EFLAGS direct proof obligations
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Direct z4 proof obligations for x86-64 CMP/SUB flag writes (SF/ZF/CF/OF).
 //

@@ -1,7 +1,7 @@
 // llvm2-verify/tests/z4_prove_smoke.rs - z4-prove feature smoke tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // This test file is gated on the `z4-prove` cargo feature (see
 // `crates/llvm2-verify/Cargo.toml`). It is the entry point for the

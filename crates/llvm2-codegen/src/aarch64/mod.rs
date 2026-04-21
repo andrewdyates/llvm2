@@ -1,7 +1,7 @@
 // llvm2-codegen/aarch64/mod.rs - AArch64 target encoding modules
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! AArch64 (ARM64) instruction encoding.
 //!

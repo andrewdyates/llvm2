@@ -1,7 +1,7 @@
 // Integration test: CegisSuperoptPass cache hit/miss + MachinePass wiring.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // tla2 supremacy blocker 8 (issue #395): repeat compilations of the same
 // (function, target, cpu, features) tuple must reuse cached CEGIS results.

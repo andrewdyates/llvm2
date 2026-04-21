@@ -1,7 +1,7 @@
 // aggregate_pipeline.rs — O0/O1/O2/O3 regression for aggregates (#391)
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Verify that aggregate-style code patterns (struct field addressing,
 //! array element addressing, aggregate loads/stores) survive every

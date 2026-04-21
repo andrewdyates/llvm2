@@ -1,7 +1,7 @@
 // llvm2-verify/aarch64_semantics.rs - AArch64 instruction semantics as SMT formulas
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Encodes AArch64 instruction semantics as bitvector SMT expressions.
 // Each instruction maps to a pure function from input bitvectors to output

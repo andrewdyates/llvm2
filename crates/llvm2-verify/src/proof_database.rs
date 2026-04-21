@@ -1,7 +1,7 @@
 // llvm2-verify/proof_database.rs - Unified proof obligation database
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Consolidates all proof obligation registries across llvm2-verify into a
 // single queryable database. Previously, proofs were scattered across 8+

@@ -1,7 +1,7 @@
 // llvm2-dialect - machir.* -> llvm2_ir::MachFunction adapter
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Translate a fully-lowered `machir.*` [`DialectFunction`] into a
 //! `llvm2_ir::MachFunction`. This is the v1 bridge that lets the dialect

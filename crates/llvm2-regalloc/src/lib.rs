@@ -1,7 +1,7 @@
 // llvm2-regalloc - Register allocation for LLVM2
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Register allocation for the LLVM2 verified compiler backend.
 //!

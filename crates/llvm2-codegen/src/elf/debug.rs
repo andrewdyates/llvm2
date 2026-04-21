@@ -1,7 +1,7 @@
 // llvm2-codegen/elf/debug.rs - DWARF debug sections and ELF metadata stubs
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: DWARF Debugging Information Format Version 5 (2017-02-13)
 // Reference: System V ABI, ELF-64 Object File Format (section groups, program headers)

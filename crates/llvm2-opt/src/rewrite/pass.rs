@@ -1,7 +1,7 @@
 // llvm2-opt - Declarative rewrite as a MachinePass
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! [`DeclarativeRewritePass`] wraps a [`RewriteEngine`] behind the
 //! [`MachinePass`] trait so it can be plugged into the existing

@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/xxh3_main_loop_tmir.rs - xxh3 main-loop primitive as tMIR
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Implements the xxh3 bulk-hashing main loop primitive as tMIR and verifies
 // that LLVM2's O2 pipeline compiles it to correct machine code. This is the

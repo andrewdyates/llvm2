@@ -1,7 +1,7 @@
 // llvm2-verify/x86_64_function_verifier.rs - x86-64 function-level verification
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Provides verify_x86_64_function(): given an X86ISelFunction, walk every
 // instruction, map each X86Opcode to a proof obligation from the

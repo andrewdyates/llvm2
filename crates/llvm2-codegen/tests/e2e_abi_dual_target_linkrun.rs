@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_abi_dual_target_linkrun.rs -- link+run ABI fixture (#466)
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Companion to `e2e_abi_dual_target.rs`. That sibling file stops at
 // disassembly-level assertions ("the ABI surface looks right"). #466 AC-4

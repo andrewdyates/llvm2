@@ -1,7 +1,7 @@
 // llvm2-verify/tests/full_proof_suite.rs - Full ProofDatabase verification
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Integration test that constructs the complete ProofDatabase, runs
 // VerificationRunner.run_all() against every proof obligation, and

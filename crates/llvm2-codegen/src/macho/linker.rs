@@ -1,7 +1,7 @@
 // llvm2-codegen/macho/linker.rs - Mach-O linker: read .o files, resolve symbols, emit executables
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Minimal Mach-O linker for LLVM2-generated object files.
 //!

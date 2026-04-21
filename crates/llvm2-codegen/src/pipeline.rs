@@ -1,7 +1,7 @@
 // llvm2-codegen/pipeline.rs - End-to-end compilation pipeline
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Wires together all LLVM2 crates into a single entry point:
 //   tMIR -> ISel -> Optimization -> RegAlloc -> Frame Lowering -> Encoding -> Mach-O

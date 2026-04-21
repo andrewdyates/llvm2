@@ -1,7 +1,7 @@
 // llvm2-dialect - Sample `machir` dialect (AArch64 facade)
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Minimal `machir` dialect wrapping a small subset of `AArch64Opcode`.
 //!

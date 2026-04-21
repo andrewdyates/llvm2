@@ -1,7 +1,7 @@
 // llvm2-verify/rule_discovery.rs - AI-native automatic rule discovery
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Bridges AI agent proposals to the solver verification pipeline. AI agents
 // propose optimization rules as (pattern, replacement) pairs. The CEGIS loop

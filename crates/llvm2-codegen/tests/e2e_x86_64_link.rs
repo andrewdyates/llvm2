@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_x86_64_link.rs - x86-64 link-and-run E2E tests via Rosetta 2
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // End-to-end tests that compile x86-64 ISel functions and tMIR functions to
 // Mach-O .o files, link them with C drivers using `cc -arch x86_64`, and run

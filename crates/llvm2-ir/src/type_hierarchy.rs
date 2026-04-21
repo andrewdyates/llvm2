@@ -1,7 +1,7 @@
 // llvm2-ir/type_hierarchy.rs - Documentation of the type hierarchy across crates
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! # LLVM2 Type Hierarchy Documentation
 //!

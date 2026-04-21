@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/tla2_bfs_minimal.rs - minimal tla2 BFS kernel as tMIR
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Minimal end-to-end integration test for the tla2 model-checker BFS backend.
 // Verifies compile-time-offset i64 array load/store, runtime-index i64 GEP,

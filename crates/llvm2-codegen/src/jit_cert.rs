@@ -1,7 +1,7 @@
 // llvm2-codegen/jit_cert.rs - Proof certificates attached to JIT buffers
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Proof certificates for JIT-compiled functions (issue #348).
 //!

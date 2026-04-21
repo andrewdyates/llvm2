@@ -1,7 +1,7 @@
 // llvm2-lower/smulh_idiom.rs - AArch64 SMULH idiom detection
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Pre-ISel detection of the canonical i128-widened signed-multiply-high
 //! idiom.

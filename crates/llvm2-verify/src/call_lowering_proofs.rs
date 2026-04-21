@@ -1,7 +1,7 @@
 // llvm2-verify/call_lowering_proofs.rs - SMT proofs for call lowering correctness
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Proves that call lowering (function calls and returns) in llvm2-lower
 // preserves program semantics. Call lowering moves arguments into ABI-specified

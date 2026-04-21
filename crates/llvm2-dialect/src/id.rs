@@ -1,7 +1,7 @@
 // llvm2-dialect - Typed identifiers for dialects, ops, values, blocks.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Typed `u16`/`u32` wrappers used throughout the dialect framework.
 

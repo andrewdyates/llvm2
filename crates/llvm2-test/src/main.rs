@@ -1,7 +1,7 @@
 // llvm2-test — unified test and verification CLI entry point.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // This binary is the ONLY entry point for every workstream (WS1-WS9) in the
 // "Proving LLVM2 replaces LLVM for Rust" program. See

@@ -1,7 +1,7 @@
 // llvm2-ws2-import — WS2 driver helper.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reads a `.ll` file, imports it to `tmir::Module`, and compiles through
 // `llvm2-codegen` to a Mach-O object file.

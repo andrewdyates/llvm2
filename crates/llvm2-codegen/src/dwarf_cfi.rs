@@ -1,7 +1,7 @@
 // llvm2-codegen - DWARF CFI (Call Frame Information) for AArch64 and x86-64 macOS
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: DWARF 5 spec, Section 6.4 (Call Frame Information)
 // Reference: ~/llvm-project-ref/llvm/lib/MC/MCDwarf.cpp

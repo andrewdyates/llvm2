@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_abi_dual_target.rs — Cross-target ABI fixture (#466)
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // tla2-shaped ABI fixture: compile one tMIR function through both AArch64
 // (AAPCS64) and x86-64 (SysV AMD64) dispatchers, then assert the calling-

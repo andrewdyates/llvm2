@@ -1,7 +1,7 @@
 // llvm2-verify/verification_runner.rs - Bulk proof verification with reporting
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Wires the ProofDatabase into the verification pipeline. Provides
 // VerificationRunner for running all proofs in the database and

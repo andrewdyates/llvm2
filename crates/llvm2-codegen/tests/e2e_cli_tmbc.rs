@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_cli_tmbc.rs - E2E test for the binary tMIR bitcode (.tmbc) wire format pipeline
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Tests the full binary bitcode pipeline:
 //   1. Build a tMIR module programmatically using the builder API

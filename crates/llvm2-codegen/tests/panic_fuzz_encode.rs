@@ -2,7 +2,7 @@
 // Property-based panic-fuzz harness for `encode_instruction` (AArch64).
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Part of #387 (proptest panic-fuzz) / Part of #372 (Crash-free codegen) /
 // Part of #450 (widen opcode coverage >= 80%).

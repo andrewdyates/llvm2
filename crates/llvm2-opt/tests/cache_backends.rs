@@ -1,7 +1,7 @@
 // Integration test: cache backend semantics (InMemory + File).
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Verifies the miss → put → hit lifecycle on both backends, and that the
 // on-disk backend survives across two FileCache constructions on the same

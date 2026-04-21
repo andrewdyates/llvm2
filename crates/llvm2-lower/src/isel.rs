@@ -1,7 +1,7 @@
 // llvm2-lower/isel.rs - AArch64 instruction selection (Phase 1: tMIR -> MachIR)
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // *** This is instruction selection, not machine code emission. ***
 // Despite naming similarity, this module is unrelated to `llvm2-codegen/lower.rs`.

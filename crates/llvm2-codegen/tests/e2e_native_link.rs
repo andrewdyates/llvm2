@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_native_link.rs - Native Mach-O linker runnable E2E test
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // T1 prototype for issue #328: build a .o, link it into a Mach-O MH_EXECUTE
 // with our native linker (no system ld, no cc), write to disk, execute it,

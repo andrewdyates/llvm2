@@ -1,7 +1,7 @@
 // Golden help-text snapshot tests for `llvm2-test`.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // The snapshots under `tests/snapshots/` are the stable contract with
 // operators + CI — CI fails on any un-committed drift. Regenerate via:

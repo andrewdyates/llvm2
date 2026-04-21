@@ -1,7 +1,7 @@
 // llvm2-dialect - Dialect framework + progressive lowering
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Dialect framework for LLVM2.
 //!

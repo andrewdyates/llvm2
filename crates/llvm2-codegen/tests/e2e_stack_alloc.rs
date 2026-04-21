@@ -2,7 +2,7 @@
 // through the full tMIR pipeline (Alloc/Store/Load)
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // These tests exercise stack allocation (Alloc/Store/Load) through the
 // complete tMIR-to-binary pipeline:

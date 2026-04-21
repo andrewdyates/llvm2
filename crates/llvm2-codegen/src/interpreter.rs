@@ -1,7 +1,7 @@
 // llvm2-codegen/src/interpreter.rs - tMIR direct interpreter for golden truth validation
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // This module provides a direct interpreter for tMIR programs. It evaluates
 // tMIR instructions without any codegen, lowering, or optimization — serving

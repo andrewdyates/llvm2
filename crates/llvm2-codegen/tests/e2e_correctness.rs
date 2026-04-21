@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_correctness.rs - Correctness validation tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // These tests verify that LLVM2-compiled functions produce CORRECT computed
 // results, not just valid binaries. Each test checks multiple inputs and

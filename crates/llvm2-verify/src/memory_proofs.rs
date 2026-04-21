@@ -1,7 +1,7 @@
 // llvm2-verify/memory_proofs.rs - Array-based SMT memory model for Load/Store verification
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Verifies tMIR Load/Store lowering to AArch64 LDR/STR using SMT array theory.
 // Memory is modeled as Array(BitVec64, BitVec8) — byte-addressable, little-endian.

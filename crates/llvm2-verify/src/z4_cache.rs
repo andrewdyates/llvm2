@@ -1,7 +1,7 @@
 // llvm2-verify/z4_cache.rs - Persistent result cache for the z4 bridge
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: Task 3 of epic #407 / issue #420.
 //

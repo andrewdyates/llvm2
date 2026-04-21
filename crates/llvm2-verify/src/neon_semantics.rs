@@ -1,7 +1,7 @@
 // llvm2-verify/neon_semantics.rs - AArch64 NEON SIMD instruction semantics
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Encodes AArch64 NEON (Advanced SIMD) instruction semantics as bitvector
 // SMT expressions using lane decomposition. Each NEON instruction operates

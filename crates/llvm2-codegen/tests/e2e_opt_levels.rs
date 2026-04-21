@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_opt_levels.rs - Cross-optimization-level correctness tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // These tests verify that LLVM2-compiled functions produce CORRECT results at
 // ALL optimization levels (O0, O1, O2, O3). For each test function, we compile

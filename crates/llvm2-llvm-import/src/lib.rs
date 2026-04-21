@@ -1,7 +1,7 @@
 // llvm2-llvm-import / lib.rs
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Minimal LLVM-IR text (.ll) -> tMIR importer. See crate-level README
 // and `Cargo.toml` for scope and motivation (WS2, issue #439).

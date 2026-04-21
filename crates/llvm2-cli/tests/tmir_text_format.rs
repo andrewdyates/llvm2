@@ -1,7 +1,7 @@
 // llvm2-cli/tests/tmir_text_format.rs - Integration tests for .tmir text I/O (#413)
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Per `designs/2026-04-16-tmir-transport-architecture.md` Layer 3 and
 // issue #413, LLVM2 now:

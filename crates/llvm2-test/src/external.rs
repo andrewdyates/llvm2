@@ -1,7 +1,7 @@
 // Typed wrappers around every external tool `llvm2-test` may invoke.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Only `shell.rs` and this module may construct a subprocess. Any other
 // file doing so fails `llvm2-test ratchet shell-isolation`.

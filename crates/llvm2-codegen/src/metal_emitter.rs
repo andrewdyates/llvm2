@@ -1,7 +1,7 @@
 // llvm2-codegen/metal_emitter.rs - Metal Shading Language (MSL) kernel emitter
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Generates Metal compute kernel source text from GpuKernelShape and kernel
 // pattern descriptors. Phase 1 of the Metal emission pipeline (MSL source;

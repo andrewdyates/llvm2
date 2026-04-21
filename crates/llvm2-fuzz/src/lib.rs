@@ -1,7 +1,7 @@
 // llvm2-fuzz - Differential fuzzing for LLVM2
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Differential fuzzing infrastructure for LLVM2. Three drivers live in
 // `src/bin/*.rs`; shared helpers (PRNG, tMIR generation, JSON run log

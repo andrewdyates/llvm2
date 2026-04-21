@@ -1,7 +1,7 @@
 // llvm2-verify/x86_64_lowering_proofs.rs - x86-64 lowering rule proof obligations
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Defines proof obligations for tMIR -> x86-64 lowering rules and verifies
 // semantic equivalence using the same ProofObligation framework as AArch64.

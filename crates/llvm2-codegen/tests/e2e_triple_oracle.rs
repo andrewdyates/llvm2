@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_triple_oracle.rs - Triple oracle validation
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Three-way differential testing: every function is evaluated by THREE
 // independent truth sources and all three must agree:

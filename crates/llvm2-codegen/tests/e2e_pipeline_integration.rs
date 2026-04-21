@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_pipeline_integration.rs - End-to-end pipeline integration tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Integration tests exercising the full compilation path from tMIR to Mach-O
 // with coverage of:

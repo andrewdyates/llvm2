@@ -1,7 +1,7 @@
 // llvm2-codegen/x86_64/pipeline.rs - x86-64 end-to-end compilation pipeline
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: System V AMD64 ABI (https://refspecs.linuxbase.org/elf/x86_64-abi-0.99.pdf)
 // Reference: ~/llvm-project-ref/llvm/lib/Target/X86/X86FrameLowering.cpp

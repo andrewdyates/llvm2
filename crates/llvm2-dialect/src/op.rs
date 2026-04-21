@@ -1,7 +1,7 @@
 // llvm2-dialect - DialectOp + Attribute
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! [`DialectOp`] and [`Attribute`]: the SSA op wrapper and its static metadata.
 

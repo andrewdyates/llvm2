@@ -1,7 +1,7 @@
 // llvm2-codegen/macho/constants.rs - Mach-O format constants
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/mach-o/loader.h
 // Reference: /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/mach-o/arm64/reloc.h

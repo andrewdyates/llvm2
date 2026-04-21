@@ -1,6 +1,6 @@
 // llvm2-ir/tls.rs - Thread-local storage access models
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! TLS access models.
 //!

@@ -1,7 +1,7 @@
 // llvm2-opt - Rule struct + builder
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! A [`Rule`] bundles a matcher, a list of constraints, a rewriter, a
 //! name, and a benefit score.

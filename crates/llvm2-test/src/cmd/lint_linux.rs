@@ -1,7 +1,7 @@
 // `llvm2-test lint-linux` — cross-compile check for Linux targets.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Cross-compilation lint for the `#[cfg(target_os = "linux")]` paths in
 //! `llvm2-codegen` (especially `src/jit.rs`).

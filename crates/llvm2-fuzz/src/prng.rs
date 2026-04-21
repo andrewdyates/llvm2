@@ -1,7 +1,7 @@
 // llvm2-fuzz/src/prng.rs - Deterministic PRNG for reproducible campaigns
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // SplitMix64: tiny, well-tested, no_std-friendly PRNG. Seed one, get bits.
 // Reference: https://xorshift.di.unimi.it/splitmix64.c

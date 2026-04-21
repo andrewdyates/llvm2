@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/jit_profiling.rs - End-to-end JIT profiling hook tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Exercises the JIT call-count profiling hook from the public API surface.
 // Covers:

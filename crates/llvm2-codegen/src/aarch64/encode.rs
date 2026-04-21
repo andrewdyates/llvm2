@@ -1,7 +1,7 @@
 // llvm2-codegen/aarch64/encode.rs - Unified AArch64 instruction encoder
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Unified AArch64 instruction encoder.
 //!

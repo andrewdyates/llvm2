@@ -1,7 +1,7 @@
 // Shared JSON result schema for `llvm2-test`.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // See `designs/2026-04-19-proving-llvm2-replaces-llvm.md` section
 // "Structured results schema". Every result-emitting subcommand serializes

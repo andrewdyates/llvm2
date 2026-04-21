@@ -3,7 +3,7 @@
 // Regression tests for optimization convergence and termination.
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // These tests guard against infinite loops in the scheduler (cyclic DAG
 // dependencies) and CFG simplification (oscillating sub-passes). The bugs

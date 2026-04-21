@@ -1,7 +1,7 @@
 // llvm2-codegen/elf/symbol.rs - ELF64 symbol table and string table
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: System V ABI, "Symbol Table" section
 // Elf64_Sym layout (24 bytes):

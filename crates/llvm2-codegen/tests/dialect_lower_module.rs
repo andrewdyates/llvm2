@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/dialect_lower_module.rs - lower_module pipeline hook
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Integration test for LLVM2#433 / tMIR#428. Confirms that
 // `pipeline::dialect_lower_module` drives the full verif.* -> tmir.* ->

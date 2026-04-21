@@ -1,7 +1,7 @@
 // Symbolic execution: null-pointer-dereference detector
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Symbolic execution: null-pointer-dereference detector (Phase 1a).
 //!

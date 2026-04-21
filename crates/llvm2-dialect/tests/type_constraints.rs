@@ -1,7 +1,7 @@
 // llvm2-dialect - Type-constraint vocabulary tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Tests for the `TypeConstraint` vocabulary added per the coordination spec
 //! §5 (`designs/2026-04-18-aggregates-dialects-coordination.md`).

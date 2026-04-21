@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/jit_calling_convention_contract.rs
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //! Regression test that pins the #431 calling-convention contract. JIT-compiled
 //! tMIR functions must follow the host C ABI so that `std::mem::transmute` to
 //! `extern "C" fn(...)` is sound; the contract is defined in `crates/llvm2-codegen/src/jit.rs` module docs.

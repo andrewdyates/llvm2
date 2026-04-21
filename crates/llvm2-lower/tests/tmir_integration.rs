@@ -1,7 +1,7 @@
 // tmir_integration.rs - End-to-end tMIR -> adapter -> ISel integration tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 use llvm2_lower::adapter::{translate_function, translate_module, AdapterError, ProofContext};
 use llvm2_lower::function::Function;

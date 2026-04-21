@@ -1,7 +1,7 @@
 // fuzz/fuzz_targets/fuzz_macho_fixup.rs
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // libFuzzer target shadowing `panic_fuzz_macho_fixup.rs`. Feeds the raw
 // byte buffer into `MachOParser::parse` and, separately, synthesises a

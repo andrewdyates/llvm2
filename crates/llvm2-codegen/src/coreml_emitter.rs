@@ -1,7 +1,7 @@
 // llvm2-codegen/coreml_emitter.rs - CoreML MIL operation emitter for ANE targeting
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Generates CoreML Model Intermediate Language (MIL) operation graphs from
 // AneTensorShape and ANE operation descriptors. The MIL program is serialized

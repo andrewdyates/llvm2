@@ -1,7 +1,7 @@
 // llvm2-codegen/aarch64/encoding.rs - AArch64 instruction encoding
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! AArch64 binary instruction encoding.
 //!

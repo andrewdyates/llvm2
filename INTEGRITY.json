@@ -1,0 +1,1703 @@
+{
+  "build_attestation": {
+    "all_passed": false,
+    "bad_file_scan_passed": true,
+    "build_system": "cargo",
+    "cargo_check_passed": true,
+    "cargo_test_passed": false,
+    "projects_verified": [
+      "LLVM2"
+    ],
+    "rustc_version": "rustc 1.93.1 (01f6ddf75 2026-02-11)",
+    "target_triple": "aarch64-apple-macos"
+  },
+  "created_at": "2026-04-21T05:20:20Z",
+  "directories": {
+    "": "93551cc8fc3f0c1ef4949cabfaa41d16f60e5f40c4151b1cf6e6831b7ddb8c25",
+    "crates/": "d5a2dbb7de6a2ea3f3f3ff9059351ecb52990b5deafdde28e62458914541f4b6",
+    "crates/llvm2-cli/": "58e07afe243b34bf5046e9203b8195f97afd9909a694ac140ac7ecf818c7aa9b",
+    "crates/llvm2-cli/src/": "8701aea9a01353175859f20351dcf0690c942591d5c6b787113d678e4112f87f",
+    "crates/llvm2-cli/tests/": "5e87efbb19957e63e294c83c725037a342d591d0fb64099afd3a25f84573cc67",
+    "crates/llvm2-codegen/": "b28786a0a73a48162a8e24eb033746d1bd1584e72818ce0e708d2397b43df06e",
+    "crates/llvm2-codegen/benches/": "ecc373123808c0eac1c4ea4236412197145fac688411cc7af3bd413000f42668",
+    "crates/llvm2-codegen/benches/compare_inputs/": "729336cf730d95bfbdef56320ce7692d5c99e204083f26fa9da30c3e8ddf9703",
+    "crates/llvm2-codegen/src/": "6808f2376740b68c68e572e03a7fc4b68784e94be5def42bb978428eea0df6aa",
+    "crates/llvm2-codegen/src/aarch64/": "38f928c1fa99a636da5b80586a58d91844dca1a80ad5bad68953020991e38afd",
+    "crates/llvm2-codegen/src/elf/": "6d44aadccaad794f3812a922f985caf7897613a4aef020948aff8031a1bb5b0b",
+    "crates/llvm2-codegen/src/macho/": "60dafebbac7d97b5083e925a05d04be97141c045c6ceab7a43956e7949b95a4c",
+    "crates/llvm2-codegen/src/riscv/": "88283f89f66eacd94859edcf301b48523314e54b484fe94c2dc2dfd12b883042",
+    "crates/llvm2-codegen/src/x86_64/": "9cb88a6133bd5977443ee93b26489b916d8e8b9b498b7b3395160f3c596c309e",
+    "crates/llvm2-codegen/tests/": "eb7837a9e09df567914d87ab26911a7ccad4c8feaa3a1b90e79fc7ed3125b698",
+    "crates/llvm2-dialect/": "e6138f0bb91ed1741623284db64d7580a7c49a4618cee210d5501d1376cf2cf1",
+    "crates/llvm2-dialect/src/": "136362bbdb095da0838d7b9cf263bda677d00436aadaa8ad6127b3b4ec65abc8",
+    "crates/llvm2-dialect/src/dialects/": "9c511df5578c05aa6113d3803b93877ec61fe57093918a3a8ae40d019b5f8568",
+    "crates/llvm2-dialect/tests/": "9dad0d7f845f52052b715a5832064868c81544e1c0dba38c506823e2b649eae6",
+    "crates/llvm2-fuzz/": "cefd360eda0718b142fc60b3dcde9b378f9164095396599fcec280fa26b839c9",
+    "crates/llvm2-fuzz/src/": "98878875fac42bea18e5fbeb62274887eacbdb2cd498e3fd49a8ea2216e8d047",
+    "crates/llvm2-fuzz/src/bin/": "a203287e7522c839996f10c999cdb050dd97e8c7abf1b4c5af58fdd73af17cb7",
+    "crates/llvm2-gpu/": "d9af8fc4ec7d351b0a68b80f140a09940c1bdf317b71560505f15706085f226f",
+    "crates/llvm2-gpu/src/": "211208a06f4c9ba9562451321f11962166c0eda3e9c08110959abb636e4aeb9d",
+    "crates/llvm2-gpu/tests/": "afe06590bb036f5206485a054d1af0153b293fddebcfc5752ca072d3e9bbe0e4",
+    "crates/llvm2-ir/": "47e4f4f62abb6be5251303f1d14fb58feffa810183d8100be9112dd9b41d420f",
+    "crates/llvm2-ir/src/": "06da4118333434a9b00fc06b859b0dedebdba5d129bc57702be9a48aaf6f3733",
+    "crates/llvm2-ir/tests/": "0472218a733a0851478880f83d00ee9e46c0cc72c886ab307a7693c98976d58e",
+    "crates/llvm2-llvm-import/": "9b21fe5a0c8363e20729415e011dbddc757efa519a1349bbf76ce56e74b8ca97",
+    "crates/llvm2-llvm-import/src/": "6a98668ac7d98455be54b79c36ae47b99b9a5fc3c8c584e484042533d6b9273c",
+    "crates/llvm2-llvm-import/src/bin/": "502a7dd3fff08861dfd84a43285b41c5e80c7dd1c6477b95194a0d83cadc4f50",
+    "crates/llvm2-llvm-import/tests/": "2d805702818bf23d201a27eab5d80f1d578588ac42c17d967a6498cd6ea2c0a0",
+    "crates/llvm2-lower/": "68604076a8c5262a209a27fc12040f259e7bd324cb91933d7aef8873695babba",
+    "crates/llvm2-lower/src/": "41e8b1317b2b0dc054de70a40879f30ff91eecee1adb210eb862bd20db4c24d2",
+    "crates/llvm2-lower/tests/": "22dce71e4cdbaffbc173023f9fe3ccfe5baac689ece9add9ef1f07bc83a932c2",
+    "crates/llvm2-opt/": "93514c06d675a3a1a684aa2ccfe4bc26d783981990967abaf6e61a2b23a38910",
+    "crates/llvm2-opt/src/": "aa07b3cbe98605548823a1955744f443cf8839df4467a94a49059684bb7fdfbf",
+    "crates/llvm2-opt/src/pgo/": "6df7aee40c91388f1a7117327c24ff7d6b128dc8b48c450986df558ef7c74f96",
+    "crates/llvm2-opt/src/rewrite/": "dfe67c4014695e2c2b7412af7cc518231906dfc36b715f069f60094759733086",
+    "crates/llvm2-opt/tests/": "22f07b32721ad53c93f2d0270d0805a90fc75cea95bdeb15e9843eeac773c76f",
+    "crates/llvm2-regalloc/": "62d88cf7fcba7152e16ea0fffad505a2ed2dd9b212613e49d8fb7459815df3b3",
+    "crates/llvm2-regalloc/src/": "b78546b3575bb4e44b9e08c7771e36c1bfd48541a454aa22cf342fa5376fb408",
+    "crates/llvm2-test/": "b02b00c76da5a293cbabddcf3298025e23f01d663c15151ca77d36419247fc10",
+    "crates/llvm2-test/src/": "9b0abee47daa2dbad8bfb6d4cd616a9d2a9ed252a7bd2911f92c67f9c5532211",
+    "crates/llvm2-test/src/cmd/": "c2c829760cb6779d77d888f6eaa0cff7aeef4ba97f6c5641b4c2306d8f957671",
+    "crates/llvm2-test/tests/": "cdf1933f8fa29c6ce07a0c1d047c3739695b5c7db9f3c8ccc6306ca88140a1b4",
+    "crates/llvm2-test/tests/snapshots/": "4dba2f2a9ffa123b9278a87b69cc2e45e82366343739b203020a1e377e1907cb",
+    "crates/llvm2-verify/": "293b8b83ecd1b97559e28408e816a5445db597f1bc4186e5e677bc498ac3e94f",
+    "crates/llvm2-verify/src/": "3b3a508efaed06f0085da2c6880ae1c97b3eb4da8f4504dc5601311e971e74b6",
+    "crates/llvm2-verify/tests/": "b6df018d7931827bfae22f06b488b0c36560403a7089230cc864927b88394b58",
+    "crates/rustc_codegen_llvm2/": "bf9d80e4b85ad6a71a57fe514a8bc6cd02cce95f74a8cbb35d4c26ae58fbc586",
+    "crates/rustc_codegen_llvm2/examples/": "d70bf57d5d5c7800fbca4d179d062439f849ad4ef9982f5ceb5096370ac93b2f",
+    "crates/rustc_codegen_llvm2/src/": "805c05ac9be2e72495677845639e4ed81b5c8b89d59bcd52c5dee14d9c9374b6",
+    "crates/rustc_codegen_llvm2/tests/": "76eb2c91c6a81cc72c7a5f04178cc96b3d1f92e77eb62235e5741b839a361235",
+    "fuzz/": "cec54d33f3a92ddf2f48a36c27b573c7cec14a1b16b0331154a67aa1edc7f46e",
+    "fuzz/fuzz_targets/": "0fd914719e97d57851f9653f1a28f071dcb9acb3629611fc2c425a1bdb0a9930",
+    "ratchet/": "12ef39e3bf5c862d896ba9e5f416c4922c36a382ffe4dff8fdf11cb127dfdd71",
+    "tests/": "c49b4445e05b71b7ffd0f7fd75bc3ed1bb964660ecff14b540d43540060482bb",
+    "tests/fixtures/": "f255428c4e826ff71fc7d0a5b4a853dd706e8030ec63607e8fa72e7a86fda20c"
+  },
+  "file_count": 405,
+  "files": {
+    ".gitignore": {
+      "sha256": "8b89a8ffe91d19ae59b75fa4fb86ecee245588ac128f076f029fcc168758743e",
+      "size_bytes": 1263
+    },
+    "Cargo.lock": {
+      "sha256": "574433c6bd372c9522e0adb55869a969663611fe7baac16dd33a8a09cd243373",
+      "size_bytes": 63382
+    },
+    "Cargo.toml": {
+      "sha256": "1e2258fc88066e6599d9fc33990d9aae523971ff1e3d00f18c2a1c6da352ecd3",
+      "size_bytes": 2443
+    },
+    "LICENSE": {
+      "sha256": "27955ae9a657fb00072aa172075636a3778fbe579b7b9cc981af889533fec0de",
+      "size_bytes": 10795
+    },
+    "README.md": {
+      "sha256": "9c737fa47a9f06455cfd38f6cd2e09e6af4acd98f2137e71f12a8e9bb4b0e3b1",
+      "size_bytes": 14688
+    },
+    "crates/llvm2-cli/Cargo.toml": {
+      "sha256": "320a26fd1c8088057dff6200f9b53a8747d4c1ef364b8b772af7cc7b0018e48c",
+      "size_bytes": 932
+    },
+    "crates/llvm2-cli/src/emit_proofs.rs": {
+      "sha256": "6c034a385d7de64cd3fc884443be660196e40850b9eb6bce681d2dbd9e9efdf2",
+      "size_bytes": 12446
+    },
+    "crates/llvm2-cli/src/main.rs": {
+      "sha256": "d26ccde4de6377548d0c9f34c9aee5b379cbd7ecb9fc703f7a841818e12b4b01",
+      "size_bytes": 27569
+    },
+    "crates/llvm2-cli/tests/emit_proofs_flag.rs": {
+      "sha256": "0defc06643ab239b00caa65954d37de20aa931843cd6f6833e0e2fa5cc4162a9",
+      "size_bytes": 7056
+    },
+    "crates/llvm2-cli/tests/format_flag.rs": {
+      "sha256": "fb8400221b634d38af2fce8e4183d542d4c8ebd62e302b46d1fc009ff098fba9",
+      "size_bytes": 8806
+    },
+    "crates/llvm2-cli/tests/tmir_text_format.rs": {
+      "sha256": "32c3e396ddf073327afbfe9496b843dec83269a5b8041e15e514edadcb188422",
+      "size_bytes": 10534
+    },
+    "crates/llvm2-codegen/Cargo.toml": {
+      "sha256": "24c4dd41d7cd3f9de7b5657b74302877fc7280498b24d0afaadda297a983579b",
+      "size_bytes": 1205
+    },
+    "crates/llvm2-codegen/benches/compare_clang.rs": {
+      "sha256": "8beb6e4ef67c6e51e16a3f366fe1077b34b57da2f4c6f5b2495fe6197e551e09",
+      "size_bytes": 27238
+    },
+    "crates/llvm2-codegen/benches/compare_inputs/add.c": {
+      "sha256": "08832b27d9663d22ebd9b9cca63ac04955a3dc558e5738915001e4f23828929a",
+      "size_bytes": 225
+    },
+    "crates/llvm2-codegen/benches/compare_inputs/factorial.c": {
+      "sha256": "5ff2be6cc40aeb04521021a2de950aaa5cd78c41f619337d0afa66d06f23da78",
+      "size_bytes": 355
+    },
+    "crates/llvm2-codegen/benches/compare_inputs/fibonacci.c": {
+      "sha256": "efd9c4356ac38d24f233341a9333757c4827e91b39030b0cc59ba815f0532f5e",
+      "size_bytes": 398
+    },
+    "crates/llvm2-codegen/benches/compare_inputs/max.c": {
+      "sha256": "e7719c2cb2f11073dbcb1b936f913f28f1b9aab3c4fbf5c5f4a2fd8f2526fd47",
+      "size_bytes": 280
+    },
+    "crates/llvm2-codegen/benches/compare_inputs/trivial.c": {
+      "sha256": "b45e995a0211368dd96a27b8e4ec402480434d2847ff0d2ef37381576d7a021b",
+      "size_bytes": 209
+    },
+    "crates/llvm2-codegen/benches/compile_bench.rs": {
+      "sha256": "bd1d461a22d7bf2bb19abf635788c93f748566aac43c578a8b82419e1f412d55",
+      "size_bytes": 21861
+    },
+    "crates/llvm2-codegen/benches/compile_speed.rs": {
+      "sha256": "c4179e53b88ddd959f6c5bca19a6159c524fb44bd278dd644c68f0616a1ad6f8",
+      "size_bytes": 36196
+    },
+    "crates/llvm2-codegen/src/aarch64/encode.rs": {
+      "sha256": "2ac3d8a115b9f5517038138d169823e44fa527d97a94fce2364b081a4f42d417",
+      "size_bytes": 237894
+    },
+    "crates/llvm2-codegen/src/aarch64/encoding.rs": {
+      "sha256": "d6fffc97571a1597aca150c123318b503a6aaf137f55e59ab2657abb9b5c9f62",
+      "size_bytes": 37383
+    },
+    "crates/llvm2-codegen/src/aarch64/encoding_fp.rs": {
+      "sha256": "46c00bb990253f9fcd20a9a904d8fed083039219ba03cb8fc246c415cbac352f",
+      "size_bytes": 15968
+    },
+    "crates/llvm2-codegen/src/aarch64/encoding_mem.rs": {
+      "sha256": "654f8c044c564946c8b98bf09fcc659e8f6ab0b3c9442234aeff1f4915fba35d",
+      "size_bytes": 23969
+    },
+    "crates/llvm2-codegen/src/aarch64/encoding_neon.rs": {
+      "sha256": "6446be9b4f9026bd45f4ffdc36bab34c15fc15dd127a0fbfc4329c24b6658916",
+      "size_bytes": 29260
+    },
+    "crates/llvm2-codegen/src/aarch64/mod.rs": {
+      "sha256": "05a200dbe4e3e52ab64b6f5cfe9bf6e23589b1d7e9b6b9edfdc694bff2ff63a3",
+      "size_bytes": 692
+    },
+    "crates/llvm2-codegen/src/compiler.rs": {
+      "sha256": "21a773558154a6437dcaaf9a3bbe66c0d4878409f63af3392d0c436a1b118c33",
+      "size_bytes": 71956
+    },
+    "crates/llvm2-codegen/src/constant_pool.rs": {
+      "sha256": "24ccb522048dde6f2b438d42ad1d07a788a762a0e7c9500aaada30eefafe4b4c",
+      "size_bytes": 13077
+    },
+    "crates/llvm2-codegen/src/coreml_emitter.rs": {
+      "sha256": "e5aee61ed97a7e683ef46c6311e3ecc37c136d94cc0e2035741049d6c81bee8e",
+      "size_bytes": 61492
+    },
+    "crates/llvm2-codegen/src/dialect_pipeline.rs": {
+      "sha256": "410e212b7f78b8280cf55785242e12583655f845a6aa1d8350d6141e8b5f9093",
+      "size_bytes": 6142
+    },
+    "crates/llvm2-codegen/src/dwarf_cfi.rs": {
+      "sha256": "5d2903e7ae7cadc4ff663f79fcd0e6068f222662d6004297d43fdc0d1ad681ae",
+      "size_bytes": 65956
+    },
+    "crates/llvm2-codegen/src/dwarf_info.rs": {
+      "sha256": "bb0a9c94c9e9bbf12cfc5b56dfe726f76639e9efce6570f23539dc194e07052c",
+      "size_bytes": 118132
+    },
+    "crates/llvm2-codegen/src/elf/constants.rs": {
+      "sha256": "57d9d252dbfdb683ccb62948d8a6bba7dba4b004488a67b9c21e4fc3d2080ac4",
+      "size_bytes": 7206
+    },
+    "crates/llvm2-codegen/src/elf/debug.rs": {
+      "sha256": "2e271ba823fb6700f2bf75ca4fd7af14fee87789f3f885cc7668829cad72a50e",
+      "size_bytes": 24015
+    },
+    "crates/llvm2-codegen/src/elf/header.rs": {
+      "sha256": "dc112547d251762052e43cccad9cd21332b2df271ce7bfe589bceef193f3d34b",
+      "size_bytes": 7175
+    },
+    "crates/llvm2-codegen/src/elf/mod.rs": {
+      "sha256": "2e2ec8951f8e7317f2a76f6131b1268deebad0b2bcc938af73ab4a5ae6faf2db",
+      "size_bytes": 1206
+    },
+    "crates/llvm2-codegen/src/elf/reloc.rs": {
+      "sha256": "979e02a6add2b912c774bf1c5f09e6aae11650db69b798638840700e84e5b4b5",
+      "size_bytes": 14106
+    },
+    "crates/llvm2-codegen/src/elf/section.rs": {
+      "sha256": "ed1807fbf6f22fe0e78580584e41e65ca9efaab721d7ee97c7c13578b93d2a13",
+      "size_bytes": 9308
+    },
+    "crates/llvm2-codegen/src/elf/symbol.rs": {
+      "sha256": "b0398c23f671df88c12c13081b9c1dedbfd1e8b732a2422b95c1e7be7d84b24c",
+      "size_bytes": 8122
+    },
+    "crates/llvm2-codegen/src/elf/writer.rs": {
+      "sha256": "b53d408dcbe69ba5a4c4bf50d0704a29ea30fd8e3a10bec8c9409fdf567696f4",
+      "size_bytes": 43849
+    },
+    "crates/llvm2-codegen/src/error.rs": {
+      "sha256": "588477e79d0f8f3e994a29d2c6076a5f6a8e2b107dbd0889518629b6cd81d0f0",
+      "size_bytes": 1331
+    },
+    "crates/llvm2-codegen/src/exception_handling.rs": {
+      "sha256": "8226ab37ff55ea9ba219d6db77b62fa67bd6f6b51d09e66e2e48cba1034933fd",
+      "size_bytes": 56751
+    },
+    "crates/llvm2-codegen/src/frame.rs": {
+      "sha256": "695b5cf9af6b5aaaf976cb03bf484e45dbecd739fce2aa5bd5ace3a4308f05e7",
+      "size_bytes": 90881
+    },
+    "crates/llvm2-codegen/src/interpreter.rs": {
+      "sha256": "53a569f6dee168cc8dd5aca7e321afc6f4b48001dc5e8517f9f5c36d8bbd72e4",
+      "size_bytes": 48675
+    },
+    "crates/llvm2-codegen/src/jit.rs": {
+      "sha256": "4c256b4368e1e2957e1ecef7b977c07d9d3d9c1813e6b92cfcaffac9768a7d37",
+      "size_bytes": 190627
+    },
+    "crates/llvm2-codegen/src/jit_cert.rs": {
+      "sha256": "b34a3252944a9d4cceb84c5683b13833e6027bc90c0416075fcfe3839a9a3041",
+      "size_bytes": 19330
+    },
+    "crates/llvm2-codegen/src/layout.rs": {
+      "sha256": "a8f3dd09269f815d59a77f437e9cf964e922996816c11a8b66d0c8adcfec7f78",
+      "size_bytes": 17828
+    },
+    "crates/llvm2-codegen/src/lib.rs": {
+      "sha256": "3d2f9da959a27355a1af6abfb99d57a1cc0007789ef410ff69a113d663106aa5",
+      "size_bytes": 2604
+    },
+    "crates/llvm2-codegen/src/lower.rs": {
+      "sha256": "fb6849053dc5dbb50625363293a53cfa923411b35868f73db78982da6fb2916e",
+      "size_bytes": 86006
+    },
+    "crates/llvm2-codegen/src/macho/constants.rs": {
+      "sha256": "8d23474c850076eeedcf5b223ae7b94d12053217d57ebdb5d422f3be315db8d0",
+      "size_bytes": 6439
+    },
+    "crates/llvm2-codegen/src/macho/fixup.rs": {
+      "sha256": "6e8112dd8738a11b0665bbc894e5181c86c82366b08244e75f143ca9efc09b99",
+      "size_bytes": 26995
+    },
+    "crates/llvm2-codegen/src/macho/header.rs": {
+      "sha256": "ffc0dc8449752e679799b6d1ea588dfb4d922b3e990fa131b20c37b79c79e4f0",
+      "size_bytes": 4501
+    },
+    "crates/llvm2-codegen/src/macho/linker.rs": {
+      "sha256": "be1e1a467fb08f22abd62a7c9a5bcdc6e959951b7289c2c98520ad6bd0ef77d3",
+      "size_bytes": 119311
+    },
+    "crates/llvm2-codegen/src/macho/mod.rs": {
+      "sha256": "f821bd3e193a74b8c691c12e0cfa48a01c28b895b103dd7f09b8cb7a73a980ab",
+      "size_bytes": 1420
+    },
+    "crates/llvm2-codegen/src/macho/reloc.rs": {
+      "sha256": "48ed34f99d946ea2e9a2a6a8864f751802eeaf60544616228809af77e114c2d7",
+      "size_bytes": 23294
+    },
+    "crates/llvm2-codegen/src/macho/section.rs": {
+      "sha256": "85db71d75083d9fc014694a02855d2842f198214cf64c74d558e6e95d880faf1",
+      "size_bytes": 7538
+    },
+    "crates/llvm2-codegen/src/macho/symbol.rs": {
+      "sha256": "fe519837dbf008629abf6cfbffa43854a931f8c9afbb18d987a476d10eda2388",
+      "size_bytes": 26508
+    },
+    "crates/llvm2-codegen/src/macho/writer.rs": {
+      "sha256": "e3fc9bc659f0075415626d988a5abc749966ecf0d9bbd6344b92b8dafaede5c9",
+      "size_bytes": 47336
+    },
+    "crates/llvm2-codegen/src/macho/x86_64_reloc.rs": {
+      "sha256": "0811bc0fe8bfa243137dc6284ec3fdce36aeb17fec99dbcd2e0aabc14e037e17",
+      "size_bytes": 20316
+    },
+    "crates/llvm2-codegen/src/metal_emitter.rs": {
+      "sha256": "dadc87448e17ed0e02c7e20b0e311a7d49fc51db17daf567daef4551a807ac12",
+      "size_bytes": 101905
+    },
+    "crates/llvm2-codegen/src/pipeline.rs": {
+      "sha256": "88b90cee58ae687410bc692af51cd3efa9b319fc3ca7d95fd6a651daccc2d5a0",
+      "size_bytes": 193783
+    },
+    "crates/llvm2-codegen/src/relax.rs": {
+      "sha256": "355484101d93b3b8a603eb451c2dea679ff27defb7d2dfabbc6d47e4b2b50ff4",
+      "size_bytes": 63460
+    },
+    "crates/llvm2-codegen/src/riscv/encode.rs": {
+      "sha256": "50a2f9414359f74c13d6710fc149d5ac3f82481190e38cfd15586837739b08f4",
+      "size_bytes": 42164
+    },
+    "crates/llvm2-codegen/src/riscv/mod.rs": {
+      "sha256": "5af4c2c624fccf9567db93e3543e465263059c2a259dec67c91f7ee6cc7eef90",
+      "size_bytes": 1662
+    },
+    "crates/llvm2-codegen/src/riscv/pipeline.rs": {
+      "sha256": "aea42b7183526fcf4e7d6f692c9dd3ce5a0530fc3a16ea003fb2ebd7d8da1767",
+      "size_bytes": 51666
+    },
+    "crates/llvm2-codegen/src/target.rs": {
+      "sha256": "da83995934cd7b08363d5577dc7762c0f231330eac50ec5a3a9d3ec3d67e2133",
+      "size_bytes": 11465
+    },
+    "crates/llvm2-codegen/src/unwind.rs": {
+      "sha256": "25c325c2ced7c0e5971f0e141c24b6e41fbe712a0004b9d133a108d7a103ad33",
+      "size_bytes": 27794
+    },
+    "crates/llvm2-codegen/src/x86_64/encode.rs": {
+      "sha256": "f78c365bf7e56b795b8b5e7133059d60e5163d2d484484f6e251b80d76555cac",
+      "size_bytes": 175788
+    },
+    "crates/llvm2-codegen/src/x86_64/mod.rs": {
+      "sha256": "6fe0fd456e16882e1e8dd01f0dd20bd642281e97bdf3a7dddc79e44d4dadcd41",
+      "size_bytes": 2316
+    },
+    "crates/llvm2-codegen/src/x86_64/pipeline.rs": {
+      "sha256": "e1870c7e4f6ec7a9b497cbb823f4d3f4601b46ed287c274a3e3981f7427546c0",
+      "size_bytes": 151991
+    },
+    "crates/llvm2-codegen/tests/aarch64_encoding.rs": {
+      "sha256": "fc89bfb501bf4ac0ca706f4413aa61884e59ff243abc02e05156cf92f4b846c9",
+      "size_bytes": 44399
+    },
+    "crates/llvm2-codegen/tests/abi_many_args_e2e.rs": {
+      "sha256": "c371763c56663bd530bd2537dd5daa475fdc3a8645b760cfe3109d871bfb6380",
+      "size_bytes": 14561
+    },
+    "crates/llvm2-codegen/tests/compact_unwind_integration.rs": {
+      "sha256": "ad769a5b67a5c13cead99a27696cc2cb83dc6a92b9b04f5e7d5bf8102cacce5b",
+      "size_bytes": 8484
+    },
+    "crates/llvm2-codegen/tests/dialect_lower_module.rs": {
+      "sha256": "ee9fe58ebe63b9aa7fcbabbfad96eeb61ecda76612a22ebe776f3feda476608f",
+      "size_bytes": 3965
+    },
+    "crates/llvm2-codegen/tests/e2e_aarch64_link.rs": {
+      "sha256": "bc0d5ed85794665bd66f72254543e550856fc88b28c6c0dbce48168979af0e14",
+      "size_bytes": 89833
+    },
+    "crates/llvm2-codegen/tests/e2e_abi_dual_target.rs": {
+      "sha256": "21e6d7f70d7b1daad245f3acdea9736263e0acc35e6a083c838f1ff31b16200b",
+      "size_bytes": 15526
+    },
+    "crates/llvm2-codegen/tests/e2e_abi_dual_target_linkrun.rs": {
+      "sha256": "2b5c73b92325c39d8e41db49d740f373607f6b944f16cbd1aec390d6d5a37108",
+      "size_bytes": 21968
+    },
+    "crates/llvm2-codegen/tests/e2e_bridge.rs": {
+      "sha256": "f80ed2ca6a4e59dd29966a277cb383d39bd2c900a37ae15797b7aa1756158df1",
+      "size_bytes": 23289
+    },
+    "crates/llvm2-codegen/tests/e2e_cegis_superopt.rs": {
+      "sha256": "386ce8f8beb1a77ec2cf14e7f948a6285435752cc973184bb2933f0a63709ac6",
+      "size_bytes": 3544
+    },
+    "crates/llvm2-codegen/tests/e2e_cli_json.rs": {
+      "sha256": "65546469157a313f8a81db2766f5446406655fa8475a111c53acc7864d561055",
+      "size_bytes": 19628
+    },
+    "crates/llvm2-codegen/tests/e2e_cli_tmbc.rs": {
+      "sha256": "da75d4ea584e0b0fcdf2c8c7d65b21e7bc9827f6cce6bc35864643acb5e736a2",
+      "size_bytes": 17712
+    },
+    "crates/llvm2-codegen/tests/e2e_correctness.rs": {
+      "sha256": "d20dec45169b7a5df63489eba52544ce3d42e0d9dc321f50d32db5d825d29e8f",
+      "size_bytes": 30482
+    },
+    "crates/llvm2-codegen/tests/e2e_cse_movz_movn.rs": {
+      "sha256": "bbea30bbcffbb9fc5bfb341369e084dac038365a0af4fecd0d8a9f600cc3ac64",
+      "size_bytes": 7010
+    },
+    "crates/llvm2-codegen/tests/e2e_differential.rs": {
+      "sha256": "d7f683f50040d072bdeefe015d5a4556284568f271fe45340df1c5b4089f4569",
+      "size_bytes": 263428
+    },
+    "crates/llvm2-codegen/tests/e2e_elf_link.rs": {
+      "sha256": "5392c3f376425b8286c68e5d2547e7aac0cc9bc46671b31e902ad1b3457bfeaf",
+      "size_bytes": 32876
+    },
+    "crates/llvm2-codegen/tests/e2e_full_pipeline.rs": {
+      "sha256": "1f0c8220deb111346f9a9dc8e34aef95ba162ec88750691db76470781d4af5ed",
+      "size_bytes": 95474
+    },
+    "crates/llvm2-codegen/tests/e2e_heterogeneous.rs": {
+      "sha256": "ec93b89cfeb79b1bf950186a240954a216055dcc8009df824df12939797d1df1",
+      "size_bytes": 29099
+    },
+    "crates/llvm2-codegen/tests/e2e_macho_link.rs": {
+      "sha256": "d901843d9e22a44c379d23e250c734cf467b5e3dd2a23e6a50091ae921aba305",
+      "size_bytes": 34968
+    },
+    "crates/llvm2-codegen/tests/e2e_macho_validation.rs": {
+      "sha256": "8071d878f6e13233f7b8bc410eeaa1ca99fc3a16a080ee4f738bcb478e09aaa0",
+      "size_bytes": 51694
+    },
+    "crates/llvm2-codegen/tests/e2e_multiblock_builder.rs": {
+      "sha256": "3d7aac71e135b997cde32049c2ae36a95b8a0558ecec0f02159ce63a9fd9a2cc",
+      "size_bytes": 15967
+    },
+    "crates/llvm2-codegen/tests/e2e_native_link.rs": {
+      "sha256": "fc8a8c202b64be48c533e30154456539e865f727345e7819cd03d94ba9ecbd7d",
+      "size_bytes": 11165
+    },
+    "crates/llvm2-codegen/tests/e2e_opt_levels.rs": {
+      "sha256": "dd108f0b4cdd7226b6e3ce08081a245b0205f007f45a1db09271a35a98caa356",
+      "size_bytes": 38742
+    },
+    "crates/llvm2-codegen/tests/e2e_pipeline.rs": {
+      "sha256": "185e34b38a904f8c58028e9b0529024001a663f92fb9f71387d41b307924ff33",
+      "size_bytes": 43413
+    },
+    "crates/llvm2-codegen/tests/e2e_pipeline_integration.rs": {
+      "sha256": "5e322ef33c9f11ecf0161a74488d1275eb500e844681cc4280ba42a5bf1f6c45",
+      "size_bytes": 46998
+    },
+    "crates/llvm2-codegen/tests/e2e_riscv_elf.rs": {
+      "sha256": "a071468ac7aba1d7d949e25ae2267707c04dea5ed649f3d1f79e49ff5d03f1c8",
+      "size_bytes": 96352
+    },
+    "crates/llvm2-codegen/tests/e2e_run.rs": {
+      "sha256": "05e517177f43c956cfd580142542d4ba86dcb349e85a1d32c91054368a341430",
+      "size_bytes": 68528
+    },
+    "crates/llvm2-codegen/tests/e2e_stack_alloc.rs": {
+      "sha256": "f8718fc63b79c9a3b24f4a5c9c06caa0233f0c7088b261da2c4236105ea5028a",
+      "size_bytes": 14467
+    },
+    "crates/llvm2-codegen/tests/e2e_triple_oracle.rs": {
+      "sha256": "82c3c0e04886947e4adf6ee859a270f1469d482f645f0dd095613227e17f4a65",
+      "size_bytes": 42199
+    },
+    "crates/llvm2-codegen/tests/e2e_x86_64_correctness.rs": {
+      "sha256": "f460dcc581aa137fefc080a9c03ea449a2e1d8bd05e233ae92ec837c08ec86bf",
+      "size_bytes": 79733
+    },
+    "crates/llvm2-codegen/tests/e2e_x86_64_dispatcher.rs": {
+      "sha256": "db2f6198551e6689f88d3a058a2536d49afa0085e8997bec808ec00743130b27",
+      "size_bytes": 19188
+    },
+    "crates/llvm2-codegen/tests/e2e_x86_64_link.rs": {
+      "sha256": "4e32f3006a290e59cda699d55512e5fc6d7cad0d1b2911dd098d63bae51e5b0b",
+      "size_bytes": 56398
+    },
+    "crates/llvm2-codegen/tests/e2e_x86_64_macho.rs": {
+      "sha256": "2b4bb324481c7a8a09511c2db9515c34a917ad19b4e370e347539e7309d82b06",
+      "size_bytes": 27257
+    },
+    "crates/llvm2-codegen/tests/jit_block_counter_lifetime.rs": {
+      "sha256": "16ae847f885719904c3a2e0e81b346a90c37c6adb57127c4b91dc77e0e9f63b3",
+      "size_bytes": 11139
+    },
+    "crates/llvm2-codegen/tests/jit_block_counters.rs": {
+      "sha256": "cb3a4e9a8b077758941388d77482f7241afd3fe38273649a8f7eec3fad4af615",
+      "size_bytes": 18800
+    },
+    "crates/llvm2-codegen/tests/jit_block_counters_and_timing.rs": {
+      "sha256": "c1100685e540df56d7b34c6759296c657e5e3279f3b44dc80a5646aa48670dd6",
+      "size_bytes": 12012
+    },
+    "crates/llvm2-codegen/tests/jit_calling_convention_contract.rs": {
+      "sha256": "3f9897b4771baa6d2b9e9c2d64cc77c40b0aa9a2fad0442fc00da617d6fa4647",
+      "size_bytes": 2021
+    },
+    "crates/llvm2-codegen/tests/jit_entry_counters.rs": {
+      "sha256": "5afee1dcdd305a1e89fa31db0232e3395bd28bdf8d4bcb60ca90ae6c2d9f0e21",
+      "size_bytes": 5299
+    },
+    "crates/llvm2-codegen/tests/jit_integration.rs": {
+      "sha256": "e146bac00c63cfa7c33cdde4d7cd9732f321ba2559666c2ab663a54210d5a19b",
+      "size_bytes": 58138
+    },
+    "crates/llvm2-codegen/tests/jit_integration_x86_64.rs": {
+      "sha256": "803399c2beb1e89908edeee0a82c073b9efbe4e555ea5398ce5b3d0c48076d0f",
+      "size_bytes": 10161
+    },
+    "crates/llvm2-codegen/tests/jit_mrs_tpidr.rs": {
+      "sha256": "0ba709de8a9a4406b088408eba513cb448ad008928c2246469c43d5abcea8429",
+      "size_bytes": 3524
+    },
+    "crates/llvm2-codegen/tests/jit_profiling.rs": {
+      "sha256": "de39f2b1748968f0ee9d4e7b0f244c1009aadcf9f8a91cbf5d160701bed71f2d",
+      "size_bytes": 14430
+    },
+    "crates/llvm2-codegen/tests/jit_proof_certs.rs": {
+      "sha256": "782ed11257f9e8c7a3ace7817a593ca2dac3319db82e4491500419d6962f3e46",
+      "size_bytes": 9177
+    },
+    "crates/llvm2-codegen/tests/jit_tls.rs": {
+      "sha256": "bffb788787f8dc7f86b53cfeabf5da7f84b35655a02779a7b0fbce39f2749648",
+      "size_bytes": 2525
+    },
+    "crates/llvm2-codegen/tests/jit_z4_simplex_pivot.rs": {
+      "sha256": "84109f201194055f49ff981c36f5305e713b9aec3976583305096019b3d2fcfd",
+      "size_bytes": 5538
+    },
+    "crates/llvm2-codegen/tests/macho_integration.rs": {
+      "sha256": "ef37572fbf7599ba5f223568ffe705e6eb6723316a18afd3782180738f52c301",
+      "size_bytes": 8329
+    },
+    "crates/llvm2-codegen/tests/o2_hang_diagnostic.rs": {
+      "sha256": "1dba36e1a2249576fe72aa7a743350ad29dbbdbdfe62b69e142f60f4a441ec55",
+      "size_bytes": 8507
+    },
+    "crates/llvm2-codegen/tests/panic_fuzz_compile.proptest-regressions": {
+      "sha256": "7801e03acb76194cf3128ee0e5d8764bda66940dcda82205ec030f19efc26557",
+      "size_bytes": 661
+    },
+    "crates/llvm2-codegen/tests/panic_fuzz_compile.rs": {
+      "sha256": "f1afff2b5ce330e815a39fbb361738ad09a4fcf06472f424f6f1229fe4c157d6",
+      "size_bytes": 15438
+    },
+    "crates/llvm2-codegen/tests/panic_fuzz_encode.proptest-regressions": {
+      "sha256": "416b895b0462eab5760aa0c17de5e5a57fb89d27ad45d06f993d984c0d1ad029",
+      "size_bytes": 821
+    },
+    "crates/llvm2-codegen/tests/panic_fuzz_encode.rs": {
+      "sha256": "d49b7874777f4978107fb513b82da753c66144d5c3e122309272661ffed807f0",
+      "size_bytes": 39389
+    },
+    "crates/llvm2-codegen/tests/panic_fuzz_encode_x86_64.rs": {
+      "sha256": "e568265f52cfabeafbddff9777bcd1034f81dc0e76cfb9c818389b4bf0bb4086",
+      "size_bytes": 30329
+    },
+    "crates/llvm2-codegen/tests/panic_fuzz_macho_fixup.rs": {
+      "sha256": "8b27f4cc7c28d10e81aaf378669d5e2188750d404b22317e0f181a88654431b9",
+      "size_bytes": 14353
+    },
+    "crates/llvm2-codegen/tests/pipeline_integration.rs": {
+      "sha256": "4895d80411d2b7eea91c1d0391b3ffd8c69861643eb48e0704b4f893bd1ba949",
+      "size_bytes": 19005
+    },
+    "crates/llvm2-codegen/tests/tla2_bfs_minimal.rs": {
+      "sha256": "db13a63df12bf8188a2c374960f177a23a92d53ef9bc3b1a4eff7761f02cd6aa",
+      "size_bytes": 11639
+    },
+    "crates/llvm2-codegen/tests/tmbc_canonical.rs": {
+      "sha256": "0f284bac2addedf1b32c5c8a6b3d9c6a76dceb0560cee9d6b939055dc62717b0",
+      "size_bytes": 6016
+    },
+    "crates/llvm2-codegen/tests/tmbc_roundtrip_prop.rs": {
+      "sha256": "f017caf4dcc7d62fde3ee1fd733f8283ab40b7d950a373e142bae44d910d028e",
+      "size_bytes": 17692
+    },
+    "crates/llvm2-codegen/tests/tmir_text_roundtrip.rs": {
+      "sha256": "a525616fcb78cf62d3fbfc215e6189a05b66e35d863be32bb9c1c8e152720289",
+      "size_bytes": 6913
+    },
+    "crates/llvm2-codegen/tests/xxh3_main_loop_tmir.rs": {
+      "sha256": "c3259faa7d8af706521207dbdb2b97811fd162391a62ca4a0f96677fc35c986e",
+      "size_bytes": 11053
+    },
+    "crates/llvm2-codegen/tests/xxh3_tmir.rs": {
+      "sha256": "a0a1f41057ce05db5c1b7dff39c232af4672949ebb72b6ec7d8dc8846507500e",
+      "size_bytes": 46566
+    },
+    "crates/llvm2-dialect/Cargo.toml": {
+      "sha256": "ba1b6b8c9e1eab1ea2da75796e4c63170803143b21ca52654044e46801a7f430",
+      "size_bytes": 512
+    },
+    "crates/llvm2-dialect/src/conversion.rs": {
+      "sha256": "48086a7886418dd4675d6ad525be3369f855d52c06e290517df459b13e9d3e4a",
+      "size_bytes": 13997
+    },
+    "crates/llvm2-dialect/src/dialect.rs": {
+      "sha256": "2ac0c3196d3f9fec58e4dcdbe52e1de5b9e33b12f7c7c87d81433964d0a339ee",
+      "size_bytes": 8384
+    },
+    "crates/llvm2-dialect/src/dialects/conversions.rs": {
+      "sha256": "6944b819fba7514af9e5a5f206baebe3ded793caae5a2d8f174d147850d27b48",
+      "size_bytes": 8248
+    },
+    "crates/llvm2-dialect/src/dialects/machir.rs": {
+      "sha256": "87f67e679a053cb2c867cca369dd37f01bb3a2543bec5c5a4257733ee50669d1",
+      "size_bytes": 3596
+    },
+    "crates/llvm2-dialect/src/dialects/mod.rs": {
+      "sha256": "7293c84be0f47d0241cba5373f2eec6d36b9c1945feed54eae6b33d4cc375af6",
+      "size_bytes": 754
+    },
+    "crates/llvm2-dialect/src/dialects/tmir.rs": {
+      "sha256": "003cc4166b292685e69aafada76d626901a3495a8cc14a521379c8d2f06ff8ed",
+      "size_bytes": 3500
+    },
+    "crates/llvm2-dialect/src/dialects/verif.rs": {
+      "sha256": "b629a0b8320dea8866268590d2dbc26fa3585da1e3a6e051a9fadf97d1eec95f",
+      "size_bytes": 1929
+    },
+    "crates/llvm2-dialect/src/id.rs": {
+      "sha256": "7a29b72125993deb37c4034f58bce8983847159062ac3135eceacd4ecd94593a",
+      "size_bytes": 1360
+    },
+    "crates/llvm2-dialect/src/lib.rs": {
+      "sha256": "427171cbcd473e2ca29afff8fdac6b47d650d8ab00f0b09c57ddbd7dffac4f69",
+      "size_bytes": 5977
+    },
+    "crates/llvm2-dialect/src/machir_emit.rs": {
+      "sha256": "278fd7a0d16a7da26ee25fd3e867c80c029963024c466e2f1af780e2a3a74a36",
+      "size_bytes": 8209
+    },
+    "crates/llvm2-dialect/src/module.rs": {
+      "sha256": "8c56ad9a7f95aead619509f6b0a76fdd465f1229b3986e86a8ad5a4f3ec15833",
+      "size_bytes": 6115
+    },
+    "crates/llvm2-dialect/src/op.rs": {
+      "sha256": "fa043a97b18350b61525e8f51faafd43f539461127ac3b6739d8bdb2d174a40b",
+      "size_bytes": 6333
+    },
+    "crates/llvm2-dialect/src/pass.rs": {
+      "sha256": "b5bafcf44af949942e410d0f8a2859bd842b6493a22bde02bdb2e6c4cf03520f",
+      "size_bytes": 11339
+    },
+    "crates/llvm2-dialect/src/registry.rs": {
+      "sha256": "e9ae962075a45307d80fd09a781a482c47d270110d3289091c1b6c2f6d04b153",
+      "size_bytes": 2658
+    },
+    "crates/llvm2-dialect/tests/end_to_end.rs": {
+      "sha256": "ca594e90653096125cce8a1cfb49ea169c7dead8f47b3690032d0b37642c8f84",
+      "size_bytes": 8422
+    },
+    "crates/llvm2-dialect/tests/multi_block_conversion.rs": {
+      "sha256": "cc712af78c3ca63a70d37ebe1c28e1ebc801e065a11562c59d4d748ab19112d8",
+      "size_bytes": 15575
+    },
+    "crates/llvm2-dialect/tests/type_constraints.rs": {
+      "sha256": "a502b220aae8d63218f27bb671cfedf7ac50e35125643b14f1e3d9f572af513e",
+      "size_bytes": 17198
+    },
+    "crates/llvm2-fuzz/Cargo.toml": {
+      "sha256": "2225cd8d52bcb15472b6bd48daa0bd2573472c22aee86f6da6cbaf0904538762",
+      "size_bytes": 1212
+    },
+    "crates/llvm2-fuzz/README.md": {
+      "sha256": "4bfa9bf83e7f39d1e099dfd426ce2a348a98224eaf9645fffeb71fa659e315fe",
+      "size_bytes": 4179
+    },
+    "crates/llvm2-fuzz/src/bin/csmith_driver.rs": {
+      "sha256": "9322a7839fb0cd9f7b73ec15263390c7a20def3885136a60b7b11aabc7741e75",
+      "size_bytes": 15987
+    },
+    "crates/llvm2-fuzz/src/bin/tmir_gen.rs": {
+      "sha256": "267569439a5206817205a4205bd17d5ab9397cc249b0c92f237248db345b4335",
+      "size_bytes": 13360
+    },
+    "crates/llvm2-fuzz/src/bin/yarpgen_driver.rs": {
+      "sha256": "e47ea3125ca9d0b6b3f7d7048f5c4261dc5c2989edac39948b4dbbc4cdc004b9",
+      "size_bytes": 15682
+    },
+    "crates/llvm2-fuzz/src/lib.rs": {
+      "sha256": "ff5d23474bda7a527c17210310ef4348fefa965d49e7537dd721803866cd9f5e",
+      "size_bytes": 495
+    },
+    "crates/llvm2-fuzz/src/prng.rs": {
+      "sha256": "a151e87eb4a9d77405b33bdd8b6e65af9ef13d17f972cd784af393087368e259",
+      "size_bytes": 1832
+    },
+    "crates/llvm2-fuzz/src/runlog.rs": {
+      "sha256": "250be5739d4ebfd5c280977ff527e82c244719e24c7bef7aae34b205aa619e5a",
+      "size_bytes": 1851
+    },
+    "crates/llvm2-fuzz/src/tmir_gen.rs": {
+      "sha256": "4b476a617f44e6017cc39a0bf018a52a034c691f867842274bfdb782ca76bee1",
+      "size_bytes": 5971
+    },
+    "crates/llvm2-gpu/Cargo.toml": {
+      "sha256": "44316e4e278ad3ca1e1f90dbe73d5f0a482f729ccedeb65c8f21422f2f680f0a",
+      "size_bytes": 865
+    },
+    "crates/llvm2-gpu/src/address_space.rs": {
+      "sha256": "d00227d1ff3d72e9d6ba5b1c16db6cb85bdf5c24cf4e83fdbcb1f1edf246ed35",
+      "size_bytes": 5481
+    },
+    "crates/llvm2-gpu/src/divergence_flatten.rs": {
+      "sha256": "cb9913d84175e05a6720474c803bc69fb0b381a94326ad72fe22705e04f2c6fc",
+      "size_bytes": 4554
+    },
+    "crates/llvm2-gpu/src/hetero_partition.rs": {
+      "sha256": "0710a276c5937d10d5f6a45977373ba6e7821d2e3437b747ac1d95b171185899",
+      "size_bytes": 8642
+    },
+    "crates/llvm2-gpu/src/kernel_extract.rs": {
+      "sha256": "893708d3c1f6341035b0d7a3f04ed58be45313fd81cd950e07f901e68c9d97f5",
+      "size_bytes": 12585
+    },
+    "crates/llvm2-gpu/src/launch_synth.rs": {
+      "sha256": "3133415abaa2b9c43658a1e0ef933fb5d08e26e9038f733683595ed571ea11f3",
+      "size_bytes": 10208
+    },
+    "crates/llvm2-gpu/src/lib.rs": {
+      "sha256": "aa2d5685b85ca7a1daca8cc397bac5d0f4645f88887bb2fa021ad690ac683616",
+      "size_bytes": 2448
+    },
+    "crates/llvm2-gpu/src/memory_partition.rs": {
+      "sha256": "3c7e94991fdba4498a84b3e5198d1ed8dc80dc02ade9570c59331331b834ed7e",
+      "size_bytes": 7887
+    },
+    "crates/llvm2-gpu/src/pipeline.rs": {
+      "sha256": "16a43ccc49ac69f6722922b9b3255a30b201e39c63a440363f7a5a044847b5b3",
+      "size_bytes": 7848
+    },
+    "crates/llvm2-gpu/src/region.rs": {
+      "sha256": "b9b9fa0dd3d1dcae6f04ff6d110edd7818c9307205c91fcb5d32f71ad7b3131c",
+      "size_bytes": 4516
+    },
+    "crates/llvm2-gpu/src/sample_bfs.rs": {
+      "sha256": "80709b104a53ae325503a63e98ba6097b5e7e92d2c8002e2217405844bc29c14",
+      "size_bytes": 12468
+    },
+    "crates/llvm2-gpu/tests/end_to_end_bfs.rs": {
+      "sha256": "d0317763b24a0b5ce57f076d570bb6ce6e801150db21b8f603ffdfd2f33173b8",
+      "size_bytes": 3130
+    },
+    "crates/llvm2-gpu/tests/passes_end_to_end.rs": {
+      "sha256": "8aafa1ead5fd8c6787327d6bfa8a02fa7dbf35442ebebb16e14375b0ef925bf5",
+      "size_bytes": 11144
+    },
+    "crates/llvm2-ir/Cargo.toml": {
+      "sha256": "ef33fc40ad672bb90fe333288f8b42f0ede638c41e31f110def39ea8f05059f9",
+      "size_bytes": 499
+    },
+    "crates/llvm2-ir/src/aarch64_regs.rs": {
+      "sha256": "316b6217f891def41c3e28ee124535955ca18815c43abb504f2306183fece3a2",
+      "size_bytes": 47571
+    },
+    "crates/llvm2-ir/src/cc.rs": {
+      "sha256": "80c2c82cc20bd9356ed91ba77d62c411c739b0401ac3d96a6d55dae891077b16",
+      "size_bytes": 7129
+    },
+    "crates/llvm2-ir/src/cost_model.rs": {
+      "sha256": "d5c51dff1e4e61c5ec8adf46e3b264ee54961f14e9bebcc2da71092366abedf7",
+      "size_bytes": 109575
+    },
+    "crates/llvm2-ir/src/function.rs": {
+      "sha256": "b84f07123e5ebd6cee3de4b11b7a5e703de71f72f0742cc96980afdb9050f8ea",
+      "size_bytes": 33623
+    },
+    "crates/llvm2-ir/src/inst.rs": {
+      "sha256": "543e62a30cc3c6a98a2fc5b53d2efe84f6ef80668f5e597ff389d600f8502659",
+      "size_bytes": 59435
+    },
+    "crates/llvm2-ir/src/lib.rs": {
+      "sha256": "ea0061d93b95e2fa6b052fccdf2ff8660a33fcf74e860a0502cfaeb627b273c6",
+      "size_bytes": 4452
+    },
+    "crates/llvm2-ir/src/operand.rs": {
+      "sha256": "e137a8f9c0908e8055fa63e3e1e098842e6c2eb275fbbc35a6aeeed6c6a36af1",
+      "size_bytes": 12257
+    },
+    "crates/llvm2-ir/src/provenance.rs": {
+      "sha256": "8ffc99f2fc567ae483b2530693c7550bb2d9e34825147e4e1091fefd058dbf46",
+      "size_bytes": 37023
+    },
+    "crates/llvm2-ir/src/regs.rs": {
+      "sha256": "ad6bf4539d7c574b81c760947eb992056ebfb0020fb097175d188a7ae583f82f",
+      "size_bytes": 4518
+    },
+    "crates/llvm2-ir/src/riscv_ops.rs": {
+      "sha256": "bc91cb608b5f381bb36a971dcfc6d5a3cdcbe376d4987ac8745285047d947add",
+      "size_bytes": 22190
+    },
+    "crates/llvm2-ir/src/riscv_regs.rs": {
+      "sha256": "be4e8fadd68ba1f20b30ecb3b6ed355b3c3ae5027452ff5a00338c5117b3ad02",
+      "size_bytes": 32287
+    },
+    "crates/llvm2-ir/src/target_info.rs": {
+      "sha256": "fed6e03c7cebea9841e48bdf6c3acacf4a3827c564f0980a81f150968efc1e00",
+      "size_bytes": 33043
+    },
+    "crates/llvm2-ir/src/tls.rs": {
+      "sha256": "598e5a62f54e29f89275b5ce316dc242087ea76a0d67481e0c39a384ee4bec91",
+      "size_bytes": 2863
+    },
+    "crates/llvm2-ir/src/trace.rs": {
+      "sha256": "15bb486380b2a3b643245daf4a3cb2716757cc66831da68281a882f1a9e897ee",
+      "size_bytes": 20932
+    },
+    "crates/llvm2-ir/src/type_hierarchy.rs": {
+      "sha256": "c7fc583ead2300ca3fd38510e58006fda4bedb3310116aa1b20ea543d0e65872",
+      "size_bytes": 5786
+    },
+    "crates/llvm2-ir/src/types.rs": {
+      "sha256": "a767221c31e4f00bc3582533129e8ef7df639031bb5f33a15230f25498170d02",
+      "size_bytes": 7078
+    },
+    "crates/llvm2-ir/src/x86_64_ops.rs": {
+      "sha256": "18fb70d7106a43a908e45ac444600484929285a1ae538b1b2be87b3ea8f309a5",
+      "size_bytes": 24816
+    },
+    "crates/llvm2-ir/src/x86_64_regs.rs": {
+      "sha256": "12715afefc3a6a97cd94c1d1e030adce61b5702c7f00bec228896f1d8535f3e2",
+      "size_bytes": 39994
+    },
+    "crates/llvm2-ir/tests/core_types.rs": {
+      "sha256": "4c7c3b8a17002a4deaf26e67a98ee0ecdfd038b40588b14e24c04acd2a5fd614",
+      "size_bytes": 19448
+    },
+    "crates/llvm2-llvm-import/Cargo.toml": {
+      "sha256": "895a9df93d9731683798a2e77802f88f250b9e234804342d00f7d5ed10920f2e",
+      "size_bytes": 1099
+    },
+    "crates/llvm2-llvm-import/README.md": {
+      "sha256": "681a4318f5f1ab692f9af7b5308515008dc208b89dc7e3cb06054b0c60a73a9d",
+      "size_bytes": 6711
+    },
+    "crates/llvm2-llvm-import/src/bin/llvm2-ws2-import.rs": {
+      "sha256": "7415316c9befb776de71b8323c7682ea9fe75301496f2cfb870fa24ddb7131dd",
+      "size_bytes": 2949
+    },
+    "crates/llvm2-llvm-import/src/lib.rs": {
+      "sha256": "917af1b766c55212306a7f9b63dcf685e2e577408127029ac8df90ec74592c4d",
+      "size_bytes": 1734
+    },
+    "crates/llvm2-llvm-import/src/parser.rs": {
+      "sha256": "86fb4f6623eac4065a9d1f0f64c1cb4e799755b381c95202146c80e925d5b88b",
+      "size_bytes": 115083
+    },
+    "crates/llvm2-llvm-import/tests/fp_e2e.rs": {
+      "sha256": "4c99c6451218890f26b1c628c8c81c990d3ddc364ce115df3a4fdd4baac8c5ba",
+      "size_bytes": 5104
+    },
+    "crates/llvm2-llvm-import/tests/switch_e2e.rs": {
+      "sha256": "88b56060ddb757a12ea3ff779637544c4afe22b7d251623194514a7b2a1ac49b",
+      "size_bytes": 6409
+    },
+    "crates/llvm2-lower/Cargo.toml": {
+      "sha256": "c7f143809863082c7a9d935bbed24e3f6f8a3e8989998886e0afe8abbde6ff70",
+      "size_bytes": 881
+    },
+    "crates/llvm2-lower/src/abi.rs": {
+      "sha256": "246306cf3c1c465a1003f069b7c88dbb5db65dd7ab3b50f12d4df42bb5777dab",
+      "size_bytes": 164317
+    },
+    "crates/llvm2-lower/src/adapter.rs": {
+      "sha256": "8bb92df79cf9a8d6ec19d628d3682ebf744dc5bb262db13bf21b8f1b5e37151b",
+      "size_bytes": 275018
+    },
+    "crates/llvm2-lower/src/compute_graph.rs": {
+      "sha256": "953b570ae2ddb38508bdcae572ad003090d61e95eed6799f2486500c8feeac98",
+      "size_bytes": 141242
+    },
+    "crates/llvm2-lower/src/dispatch.rs": {
+      "sha256": "8ecc158982d3c86731ebfc20696d251c39a561b4ce08da0a1aa2f22b928fbcae",
+      "size_bytes": 105980
+    },
+    "crates/llvm2-lower/src/function.rs": {
+      "sha256": "4be6731ea2341af3e26e8ac036117f4b7c3453040a6f8e6a0596eef390c87eaa",
+      "size_bytes": 4976
+    },
+    "crates/llvm2-lower/src/instructions.rs": {
+      "sha256": "3f151c38d748a322b6acfb0acfb3183afb79408105b735da94da959911a0e1cd",
+      "size_bytes": 14336
+    },
+    "crates/llvm2-lower/src/isel.rs": {
+      "sha256": "02cc2d21ba4baeb4185da31eeed7ba679b0de918cad70a6a82866de00f9f4035",
+      "size_bytes": 546535
+    },
+    "crates/llvm2-lower/src/lib.rs": {
+      "sha256": "a07c8e226fb91f35b16334d7e63d0fb047fb5ce6f91b362cb0e09631b196f4e2",
+      "size_bytes": 2209
+    },
+    "crates/llvm2-lower/src/overflow_idiom.rs": {
+      "sha256": "d70ddd801276713fd545f0d021ae6eabef8b34a5c5f788d08cc69ec46209f928",
+      "size_bytes": 24595
+    },
+    "crates/llvm2-lower/src/smulh_idiom.rs": {
+      "sha256": "d3b0bebb303f8e737dfd5428d509d7921c6eb3070849e34f701e919cb7984930",
+      "size_bytes": 14002
+    },
+    "crates/llvm2-lower/src/switch.rs": {
+      "sha256": "dc20f503310885605c18e10c718a006415043a47b63f8f368e78fb0084eac0e5",
+      "size_bytes": 41382
+    },
+    "crates/llvm2-lower/src/target_analysis.rs": {
+      "sha256": "ee4f9ec19ee7fcc7449a03987d422c31040255777c176c357b5c3e1b6cbc09c7",
+      "size_bytes": 47905
+    },
+    "crates/llvm2-lower/src/tmir_compat.rs": {
+      "sha256": "f34edc732ba6458c46e3eab0cf8f482832dfe6d60d9e69955c756f4503b69b3c",
+      "size_bytes": 10478
+    },
+    "crates/llvm2-lower/src/types.rs": {
+      "sha256": "fa37702331b63a4ba84d3aafeffc1d0a5cf86b06a0ac7f870755b85320daa272",
+      "size_bytes": 10797
+    },
+    "crates/llvm2-lower/src/va_list.rs": {
+      "sha256": "70727a53c0ff05d63822e22474037e4a69ba5052063d64736b4597509f48cf67",
+      "size_bytes": 17887
+    },
+    "crates/llvm2-lower/src/x86_64_isel.rs": {
+      "sha256": "6da6a53ea2e46945a228669d72686324eadaf909727d9feca19e47025eaadafa",
+      "size_bytes": 151820
+    },
+    "crates/llvm2-lower/tests/aggregate_constants.rs": {
+      "sha256": "e787350d9fa0ff650b19a41facbb31382e812db63181ac8718ddf6cc89643ad1",
+      "size_bytes": 17968
+    },
+    "crates/llvm2-lower/tests/aggregate_lowering.rs": {
+      "sha256": "2f15711dc59971d2283229b55a9caeea200af8a68256603849d519dd319d1db9",
+      "size_bytes": 7264
+    },
+    "crates/llvm2-lower/tests/aggregate_types.rs": {
+      "sha256": "02ef72f029036765520abe22955443d421275fd11e2300a72fd22146d6eff538",
+      "size_bytes": 12737
+    },
+    "crates/llvm2-lower/tests/panic_fuzz_lower.proptest-regressions": {
+      "sha256": "947caaaa4fb21f4e9908931bba49658c4a1211da9296aa77525fc0aa86ec6dcc",
+      "size_bytes": 482
+    },
+    "crates/llvm2-lower/tests/panic_fuzz_lower.rs": {
+      "sha256": "2473c36b93c715dcb15f674dc4affbb6da915ef19607f792ae5d69fdcc46f392",
+      "size_bytes": 28518
+    },
+    "crates/llvm2-lower/tests/tmir_integration.rs": {
+      "sha256": "77152fcc87002262aadf1e5e72222b1c9b94f1c660089b5a64ad9f8ef4b7daa0",
+      "size_bytes": 185658
+    },
+    "crates/llvm2-opt/Cargo.toml": {
+      "sha256": "75c50d6ebe8c41b545e1824de5b0c15bdea2f88ecbfd0fb634f9bde6d3b2dc69",
+      "size_bytes": 527
+    },
+    "crates/llvm2-opt/src/addr_mode.rs": {
+      "sha256": "02bd76e373904fb0dfdd1c732ae04c3b2efff8f5375593f1e0fea92774ac5098",
+      "size_bytes": 41075
+    },
+    "crates/llvm2-opt/src/cache.rs": {
+      "sha256": "87aa1a902e171446aedb2eee635e8ead96fef1e31a2dba2558ed59b6a4e5945d",
+      "size_bytes": 26710
+    },
+    "crates/llvm2-opt/src/cfg_simplify.rs": {
+      "sha256": "87d240711679b98fa6f9378ebb7d26630677ec31c2854a8ef7ed045da8d11334",
+      "size_bytes": 32761
+    },
+    "crates/llvm2-opt/src/cmp_branch_fusion.rs": {
+      "sha256": "388c16ea2a735fe6d8a819f114d6259211393684b2aa14b8d684bf2336605d40",
+      "size_bytes": 22305
+    },
+    "crates/llvm2-opt/src/cmp_select.rs": {
+      "sha256": "d6c057dfbf5932ac06a02e8b71b3d99346b204631dfebfbe06d5a7e6f28a4287",
+      "size_bytes": 26126
+    },
+    "crates/llvm2-opt/src/const_fold.rs": {
+      "sha256": "f8334251dcf5e09756e258027272b20d713865f1bad2e701dc51bd7bc4876c6d",
+      "size_bytes": 38814
+    },
+    "crates/llvm2-opt/src/const_materialize.rs": {
+      "sha256": "6f7caa1bdec1a2c9c7884e1b3f6030a033e7470fa1504f4517270b443d091e26",
+      "size_bytes": 27577
+    },
+    "crates/llvm2-opt/src/copy_prop.rs": {
+      "sha256": "d75e14c53eac9390af2e91299cbbe9f63ea867f17bbff322f860796099e24978",
+      "size_bytes": 8335
+    },
+    "crates/llvm2-opt/src/cse.rs": {
+      "sha256": "7725e543e6d3e2aa7c48a1d20bdfb420e879a6c198c862254176b35b5de50d58",
+      "size_bytes": 32601
+    },
+    "crates/llvm2-opt/src/dce.rs": {
+      "sha256": "e0d866fd82a03ea6a6811578bbfe5441c5298789cb5c22131c72d04c6e0c03c2",
+      "size_bytes": 10173
+    },
+    "crates/llvm2-opt/src/dom.rs": {
+      "sha256": "f94f9083c08e8eac86d7ac2a392da01599d4be9c5a581bc6c1d9a9da4c98d353",
+      "size_bytes": 16086
+    },
+    "crates/llvm2-opt/src/effects.rs": {
+      "sha256": "8a7f7ec7d6a88c5f95b7b1e2c107425f870c1b86be54b479766d8c147ec84a47",
+      "size_bytes": 39890
+    },
+    "crates/llvm2-opt/src/gvn.rs": {
+      "sha256": "6d63bb3344bf92b01f69deb21db034cc53c0c12ca693181451e0dae2c97a1866",
+      "size_bytes": 55492
+    },
+    "crates/llvm2-opt/src/if_convert.rs": {
+      "sha256": "70dc2edc7c3db75b12c33c4bc4952cd24b9b98d5d4f5032c5b329c2c69ad1f72",
+      "size_bytes": 42735
+    },
+    "crates/llvm2-opt/src/inline.rs": {
+      "sha256": "e4ff72ec9551b78758dcb7bff460f7ff7fb4ee768e40105a31bc2a6116949421",
+      "size_bytes": 21360
+    },
+    "crates/llvm2-opt/src/interfaces.rs": {
+      "sha256": "a967f9c988b8ab2af0339d7867c77feaaa237155e9e9c89853bad1da2c7462df",
+      "size_bytes": 17767
+    },
+    "crates/llvm2-opt/src/lib.rs": {
+      "sha256": "33b631da42b35a9a3eac1250fe1745075b2d61c83effafbe6f2eab1bf19efb31",
+      "size_bytes": 3746
+    },
+    "crates/llvm2-opt/src/licm.rs": {
+      "sha256": "61b0e2d7fb921d2599f192144ce1be0e7f9e5f4b03500659316c176eadbcfbd1",
+      "size_bytes": 19695
+    },
+    "crates/llvm2-opt/src/loop_unroll.rs": {
+      "sha256": "77886ba33000fa4dbeab5e236b87cf0306a3e72154d7ab55bd5ba659c31354ce",
+      "size_bytes": 28163
+    },
+    "crates/llvm2-opt/src/loops.rs": {
+      "sha256": "a0e5d0bfac705ce7a5de961273c5abda57798f4d32fbb6f7c525f3b9fdc5e819",
+      "size_bytes": 37021
+    },
+    "crates/llvm2-opt/src/pass_manager.rs": {
+      "sha256": "7b97f6cb199b95a03882a51de66a24867aed69de4c991d0c27c697bce39f0619",
+      "size_bytes": 11389
+    },
+    "crates/llvm2-opt/src/passes.rs": {
+      "sha256": "44e915bb88fdd5bd1fd5f75efe69da58f74932d188660a80df8d101ad886bcfe",
+      "size_bytes": 751
+    },
+    "crates/llvm2-opt/src/peephole.rs": {
+      "sha256": "e950f9a3fa7688a0dbba6778e271427d96e9327fa81f1af16862662bf21d4965",
+      "size_bytes": 94506
+    },
+    "crates/llvm2-opt/src/pgo/inject.rs": {
+      "sha256": "84962d28664a8be711a7f71839cd3f0da1212f073bf9975257901eb5feb86cf4",
+      "size_bytes": 10705
+    },
+    "crates/llvm2-opt/src/pgo/io.rs": {
+      "sha256": "232bb1a692cf93604e0a80ef8c13b16052a580b979660e3901c8f80e1992c3e9",
+      "size_bytes": 8382
+    },
+    "crates/llvm2-opt/src/pgo/mod.rs": {
+      "sha256": "0a3a3aa1c4e2ea4e36d9c0c6f057612396432f072bf9fa1bc542b69245111c94",
+      "size_bytes": 7349
+    },
+    "crates/llvm2-opt/src/pgo/schema.rs": {
+      "sha256": "7495ad1cde6d0689e80690bbee7f44c6d34e497e0220abae6d2d73f7ef5558e8",
+      "size_bytes": 9193
+    },
+    "crates/llvm2-opt/src/pipeline.rs": {
+      "sha256": "ceb2cabd8a94ce85348343ca84173ae85a8582691fe3e3a1d988c7f2df47b579",
+      "size_bytes": 36557
+    },
+    "crates/llvm2-opt/src/proof_opts.rs": {
+      "sha256": "efc055a796ca9f62f8d60458c101d7550648b85a7f60912caf8b2fa191adba50",
+      "size_bytes": 91080
+    },
+    "crates/llvm2-opt/src/rewrite/constraint.rs": {
+      "sha256": "cf20080ed689e36a26a076205162e58d6134ddb27d340ba2eb91a25c2de2a607",
+      "size_bytes": 22016
+    },
+    "crates/llvm2-opt/src/rewrite/engine.rs": {
+      "sha256": "a2551aa696b0527001c53d980e203d2eee56c6896b2093ffc4a604ff56ec64f2",
+      "size_bytes": 7415
+    },
+    "crates/llvm2-opt/src/rewrite/matcher.rs": {
+      "sha256": "e68803fbb20fa8188017553ccec0d0af1b72cec9fe8fbdb83078525931c61821",
+      "size_bytes": 10883
+    },
+    "crates/llvm2-opt/src/rewrite/mod.rs": {
+      "sha256": "baff22b8699be34cc1bdfd1da141f64c9170279b0af67d9d8b5734d32c834c72",
+      "size_bytes": 1753
+    },
+    "crates/llvm2-opt/src/rewrite/pass.rs": {
+      "sha256": "b784fa29bb108d9949010ffb8fb715f2c854dd754fa077180114db13035d464f",
+      "size_bytes": 3696
+    },
+    "crates/llvm2-opt/src/rewrite/patterns.rs": {
+      "sha256": "4a1619fe506bf1cbc8b17f37286cfdd271e9e4b5cb8c5eb1a6799c6160597c7e",
+      "size_bytes": 130777
+    },
+    "crates/llvm2-opt/src/rewrite/rewriter.rs": {
+      "sha256": "da07ddf8fea7e97ece0b5918fbfbf4955f62978841c018595d8a0e2c4f3852e8",
+      "size_bytes": 1452
+    },
+    "crates/llvm2-opt/src/rewrite/rule.rs": {
+      "sha256": "675b653167f61089e5ef8da28141bcbbe44f5a8a12cabf8c2af89d085c8260d9",
+      "size_bytes": 3676
+    },
+    "crates/llvm2-opt/src/scheduler.rs": {
+      "sha256": "a31fe18150b5954161cb0add4f3c0df77aac397ad8a47b1a4adab7731f3339f3",
+      "size_bytes": 130860
+    },
+    "crates/llvm2-opt/src/sroa.rs": {
+      "sha256": "b216c042458d2387bdeb7b9b2e870132422cc0094fc19abdb07ee2f9dc7bb1b6",
+      "size_bytes": 48881
+    },
+    "crates/llvm2-opt/src/strength_reduce.rs": {
+      "sha256": "41fd272feccd2802f784b399815aba262181f3f087b7012b4088468a28871f92",
+      "size_bytes": 31543
+    },
+    "crates/llvm2-opt/src/tail_call.rs": {
+      "sha256": "17d3370d48d125a6b037806a5d6e70b8babdc429d29c96edde524c2dddb61f2e",
+      "size_bytes": 26635
+    },
+    "crates/llvm2-opt/src/vectorize.rs": {
+      "sha256": "90e562588db87b4d815c5f04dd43f7391a156e21193e9b0067ecee4a7405df41",
+      "size_bytes": 79146
+    },
+    "crates/llvm2-opt/tests/aggregate_pipeline.rs": {
+      "sha256": "20943b04c2ca158e1ee13972b30a1f40efd9716369e247732699a2af40f72aaa",
+      "size_bytes": 10685
+    },
+    "crates/llvm2-opt/tests/cache_backends.rs": {
+      "sha256": "b3f7e66c23e1ef34773fda65529446ee1a6d8ed1c4937f570cd2456176c59bd5",
+      "size_bytes": 3068
+    },
+    "crates/llvm2-opt/tests/cache_stable_hash.rs": {
+      "sha256": "60e0ca1943d173e80bc54963aa7d5c9690a4739862b849792c8b539603cadc9f",
+      "size_bytes": 2820
+    },
+    "crates/llvm2-opt/tests/pgo_round_trip.rs": {
+      "sha256": "ad3f600578ac99d8877b392aa427ea4fe905d7563695ff369d429fd60b4e3d4c",
+      "size_bytes": 5462
+    },
+    "crates/llvm2-opt/tests/regression_convergence.rs": {
+      "sha256": "ed399a930569dbed43e1788d60dce85a8d2fe6f5aa2cb6c7af792ec1071f529b",
+      "size_bytes": 10614
+    },
+    "crates/llvm2-opt/tests/sroa_pipeline.rs": {
+      "sha256": "ff1e76d32ec5953b2e4e06af76c1fd3c7b5c4c346229e5f79a90bafe992cd0b7",
+      "size_bytes": 19438
+    },
+    "crates/llvm2-regalloc/Cargo.toml": {
+      "sha256": "39891517fe83f5ce337105270f93abda7f4db19c7691a7fb4723ac6527338a72",
+      "size_bytes": 549
+    },
+    "crates/llvm2-regalloc/src/call_clobber.rs": {
+      "sha256": "3e9b6423b40094c4038792a4f61e859d4fa337365fcd201498523ab8fe250855",
+      "size_bytes": 25883
+    },
+    "crates/llvm2-regalloc/src/coalesce.rs": {
+      "sha256": "9cef33aec3edfa1ff12117ce049e1bd4deefc5e3a6d9a5959ec9f95defb026d9",
+      "size_bytes": 54484
+    },
+    "crates/llvm2-regalloc/src/greedy.rs": {
+      "sha256": "dd712a1c1bbd7c0f22a2838e7e4d98df4cb4ea4a18176777d718eb0c60bb2498",
+      "size_bytes": 69952
+    },
+    "crates/llvm2-regalloc/src/lib.rs": {
+      "sha256": "453428d5a2e140834faf9b4758b8a9a43bf501c98e78465390bf313527266a2b",
+      "size_bytes": 39491
+    },
+    "crates/llvm2-regalloc/src/linear_scan.rs": {
+      "sha256": "fbd066cfd5682ccc3447273e407bc7981d8f7bec7996bcd020ecab8836f8e5df",
+      "size_bytes": 44577
+    },
+    "crates/llvm2-regalloc/src/liveness.rs": {
+      "sha256": "b75e8d9fe12ff986873cf720df989ae64a12f893a8c832ea27990ce8d5905530",
+      "size_bytes": 71389
+    },
+    "crates/llvm2-regalloc/src/machine_types.rs": {
+      "sha256": "8aeed9c0ae5870b970926d03b126c3561854c7c08c4d44a0b5c4896ba3e471be",
+      "size_bytes": 23243
+    },
+    "crates/llvm2-regalloc/src/phi_elim.rs": {
+      "sha256": "55f11b3b8464d27260d5bf118612b2e62f734d2f942ec5f493b9a330097ecc03",
+      "size_bytes": 80863
+    },
+    "crates/llvm2-regalloc/src/post_ra_coalesce.rs": {
+      "sha256": "e58b09c3ea053e4bc960c6e7ec00776740026593845337d18d8b4d6ee8082382",
+      "size_bytes": 25136
+    },
+    "crates/llvm2-regalloc/src/post_ra_opt.rs": {
+      "sha256": "959a95ad69ad03b66b251afaba9e3c9853edc2834660dfad4e8a48dc464bbaa8",
+      "size_bytes": 30001
+    },
+    "crates/llvm2-regalloc/src/remat.rs": {
+      "sha256": "76731f1cb8e1da27d1f9ee68ffa5df5b824cca006a5c08a5c4be594f54c01b66",
+      "size_bytes": 27106
+    },
+    "crates/llvm2-regalloc/src/spill.rs": {
+      "sha256": "06ff722ced972f59eacac5ced564a882708d2ee25d4318cc3d939c60260d3834",
+      "size_bytes": 38832
+    },
+    "crates/llvm2-regalloc/src/spill_slot_reuse.rs": {
+      "sha256": "c40e40099590b6d336ac6fdbbe2fa681d55a29ee81f5d6bf1ce20c55f399b626",
+      "size_bytes": 20517
+    },
+    "crates/llvm2-regalloc/src/split.rs": {
+      "sha256": "d44faf0af7d143d0e95886d4d23ba58e37c444b82fa1fa9a95dc5fa5b8774c9c",
+      "size_bytes": 32276
+    },
+    "crates/llvm2-regalloc/src/x86_adapter.rs": {
+      "sha256": "6a866c7753daec053cc1ad0b7625698479cb4688d7711909d4526b417e682631",
+      "size_bytes": 39958
+    },
+    "crates/llvm2-test/Cargo.toml": {
+      "sha256": "1279e2bbbc346ac2de6dd6a519634a81e630b3928cf2165a94f89050da492522",
+      "size_bytes": 1207
+    },
+    "crates/llvm2-test/README.md": {
+      "sha256": "c382fd5dff00fd170860b6e80e70466eda390298a81ed760a64205235ec0552e",
+      "size_bytes": 3228
+    },
+    "crates/llvm2-test/src/cmd/bootstrap.rs": {
+      "sha256": "81a45348b9f3224c83441cd782961b5c5e8959b9534b63638198b285cc7987b7",
+      "size_bytes": 1488
+    },
+    "crates/llvm2-test/src/cmd/doctor.rs": {
+      "sha256": "f91c6b151f214c85ef9dd00fb3587fb8f51bcab399defdee61a5747733ce1304",
+      "size_bytes": 6417
+    },
+    "crates/llvm2-test/src/cmd/ecosystem.rs": {
+      "sha256": "ed5d069eddbd796f9dd59a297ca6d536a103260b23f2c3c7bd54a414f66202e1",
+      "size_bytes": 1466
+    },
+    "crates/llvm2-test/src/cmd/fuzz.rs": {
+      "sha256": "a66758f50f759e3480e9b58ebafef0315b4cd2b81ea36b86082dd0a85fbb9348",
+      "size_bytes": 2423
+    },
+    "crates/llvm2-test/src/cmd/lint_linux.rs": {
+      "sha256": "34190d2268c6530b7b8a6e8633b7e9f998e3ae3c6842c8388b7aac2f93c1f283",
+      "size_bytes": 14860
+    },
+    "crates/llvm2-test/src/cmd/matrix.rs": {
+      "sha256": "6e49081535e44066d11dfbb1c6d29663b1bbd9f9b7e851725c8272cff72aebe9",
+      "size_bytes": 1964
+    },
+    "crates/llvm2-test/src/cmd/mod.rs": {
+      "sha256": "4145cb9e7aa0b12224f00265fa564200ef7507a447a173e7dde3a124ae25b239",
+      "size_bytes": 2180
+    },
+    "crates/llvm2-test/src/cmd/pipeline.rs": {
+      "sha256": "0a44d5f7e862f8af47b6e2a2198fccc9644ff8bf01047d713317f04e827cf942",
+      "size_bytes": 1383
+    },
+    "crates/llvm2-test/src/cmd/prove.rs": {
+      "sha256": "d45791bcd3dc4d55a249b4d910d188cf9a826a58bdece5c223bf1e2786fa7a37",
+      "size_bytes": 1894
+    },
+    "crates/llvm2-test/src/cmd/ratchet.rs": {
+      "sha256": "9ef29ce70b8364983352639f847f6f479840208e05a4e073be4ad5bc8decdd87",
+      "size_bytes": 50399
+    },
+    "crates/llvm2-test/src/cmd/report.rs": {
+      "sha256": "3356514a5567b4171336b97828ad3ed00da93f9dc3945fc88ecb30710f3be968",
+      "size_bytes": 11321
+    },
+    "crates/llvm2-test/src/cmd/rustc.rs": {
+      "sha256": "e1128892d0db6f89412ffcf50a8ddd731b3667d687b600a2273793ba693fe3aa",
+      "size_bytes": 1704
+    },
+    "crates/llvm2-test/src/cmd/suite.rs": {
+      "sha256": "b583edf6bb1ce950a307ceb50f7010d5866b70771ad726a1248e0203948a273d",
+      "size_bytes": 1675
+    },
+    "crates/llvm2-test/src/config.rs": {
+      "sha256": "4e8fc77ac56d5b3d427a500f502180dab01e582233b7121a43719673ed6b07a8",
+      "size_bytes": 2790
+    },
+    "crates/llvm2-test/src/corpus.rs": {
+      "sha256": "78b2d695da7e1773acaa455127008c132db1f31508b35d14e95096ab3781df9b",
+      "size_bytes": 1482
+    },
+    "crates/llvm2-test/src/external.rs": {
+      "sha256": "38ece86b52566f5201851f8c12104f5f3130cc39bfc4bc99b5694e4892c2957a",
+      "size_bytes": 4829
+    },
+    "crates/llvm2-test/src/main.rs": {
+      "sha256": "eef8686b7df770a0d8acf2c691de8016e07706bc9b2706246c9eda9419ffd58b",
+      "size_bytes": 8773
+    },
+    "crates/llvm2-test/src/progress.rs": {
+      "sha256": "5ef97e3df809bde3fe3ec41087d990c1b1e2355c800668f6e846a8a5aecdc0f4",
+      "size_bytes": 943
+    },
+    "crates/llvm2-test/src/results.rs": {
+      "sha256": "f233d52334fd0438f3b0cd58e66ae2b3ea8dbccbe93f948c39e8af15a1855b0b",
+      "size_bytes": 6673
+    },
+    "crates/llvm2-test/src/shell.rs": {
+      "sha256": "a83f8fe36c4d8c1355b34ff1298fee62b7e4cfc4475d0a9aa633a1938f60079f",
+      "size_bytes": 4784
+    },
+    "crates/llvm2-test/tests/cli.rs": {
+      "sha256": "3e608e0fc20048591761c9d4d679e5d3ea2d3d41264d64608b47a7f4309a91b1",
+      "size_bytes": 2611
+    },
+    "crates/llvm2-test/tests/schema.rs": {
+      "sha256": "fc69872337ff7be0ee9408397fb5f32d73e4ad2211b8e4cd70672de37310b256",
+      "size_bytes": 883
+    },
+    "crates/llvm2-test/tests/snapshots/cli__bootstrap_help.snap": {
+      "sha256": "6ea623be203dfff80619735ee1259ab0aa1a9f04bf9754361310566bfebc7945",
+      "size_bytes": 1464
+    },
+    "crates/llvm2-test/tests/snapshots/cli__doctor_help.snap": {
+      "sha256": "bf2ce330d1341a7b47232ad420e87c267b5f23a79be7af402c197d314a268ae2",
+      "size_bytes": 1976
+    },
+    "crates/llvm2-test/tests/snapshots/cli__ecosystem_help.snap": {
+      "sha256": "e6dacccf95598477b6ad066b84103c91ac206c39b43da4ca782537d972d89b13",
+      "size_bytes": 1574
+    },
+    "crates/llvm2-test/tests/snapshots/cli__fuzz_help.snap": {
+      "sha256": "4a503c1aa149b92697bb5ebebc301d07ddee430ab784d5d2df71fcb8c5f91b1a",
+      "size_bytes": 2078
+    },
+    "crates/llvm2-test/tests/snapshots/cli__matrix_help.snap": {
+      "sha256": "150bfcca0646743745b3b228f5af66e73b76775d39efb9aef8ae5ccf109decbd",
+      "size_bytes": 1654
+    },
+    "crates/llvm2-test/tests/snapshots/cli__pipeline_help.snap": {
+      "sha256": "3290bda266e177b3bee2b5831a68f48beaaf0b9ce25ed89d4e41482f6fd81256",
+      "size_bytes": 1544
+    },
+    "crates/llvm2-test/tests/snapshots/cli__prove_help.snap": {
+      "sha256": "dca3ad0d6ef46507a4a899998ec1206842788e1717ab047b67363e287a30a81f",
+      "size_bytes": 1818
+    },
+    "crates/llvm2-test/tests/snapshots/cli__ratchet_help.snap": {
+      "sha256": "dbebcaa146333e0b43b9d2959c965186a689675f8ea3190ba0665fd220d7ccd0",
+      "size_bytes": 2396
+    },
+    "crates/llvm2-test/tests/snapshots/cli__report_help.snap": {
+      "sha256": "2db9088c718f20b4c0b3d90f89b48fdf9a794df6f8072e5a5afd33d14097473a",
+      "size_bytes": 1555
+    },
+    "crates/llvm2-test/tests/snapshots/cli__rustc_help.snap": {
+      "sha256": "66925c9d6e0fd4f9d68238af1a2ec8b28b4387429e1b179cdabd22cfecdd5eaf",
+      "size_bytes": 1625
+    },
+    "crates/llvm2-test/tests/snapshots/cli__suite_help.snap": {
+      "sha256": "8425e7bea44de2c12a8634cdd9045fcbb06ece9f9dabd6ab89d0b2496c1f45ba",
+      "size_bytes": 1597
+    },
+    "crates/llvm2-test/tests/snapshots/cli__top_help.snap": {
+      "sha256": "b7ff64968225dc11ba9b4c99cd060a3bde8228df153f71da3d235269470d7927",
+      "size_bytes": 2747
+    },
+    "crates/llvm2-verify/Cargo.toml": {
+      "sha256": "e0fa0bcebdd8ae96d4e2f64caee89e013fee61a89ff5c9055f64ec850c68a010",
+      "size_bytes": 2298
+    },
+    "crates/llvm2-verify/README.md": {
+      "sha256": "aedacfe9e9446818e52e70b33343f19308583a82aeeb65c5388af6b76b1db6fb",
+      "size_bytes": 4843
+    },
+    "crates/llvm2-verify/src/aarch64_semantics.rs": {
+      "sha256": "da9c4b6f7110b78c795718ff2da7d914271ecb21b17f1433524d72427a3ed485",
+      "size_bytes": 35425
+    },
+    "crates/llvm2-verify/src/addr_mode_proofs.rs": {
+      "sha256": "413effa0dc33d536f1b7c7ff63c3a143551ac8a4596fcb3bd947f5f508274f82",
+      "size_bytes": 39279
+    },
+    "crates/llvm2-verify/src/ane_precision_proofs.rs": {
+      "sha256": "fc020340fe214c3aaa0eb5c7675b02f4f213cebac870fc14b4d5d4c1602e10c7",
+      "size_bytes": 33155
+    },
+    "crates/llvm2-verify/src/ane_semantics.rs": {
+      "sha256": "7eb39a94cf149164f58963b1856282a03fd5ec3774ba204076394400450f088a",
+      "size_bytes": 49679
+    },
+    "crates/llvm2-verify/src/atomic_proofs.rs": {
+      "sha256": "edf2ef150275c51f986a366ca27e10828893bb9505435829062de19ab55dd8c6",
+      "size_bytes": 54069
+    },
+    "crates/llvm2-verify/src/call_lowering_proofs.rs": {
+      "sha256": "f1bfdb48c7af60f7387d5a5d0afbbdded95c4999f42a582224abfaa5a6510dab",
+      "size_bytes": 52633
+    },
+    "crates/llvm2-verify/src/cegis.rs": {
+      "sha256": "a5afd3979307cc45963a0ea122081a239c8e88234a4dddf80bf165a660db5427",
+      "size_bytes": 43605
+    },
+    "crates/llvm2-verify/src/cegis_pass.rs": {
+      "sha256": "2f05a3a57ed0051510d2abd692304891efd8c71bcbb94fb6f7b01face65eb55c",
+      "size_bytes": 56682
+    },
+    "crates/llvm2-verify/src/cfg_proofs.rs": {
+      "sha256": "d7e33c1821045cfeac5eee1df17401964c0475e5becb6bd958cf274f906b0544",
+      "size_bytes": 43662
+    },
+    "crates/llvm2-verify/src/cmp_combine_proofs.rs": {
+      "sha256": "44f33569cf88ba6630948f8b314a6aa158444d6e90b42f82837001568e169a40",
+      "size_bytes": 38539
+    },
+    "crates/llvm2-verify/src/const_fold_proofs.rs": {
+      "sha256": "969f41ce319b78f58b03b39d3173d40c9d2c303cbfe33a2aac6f0cd6bf1b1e41",
+      "size_bytes": 42646
+    },
+    "crates/llvm2-verify/src/const_materialize_proofs.rs": {
+      "sha256": "bb3e6d3fe77c8cc9526784f7520bb737d78abaaeea64f4cf6f587d92ac3d2c79",
+      "size_bytes": 39288
+    },
+    "crates/llvm2-verify/src/copy_prop_proofs.rs": {
+      "sha256": "4c3ce24906124af399b0f70642fd952785b4562932fad8cc27aa3eb45b39adbb",
+      "size_bytes": 26680
+    },
+    "crates/llvm2-verify/src/cse_licm_proofs.rs": {
+      "sha256": "f8eb048367a581bf3ed2b4170af0c057b74b9628d9bb52700f035d220a70f0dc",
+      "size_bytes": 45561
+    },
+    "crates/llvm2-verify/src/dce_proofs.rs": {
+      "sha256": "e5aad341d83a6d16af86d8eb8370822266ee46fa58f8bbaa7741ad486fa650af",
+      "size_bytes": 35092
+    },
+    "crates/llvm2-verify/src/ext_trunc_proofs.rs": {
+      "sha256": "1dd9a48403dc2c7ca306bcba64d8d0904634979218f0e3643279787257b0b3d0",
+      "size_bytes": 29506
+    },
+    "crates/llvm2-verify/src/fp_convert_proofs.rs": {
+      "sha256": "138bae5fdb0ae752a0e9336055bbe52b3a70e1d8eeb707747b15f8b98f15fb8f",
+      "size_bytes": 32278
+    },
+    "crates/llvm2-verify/src/frame_proofs.rs": {
+      "sha256": "85e54e33ec43321ca2d496029d9796e116636052f337d5176e4658c45d379e06",
+      "size_bytes": 55760
+    },
+    "crates/llvm2-verify/src/fsym_null.rs": {
+      "sha256": "aa3381e7f741ec2555e9b32bbaa1838b264fd02fd35f4af63c825daf4e4226b7",
+      "size_bytes": 7670
+    },
+    "crates/llvm2-verify/src/function_verifier.rs": {
+      "sha256": "29e5fc843c0a0ab7f887057b6404848091235acc0c7c7479f181dd3a67f0e182",
+      "size_bytes": 36241
+    },
+    "crates/llvm2-verify/src/gpu_semantics.rs": {
+      "sha256": "aa342e327efd8e56fdb8ec7a1cef7037e58abbd5cac16e64ec3713b76916baf7",
+      "size_bytes": 41719
+    },
+    "crates/llvm2-verify/src/gvn_proofs.rs": {
+      "sha256": "5aa0df7d7294995e90bf7cc79dffe0de10f7b9771ed44e84bad376b497a5d96c",
+      "size_bytes": 51603
+    },
+    "crates/llvm2-verify/src/if_convert_proofs.rs": {
+      "sha256": "99d92683587286ef26f9d59bd976d9fbf00b4398247ba999e7a2f430fb446d7f",
+      "size_bytes": 48126
+    },
+    "crates/llvm2-verify/src/lib.rs": {
+      "sha256": "11856d8871ba6e134dba75ad82253063013c1d61adcc53ffb851977ddf4b4055",
+      "size_bytes": 7459
+    },
+    "crates/llvm2-verify/src/loop_opt_proofs.rs": {
+      "sha256": "95fd055f0f1e6ded12524952325746c00524e81edf7d1374b09a718ccab3ff66",
+      "size_bytes": 34581
+    },
+    "crates/llvm2-verify/src/lowering_proof.rs": {
+      "sha256": "4ee551143f7426d51d7fd863ae0dbadabddd1a00fd9193865f5dd2ea90dda2a0",
+      "size_bytes": 209714
+    },
+    "crates/llvm2-verify/src/macho_proofs.rs": {
+      "sha256": "332c7ffd93e4e768151d88a98decea28da19f7f81b1edcefcbae1ccbb1558cc0",
+      "size_bytes": 46783
+    },
+    "crates/llvm2-verify/src/memory_model.rs": {
+      "sha256": "ac309dc0ae0034c2aeaf7ba7a239bedda6dc18a34eeec6b2b3a1740a99c74983",
+      "size_bytes": 34736
+    },
+    "crates/llvm2-verify/src/memory_proofs.rs": {
+      "sha256": "c703e7192d35baf4a1a9dba0d6d26885d9746b3ca5bf88485a93fe58a1aafd5e",
+      "size_bytes": 115833
+    },
+    "crates/llvm2-verify/src/neon_encoding_proofs.rs": {
+      "sha256": "73236770f30f80777f7b199333b0228e3a4c59d232d98d7960cc65c86579be42",
+      "size_bytes": 35865
+    },
+    "crates/llvm2-verify/src/neon_lowering_proofs.rs": {
+      "sha256": "2193c313394299637fcf39229c100d66478fc538c9e2287b70ce8ad35f5b97a6",
+      "size_bytes": 40176
+    },
+    "crates/llvm2-verify/src/neon_semantics.rs": {
+      "sha256": "e30ca249a41c285d156561720ff10233cb71941f5c9ee3dd2a79ae167a7c0b81",
+      "size_bytes": 59431
+    },
+    "crates/llvm2-verify/src/nzcv.rs": {
+      "sha256": "4c1c535af365d6447c87bb81312c7f0fb13925c09a8d24ce67e3b0e41f338b3b",
+      "size_bytes": 14547
+    },
+    "crates/llvm2-verify/src/opt_proofs.rs": {
+      "sha256": "90cb27663a3c5e7939cb7f195be9005910ad44e5d6fe086b6ecae68887de1dd9",
+      "size_bytes": 23477
+    },
+    "crates/llvm2-verify/src/peephole_proofs.rs": {
+      "sha256": "b842b41959d5450d76a1067b24bcbb84dc82794eb5f1acb782ae43ab95a05a99",
+      "size_bytes": 103234
+    },
+    "crates/llvm2-verify/src/proof_certificate.rs": {
+      "sha256": "d36c68dbfcb700fa9b92d17065aff462a7079fbcbc092b7da651ace69318e7e9",
+      "size_bytes": 39847
+    },
+    "crates/llvm2-verify/src/proof_database.rs": {
+      "sha256": "3fbc5c2dcbfe11281fb098e53eb96de2406e09cd2c53993040d2b422dd852d5f",
+      "size_bytes": 45520
+    },
+    "crates/llvm2-verify/src/regalloc_proofs.rs": {
+      "sha256": "6fb98ed9b7130e6a2b4e8b5105efa7042aafcc4590ce20cf0575e191365e561e",
+      "size_bytes": 114094
+    },
+    "crates/llvm2-verify/src/rule_discovery.rs": {
+      "sha256": "d5ca225f5e740044a89fb9f7fbebc24d6c508ed11f82fab8d875941bc9a3e802",
+      "size_bytes": 51211
+    },
+    "crates/llvm2-verify/src/scheduler_proofs.rs": {
+      "sha256": "fb4e7038252c5740ddc78e740b66aca1e23b734238f9485c5d9dc0f54905b291",
+      "size_bytes": 72761
+    },
+    "crates/llvm2-verify/src/smt.rs": {
+      "sha256": "d8ba5632c3268772c4bbc20cf52c92c5057fa5f41867690f774c3ef89bd727fb",
+      "size_bytes": 137887
+    },
+    "crates/llvm2-verify/src/strength_reduce_proofs.rs": {
+      "sha256": "84c59911cbe38ca5be490e53f253bea069ac545ee21d90bd37af79899a07d321",
+      "size_bytes": 30204
+    },
+    "crates/llvm2-verify/src/switch_proofs.rs": {
+      "sha256": "cea558565f9fe6b0839766fafddfa4fb89a02bf0c77841d38cfe12d699103642",
+      "size_bytes": 27467
+    },
+    "crates/llvm2-verify/src/synthesis.rs": {
+      "sha256": "d541727af435e7be72b9fcc526a9a9615aba2223cf3b8f01d67da7d6836eadec",
+      "size_bytes": 63306
+    },
+    "crates/llvm2-verify/src/tco_proofs.rs": {
+      "sha256": "c6dc636f0fc953cc8a1a7e78c2f5de4c0e77e550ea24510b2559b668c55a5851",
+      "size_bytes": 40471
+    },
+    "crates/llvm2-verify/src/tmir_semantics.rs": {
+      "sha256": "9576b96cdcda295c5ce70da2fb0eba18ff3d434f51a556bc8c63160c2aa3dd43",
+      "size_bytes": 35185
+    },
+    "crates/llvm2-verify/src/unified_synthesis.rs": {
+      "sha256": "e66d4b51abbce0a62c243c21be919d44c7ffbdee46a086d02ead1c574a6f82c0",
+      "size_bytes": 185295
+    },
+    "crates/llvm2-verify/src/vectorization_proofs.rs": {
+      "sha256": "5d46012c8a4fb7218db1e1b39a875e49f36cd5328b6fe0a76b07fa21c11f8ea8",
+      "size_bytes": 51414
+    },
+    "crates/llvm2-verify/src/verification_runner.rs": {
+      "sha256": "e6b226eae5ddfcdc77964bfa3ba9bd8a9b9960016c0b05aa893084eef175123d",
+      "size_bytes": 47501
+    },
+    "crates/llvm2-verify/src/verify.rs": {
+      "sha256": "a5c330a7a6d498171e9dfe3ce68357f45484499545d1ac4250dc7a4d3e7f51db",
+      "size_bytes": 30453
+    },
+    "crates/llvm2-verify/src/x86_64_eflags.rs": {
+      "sha256": "6866ba89d57f02b5b87dea12bee522cbc17dde2c50ae411cb1d9f7541d96b99c",
+      "size_bytes": 15630
+    },
+    "crates/llvm2-verify/src/x86_64_eflags_proofs.rs": {
+      "sha256": "6806907d3ec37f55fff25a5f4e46ce23d2d9953eb602978f27b1f1e2c11bb900",
+      "size_bytes": 15288
+    },
+    "crates/llvm2-verify/src/x86_64_function_verifier.rs": {
+      "sha256": "cf39889f97fa4a6efdf1edd5afd2492ff93b0f800f6f5c4c7bb20e9f0d96f290",
+      "size_bytes": 15690
+    },
+    "crates/llvm2-verify/src/x86_64_lowering_proofs.rs": {
+      "sha256": "3f4e5fa1f0a9a3fbec488b1ea97b29147a003fc30b4f9886483eaded617d7ecf",
+      "size_bytes": 96827
+    },
+    "crates/llvm2-verify/src/x86_64_semantics.rs": {
+      "sha256": "53b3caec5d574597f453385973bcfa780151d88e923e5a53d361162f61ac015c",
+      "size_bytes": 23365
+    },
+    "crates/llvm2-verify/src/z4_bridge.rs": {
+      "sha256": "205882dd9858e5687a43c1a79c9e483140d93004f1a6c85b4ee0c5d891336e1e",
+      "size_bytes": 246205
+    },
+    "crates/llvm2-verify/src/z4_cache.rs": {
+      "sha256": "62b14a4d744e636522466dc7d0424b575fec14ca1a8dbba276ac3ced62e8811b",
+      "size_bytes": 21551
+    },
+    "crates/llvm2-verify/tests/cegis_layer_a.rs": {
+      "sha256": "26b22ab024878c022225c4916233580d12126de0031ea5f4ce0948f9557ce817",
+      "size_bytes": 6266
+    },
+    "crates/llvm2-verify/tests/cegis_layer_b.rs": {
+      "sha256": "1de3dc00d08b091315daaf55c02cffde49365e85476e294531a1a8c09752c468",
+      "size_bytes": 9379
+    },
+    "crates/llvm2-verify/tests/cegis_pass.rs": {
+      "sha256": "0dddb5bc130cbb360fd374ad970cdf60242a0a587ad3aac224469f9fbf9eaec6",
+      "size_bytes": 3613
+    },
+    "crates/llvm2-verify/tests/cegis_stats_trace.rs": {
+      "sha256": "42811f24612868e9b4d8d4cc2699ecfcdf6080fe83425c06cb2e8099436e48cf",
+      "size_bytes": 13587
+    },
+    "crates/llvm2-verify/tests/full_proof_suite.rs": {
+      "sha256": "9a1af73b83660a83443ed1772fdf0eaf595d6a473a6579b5179ac9ef693ee1df",
+      "size_bytes": 15507
+    },
+    "crates/llvm2-verify/tests/panic_fuzz_verify.rs": {
+      "sha256": "d4d1a1f4bbe59f46dd2c32ed1bd950982afda4a211e75170fa05ce6141545393",
+      "size_bytes": 14295
+    },
+    "crates/llvm2-verify/tests/z4_prove_smoke.rs": {
+      "sha256": "2634b00ac77c79cebb16bbe790890664245ce8898714d3c68f00973f092222e4",
+      "size_bytes": 93112
+    },
+    "crates/rustc_codegen_llvm2/Cargo.toml": {
+      "sha256": "f759a7471fb7a07de29c48354805323e9ec90e39064af959acb2f971cbbd90d3",
+      "size_bytes": 1536
+    },
+    "crates/rustc_codegen_llvm2/README.md": {
+      "sha256": "c79ea58edd32554bb9335130dbe056e7d43eef424d4dac3679d4ff05a14e0a33",
+      "size_bytes": 7692
+    },
+    "crates/rustc_codegen_llvm2/examples/hello.rs": {
+      "sha256": "05ff9600b12dea85dd6c9d8bc9fd223f6bbc0b0d0a70b4b38a54d6b5f3dedc5c",
+      "size_bytes": 413
+    },
+    "crates/rustc_codegen_llvm2/rust-toolchain.toml": {
+      "sha256": "be9120f1474124f012263be53c93a603712e7fd9be7527eddcaaf543525d65f6",
+      "size_bytes": 1100
+    },
+    "crates/rustc_codegen_llvm2/src/lib.rs": {
+      "sha256": "7a6b0620eb431caf9ab23506f042ab12aa8a68c767175ea206aa40d22f18fd91",
+      "size_bytes": 7097
+    },
+    "crates/rustc_codegen_llvm2/tests/hello_loop.rs": {
+      "sha256": "8094cc0fa6d8481da93dbc60b7b7dfa28f3d24c1a1adc8a7661ab68fe5b6c340",
+      "size_bytes": 7227
+    },
+    "fuzz/Cargo.toml": {
+      "sha256": "4af21a272c3ab5c2b1e29421675d6c9736c1709de6be25c6452c25c44bba6dae",
+      "size_bytes": 2573
+    },
+    "fuzz/fuzz_targets/fuzz_compile_function.rs": {
+      "sha256": "3fe1f2c7166b8e65d698b973c46b3b5fb4ccdf9163cb09bbeda793388586262b",
+      "size_bytes": 3368
+    },
+    "fuzz/fuzz_targets/fuzz_encode_instruction.rs": {
+      "sha256": "4b3cc0d73bde6b77b3d8aaebbb7e8a76d9bcf8734f7bcbfc9c4f08737797e918",
+      "size_bytes": 3535
+    },
+    "fuzz/fuzz_targets/fuzz_macho_fixup.rs": {
+      "sha256": "c859683cbe3ccfbf2f0dc1b4369f3a08196f7d0c0716987393c9a3ea64d691b1",
+      "size_bytes": 3257
+    },
+    "fuzz/fuzz_targets/fuzz_translate_function.rs": {
+      "sha256": "68a3a1eed9aa8fc8aee57cd34343219f18e5fe7b2b42dca33f6d7fd157328f48",
+      "size_bytes": 4641
+    },
+    "fuzz/fuzz_targets/fuzz_verify_module.rs": {
+      "sha256": "a689e18c03f3394c76749ae4478c6289704bc17032f3750eff8492e5aed011fa",
+      "size_bytes": 2538
+    },
+    "ratchet/tests_baseline.json": {
+      "sha256": "6996be5e97a3e42cb7acb2da4d49959ad346c8c0e976f02ec3e19bbe2f4a88d2",
+      "size_bytes": 5629
+    },
+    "ratchet/unwrap_baseline.json": {
+      "sha256": "efbc5a74937736f219d2de25ac4c9b65480529f25b2169582d360adaabe293c4",
+      "size_bytes": 1165
+    },
+    "ratchet/warnings_baseline.json": {
+      "sha256": "18c0c75d44beb0f6ca7ba08552d0a6f288f5113c04a8ae403116d53ae578f818",
+      "size_bytes": 442
+    },
+    "tests/fixtures/add_i32.json": {
+      "sha256": "e709eac5edd571f5f2bf66526b6bd270d3971a28a377b389f3e35c6305c6c371",
+      "size_bytes": 2295
+    },
+    "tests/fixtures/branch_example.json": {
+      "sha256": "ba4cb33042e97a35b45afb9b345221109243249cf2f144512688ef57e7b1d822",
+      "size_bytes": 3882
+    },
+    "tests/fixtures/multi_func_proofs.json": {
+      "sha256": "9352c25c674ad6a35e1d57654a3f4627bfc20c9ac8f713d859c16ff3d3074a0f",
+      "size_bytes": 7314
+    },
+    "tests/test_example.py": {
+      "sha256": "1e4ad3b2427791d0b9a4f19891c0801698c3860088d1d85503bc7c75342f7864",
+      "size_bytes": 2734
+    }
+  },
+  "root_hash": "93551cc8fc3f0c1ef4949cabfaa41d16f60e5f40c4151b1cf6e6831b7ddb8c25",
+  "scanner_version": "integrity-scanner",
+  "total_size_bytes": 12647939,
+  "version": 1
+}

@@ -1,7 +1,7 @@
 // cegis_layer_b - Layer B (two-instruction window fusion) integration test
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Mirrors `cegis_layer_a.rs` for the two-instruction window fusion layer of
 // the CEGIS superopt payload (issue #486, Layer B).

@@ -1,7 +1,7 @@
 // llvm2-regalloc/liveness.rs - Live interval computation
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 
 //! Live interval computation for register allocation.
 //!

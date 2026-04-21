@@ -1,7 +1,7 @@
 // llvm2-fuzz/src/tmir_gen.rs - Random valid tMIR module generator
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Generates structurally valid tMIR modules from a seed. The generated
 // programs are intentionally narrow: one function, integer arithmetic only

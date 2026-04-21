@@ -1,7 +1,7 @@
 // llvm2-codegen - Compact unwind info emission for AArch64 macOS
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: ~/llvm-project-ref/llvm/lib/MC/MCObjectFileInfo.cpp
 //            (compact unwind section creation, line 213)

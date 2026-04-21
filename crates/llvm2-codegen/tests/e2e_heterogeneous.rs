@@ -1,7 +1,7 @@
 // llvm2-codegen/tests/e2e_heterogeneous.rs - End-to-end heterogeneous compute tests
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Integration tests exercising the full heterogeneous compute pipeline:
 //   ComputeGraph -> TargetRecommendation -> DispatchPlan -> Verification

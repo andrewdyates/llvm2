@@ -1,7 +1,7 @@
 // llvm2-codegen/macho/reloc.rs - ARM64 Mach-O relocation encoding
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: LLVM AArch64MachObjectWriter.cpp, <mach-o/reloc.h>
 // Mach-O relocation_info struct layout (little-endian, 8 bytes):

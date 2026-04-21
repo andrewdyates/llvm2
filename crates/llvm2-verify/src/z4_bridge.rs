@@ -1,7 +1,7 @@
 // llvm2-verify/z4_bridge.rs - Bridge to the z4 SMT solver
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Translates our SmtExpr AST into SMT-LIB2 format and invokes an SMT solver
 // to check satisfiability. Two backends:

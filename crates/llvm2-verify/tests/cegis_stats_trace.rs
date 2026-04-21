@@ -1,7 +1,7 @@
 // cegis_stats_trace - CegisPassStats + trace::emit acceptance (#492)
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Pins the #486/#492 Layer A acceptance criteria that live beyond "does the
 // rewrite happen":

@@ -1,7 +1,7 @@
 // llvm2-lower/target_analysis.rs - Proof-guided target analysis pass
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Reference: designs/2026-04-13-unified-solver-architecture.md (Phase 1)
 //

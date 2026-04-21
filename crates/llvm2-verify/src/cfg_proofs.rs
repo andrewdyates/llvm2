@@ -1,7 +1,7 @@
 // llvm2-verify/cfg_proofs.rs - SMT proofs for CFG Simplification correctness
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Proves that CFG simplification transforms in llvm2-opt/cfg_simplify.rs
 // preserve program semantics. CFG simplification eliminates unnecessary

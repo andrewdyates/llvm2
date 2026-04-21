@@ -1,7 +1,7 @@
 // llvm2-verify/gpu_semantics.rs - Metal GPU parallel operation SMT encoding
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Encodes Metal GPU compute kernel semantics as SMT expressions for the
 // unified solver architecture. GPU kernels execute massively parallel operations

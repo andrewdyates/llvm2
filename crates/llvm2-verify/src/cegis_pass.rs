@@ -1,7 +1,7 @@
 // llvm2-verify/cegis_pass.rs - CEGIS superopt pass wrapper
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Wraps the `CegisLoop` primitive as a `MachinePass` so callers can request
 // CEGIS-based superoptimization from the optimization pipeline with a

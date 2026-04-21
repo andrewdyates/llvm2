@@ -1,7 +1,7 @@
 // llvm2-verify/function_verifier.rs - Function-level verification pipeline
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Provides verify_function(): given a MachFunction, walk every instruction,
 // map each opcode to a proof obligation from the ProofDatabase, run the

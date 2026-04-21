@@ -1,7 +1,7 @@
 // llvm2-verify/lowering_proof.rs - Lowering rule proof obligations
 //
 // Author: Andrew Yates <andrewyates.name@gmail.com>
-// Copyright 2026 Andrew Yates | License: Apache-2.0
+// Copyright 2026 Dropbox, Inc. | License: Apache-2.0
 //
 // Defines proof obligations for tMIR -> AArch64 lowering rules and a
 // verification harness that checks semantic equivalence.
